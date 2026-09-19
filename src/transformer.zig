@@ -16293,9 +16293,7 @@ pub const Transformer = struct {
             }
             const wt = try transposeBf16Weight(self.lm_head_w, self.s); // [hidden, vocab] view
             defer _ = mlx.mlx_array_free(wt);
-            var result = mlx.mlx_array_new();
-            try mlx.check(mlx.mlx_matmul(&result, x, wt, self.s));
-            return result;
+            return qmatmulBits(x, wt, .{}, .{}, 0, 64, .affine, self.s);
         }
         return self.qmatmul(x, self.lm_head_w, self.lm_head_s, self.lm_head_b);
     }
@@ -38149,35 +38147,16 @@ fn verifyJoinedProjection(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array,
         total += width;
     }
     if (total != xs[1] or total > (if (wide) @as(c_int, 12) else 24)) return null;
-    if (try @import("mtp_qmv.zig").matmul(s, x, w, sc, bi)) |value| {
-        mtp_verify_kernel_calls[0] +%= 1;
-        return value;
-    }
-    if (total == 12 and n >= 2560) {
-        if (try verifyWideProjection(s, x, w, sc, bi, 6)) |value| {
-            mtp_verify_kernel_calls[0] +%= 1;
-            const Once = struct {
-                var logged = false;
-            };
-            if (!Once.logged) {
-                Once.logged = true;
-                log.info("[batched] wider dense verify tiles engaged\n", .{});
-            }
-            return value;
-        }
-    }
-    var result = mlx.mlx_array_new();
-    errdefer _ = mlx.mlx_array_free(result);
-    try mlx.check(mlx.mlx_quantized_matmul(&result, x, w, sc, bi, true, mlx.mlx_optional_int.some(64), mlx.mlx_optional_int.some(8), "affine", s));
-    return result;
+    const value = (try @import("mtp_qmv.zig").matmul(s, x, w, sc, bi)) orelse return error.Affine8SerialProjectionUnsupported;
+    mtp_verify_kernel_calls[0] +%= 1;
+    return value;
 }
 
 fn qmatmulBits(x: mlx.mlx_array, w: mlx.mlx_array, sc: mlx.mlx_array, bi: mlx.mlx_array, bits: u32, group_size: u32, mode: QuantMode, s: mlx.mlx_stream) !mlx.mlx_array {
-    // Plain BF16 weight: scales array is unset. Used by mixed-precision Unsloth
-    // Dynamic checkpoints that leave a subset of layers (e.g. linear_attn
-    // projections in Qwen3.6 UD) unquantized. The weight is pre-transposed at
-    // load to [in, out] so a single mlx_matmul does the contraction.
+    // Unquantized weights are pre-transposed to [in, out] at load.
+    // Short forwards retain each serial row's matmul arithmetic.
     if (sc.ctx == null) {
+        if (try @import("mtp_qmv.zig").denseMatmul(s, x, w)) |out| return out;
         var fp_result = mlx.mlx_array_new();
         try mlx.check(mlx.mlx_matmul(&fp_result, x, w, s));
         return fp_result;
@@ -38238,10 +38217,12 @@ fn qmatmulBits(x: mlx.mlx_array, w: mlx.mlx_array, sc: mlx.mlx_array, bi: mlx.ml
         return result;
     }
 
-    if (bits == 8 and group_size == 64 and mode == .affine) {
+    if (bits == 8 and mode == .affine) {
         const shape = mlx.getShape(x);
-        if (shape.len >= 2 and shape[shape.len - 1] > 0 and mlx.mlx_array_size(x) / @as(usize, @intCast(shape[shape.len - 1])) <= 16) {
-            if (try @import("mtp_qmv.zig").matmul(s, x, w, sc, bi)) |out| return out;
+        if (shape.len >= 2 and shape[shape.len - 1] > 0) {
+            const rows = mlx.mlx_array_size(x) / @as(usize, @intCast(shape[shape.len - 1]));
+            if (rows >= 2 and rows <= 32)
+                return (try @import("mtp_qmv.zig").matmul(s, x, w, sc, bi)) orelse error.Affine8SerialProjectionUnsupported;
         }
     }
 
@@ -63622,7 +63603,7 @@ test "exl3 shared add releases routed output study3" {
     }
 }
 
-fn qwen4FirstRowDiff(s: mlx.mlx_stream, serial: mlx.mlx_array, verify: mlx.mlx_array, width: c_int, label: []const u8) !bool {
+fn qwen4RowDiff(s: mlx.mlx_stream, serial: mlx.mlx_array, verify: mlx.mlx_array, width: c_int, row_index: c_int, label: []const u8) !bool {
     if (serial.ctx == null or verify.ctx == null) {
         try testing.expectEqual(serial.ctx == null, verify.ctx == null);
         return false;
@@ -63633,9 +63614,11 @@ fn qwen4FirstRowDiff(s: mlx.mlx_stream, serial: mlx.mlx_array, verify: mlx.mlx_a
     const step: [5]c_int = @splat(1);
     @memcpy(end[0..shape.len], shape);
     if (shape.len >= 3 and shape[0] == 1 and shape[1] == width) {
-        end[1] = 1;
+        begin[1] = row_index;
+        end[1] = row_index + 1;
     } else if (shape.len == 2 and shape[0] == width) {
-        end[0] = 1;
+        begin[0] = row_index;
+        end[0] = row_index + 1;
     } else return error.BadTraceShape;
     var row = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(row);
@@ -63668,14 +63651,18 @@ fn qwen4FirstRowDiff(s: mlx.mlx_stream, serial: mlx.mlx_array, verify: mlx.mlx_a
 }
 
 test "qwen4 verify first-row layer identity (QWEN4_TEST_MODEL)" {
-    try qwen4LayerIdentityCase(true, false);
+    try qwen4LayerIdentityCase(true, false, 2, 0, 0);
 }
 
 test "qwen4 verify unflushed stream and recurrent state identity (QWEN4_TEST_MODEL)" {
-    try qwen4LayerIdentityCase(false, true);
+    try qwen4LayerIdentityCase(false, true, 2, 0, 0);
 }
 
-fn qwen4LayerIdentityCase(capture_layers: bool, capture_hidden: bool) !void {
+test "qwen4 verify history row and cache identity (QWEN4_TEST_MODEL)" {
+    try qwen4LayerIdentityCase(false, true, 8, 24, 1);
+}
+
+fn qwen4LayerIdentityCase(capture_layers: bool, capture_hidden: bool, width: c_int, prefix: usize, row_index: c_int) !void {
     const model_dir = std.c.getenv("QWEN4_TEST_MODEL") orelse return error.SkipZigTest;
     if (mlx.noGpuBackend()) return error.SkipZigTest;
     const a = testing.allocator;
@@ -63696,10 +63683,29 @@ fn qwen4LayerIdentityCase(capture_layers: bool, capture_hidden: bool) !void {
     const verify = try Qwen4TestSlot.init(a, config.num_hidden_layers);
     defer verify.deinit(a);
     const prompt = [_]i32{ 248045, 846, 198, 7734, 264, 2716, 3255, 883, 264, 11952, 6618, 310, 5984, 13, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271 };
+    const history = [_]i32{ 4413, 220, 22, 18, 19, 11, 852, 14459, 310, 381, 2512, 328, 57517, 1288, 1467, 524, 3418, 3069, 279, 12313, 36811, 948, 781, 6749, 506, 279, 41564, 13, 1946, 28970, 11, 264 };
     for ([_]*Qwen4TestSlot{ serial, verify }) |slot| {
         try slot.cache.reinit(config.num_hidden_layers, KVQuantConfig.affine(8));
         slot.ctx.kv_attn_fused = true;
         try qwen4ReplayPrompt(&xfm, slot, &prompt);
+        var begin: usize = 0;
+        while (begin < prefix) {
+            const stop = @min(prefix, begin + if (slot == serial) @as(usize, 1) else @as(usize, @intCast(width)));
+            const ids = mlx.mlx_array_new_data(history[begin..stop].ptr, &.{ 1, @intCast(stop - begin) }, 2, .int32);
+            defer _ = mlx.mlx_array_free(ids);
+            var hidden = mlx.mlx_array_new();
+            defer _ = mlx.mlx_array_free(hidden);
+            var all = mlx.mlx_array_new();
+            defer _ = mlx.mlx_array_free(all);
+            slot.ctx.ple_defer = slot == verify;
+            slot.ctx.capture_ssm_seq = slot == verify;
+            const out = if (slot == serial) try slot.forward(&xfm, history[begin..stop]) else try xfm.forwardWithCaptureAll(&slot.ctx, ids, &hidden, &all);
+            defer _ = mlx.mlx_array_free(out);
+            try xfm.flushDeferredPle(&slot.ctx);
+            try mlx.check(mlx.mlx_array_eval(out));
+            for (slot.entries) |*entry| ssmFreeSpecCapture(entry);
+            begin = stop;
+        }
     }
     const layer_ids = try a.alloc(u32, config.num_hidden_layers);
     defer a.free(layer_ids);
@@ -63726,30 +63732,38 @@ fn qwen4LayerIdentityCase(capture_layers: bool, capture_hidden: bool) !void {
     defer st.deinit();
     var vt = Transformer.Qwen4Trace{};
     defer vt.deinit();
+    for (history[prefix..][0..@intCast(row_index)]) |token| {
+        const out = try serial.forward(&xfm, &.{token});
+        defer _ = mlx.mlx_array_free(out);
+        try mlx.check(mlx.mlx_array_eval(out));
+    }
     Transformer.qwen4_trace = &st;
     defer Transformer.qwen4_trace = null;
-    const sr = try serial.forward(&xfm, &.{4413});
+    const sr = try serial.forward(&xfm, &.{history[prefix + @as(usize, @intCast(row_index))]});
     defer _ = mlx.mlx_array_free(sr);
     try mlx.check(mlx.mlx_array_eval(sr));
     Transformer.qwen4_trace = &vt;
     verify.ctx.capture_ssm_seq = true;
+    verify.ctx.ple_defer = capture_hidden;
     var hidden = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(hidden);
     var all = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(all);
-    const tokens = [_]i32{ 4413, 220 };
-    const ids = mlx.mlx_array_new_data(&tokens, &[_]c_int{ 1, 2 }, 2, .int32);
+    const tokens = history[prefix..][0..@intCast(width)];
+    const ids = mlx.mlx_array_new_data(tokens.ptr, &[_]c_int{ 1, width }, 2, .int32);
     defer _ = mlx.mlx_array_free(ids);
-    const vr = if (capture_hidden) try xfm.forwardWithCaptureAll(&verify.ctx, ids, &hidden, &all) else try verify.forward(&xfm, &tokens);
+    const vr = if (capture_hidden) try xfm.forwardWithCaptureAll(&verify.ctx, ids, &hidden, &all) else try verify.forward(&xfm, tokens);
     defer _ = mlx.mlx_array_free(vr);
+    try xfm.flushDeferredPle(&verify.ctx);
     try mlx.check(mlx.mlx_array_eval(vr));
     var mismatch = false;
     inline for (.{ "mixed_attn", "inj_attn", "attn_out", "mixed_mlp", "inj_mlp", "mlp_out", "ple_emb", "ple_out", "attn3_input", "q3_raw", "k3_raw", "v3_raw", "gate3", "attn3_out" }) |name| {
-        if (try qwen4FirstRowDiff(s, @field(st, name), @field(vt, name), 2, name)) mismatch = true;
+        if (try qwen4RowDiff(s, @field(st, name), @field(vt, name), width, row_index, name)) mismatch = true;
     }
     inline for (.{ "q3_rope", "k3_rope", "v3_t", "kv3_k", "kv3_v", "attn3_pre_tail" }) |name| {
         const ref = @field(st, name);
-        const row = try sliceAttentionSeq(s, @field(vt, name), 0, mlx.getShape(ref)[2]);
+        const begin = if (comptime std.mem.startsWith(u8, name, "kv")) 0 else row_index;
+        const row = try sliceAttentionSeq(s, @field(vt, name), begin, begin + mlx.getShape(ref)[2]);
         defer _ = mlx.mlx_array_free(row);
         qkvExpectBitsEqual(s, ref, row) catch {
             std.debug.print("attention stage differs: {s}\n", .{name});
@@ -63759,57 +63773,183 @@ fn qwen4LayerIdentityCase(capture_layers: bool, capture_hidden: bool) !void {
     if (capture_layers) for (sa, va, 0..) |x, y, i| {
         var buf: [48]u8 = undefined;
         const label = try std.fmt.bufPrint(&buf, "layer {d}", .{i});
-        if (try qwen4FirstRowDiff(s, x, y, 2, label)) mismatch = true;
+        if (try qwen4RowDiff(s, x, y, width, row_index, label)) mismatch = true;
     };
     if (!capture_layers) for (xfm.moe_layers.?, serial.entries, verify.entries, 0..) |layer, se, *ve, i| {
         if (layer.attn != .linear) continue;
         const sequence = try logicalSsmCapture(s, ve);
         defer _ = mlx.mlx_array_free(sequence);
-        const zero = mlx.mlx_array_new_int(0);
+        const zero = mlx.mlx_array_new_int(row_index);
         defer _ = mlx.mlx_array_free(zero);
         var first = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(first);
         try mlx.check(mlx.mlx_take_axis(&first, sequence, zero, 0, s));
         qkvExpectBitsEqual(s, se.ssm_state, first) catch {
-            std.debug.print("first recurrent state differs: layer {d}\n", .{i});
+            std.debug.print("recurrent state differs: layer={d} row={d}\n", .{ i, row_index });
             mismatch = true;
         };
     };
-    if (try qwen4FirstRowDiff(s, sr, vr, 2, "logits")) mismatch = true;
+    for (serial.cache.entries, verify.cache.entries, 0..) |se, ve, layer| {
+        if (!se.initialized) continue;
+        inline for (.{ "key_view", "value_view", "key_scales_view", "key_biases_view", "value_scales_view", "value_biases_view" }) |field| {
+            const ref = @field(se, field);
+            if (ref.ctx != null) {
+                const row = try sliceAttentionSeq(s, @field(ve, field), 0, mlx.getShape(ref)[2]);
+                defer _ = mlx.mlx_array_free(row);
+                if (!try qsaArraysAllEqual(ref, row, s)) {
+                    std.debug.print("KV prefix differs: layer={d} field={s}\n", .{ layer, field });
+                    mismatch = true;
+                }
+            }
+        }
+    }
+    if (try qwen4RowDiff(s, sr, vr, width, row_index, "logits")) mismatch = true;
     if (mismatch) return error.VerifyLayerRowDivergence;
 }
 
-test "affine8 projections are row-identical to serial qmv" {
+test "affine8 projections are row-identical gs32" {
+    try testAffine8ProjectionRows(32);
+}
+
+test "affine8 projections are row-identical gs64" {
+    try testAffine8ProjectionRows(64);
+}
+
+test "affine8 projections are row-identical gs128" {
+    try testAffine8ProjectionRows(128);
+}
+
+fn testAffine8ProjectionRows(gs: u32) !void {
     if (mlx.noGpuBackend()) return error.SkipZigTest;
     const s = mlx.gpuStream();
     var prng = std.Random.DefaultPrng.init(0x8dec0de);
-    for ([_][2]c_int{ .{ 12288, 2560 }, .{ 512, 2560 }, .{ 2560, 6144 }, .{ 2560, 640 }, .{ 10240, 320 } }) |shape| {
-        const n = shape[0];
-        const k = shape[1];
-        const dense = try testRandWeightBf16(prng.random(), &shape, s);
-        defer _ = mlx.mlx_array_free(dense);
-        var weights = try kv_quant.quantizeAffine(s, dense, 64, 8);
-        defer weights.deinit();
-        for (2..10) |rows| {
-            const x = try qkvIdentityArray(s, 1, @intCast(rows), k, 0.039 * @as(f32, @floatFromInt(rows)), .bfloat16);
+    for ([_]mlx.mlx_dtype{ .bfloat16, .float16, .float32 }) |dtype| {
+        for ([_][2]c_int{ .{ 12288, 2560 }, .{ 512, 2560 }, .{ 2560, 6144 }, .{ 2560, 640 }, .{ 10240, 384 }, .{ 7, 256 }, .{ 8, 128 }, .{ 1, 128 }, .{ 13, 512 }, .{ 9, @intCast(gs) }, .{ 8, @intCast(gs * 3) }, .{ 8, @intCast(gs * 9) } }) |shape| {
+            const n = shape[0];
+            const k = shape[1];
+            const bf = try testRandWeightBf16(prng.random(), &shape, s);
+            defer _ = mlx.mlx_array_free(bf);
+            var dense = mlx.mlx_array_new();
+            defer _ = mlx.mlx_array_free(dense);
+            try mlx.check(mlx.mlx_astype(&dense, bf, dtype, s));
+            var weights = try kv_quant.quantizeAffine(s, dense, gs, 8);
+            defer weights.deinit();
+            for ([_]usize{ 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 32 }) |rows| {
+                const x = try qkvIdentityArray(s, 1, @intCast(rows), k, 0.039 * @as(f32, @floatFromInt(rows)), dtype);
+                defer _ = mlx.mlx_array_free(x);
+                const together = try qmatmulBits(x, weights.q, weights.scales, weights.biases, 8, gs, .affine, s);
+                defer _ = mlx.mlx_array_free(together);
+                for (0..rows) |row| {
+                    const begin: c_int = @intCast(row);
+                    const xr = try sliceAttentionSeq(s, x, begin, begin + 1);
+                    defer _ = mlx.mlx_array_free(xr);
+                    const single = try qmatmulBits(xr, weights.q, weights.scales, weights.biases, 8, gs, .affine, s);
+                    defer _ = mlx.mlx_array_free(single);
+                    const candidate = try sliceAttentionSeq(s, together, begin, begin + 1);
+                    defer _ = mlx.mlx_array_free(candidate);
+                    qkvExpectBitsEqual(s, single, candidate) catch |err| {
+                        std.debug.print("affine8 gs={d} N={d} K={d} rows={d} row={d} dtype={s}\n", .{ gs, n, k, rows, row, @tagName(dtype) });
+                        return err;
+                    };
+                }
+            }
+        }
+    }
+}
+
+test "dense projections are row-identical to serial matmul" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    var prng = std.Random.DefaultPrng.init(0xded8);
+    for ([_]mlx.mlx_dtype{ .bfloat16, .float16, .float32 }) |dtype| {
+        for ([_][2]c_int{ .{ 512, 2560 }, .{ 1, 2560 }, .{ 4, 10240 }, .{ 2560, 640 } }) |shape| {
+            const bf = try testRandWeightBf16(prng.random(), &shape, s);
+            defer _ = mlx.mlx_array_free(bf);
+            var dense = mlx.mlx_array_new();
+            defer _ = mlx.mlx_array_free(dense);
+            try mlx.check(mlx.mlx_astype(&dense, bf, dtype, s));
+            const w = try transposeBf16Weight(dense, s);
+            defer _ = mlx.mlx_array_free(w);
+            const k = shape[1];
+            for ([_]usize{ 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 32 }) |rows| {
+                const x = try qkvIdentityArray(s, 1, @intCast(rows), k, 0.039 * @as(f32, @floatFromInt(rows)), dtype);
+                defer _ = mlx.mlx_array_free(x);
+                const together = try qmatmulBits(x, w, .{}, .{}, 0, 64, .affine, s);
+                defer _ = mlx.mlx_array_free(together);
+                for (0..rows) |row| {
+                    const begin: c_int = @intCast(row);
+                    const xr = try sliceAttentionSeq(s, x, begin, begin + 1);
+                    defer _ = mlx.mlx_array_free(xr);
+                    const single = try qmatmulBits(xr, w, .{}, .{}, 0, 64, .affine, s);
+                    defer _ = mlx.mlx_array_free(single);
+                    const candidate = try sliceAttentionSeq(s, together, begin, begin + 1);
+                    defer _ = mlx.mlx_array_free(candidate);
+                    qkvExpectBitsEqual(s, single, candidate) catch |err| {
+                        std.debug.print("dense N={d} K={d} rows={d} row={d} dtype={s}\n", .{ shape[0], k, rows, row, @tagName(dtype) });
+                        return err;
+                    };
+                }
+            }
+        }
+    }
+}
+
+test "qwen4 checkpoint affine8 and dense projections are row-identical (QWEN4_TEST_MODEL)" {
+    const path = std.c.getenv("QWEN4_TEST_MODEL") orelse return error.SkipZigTest;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const a = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const s = mlx.gpuStream();
+    const config = try model_mod.parseConfig(io, a, std.mem.span(path));
+    defer if (config.ngram_table_path) |p| a.free(p);
+    if (config.quant_bits != 8 or config.quant_mode != .affine) return error.SkipZigTest;
+    var weights = try model_mod.loadWeights(io, a, std.mem.span(path));
+    defer weights.deinit();
+    var checked: usize = 0;
+    var it = weights.map.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const quantized = std.mem.endsWith(u8, name, ".scales");
+        const router = std.mem.endsWith(u8, name, ".mlp.gate.weight") or std.mem.endsWith(u8, name, ".mlp.shared_expert_gate.weight");
+        if (!quantized and !router) continue;
+        const sc = if (quantized) entry.value_ptr.* else mlx.mlx_array{};
+        if (quantized and mlx.getShape(sc).len != 2) continue;
+        const stem = name[0 .. name.len - (if (quantized) @as(usize, ".scales".len) else ".weight".len)];
+        const wn = try std.fmt.allocPrint(a, "{s}.weight", .{stem});
+        defer a.free(wn);
+        const bn = try std.fmt.allocPrint(a, "{s}.biases", .{stem});
+        defer a.free(bn);
+        const raw = weights.get(wn) orelse return error.MissingProjectionWeight;
+        if (!quantized and mlx.mlx_array_dtype(raw) == .uint32) continue;
+        const bi = weights.get(bn) orelse if (quantized) return error.MissingProjectionBiases else mlx.mlx_array{};
+        const w = if (quantized) try standinRef(raw) else try transposeBf16Weight(raw, s);
+        defer _ = mlx.mlx_array_free(w);
+        const ws = mlx.getShape(w);
+        try testing.expectEqual(@as(usize, 2), ws.len);
+        const k = if (quantized) ws[1] * 4 else ws[0];
+        const qp = if (quantized) affineParamsFromGeometry(w, sc, @intCast(k)) orelse return error.InvalidAffine8Geometry else QuantParams{ .bits = 0, .group_size = 64, .mode = .affine };
+        for ([_]c_int{ 2, 9 }) |rows| {
+            const x = try qkvIdentityArray(s, 1, rows, k, 0.039 * @as(f32, @floatFromInt(rows)), mlx.mlx_array_dtype(if (quantized) sc else w));
             defer _ = mlx.mlx_array_free(x);
-            const together = try qmatmulBits(x, weights.q, weights.scales, weights.biases, 8, 64, .affine, s);
+            const together = try qmatmulBits(x, w, sc, bi, qp.bits, qp.group_size, .affine, s);
             defer _ = mlx.mlx_array_free(together);
-            for (0..rows) |row| {
+            for (0..@intCast(rows)) |row| {
                 const begin: c_int = @intCast(row);
                 const xr = try sliceAttentionSeq(s, x, begin, begin + 1);
                 defer _ = mlx.mlx_array_free(xr);
-                const single = try qmatmulBits(xr, weights.q, weights.scales, weights.biases, 8, 64, .affine, s);
+                const single = try qmatmulBits(xr, w, sc, bi, qp.bits, qp.group_size, .affine, s);
                 defer _ = mlx.mlx_array_free(single);
                 const candidate = try sliceAttentionSeq(s, together, begin, begin + 1);
                 defer _ = mlx.mlx_array_free(candidate);
                 qkvExpectBitsEqual(s, single, candidate) catch |err| {
-                    std.debug.print("affine8 N={d} K={d} rows={d} row={d}\n", .{ n, k, rows, row });
+                    std.debug.print("projection {s} gs={d} rows={d} row={d}\n", .{ stem, qp.group_size, rows, row });
                     return err;
                 };
             }
         }
+        checked += 1;
     }
+    try testing.expect(checked > 0);
 }
 
 test "hc write compilation preserves the serial pending-write rounding" {

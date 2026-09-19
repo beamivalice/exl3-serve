@@ -11,12 +11,12 @@ const SOURCE =
     \\const int N = int(N_size);
     \\constexpr int VPT = FAST ? 8 : 4;
     \\constexpr int BLOCK = VPT * 32;
-    \\const int groups = K / 64;
-    \\const device uchar* ws = (const device uchar*)w + out_row * K + lane * VPT;
-    \\const device T* sp = sc + out_row * groups + lane / (64 / VPT);
-    \\const device T* bp = bi + out_row * groups + lane / (64 / VPT);
+    \\const int groups = K / GS;
+    \\const device uchar* ws = (const device uchar*)w + size_t(out_row) * K + lane * VPT;
+    \\const device T* sp = sc + size_t(out_row) * groups + lane / (GS / VPT);
+    \\const device T* bp = bi + size_t(out_row) * groups + lane / (GS / VPT);
     \\const device T* xp[NV];
-    \\for (int v = 0; v < NV; ++v) xp[v] = x + min(vec0 + uint(v), uint(M - 1)) * K + lane * VPT;
+    \\for (int v = 0; v < NV; ++v) xp[v] = x + size_t(min(vec0 + uint(v), uint(M - 1))) * K + lane * VPT;
     \\float result[NV][4] = {};
     \\int k = 0;
     \\for (; k < (FAST ? K : K - BLOCK); k += BLOCK) {
@@ -37,8 +37,8 @@ const SOURCE =
     \\    }
     \\  }
     \\  ws += BLOCK;
-    \\  sp += BLOCK / 64;
-    \\  bp += BLOCK / 64;
+    \\  sp += BLOCK / GS;
+    \\  bp += BLOCK / GS;
     \\  for (int v = 0; v < NV; ++v) xp[v] += BLOCK;
     \\}
     \\if (!FAST) {
@@ -65,21 +65,21 @@ const SOURCE =
     \\for (int v = 0; v < NV; ++v) {
     \\  for (int row = 0; row < 4; ++row) {
     \\    const float value = simd_sum(result[v][row]);
-    \\    if (lane == 0 && vec0 + uint(v) < uint(M)) y[(vec0 + uint(v)) * N + out_row + row] = T(value);
+    \\    if (lane == 0 && vec0 + uint(v) < uint(M)) y[size_t(vec0 + uint(v)) * N + out_row + row] = T(value);
     \\  }
     \\}
 ;
 
 var kernel: ?mlx.mlx_fast_metal_kernel = null;
 var engaged = false;
-const Key = struct { dims: [8]c_int = @splat(0), ndim: usize, n: c_int };
+const Key = struct { dims: [8]c_int = @splat(0), ndim: usize, n: c_int, gs: c_int };
 const Entry = struct { key: Key, cfg: mlx.mlx_fast_metal_kernel_config, k_size: mlx.mlx_array, n_size: mlx.mlx_array, tick: u64 };
 var entries: [128]Entry = undefined;
 var count: usize = 0;
 var tick: u64 = 0;
 
-fn configuration(xs: []const c_int, n: c_int, k: c_int, m: c_int) !*const Entry {
-    var key = Key{ .ndim = xs.len, .n = n };
+fn configuration(xs: []const c_int, n: c_int, k: c_int, m: c_int, gs: c_int) !*const Entry {
+    var key = Key{ .ndim = xs.len, .n = n, .gs = gs };
     @memcpy(key.dims[0..xs.len], xs);
     tick +%= 1;
     for (entries[0..count]) |*entry| {
@@ -103,6 +103,7 @@ fn configuration(xs: []const c_int, n: c_int, k: c_int, m: c_int) !*const Entry 
     try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, 2, 1));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "T", .bfloat16));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "M", m));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "GS", gs));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "NV", nv));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "FAST", @intFromBool(@mod(k, 256) == 0)));
     var slot = count;
@@ -119,18 +120,25 @@ fn configuration(xs: []const c_int, n: c_int, k: c_int, m: c_int) !*const Entry 
     return &entries[slot];
 }
 
+// Every admitted affine8 geometry uses M=1 arithmetic for each of at most 32 rows.
+// Shapes outside the shared tile use separate M=1 calls, never a width-dependent qmm.
 pub fn matmul(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array, sc: mlx.mlx_array, bi: mlx.mlx_array) !?mlx.mlx_array {
-    if (!mlx.streamIsGpu(s) or x.ctx == null or w.ctx == null or sc.ctx == null or bi.ctx == null) return null;
-    if (mlx.mlx_array_dtype(x) != .bfloat16 or mlx.mlx_array_dtype(w) != .uint32 or mlx.mlx_array_dtype(sc) != .bfloat16 or mlx.mlx_array_dtype(bi) != .bfloat16) return null;
+    if (x.ctx == null or w.ctx == null or sc.ctx == null or bi.ctx == null) return null;
     const xs = mlx.getShape(x);
     const ws = mlx.getShape(w);
     const ss = mlx.getShape(sc);
     if (xs.len < 2 or xs.len > 8 or ws.len != 2 or ss.len != 2) return null;
     const k = xs[xs.len - 1];
     const n = ws[0];
-    if (k < 256 or @mod(k, 64) != 0 or n < 8 or @mod(n, 8) != 0 or ws[1] != @divExact(k, 4) or ss[0] != n or ss[1] != @divExact(k, 64) or !std.mem.eql(c_int, ss, mlx.getShape(bi))) return null;
+    if (k <= 0 or n <= 0 or ws[1] <= 0 or ss[1] <= 0 or mlx.mlx_array_dtype(w) != .uint32) return null;
+    const geom = @import("expert_quant.zig").affineGeomFromShapes(@intCast(ws[1]), @intCast(ss[1]), @intCast(k)) orelse return null;
+    if (geom.bits != 8 or ss[0] != n or !std.mem.eql(c_int, ss, mlx.getShape(bi))) return null;
     const rows = mlx.mlx_array_size(x) / @as(usize, @intCast(k));
     if (rows < 2 or rows > 32) return null;
+    const gs: c_int = @intCast(geom.group_size);
+    if (!mlx.streamIsGpu(s) or k < 256 or @mod(n, 8) != 0 or
+        mlx.mlx_array_dtype(x) != .bfloat16 or mlx.mlx_array_dtype(sc) != .bfloat16 or mlx.mlx_array_dtype(bi) != .bfloat16)
+        return try serialRows(s, x, w, sc, bi, gs, @intCast(rows));
     if (kernel == null) {
         const names = [_][*:0]const u8{ "x", "w", "sc", "bi", "K_size", "N_size" };
         const outs = [_][*:0]const u8{"y"};
@@ -146,7 +154,7 @@ pub fn matmul(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array, sc: mlx.mlx
         engaged = true;
         @import("log.zig").info("[mtp-qmv] row-identical affine8 projections engaged\n", .{});
     }
-    const cfg = try configuration(xs, n, k, @intCast(rows));
+    const cfg = try configuration(xs, n, k, @intCast(rows), gs);
     const inputs = [_]mlx.mlx_array{ x, w, sc, bi, cfg.k_size, cfg.n_size };
     const iv = mlx.mlx_vector_array_new_data(&inputs, inputs.len);
     defer _ = mlx.mlx_vector_array_free(iv);
@@ -159,18 +167,75 @@ pub fn matmul(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array, sc: mlx.mlx
     return out;
 }
 
-test "qmv8 shared rows retain every serial qmv output bit" {
+pub fn denseMatmul(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array) !?mlx.mlx_array {
+    if (x.ctx == null or w.ctx == null) return null;
+    const xs = mlx.getShape(x);
+    const ws = mlx.getShape(w);
+    if (xs.len < 2 or xs.len > 8 or ws.len != 2 or ws[0] <= 0 or ws[1] <= 0 or xs[xs.len - 1] != ws[0]) return null;
+    const rows = mlx.mlx_array_size(x) / @as(usize, @intCast(ws[0]));
+    if (rows < 2 or rows > 32) return null;
+    return try serialRows(s, x, w, .{}, .{}, null, @intCast(rows));
+}
+
+fn serialRows(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array, sc: mlx.mlx_array, bi: mlx.mlx_array, gs: ?c_int, rows: c_int) !mlx.mlx_array {
+    const xs = mlx.getShape(x);
+    const k = xs[xs.len - 1];
+    var flat = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(flat);
+    try mlx.check(mlx.mlx_reshape(&flat, x, &.{ rows, k }, 2, s));
+    var parts: [32]mlx.mlx_array = @splat(.{ .ctx = null });
+    defer for (parts) |part| {
+        if (part.ctx != null) _ = mlx.mlx_array_free(part);
+    };
+    for (0..@intCast(rows)) |row| {
+        var xr = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(xr);
+        try mlx.check(mlx.mlx_slice(&xr, flat, &.{ @intCast(row), 0 }, 2, &.{ @intCast(row + 1), k }, 2, &.{ 1, 1 }, 2, s));
+        parts[row] = mlx.mlx_array_new();
+        if (gs) |group_size| {
+            try mlx.check(mlx.mlx_quantized_matmul(&parts[row], xr, w, sc, bi, true, mlx.mlx_optional_int.some(group_size), mlx.mlx_optional_int.some(8), "affine", s));
+        } else {
+            try mlx.check(mlx.mlx_matmul(&parts[row], xr, w, s));
+        }
+    }
+    const pv = mlx.mlx_vector_array_new_data(&parts, @intCast(rows));
+    defer _ = mlx.mlx_vector_array_free(pv);
+    var joined = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(joined);
+    try mlx.check(mlx.mlx_concatenate_axis(&joined, pv, 0, s));
+    var shape: [8]c_int = undefined;
+    @memcpy(shape[0..xs.len], xs);
+    shape[xs.len - 1] = mlx.getShape(w)[if (gs == null) @as(usize, 1) else 0];
+    var out = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(out);
+    try mlx.check(mlx.mlx_reshape(&out, joined, &shape, xs.len, s));
+    return out;
+}
+
+test "qmv8 gs32 shared rows retain every serial qmv output bit" {
+    try testSharedRows(32);
+}
+
+test "qmv8 gs64 shared rows retain every serial qmv output bit" {
+    try testSharedRows(64);
+}
+
+test "qmv8 gs128 shared rows retain every serial qmv output bit" {
+    try testSharedRows(128);
+}
+
+fn testSharedRows(gs: c_int) !void {
     if (mlx.noGpuBackend()) return error.SkipZigTest;
     const s = mlx.gpuStream();
     const a = std.testing.allocator;
     var random = std.Random.DefaultPrng.init(0x8a57a);
     const rng = random.random();
-    for ([_][2]c_int{ .{ 12288, 2560 }, .{ 2560, 6144 }, .{ 512, 640 }, .{ 10240, 320 }, .{ 48, 2560 } }) |dims| {
+    for ([_][2]c_int{ .{ 12288, 2560 }, .{ 2560, 6144 }, .{ 512, 640 }, .{ 10240, 384 }, .{ 7, 256 }, .{ 8, 128 }, .{ 1, 128 }, .{ 13, 512 }, .{ 9, gs }, .{ 8, gs * 3 }, .{ 8, gs * 9 }, .{ 48, 2560 } }) |dims| {
         const n = dims[0];
         const k = dims[1];
         const wh = try a.alloc(u32, @intCast(n * @divExact(k, 4)));
         defer a.free(wh);
-        const sh = try a.alloc(u16, @intCast(n * @divExact(k, 64)));
+        const sh = try a.alloc(u16, @intCast(n * @divExact(k, gs)));
         defer a.free(sh);
         const bh = try a.alloc(u16, sh.len);
         defer a.free(bh);
@@ -181,9 +246,9 @@ test "qmv8 shared rows retain every serial qmv output bit" {
         }
         const w = mlx.mlx_array_new_data(wh.ptr, &[_]c_int{ n, @divExact(k, 4) }, 2, .uint32);
         defer _ = mlx.mlx_array_free(w);
-        const sc = mlx.mlx_array_new_data(sh.ptr, &[_]c_int{ n, @divExact(k, 64) }, 2, .bfloat16);
+        const sc = mlx.mlx_array_new_data(sh.ptr, &[_]c_int{ n, @divExact(k, gs) }, 2, .bfloat16);
         defer _ = mlx.mlx_array_free(sc);
-        const bi = mlx.mlx_array_new_data(bh.ptr, &[_]c_int{ n, @divExact(k, 64) }, 2, .bfloat16);
+        const bi = mlx.mlx_array_new_data(bh.ptr, &[_]c_int{ n, @divExact(k, gs) }, 2, .bfloat16);
         defer _ = mlx.mlx_array_free(bi);
         for (2..10) |rows| {
             const xh = try a.alloc(u16, rows * @as(usize, @intCast(k)));
@@ -191,7 +256,10 @@ test "qmv8 shared rows retain every serial qmv output bit" {
             for (xh) |*v| v.* = @truncate(@as(u32, @bitCast((rng.float(f32) - 0.5) * 0.4)) >> 16);
             const x = mlx.mlx_array_new_data(xh.ptr, &[_]c_int{ @intCast(rows), k }, 2, .bfloat16);
             defer _ = mlx.mlx_array_free(x);
-            const together = (try matmul(s, x, w, sc, bi)) orelse return error.KernelDeclined;
+            const together = (try matmul(s, x, w, sc, bi)) orelse {
+                std.debug.print("qmv8 declined gs={d} N={d} K={d} M={d}\n", .{ gs, n, k, rows });
+                return error.KernelDeclined;
+            };
             defer _ = mlx.mlx_array_free(together);
             for (0..rows) |row| {
                 var xr = mlx.mlx_array_new();
@@ -202,14 +270,14 @@ test "qmv8 shared rows retain every serial qmv output bit" {
                 try mlx.check(mlx.mlx_slice(&yr, together, &[_]c_int{ @intCast(row), 0 }, 2, &[_]c_int{ @intCast(row + 1), n }, 2, &[_]c_int{ 1, 1 }, 2, s));
                 var reference = mlx.mlx_array_new();
                 defer _ = mlx.mlx_array_free(reference);
-                try mlx.check(mlx.mlx_quantized_matmul(&reference, xr, w, sc, bi, true, mlx.mlx_optional_int.some(64), mlx.mlx_optional_int.some(8), "affine", s));
+                try mlx.check(mlx.mlx_quantized_matmul(&reference, xr, w, sc, bi, true, mlx.mlx_optional_int.some(gs), mlx.mlx_optional_int.some(8), "affine", s));
                 try mlx.check(mlx.mlx_array_eval(reference));
                 try mlx.check(mlx.mlx_array_eval(yr));
                 const rp = mlx.mlx_array_data_bfloat16(reference) orelse return error.Unreadable;
                 const yp = mlx.mlx_array_data_bfloat16(yr) orelse return error.Unreadable;
                 for (0..@intCast(n)) |i| {
                     if (rp[i] != yp[i]) {
-                        std.debug.print("qmv8 N={d} K={d} M={d} row={d} col={d}: serial={x} shared={x}\n", .{ n, k, rows, row, i, rp[i], yp[i] });
+                        std.debug.print("qmv8 gs={d} N={d} K={d} M={d} row={d} col={d}: serial={x} shared={x}\n", .{ gs, n, k, rows, row, i, rp[i], yp[i] });
                         return error.QmvRowNotIdentical;
                     }
                 }
