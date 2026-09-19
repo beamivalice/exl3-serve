@@ -476,6 +476,14 @@ pub const NgramTable = struct {
         for (out, 0..) |*v, i| v.* = bf16ToF32(std.mem.readInt(u16, bytes[i * 2 ..][0..2], .little));
     }
 
+    fn copyBf16Words(bytes: []const u8, out: []u16) void {
+        if (@import("builtin").cpu.arch.endian() == .little) {
+            @memcpy(std.mem.sliceAsBytes(out), bytes);
+        } else {
+            for (out, 0..) |*v, i| v.* = std.mem.readInt(u16, bytes[i * 2 ..][0..2], .little);
+        }
+    }
+
     /// Bytes one row occupies across the table's regions.
     fn rowBytes(self: *const NgramTable) usize {
         return if (self.bits == 16) self.dim * 2 else self.wcols * 4 + self.scols * 4;
@@ -546,6 +554,34 @@ pub const NgramTable = struct {
         for (row_ids, 0..) |r, i| self.row(@intCast(r), out[i * self.dim ..][0..self.dim]);
     }
 
+    pub fn gatherBf16Checked(self: *const NgramTable, allocator: std.mem.Allocator, row_ids: []const i64, out: []u16, kv_len: u64) !void {
+        std.debug.assert(self.bits == 16 and self.bf16 == null);
+        std.debug.assert(out.len >= row_ids.len * self.dim);
+        const need = self.rowBytes();
+        const wide = row_ids.len > PrefetchPool.MAX_ROWS;
+        const oversized = self.map.len > ngramCacheLimit();
+        const wide_ok = !wide or plePrefillPrefetchEnabled(kv_len, oversized);
+        const pooled = wide_ok and self.pool != null and self.fd >= 0 and need <= PrefetchPool.ROW_BUF;
+        const whole_chunk = wide and oversized;
+        if (wide) notePrefillGatherArm(pooled, row_ids.len, if (whole_chunk) row_ids.len else PrefetchPool.MAX_ROWS);
+        if (pooled and whole_chunk) {
+            if (try self.pool.?.runBf16Into(self, row_ids, .{ .words = out }, allocator)) return;
+        } else if (pooled) {
+            const pool = self.pool.?;
+            var start: usize = 0;
+            while (start < row_ids.len) : (start += PrefetchPool.MAX_ROWS) {
+                const end = @min(start + PrefetchPool.MAX_ROWS, row_ids.len);
+                if (!pool.run(self, row_ids[start..end])) break;
+                for (start..end) |i| copyBf16Words(pool.bufs[i - start][0..need], out[i * self.dim ..][0..self.dim]);
+            }
+            if (start >= row_ids.len) return;
+        }
+        for (row_ids, 0..) |r, i| {
+            const off = self.w_off + @as(usize, @intCast(r)) * need;
+            copyBf16Words(self.map[off..][0..need], out[i * self.dim ..][0..self.dim]);
+        }
+    }
+
     /// One (row, region) pread into the pool's row buffer. False on a short read.
     fn preadSite(self: *const NgramTable, r: u64, region: usize, buf: []u8) bool {
         if (self.bf16) |*store| {
@@ -582,13 +618,17 @@ const PrefetchPool = struct {
             return a.row < b.row;
         }
     };
+    const WideOutput = union(enum) {
+        floats: []f32,
+        words: []u16,
+    };
     mu: std.Io.Mutex = .init,
     cv: std.Io.Condition = .init,
     gen: u64 = 0,
     quit: bool = false,
     table: ?*const NgramTable = null,
     rows: []const i64 = &.{},
-    wide_out: ?[]f32 = null,
+    wide_out: ?WideOutput = null,
     wide_refs: []const RowRead = &.{},
     wide_preads: std.atomic.Value(u64) = .init(0),
     bufs: [MAX_ROWS][ROW_BUF]u8 = undefined,
@@ -634,8 +674,12 @@ const PrefetchPool = struct {
     }
 
     fn runBf16(self: *PrefetchPool, table: *const NgramTable, rows: []const i64, out: []f32) !bool {
-        const refs = try std.heap.page_allocator.alloc(RowRead, rows.len);
-        defer std.heap.page_allocator.free(refs);
+        return self.runBf16Into(table, rows, .{ .floats = out }, std.heap.page_allocator);
+    }
+
+    fn runBf16Into(self: *PrefetchPool, table: *const NgramTable, rows: []const i64, out: WideOutput, allocator: std.mem.Allocator) !bool {
+        const refs = try allocator.alloc(RowRead, rows.len);
+        defer allocator.free(refs);
         for (refs, rows, 0..) |*ref, row, dst| ref.* = .{ .row = row, .dst = dst };
         std.mem.sort(RowRead, refs, {}, RowRead.less);
         const before = self.wide_preads.load(.monotonic);
@@ -646,7 +690,7 @@ const PrefetchPool = struct {
         return ok;
     }
 
-    fn dispatch(self: *PrefetchPool, table: *const NgramTable, rows: []const i64, out: ?[]f32, refs: []const RowRead) bool {
+    fn dispatch(self: *PrefetchPool, table: *const NgramTable, rows: []const i64, out: ?WideOutput, refs: []const RowRead) bool {
         _ = self.runs.fetchAdd(1, .monotonic);
         const io = std.Io.Threaded.global_single_threaded.io();
         self.mu.lockUncancelable(io);
@@ -679,19 +723,29 @@ const PrefetchPool = struct {
             const wide_out = self.wide_out;
             const refs = self.wide_refs;
             self.mu.unlock(io);
-            if (wide_out) |out| {
+            if (wide_out) |output| {
                 var buf: [ROW_BUF]u8 = undefined;
-                var decoded: [ROW_BUF / 2]f32 = undefined;
                 var reads: u64 = 0;
                 var i = idx;
                 while (i < refs.len) : (i += N) {
                     if (i > 0 and refs[i - 1].row == refs[i].row) continue;
                     reads += 1;
                     if (table.preadSite(@intCast(refs[i].row), 0, &buf)) {
-                        NgramTable.decodeBf16Row(buf[0 .. table.dim * 2], decoded[0..table.dim]);
-                        var j = i;
-                        while (j < refs.len and refs[j].row == refs[i].row) : (j += 1) {
-                            @memcpy(out[refs[j].dst * table.dim ..][0..table.dim], decoded[0..table.dim]);
+                        switch (output) {
+                            .floats => |out| {
+                                var decoded: [ROW_BUF / 2]f32 = undefined;
+                                NgramTable.decodeBf16Row(buf[0 .. table.dim * 2], decoded[0..table.dim]);
+                                var j = i;
+                                while (j < refs.len and refs[j].row == refs[i].row) : (j += 1) {
+                                    @memcpy(out[refs[j].dst * table.dim ..][0..table.dim], decoded[0..table.dim]);
+                                }
+                            },
+                            .words => |out| {
+                                var j = i;
+                                while (j < refs.len and refs[j].row == refs[i].row) : (j += 1) {
+                                    NgramTable.copyBf16Words(buf[0 .. table.dim * 2], out[refs[j].dst * table.dim ..][0..table.dim]);
+                                }
+                            },
                         }
                     } else _ = self.failed.fetchAdd(1, .acq_rel);
                 }
@@ -932,6 +986,59 @@ test "ngram oversized bf16: each unique row is read once and duplicates keep the
     try f.table.gatherChecked(&ids, out, 0);
     try testing.expectEqual(next + 1, pool.wide_preads.load(.monotonic));
     try f.expectRows(&ids, out);
+}
+
+test "ngram raw bf16 gather needs only row references as workspace" {
+    var f = try Bf16GatherFixture.init();
+    defer f.deinit();
+    test_ngram_cache_limit = f.bytes.len - 1;
+    defer test_ngram_cache_limit = null;
+    const pool = f.table.pool orelse return error.TestExpectedPool;
+    var ids: [4099]i64 = undefined;
+    for (&ids, 0..) |*r, i| r.* = @intCast((i * 53) % Bf16GatherFixture.ROWS);
+    const out = try testing.allocator.alloc(u16, ids.len * Bf16GatherFixture.DIM);
+    defer testing.allocator.free(out);
+    var workspace: [ids.len * 16]u8 align(8) = undefined;
+    var allocator = std.heap.FixedBufferAllocator.init(&workspace);
+    for (0..2) |_| {
+        const before = pool.runs.load(.monotonic);
+        f.table.gatherBf16Checked(allocator.allocator(), &ids, out, 0) catch |err| {
+            std.debug.print("raw bf16 gather: {s} with a {d}-byte row-reference workspace\n", .{ @errorName(err), workspace.len });
+            return err;
+        };
+        try testing.expectEqual(before + 1, pool.runs.load(.monotonic));
+        try testing.expectEqual(@as(u32, 0), pool.failed.load(.acquire));
+        for (ids, 0..) |r, i| for (0..Bf16GatherFixture.DIM) |c| {
+            const at = Bf16GatherFixture.DATA + (@as(usize, @intCast(r)) * Bf16GatherFixture.DIM + c) * 2;
+            try testing.expectEqual(std.mem.readInt(u16, f.bytes[at..][0..2], .little), out[i * Bf16GatherFixture.DIM + c]);
+        };
+        std.mem.reverse(i64, &ids);
+    }
+    var empty: [0]u8 = .{};
+    var no_workspace = std.heap.FixedBufferAllocator.init(&empty);
+    const before = pool.runs.load(.monotonic);
+    try f.table.gatherBf16Checked(no_workspace.allocator(), ids[0..16], out[0 .. 16 * Bf16GatherFixture.DIM], 0);
+    try testing.expectEqual(before + 1, pool.runs.load(.monotonic));
+    try testing.expectEqual(@as(u32, 0), pool.failed.load(.acquire));
+    for (ids[0..16], 0..) |r, i| for (0..Bf16GatherFixture.DIM) |c| {
+        const at = Bf16GatherFixture.DATA + (@as(usize, @intCast(r)) * Bf16GatherFixture.DIM + c) * 2;
+        try testing.expectEqual(std.mem.readInt(u16, f.bytes[at..][0..2], .little), out[i * Bf16GatherFixture.DIM + c]);
+    };
+    ple_prefill_prefetch_override = false;
+    defer ple_prefill_prefetch_override = null;
+    const serial = pool.runs.load(.monotonic);
+    try f.table.gatherBf16Checked(no_workspace.allocator(), &ids, out, 0);
+    try testing.expectEqual(serial, pool.runs.load(.monotonic));
+    for (ids, 0..) |r, i| for (0..Bf16GatherFixture.DIM) |c| {
+        const at = Bf16GatherFixture.DATA + (@as(usize, @intCast(r)) * Bf16GatherFixture.DIM + c) * 2;
+        try testing.expectEqual(std.mem.readInt(u16, f.bytes[at..][0..2], .little), out[i * Bf16GatherFixture.DIM + c]);
+    };
+    ple_prefill_prefetch_override = true;
+    const floats = try testing.allocator.alloc(f32, out.len);
+    defer testing.allocator.free(floats);
+    try f.table.gatherChecked(&ids, floats, 0);
+    try testing.expectEqual(@as(u32, 0), pool.failed.load(.acquire));
+    try f.expectRows(&ids, floats);
 }
 
 test "ngram hash reproduces the reference multipliers, primes and offsets" {

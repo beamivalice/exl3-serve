@@ -20522,18 +20522,24 @@ pub const Transformer = struct {
             advancePlePrev(entry, prev, ids, ctx_len);
         }
         const emb_dim: usize = st.table.dim * nh;
-        const host = try self.allocator.alloc(f32, n * emb_dim);
-        defer self.allocator.free(host);
+        const raw_bf16 = st.table.bits == 16 and st.table.bf16 == null;
+        const host: []f32 = if (raw_bf16) &.{} else try self.allocator.alloc(f32, n * emb_dim);
+        defer if (!raw_bf16) self.allocator.free(host);
         var gclk: ProfClock = if (diagEnvOnCached(&qwen4_profile_fwd_env, "QWEN4_PROFILE_FWD")) ProfClock.init() else undefined;
-        // The pool's arm is a kv-length question; `ctx.moe_seq_offset` is the pre-chunk
-        // position (`cache.step` is 0 forever on a GDN trunk).
-        try st.table.gatherChecked(rows, host, @intCast(ctx.moe_seq_offset.*));
+        const kv_len: u64 = @intCast(ctx.moe_seq_offset.*);
+        if (raw_bf16) {
+            try st.table.gatherBf16Checked(self.allocator, rows, pk, kv_len);
+        } else {
+            try st.table.gatherChecked(rows, host, kv_len);
+        }
         if (diagEnvOnCached(&qwen4_profile_fwd_env, "QWEN4_PROFILE_FWD")) log.info("[qwen4-prof] ple gather S={d}: {d:.2} ms\n", .{ seq_len, @as(f64, @floatFromInt(gclk.lap())) / 1e6 });
-        std.debug.assert(pk.len == host.len);
-        for (host, 0..) |v, i| {
-            const u: u32 = @bitCast(v);
-            const rounded = u +% 0x7FFF +% ((u >> 16) & 1);
-            pk[i] = @intCast(rounded >> 16);
+        if (!raw_bf16) {
+            std.debug.assert(pk.len == host.len);
+            for (host, 0..) |v, i| {
+                const u: u32 = @bitCast(v);
+                const rounded = u +% 0x7FFF +% ((u >> 16) & 1);
+                pk[i] = @intCast(rounded >> 16);
+            }
         }
     }
 
