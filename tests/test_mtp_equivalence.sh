@@ -17,11 +17,8 @@
 #      depth-independent floor: healthy measures ~0.7 at depth 1 and ~0.75+
 #      at the depth-3 default even on creative temp-0 content where the
 #      chained per_draft_pct legitimately dilutes to ~25%.
-#   2. EQUIVALENCE — at temp=0 the first $PREFIX_CHARS characters match a
-#      --no-mtp baseline byte-for-byte. (Full-output equality is NOT
-#      required: INT4 weights make batched verify forwards (qmm) reduce in
-#      a different order than single-token decode (qmv), so long greedy
-#      tails legitimately diverge — same as PLD/drafter, see CLAUDE.md.)
+#   2. EQUIVALENCE — full output bytes must match at temp=0.
+#      Every divergence fails, with the serial top-two gap reported.
 #
 # Usage: MTP_TEST_MODEL=<model-dir> ./tests/test_mtp_equivalence.sh [port]
 # Default model: ~/.mlx-serve/models/ddalcu/Qwen3.8-27B-MLX-Serve-4bit. A standalone
@@ -38,11 +35,8 @@
 set -u
 MODEL="${MTP_TEST_MODEL:-$HOME/.mlx-serve/models/ddalcu/Qwen3.8-27B-MLX-Serve-4bit}"
 PORT="${1:-11313}"
-BIN="./zig-out/bin/mlx-serve"
-# ~24 tokens of prefix. Mirrors the PLD/KV-quant first-N thresholds: INT4
-# float-reduction near-ties legitimately flip argmax past ~25-30 tokens
-# (observed live at char ~116 on warm prefix-cache requests).
-PREFIX_CHARS="${PREFIX_CHARS:-100}"
+BIN="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+EXTRA_ARGS="${MLX_SERVE_TEST_EXTRA_ARGS:-}"
 MAX_TOKENS=120
 PROMPT="Write a short story about a robot learning to paint."
 EXPECT_AUTO_PROFILE="${MTP_EXPECT_AUTO_PROFILE:-}"
@@ -108,11 +102,24 @@ fi
 
 PASS=0
 FAIL=0
-LOG=/tmp/mtp_equiv_server.log
+ARTIFACTS="${MTP_TEST_OUTPUT_DIR:-$(mktemp -d)}"
+mkdir -p "$ARTIFACTS"
+LOG="$ARTIFACTS/mtp_equiv_server.log"
+BOOT=0
+SERVER_PID=""
+exec 3>&1 4>&2
+exec >"$ARTIFACTS/suite.log" 2>&1
+finish_suite() {
+    local rc=$?
+    if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; fi
+    if [ "$rc" -ne 0 ]; then cat "$ARTIFACTS/suite.log" >&4; fi
+}
+trap finish_suite EXIT
+trap 'exit 130' INT TERM
+python3 "$(dirname "$0")/test_mtp_equivalence_strict.py" || exit 1
 
 start_server() { # $1 = extra flags
-    pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
-    sleep 1
+    BOOT=$((BOOT+1))
     # --prefix-cache-entries 0: byte-stable greedy on a HYBRID needs the
     # prefix cache off (CLAUDE.md) — a warm restore re-runs the recurrence in
     # a different block size and legitimately flips near-tie argmaxes inside
@@ -120,7 +127,7 @@ start_server() { # $1 = extra flags
     # --no-drafter: a pack shipping its own drafter/ would otherwise outrank
     # the MTP head and this script would measure DFlash.
     # shellcheck disable=SC2086
-    "$BIN" --model "$MODEL" --serve --port "$PORT" --no-pld --no-drafter --prefix-cache-entries 0 --log-level info $1 >"$LOG" 2>&1 &
+    "$BIN" --model "$MODEL" --serve --port "$PORT" --no-pld --no-drafter --prefix-cache-entries 0 --log-level info $EXTRA_ARGS $1 >"$LOG" 2>&1 &
     SERVER_PID=$!
     for _ in $(seq 1 120); do
         curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
@@ -141,8 +148,12 @@ start_server() { # $1 = extra flags
 }
 
 stop_server() {
-    kill "$SERVER_PID" 2>/dev/null
-    wait "$SERVER_PID" 2>/dev/null
+    if [ -n "$SERVER_PID" ]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+        SERVER_PID=""
+    fi
+    cp "$LOG" "$LOG.boot$BOOT"
 }
 
 chat_nonstream() {
@@ -176,16 +187,7 @@ messages_nonstream() {
         python3 -c "import json,sys; print(''.join(b.get('text','') for b in json.load(sys.stdin)['content']), end='')"
 }
 
-# On a byte mismatch, decide TIE vs BUG: replay the prompt serially
-# (enable_mtp:false, adds no mode=mtp lines) on the SAME server with logprobs
-# and read the serial top-2 gap at the first divergent character. Verify
-# forwards (qmm) and serial decode (qmv) reduce in different orders, so a
-# near-tied argmax legitimately lands on either candidate — and WHICH
-# positions get verified at which width depends on draft content, so any
-# draft-side change can move the flip. A spec plumbing bug (committing a
-# token verify never approved) diverges at a CONFIDENT position and still
-# fails here. Observed live: an EXACT 0.0000 top-2 tie at token 13 of this
-# very prompt on Qwen3.8-27B.
+# Every mismatch fails and reports its serial top-two gap.
 tie_gap_at_divergence() { # $1 expected-file, $2 actual-file → prints gap or "none"
     python3 - "$1" "$2" "$PORT" "$MAX_TOKENS" "$PROMPT" <<'PYEOF'
 import json, sys, urllib.request
@@ -218,10 +220,7 @@ PYEOF
 
 check() { # $1 name, $2 expected-prefix-file, $3 actual-file, $4 expected new mtp engagements (log delta)
     local name="$1" expf="$2" actf="$3" want_engage="$4"
-    local exp act
-    exp=$(head -c "$PREFIX_CHARS" "$expf")
-    act=$(head -c "$PREFIX_CHARS" "$actf")
-    if [ -z "$act" ]; then
+    if [ ! -s "$actf" ]; then
         echo "FAIL [$name]: empty output"; FAIL=$((FAIL+1)); return
     fi
     if [ "$want_engage" = "yes" ]; then
@@ -233,26 +232,24 @@ check() { # $1 name, $2 expected-prefix-file, $3 actual-file, $4 expected new mt
         fi
         ENGAGE_BASE=$stats
     fi
-    if [ "$exp" != "$act" ]; then
+    if ! cmp -s "$expf" "$actf"; then
         local gap
         gap=$(tie_gap_at_divergence "$expf" "$actf")
-        if python3 -c "import sys; g='$gap'; sys.exit(0 if g not in ('', 'none') and float(g) <= 0.15 else 1)"; then
-            echo "PASS [$name] (spec/serial argmax flip at a near-tie, top-2 gap=$gap)"
-            PASS=$((PASS+1)); return
-        fi
-        echo "FAIL [$name]: first $PREFIX_CHARS chars differ from no-mtp baseline (top-2 gap at divergence: ${gap:-unreadable} — NOT a near-tie)"
-        echo "  expected: $(echo "$exp" | head -c 80)..."
-        echo "  actual:   $(echo "$act" | head -c 80)..."
+        echo "FAIL [$name]: full output bytes differ from no-mtp baseline (top-2 gap at divergence: ${gap:-unreadable})"
+        python3 - "$expf" "$actf" <<'PYBYTES'
+import pathlib, sys
+for label, path in zip(("expected", "actual"), sys.argv[1:]):
+    print(f"  {label}: {pathlib.Path(path).read_bytes()[:80]!r}...")
+PYBYTES
         FAIL=$((FAIL+1)); return
     fi
-    echo "PASS [$name]"
     PASS=$((PASS+1))
 }
 
 echo "── baseline server (--no-mtp) ──"
 start_server "--no-mtp"
-chat_nonstream > /tmp/mtp_base_chat.txt
-messages_nonstream > /tmp/mtp_base_msg.txt
+chat_nonstream > "$ARTIFACTS/mtp_base_chat.txt"
+messages_nonstream > "$ARTIFACTS/mtp_base_msg.txt"
 if grep -q "mode=mtp" "$LOG"; then
     echo "FAIL: --no-mtp server ran MTP rounds"; FAIL=$((FAIL+1))
 else
@@ -279,12 +276,12 @@ if [ -n "$EXPECT_AUTO_PROFILE" ]; then
     fi
 fi
 ENGAGE_BASE=0
-chat_nonstream > /tmp/mtp_on_chat.txt
-check "chat non-stream" /tmp/mtp_base_chat.txt /tmp/mtp_on_chat.txt yes
-chat_stream > /tmp/mtp_on_chat_stream.txt
-check "chat stream" /tmp/mtp_base_chat.txt /tmp/mtp_on_chat_stream.txt yes
-messages_nonstream > /tmp/mtp_on_msg.txt
-check "messages non-stream" /tmp/mtp_base_msg.txt /tmp/mtp_on_msg.txt yes
+chat_nonstream > "$ARTIFACTS/mtp_on_chat.txt"
+check "chat non-stream" "$ARTIFACTS/mtp_base_chat.txt" "$ARTIFACTS/mtp_on_chat.txt" yes
+chat_stream > "$ARTIFACTS/mtp_on_chat_stream.txt"
+check "chat stream" "$ARTIFACTS/mtp_base_chat.txt" "$ARTIFACTS/mtp_on_chat_stream.txt" yes
+messages_nonstream > "$ARTIFACTS/mtp_on_msg.txt"
+check "messages non-stream" "$ARTIFACTS/mtp_base_msg.txt" "$ARTIFACTS/mtp_on_msg.txt" yes
 # Acceptance floor: a broken head engages but accepts ~0 tokens per round.
 # avg_per_round is depth-independent (per_draft_pct divides by depth and
 # legitimately dilutes on chained creative drafts at the depth-3 default).
@@ -348,9 +345,8 @@ stop_server
 echo "── fixed-depth server (MLX_SERVE_MTP_ADAPTIVE=0) ──"
 # The env kill switch must fully revert: legacy cap 3 (not the adaptive auto
 # cap) and zero chunk-B extensions on the same echo workload.
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
-sleep 1
-MLX_SERVE_MTP_ADAPTIVE=0 "$BIN" --model "$MODEL" --serve --port "$PORT" --no-pld --no-drafter --log-level info >"$LOG" 2>&1 &
+BOOT=$((BOOT+1))
+MLX_SERVE_MTP_ADAPTIVE=0 "$BIN" --model "$MODEL" --serve --port "$PORT" --no-pld --no-drafter --prefix-cache-entries 0 --log-level info $EXTRA_ARGS >"$LOG" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 120); do
     curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
@@ -379,5 +375,6 @@ fi
 stop_server
 
 echo
-echo "RESULT: $PASS passed, $FAIL failed"
+printf '{"passed":%s,"failed":%s,"acquittals":0}\n' "$PASS" "$FAIL" >"$ARTIFACTS/result.json"
+echo "RESULT: $PASS passed, $FAIL failed, 0 acquittals"
 [ "$FAIL" -eq 0 ] || exit 1

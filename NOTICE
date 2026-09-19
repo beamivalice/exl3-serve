@@ -202,6 +202,12 @@ reducing in one dispatch. The batched coarse-head pair kernel
 (`MTP_COARSE_PAIRS_SOURCE`) adapts the 3-bit affine qmv-fast reduction from
 quantized.h, sharing each packed read across two input rows.
 
+The row-identical 8-bit projection kernel in `src/mtp_qmv.zig` adapts
+`qmv_fast_impl`, `qmv_impl`, `load_vector` and `qdot` from MLX
+`backend/metal/kernels/quantized.h` (Copyright (c) 2023-2024 Apple Inc.).
+It shares packed weights across input rows while preserving each serial
+row's lane assignment, reduction order and output rounding.
+
 Several other kernels of ours deliberately reproduce the exact arithmetic of
 MLX ops (reduction order, accumulator dtype, `fast::exp`, the `precise::rsqrt`
 variant) so a fused kernel stays bit-identical to the op chain it replaces.
