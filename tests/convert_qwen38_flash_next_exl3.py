@@ -499,6 +499,377 @@ def restack_from_exl3(src_dir: str | Path, pack_dir: str | Path, dst: str | Path
     return {"weight_map": weight_map, "k_hist": k_hist, "k": int(modal)}
 
 
+NGRAM_SHARD_RE = __import__("re").compile(r"\.ple\.ple_embedding\.ngram_embedding\.shard_(\d+)\.weight$")
+MTP_SRC_PREFIX = "mtp."
+MTP_DST_PREFIX = "language_model.mtp."
+TENSOR_SUFFIXES = (".weight", ".scales", ".biases", ".trellis", ".suh", ".svh")
+AFFINE_BITS = (2, 3, 4, 5, 6, 8)
+AFFINE_GROUPS = (32, 64, 128)
+
+
+def bf16_ngram_shards(src_dir: str | Path) -> list[tuple[str, str]]:
+    index = json.loads((Path(src_dir) / "model.safetensors.index.json").read_text())
+    found: dict[int, tuple[str, str]] = {}
+    for key, fname in index["weight_map"].items():
+        m = NGRAM_SHARD_RE.search(key)
+        if m:
+            found[int(m.group(1))] = (key, fname)
+    if not found:
+        raise RuntimeError(f"{src_dir} names no ngram_embedding shard")
+    missing = [i for i in range(max(found) + 1) if i not in found]
+    if missing:
+        raise RuntimeError(f"missing ngram shard {missing[:5]} of {max(found) + 1}")
+    return [found[i] for i in range(max(found) + 1)]
+
+
+def write_bf16_ngram_table(src_dir: str | Path, out_path: str | Path, *, chunk: int = 64 << 20) -> dict:
+    """Concatenate the checkpoint's bf16 n-gram shards into one `ngram_table.bin`."""
+    src_dir = Path(src_dir)
+    regions, rows, dim = [], 0, None
+    for key, fname in bf16_ngram_shards(src_dir):
+        header, data_off = read_header(src_dir / fname)
+        meta = header[key]
+        if meta["dtype"] != "BF16":
+            raise RuntimeError(f"{key} is {meta['dtype']}, expected BF16")
+        r, d = meta["shape"]
+        if dim is None:
+            dim = d
+        elif d != dim:
+            raise RuntimeError(f"{key} row width {d} != {dim}")
+        regions.append((src_dir / fname, data_off + meta["data_offsets"][0], r * d * 2))
+        rows += r
+    nbytes = rows * dim * 2
+    header = {
+        "__metadata__": {"format": "mlx-serve-ngram", "bits": "16", "group_size": "0"},
+        "weight": {"dtype": "BF16", "shape": [rows, dim], "data_offsets": [0, nbytes]},
+    }
+    hjson = json.dumps(header).encode()
+    hjson += b" " * ((8 - (len(hjson) % 8)) % 8)
+    tmp = str(out_path) + ".tmp"
+    with open(tmp, "wb") as out:
+        out.write(struct.pack("<Q", len(hjson)))
+        out.write(hjson)
+        for path, start, length in regions:
+            with open(path, "rb") as f:
+                f.seek(start)
+                left = length
+                while left:
+                    block = f.read(min(chunk, left))
+                    if not block:
+                        raise RuntimeError(f"{path}: short read {left} bytes from the end")
+                    out.write(block)
+                    left -= len(block)
+            print(f"ngram {path.name} {length / 1e9:.1f} GB", flush=True)
+    os.replace(tmp, out_path)
+    return {"rows": rows, "dim": dim, "shards": len(regions), "bytes": 8 + len(hjson) + nbytes}
+
+
+def read_ngram_bin_row(path: str | Path, r: int) -> np.ndarray:
+    """One row as the loader's bits-16 arm reads it: raw bf16 at w_off + r * dim * 2."""
+    with open(path, "rb") as f:
+        hlen = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(hlen))
+        meta = header["weight"]
+        dim = meta["shape"][1]
+        f.seek(8 + hlen + meta["data_offsets"][0] + r * dim * 2)
+        return np.frombuffer(f.read(dim * 2), dtype=np.uint16)
+
+
+def bf16_to_f32(a: np.ndarray) -> np.ndarray:
+    return (a.astype(np.uint32) << 16).view(np.float32)
+
+
+def to_bf16(a: np.ndarray) -> np.ndarray:
+    v = np.asarray(a, dtype=np.float32).view(np.uint32)
+    return ((v + 0x7FFF + ((v >> 16) & 1)) >> 16).astype(np.uint16)
+
+
+def within_one_bf16_ulp(a: np.ndarray, b: np.ndarray) -> bool:
+    mag = np.maximum(np.abs(a), np.abs(b))
+    ulp = np.where(mag > 0, np.exp2(np.floor(np.log2(np.maximum(mag, 1e-30))) - 7), np.float32(1e-30))
+    return bool(np.all(np.abs(a - b) <= ulp))
+
+
+def _read_tensor(root: str | Path, key: str) -> np.ndarray:
+    root = Path(root)
+    wm = json.loads((root / "model.safetensors.index.json").read_text())["weight_map"]
+    header, data_off = read_header(root / wm[key])
+    return read_raw(root / wm[key], data_off, header[key])
+
+
+def resolve_conventions(dense_dir: str | Path, expert_pack: str | Path, plan: dict) -> dict:
+    """A tensor NEITHER side quantizes carries no imatrix content, so it comes from the
+    expert pack — the copy already in the loader's convention (our converter bakes the
+    +1 of the delta-encoded norms into the stored weight; an HF-convention pack does
+    not). The dense source's copy must be the same values or that +1; anything else is
+    a refusal, never a silent choice."""
+    dense_dir, expert_pack = Path(dense_dir), Path(expert_pack)
+    expert_index = expert_pack / "model.safetensors.index.json"
+    if not expert_index.exists():
+        return {"from_expert": [], "refusals": [], "delta_norms": 0}
+    expert_wm = json.loads(expert_index.read_text())["weight_map"]
+    quantized = {module_of(k) for k in list(plan["dense"]) + list(expert_wm) if k.endswith(".scales")}
+    headers: dict[Path, tuple] = {}
+
+    def load(root: Path, fname: str, key: str):
+        path = root / fname
+        if path not in headers:
+            headers[path] = read_header(path)
+        header, data_off = headers[path]
+        return header[key], read_raw(path, data_off, header[key])
+
+    moved, refusals, deltas = [], [], 0
+    for nk, (orig, fname) in sorted(plan["dense"].items()):
+        if nk not in expert_wm or module_of(nk) in quantized:
+            continue
+        meta_d, raw_d = load(dense_dir, fname, orig)
+        meta_e, raw_e = load(expert_pack, expert_wm[nk], nk)
+        if meta_d["dtype"] != meta_e["dtype"] or list(meta_d["shape"]) != list(meta_e["shape"]):
+            refusals.append({"key": nk, "reason":
+                             f"{meta_d['dtype']}{list(meta_d['shape'])} in the dense source vs "
+                             f"{meta_e['dtype']}{list(meta_e['shape'])} in the pack"})
+            continue
+        if np.array_equal(raw_d, raw_e):
+            moved.append(nk)
+            continue
+        if meta_d["dtype"] == "BF16":
+            d, e = bf16_to_f32(raw_d).ravel(), bf16_to_f32(raw_e).ravel()
+            if within_one_bf16_ulp(e, d + np.float32(1.0)):
+                moved.append(nk)
+                deltas += 1
+                continue
+            gap = float(np.max(np.abs(e - d)))
+        else:
+            gap = float("nan")
+        refusals.append({"key": nk, "reason":
+                         f"the dense copy differs from the pack by neither 0 nor the +1 delta "
+                         f"encoding (max|d|={gap:.6g})"})
+    return {"from_expert": moved, "refusals": refusals, "delta_norms": deltas}
+
+
+def module_of(key: str) -> str:
+    for suffix in TENSOR_SUFFIXES:
+        if key.endswith(suffix):
+            return key[: -len(suffix)]
+    return key
+
+
+def normalize_dense_key(key: str) -> str:
+    if key.startswith(MTP_SRC_PREFIX):
+        return MTP_DST_PREFIX + key[len(MTP_SRC_PREFIX) :]
+    return key
+
+
+def is_ngram_shard_key(key: str) -> bool:
+    return ".ngram_embedding.shard" in key
+
+
+def plan_compose(dense_wm: dict, expert_wm: dict) -> dict:
+    """Dense source wins per MODULE; the EXL3 pack keeps the routed experts and
+    whatever module the dense source does not carry (the vision tower)."""
+    dense: dict[str, tuple[str, str]] = {}
+    for key, fname in dense_wm.items():
+        if is_ngram_shard_key(key) or is_pack_expert_key(key):
+            continue
+        nk = normalize_dense_key(key)
+        if nk in dense:
+            raise RuntimeError(f"{nk} named twice by the dense source")
+        dense[nk] = (key, fname)
+    # For a module both packs carry, the DENSE copy wins: it is the more precise one, and
+    # our fused hyper-connection read declines a quantized `block_inject_weight`.
+    quantized_dense = {module_of(k) for k in dense if k.endswith(".scales")}
+    quantized_pack = {module_of(k) for k in expert_wm if k.endswith(".scales")}
+    pack_modules = {module_of(k) for k in expert_wm}
+    pack_wins = (quantized_dense - quantized_pack) & pack_modules
+    for key in [k for k in dense if module_of(k) in pack_wins]:
+        del dense[key]
+    modules = {module_of(k) for k in dense}
+    experts, carried = {}, {}
+    for key, fname in expert_wm.items():
+        if is_pack_expert_key(key):
+            experts[key] = fname
+        elif module_of(key) not in modules:
+            carried[key] = fname
+    return {"dense": dense, "experts": experts, "carried": carried}
+
+
+def affine_admits(*, w_cols: int, s_cols: int, bits: int, gs: int) -> bool:
+    """`expert_quant.affineGeomFromShapes`: the geometry our loader solves."""
+    if bits not in AFFINE_BITS or gs not in AFFINE_GROUPS:
+        return False
+    in_dim = s_cols * gs
+    return in_dim > 0 and w_cols * 32 == in_dim * bits
+
+
+def quant_spec_for(quant_cfg: dict, module: str) -> dict:
+    spec = {k: v for k, v in quant_cfg.items() if not isinstance(v, dict)}
+    override = quant_cfg.get(module)
+    if isinstance(override, dict):
+        spec.update(override)
+    return spec
+
+
+def dense_refusals(dense_dir: str | Path, plan: dict) -> list[dict]:
+    """Every dense module whose quant geometry our loader cannot take, named."""
+    dense_dir = Path(dense_dir)
+    cfg = json.loads((dense_dir / "config.json").read_text())
+    quant_cfg = cfg.get("quantization") or cfg.get("quantization_config") or {}
+    by_module: dict[str, dict[str, tuple[str, str]]] = {}
+    for nk, (orig, fname) in plan["dense"].items():
+        for suffix in (".weight", ".scales", ".biases"):
+            if nk.endswith(suffix):
+                by_module.setdefault(module_of(nk), {})[suffix[1:]] = (orig, fname)
+    headers: dict[str, tuple[dict, int]] = {}
+    out = []
+    for module, parts in sorted(by_module.items()):
+        if "scales" not in parts:
+            continue
+        if "weight" not in parts:
+            out.append({"key": module, "reason": "scales without a weight"})
+            continue
+        spec = quant_spec_for(quant_cfg, module_of(parts["scales"][0]))
+        mode = str(spec.get("mode", "affine"))
+        def shape(part):
+            orig, fname = parts[part]
+            if fname not in headers:
+                headers[fname] = read_header(dense_dir / fname)
+            return headers[fname][0][orig]["shape"]
+        w_shape, s_shape = shape("weight"), shape("scales")
+        reason = None
+        if mode != "affine":
+            reason = f"quant mode {mode}"
+        elif "biases" not in parts:
+            reason = "affine without biases"
+        elif not affine_admits(w_cols=w_shape[-1], s_cols=s_shape[-1],
+                               bits=int(spec.get("bits", 0)), gs=int(spec.get("group_size", 0))):
+            reason = f"bits {spec.get('bits')} group {spec.get('group_size')} vs weight {w_shape} scales {s_shape}"
+        if reason:
+            out.append({"key": module, "reason": reason})
+    return out
+
+
+def _rewrite_subset(src_file: Path, out_file: Path, keys: dict[str, str]) -> None:
+    """Copy `keys` (source name -> destination name) out of one shard."""
+    header, data_off = read_header(src_file)
+    named = {}
+    for orig, dest in keys.items():
+        meta = header[orig]
+        raw = read_raw(src_file, data_off, meta)
+        named[dest] = (meta["dtype"], tuple(meta["shape"]), np.ascontiguousarray(raw).tobytes())
+    write_safetensors_raw(str(out_file), named)
+
+
+def _link(src: Path, dst: Path) -> None:
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    os.link(src, dst)
+
+
+def compose_pack(
+    dense_dir: str | Path,
+    expert_pack: str | Path,
+    dst: str | Path,
+    *,
+    ngram_src: str | Path | None = None,
+    ngram_bin: str | Path | None = None,
+) -> dict:
+    """EXL3 experts from `expert_pack`, every other module from `dense_dir`,
+    the n-gram table written bf16 from `ngram_src` (or hard-linked from `ngram_bin`)."""
+    dense_dir, expert_pack, dst = Path(dense_dir), Path(expert_pack), Path(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    dense_wm = json.loads((dense_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    expert_idx = json.loads((expert_pack / "model.safetensors.index.json").read_text())
+    plan = plan_compose(dense_wm, expert_idx["weight_map"])
+    refusals = dense_refusals(dense_dir, plan)
+    conv = resolve_conventions(dense_dir, expert_pack, plan)
+    refusals = refusals + conv["refusals"]
+    if refusals:
+        raise RuntimeError("dense tensors our loader cannot take: " +
+                           "; ".join(f"{r['key']} ({r['reason']})" for r in refusals))
+    for key in conv["from_expert"]:
+        plan["dense"].pop(key)
+        plan["carried"][key] = expert_idx["weight_map"][key]
+    print(f"from the pack (loader convention): {len(conv['from_expert'])} dense tensors, "
+          f"{conv['delta_norms']} of them delta-encoded norms", flush=True)
+
+    weight_map: dict[str, str] = {}
+    by_file: dict[str, dict[str, str]] = {}
+    for nk, (orig, fname) in plan["dense"].items():
+        by_file.setdefault(fname, {})[orig] = nk
+    dropped = {}
+    for key, fname in dense_wm.items():
+        if normalize_dense_key(key) not in plan["dense"]:
+            dropped.setdefault(fname, []).append(key)
+    for fname, keys in sorted(by_file.items()):
+        renamed = any(orig != dest for orig, dest in keys.items())
+        if not renamed and fname not in dropped:
+            _link(dense_dir / fname, dst / fname)
+        else:
+            _rewrite_subset(dense_dir / fname, dst / fname, keys)
+        for dest in keys.values():
+            weight_map[dest] = fname
+        print(f"dense {fname} {len(keys)} tensors", flush=True)
+
+    expert_files: dict[str, dict[str, str]] = {}
+    for key, fname in {**plan["experts"], **plan["carried"]}.items():
+        expert_files.setdefault(fname, {})[key] = key
+    for fname, keys in sorted(expert_files.items()):
+        if fname in weight_map.values():
+            raise RuntimeError(f"{fname} names a shard on both sides")
+        whole = sum(1 for k, f in expert_idx["weight_map"].items() if f == fname) == len(keys)
+        if whole:
+            _link(expert_pack / fname, dst / fname)
+        else:
+            _rewrite_subset(expert_pack / fname, dst / fname, keys)
+        for key in keys:
+            weight_map[key] = fname
+
+    for name in sorted(os.listdir(expert_pack)):
+        srcp = expert_pack / name
+        if not srcp.is_file() or name.endswith(".safetensors") or name in (
+            "model.safetensors.index.json", "config.json", "ngram_table.bin"):
+            continue
+        _link(srcp, dst / name)
+
+    ngram_info: dict = {}
+    if ngram_bin is not None:
+        _link(Path(ngram_bin), dst / "ngram_table.bin")
+        ngram_info = {"source": str(ngram_bin), "linked": True}
+    elif ngram_src is not None:
+        ngram_info = write_bf16_ngram_table(ngram_src, dst / "ngram_table.bin")
+        ngram_info["source"] = str(ngram_src)
+
+    cfg = json.loads((expert_pack / "config.json").read_text())
+    dense_cfg = json.loads((dense_dir / "config.json").read_text())
+    # The quantization block describes the tensors it came with: dense modules from
+    # the dense source, carried modules (the vision tower) from the expert pack.
+    dense_modules = {module_of(k) for k in plan["dense"]}
+    carried_modules = {module_of(k) for k in plan["carried"]}
+    for block in ("quantization", "quantization_config"):
+        src_block = dense_cfg.get(block)
+        if src_block is None:
+            cfg.pop(block, None)
+            continue
+        out_block = {}
+        for k, v in src_block.items():
+            if not isinstance(v, dict):
+                out_block[k] = v
+            elif normalize_dense_key(k) in dense_modules:
+                out_block[normalize_dense_key(k)] = v
+        for k, v in (cfg.get(block) or {}).items():
+            if isinstance(v, dict) and k in carried_modules:
+                out_block[k] = v
+        cfg[block] = out_block
+    cfg["ngram_table"] = {"file": "ngram_table.bin", "bits": 16, "group_size": 0}
+    (dst / "config.json").write_text(json.dumps(cfg, indent=2))
+    total = sum(os.path.getsize(dst / f) for f in sorted(set(weight_map.values())))
+    (dst / "model.safetensors.index.json").write_text(json.dumps(
+        {"metadata": {"total_size": total}, "weight_map": weight_map}, indent=2))
+    return {"weight_map": weight_map, "refusals": refusals, "ngram": ngram_info,
+            "carried": sorted(plan["carried"]), "bytes": total,
+            "from_expert": conv["from_expert"], "delta_norms": conv["delta_norms"]}
+
+
 def expert_quant_block(source: str, **extra) -> dict:
     """The `expert_quant` block the server admits: exl3, K, mul1 — nothing else."""
     block = {"format": "exl3", "k": int(K), "codebook": CODEBOOK, "out_scales": "svh", "source": source}
@@ -1272,6 +1643,343 @@ class LayoutTests(unittest.TestCase):
             np.testing.assert_array_equal(got, router)
 
 
+class Bf16NgramTableTests(unittest.TestCase):
+    """The bf16 `.bin` is the shards concatenated: one row must survive the trip."""
+
+    def _shards(self, td, rows=(3, 5), dim=4):
+        rng = np.random.default_rng(7)
+        src = Path(td)
+        wm = {}
+        blocks = []
+        for i, r in enumerate(rows):
+            bits = rng.integers(0, 1 << 16, size=(r, dim), dtype=np.uint16)
+            blocks.append(bits)
+            key = f"model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_{i}.weight"
+            fname = f"model-{i:05d}.safetensors"
+            write_safetensors_raw(str(src / fname), {key: ("BF16", (r, dim), bits.tobytes())})
+            wm[key] = fname
+        (src / "model.safetensors.index.json").write_text(json.dumps({"weight_map": wm}))
+        return np.concatenate(blocks, axis=0)
+
+    def test_every_row_including_the_shard_boundary_is_bit_exact(self):
+        with tempfile.TemporaryDirectory() as td:
+            want = self._shards(td)
+            out = Path(td) / "ngram_table.bin"
+            info = write_bf16_ngram_table(td, out)
+            self.assertEqual(info["rows"], want.shape[0])
+            self.assertEqual(info["dim"], want.shape[1])
+            # rows 2 and 3 straddle the shard-0/shard-1 boundary.
+            for r in range(want.shape[0]):
+                np.testing.assert_array_equal(read_ngram_bin_row(out, r), want[r])
+
+    def test_the_header_is_the_bits_16_contract_the_loader_parses(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._shards(td)
+            out = Path(td) / "ngram_table.bin"
+            write_bf16_ngram_table(td, out)
+            with open(out, "rb") as f:
+                hlen = struct.unpack("<Q", f.read(8))[0]
+                header = json.loads(f.read(hlen))
+            self.assertEqual(header["__metadata__"]["format"], "mlx-serve-ngram")
+            self.assertEqual(header["__metadata__"]["bits"], "16")
+            self.assertEqual(header["weight"]["dtype"], "BF16")
+            self.assertEqual(header["weight"]["data_offsets"][0], 0)
+
+    def test_a_missing_shard_index_is_named_not_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._shards(td)
+            idx = Path(td) / "model.safetensors.index.json"
+            wm = json.loads(idx.read_text())["weight_map"]
+            wm.pop("model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight")
+            idx.write_text(json.dumps({"weight_map": wm}))
+            with self.assertRaises(RuntimeError) as cm:
+                write_bf16_ngram_table(td, Path(td) / "x.bin")
+            self.assertIn("shard", str(cm.exception))
+
+
+class ComposeDenseTests(unittest.TestCase):
+    """Dense source wins per MODULE; routed experts come from the EXL3 pack."""
+
+    def test_the_mtp_prefix_is_normalized_to_the_one_the_loader_reads(self):
+        self.assertEqual(normalize_dense_key("mtp.fc_hidden.weight"), "language_model.mtp.fc_hidden.weight")
+        self.assertEqual(normalize_dense_key("language_model.lm_head.weight"), "language_model.lm_head.weight")
+
+    def test_plan_takes_dense_from_the_dense_source_and_experts_from_the_pack(self):
+        dense = {
+            "language_model.lm_head.weight": "d1", "language_model.lm_head.scales": "d1",
+            "language_model.model.layers.0.mlp.gate.weight": "d1",
+            "mtp.fc_hidden.weight": "d2",
+            "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight": "d2",
+            "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight": "d3",
+        }
+        expert = {
+            "language_model.lm_head.weight": "p1", "language_model.lm_head.scales": "p1",
+            "language_model.model.layers.0.mlp.gate.weight": "p1",
+            "language_model.model.layers.0.mlp.switch_mlp.gate_proj.trellis": "p2",
+            "model.visual.patch_embed.proj.weight": "p3",
+        }
+        plan = plan_compose(dense, expert)
+        self.assertEqual(plan["dense"]["language_model.mtp.fc_hidden.weight"], ("mtp.fc_hidden.weight", "d2"))
+        self.assertNotIn("language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight", plan["dense"])
+        self.assertNotIn("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight", plan["dense"])
+        self.assertEqual(sorted(plan["experts"]), ["language_model.model.layers.0.mlp.switch_mlp.gate_proj.trellis"])
+        self.assertEqual(sorted(plan["carried"]), ["model.visual.patch_embed.proj.weight"])
+
+    def test_a_quantized_module_the_dense_source_carries_replaces_the_pack_whole(self):
+        # ours quantizes `gate` (weight+scales+biases), the dense source keeps it dense:
+        # the module comes from one side or the other, never half from each.
+        dense = {"language_model.model.layers.0.mlp.gate.weight": "d1"}
+        expert = {
+            "language_model.model.layers.0.mlp.gate.weight": "p1",
+            "language_model.model.layers.0.mlp.gate.scales": "p1",
+            "language_model.model.layers.0.mlp.gate.biases": "p1",
+        }
+        plan = plan_compose(dense, expert)
+        self.assertEqual(plan["carried"], {})
+        self.assertEqual(sorted(plan["dense"]), ["language_model.model.layers.0.mlp.gate.weight"])
+
+    def test_a_geometry_the_loader_cannot_take_is_a_named_refusal(self):
+        ok = affine_admits(w_cols=640, s_cols=40, bits=8, gs=64)          # in 2560, 8-bit gs64
+        self.assertTrue(ok)
+        self.assertTrue(affine_admits(w_cols=320, s_cols=40, bits=4, gs=64))
+        self.assertFalse(affine_admits(w_cols=640, s_cols=40, bits=7, gs=64))   # width mx.quantize never ships
+        self.assertFalse(affine_admits(w_cols=640, s_cols=160, bits=8, gs=16))  # group size the solver rejects
+        self.assertFalse(affine_admits(w_cols=641, s_cols=40, bits=8, gs=64))   # packed cols do not solve
+
+    def test_a_scales_tensor_with_no_weight_is_named_too(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            sc = np.zeros((4, 1), dtype=np.uint16)
+            write_safetensors_raw(str(src / "m.safetensors"), {
+                "a.scales": ("BF16", sc.shape, sc.tobytes()),
+                "a.biases": ("BF16", sc.shape, sc.tobytes()),
+            })
+            wm = {k: "m.safetensors" for k in ("a.scales", "a.biases")}
+            (src / "model.safetensors.index.json").write_text(json.dumps({"weight_map": wm}))
+            (src / "config.json").write_text(json.dumps({"quantization": {"bits": 8, "group_size": 64}}))
+            refusals = dense_refusals(src, plan_compose(wm, {}))
+            self.assertEqual([r["key"] for r in refusals], ["a"])
+            self.assertIn("weight", refusals[0]["reason"])
+
+    def test_refusals_name_the_tensor_and_its_geometry(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            good = np.zeros((4, 2), dtype=np.uint32)
+            bad = np.zeros((4, 3), dtype=np.uint32)
+            sc = np.zeros((4, 1), dtype=np.uint16)
+            write_safetensors_raw(str(src / "m.safetensors"), {
+                "a.weight": ("U32", good.shape, good.tobytes()),
+                "a.scales": ("BF16", sc.shape, sc.tobytes()),
+                "a.biases": ("BF16", sc.shape, sc.tobytes()),
+                "b.weight": ("U32", bad.shape, bad.tobytes()),
+                "b.scales": ("BF16", sc.shape, sc.tobytes()),
+                "b.biases": ("BF16", sc.shape, sc.tobytes()),
+            })
+            wm = {k: "m.safetensors" for k in ("a.weight", "a.scales", "a.biases", "b.weight", "b.scales", "b.biases")}
+            (src / "model.safetensors.index.json").write_text(json.dumps({"weight_map": wm}))
+            (src / "config.json").write_text(json.dumps({"quantization": {"bits": 2, "group_size": 32, "mode": "affine"}}))
+            plan = plan_compose(wm, {})
+            bad_names = [r["key"] for r in dense_refusals(src, plan)]
+            self.assertEqual(bad_names, ["b"])
+
+
+class ConventionTests(unittest.TestCase):
+    """A tensor neither side quantizes comes from the EXPERT pack, because that copy is
+    already in the loader's convention: our converter bakes the +1 of the delta-encoded
+    norms into the stored weight, an HF-convention pack does not."""
+
+    def _pair(self, td, ours, theirs, name="n.weight"):
+        root = Path(td)
+        a, b = root / "a", root / "b"
+        for d, arr in ((a, ours), (b, theirs)):
+            d.mkdir()
+            write_safetensors_raw(str(d / "m.safetensors"), {name: ("BF16", arr.shape, arr.tobytes())})
+            (d / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {name: "m.safetensors"}}))
+        (b / "config.json").write_text(json.dumps({"quantization": {"bits": 8, "group_size": 64}}))
+        wm = {name: "m.safetensors"}
+        return b, a, plan_compose(wm, wm)
+
+    def test_an_identical_dense_tensor_comes_from_the_expert_pack(self):
+        v = to_bf16(np.array([0.5, -2.0, 7.625], dtype=np.float32))
+        with tempfile.TemporaryDirectory() as td:
+            dense_dir, pack, plan = self._pair(td, v, v)
+            out = resolve_conventions(dense_dir, pack, plan)
+            self.assertEqual(out["refusals"], [])
+            self.assertEqual(out["from_expert"], ["n.weight"])
+            self.assertEqual(out["delta_norms"], 0)
+
+    def test_the_plus_one_delta_encoding_is_recognized_not_refused(self):
+        base = to_bf16(np.array([-0.0635, -5.9375, 6.625], dtype=np.float32))
+        ours = to_bf16(bf16_to_f32(base) + 1.0)
+        with tempfile.TemporaryDirectory() as td:
+            dense_dir, pack, plan = self._pair(td, ours, base)
+            out = resolve_conventions(dense_dir, pack, plan)
+            self.assertEqual(out["refusals"], [])
+            self.assertEqual(out["from_expert"], ["n.weight"])
+            self.assertEqual(out["delta_norms"], 1)
+
+    def test_any_other_disagreement_is_a_named_refusal(self):
+        base = to_bf16(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+        ours = to_bf16(np.array([1.0, 2.0, 3.5], dtype=np.float32))
+        with tempfile.TemporaryDirectory() as td:
+            dense_dir, pack, plan = self._pair(td, ours, base)
+            out = resolve_conventions(dense_dir, pack, plan)
+            self.assertEqual([r["key"] for r in out["refusals"]], ["n.weight"])
+            self.assertIn("neither", out["refusals"][0]["reason"])
+
+    def test_a_tensor_only_the_dense_source_has_stays_with_the_dense_source(self):
+        v = to_bf16(np.array([1.0, 2.0], dtype=np.float32))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            d = root / "d"; d.mkdir()
+            write_safetensors_raw(str(d / "m.safetensors"), {"n.weight": ("BF16", v.shape, v.tobytes())})
+            (d / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"n.weight": "m.safetensors"}}))
+            (d / "config.json").write_text(json.dumps({"quantization": {"bits": 8, "group_size": 64}}))
+            pack = root / "p"; pack.mkdir()
+            out = resolve_conventions(d, pack, plan_compose({"n.weight": "m.safetensors"}, {}))
+            self.assertEqual(out["from_expert"], [])
+            self.assertEqual(out["refusals"], [])
+
+    def test_compose_puts_the_pack_norm_in_the_output(self):
+        u32 = np.zeros((4, 4), dtype=np.uint32).tobytes()
+        bfz = np.zeros((4, 1), dtype=np.uint16).tobytes()
+        base = to_bf16(np.array([-0.0635, -5.9375], dtype=np.float32))
+        ours = to_bf16(bf16_to_f32(base) + 1.0)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            dense, pack, dst = root / "dense", root / "pack", root / "out"
+            for d, norm, shard in ((dense, base, "d.safetensors"), (pack, ours, "p.safetensors")):
+                d.mkdir()
+                write_safetensors_raw(str(d / shard), {
+                    "language_model.lm_head.weight": ("U32", (4, 4), u32),
+                    "language_model.lm_head.scales": ("BF16", (4, 1), bfz),
+                    "language_model.lm_head.biases": ("BF16", (4, 1), bfz),
+                    "language_model.model.layers.0.q_norm.weight": ("BF16", norm.shape, norm.tobytes()),
+                })
+                wm = {k: shard for k in ("language_model.lm_head.weight", "language_model.lm_head.scales",
+                                         "language_model.lm_head.biases",
+                                         "language_model.model.layers.0.q_norm.weight")}
+                (d / "model.safetensors.index.json").write_text(json.dumps({"weight_map": wm}))
+            (dense / "config.json").write_text(json.dumps({"quantization": {"bits": 4, "group_size": 32, "mode": "affine"}}))
+            (pack / "config.json").write_text(json.dumps({"expert_quant": expert_quant_block("restack", k=4)}))
+            ng = root / "ng"; ng.mkdir()
+            bits = np.arange(4, dtype=np.uint16).reshape(1, 4)
+            key = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight"
+            write_safetensors_raw(str(ng / "s.safetensors"), {key: ("BF16", (1, 4), bits.tobytes())})
+            (ng / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {key: "s.safetensors"}}))
+            out = compose_pack(dense, pack, dst, ngram_src=ng)
+            self.assertEqual(out["delta_norms"], 1)
+            got = _read_tensor(dst, "language_model.model.layers.0.q_norm.weight")
+            np.testing.assert_array_equal(got, ours)
+
+
+class DensePrecedenceTests(unittest.TestCase):
+    """For a module both packs carry, the DENSE copy wins: it is the more precise one,
+    and our fused hyper-connection read declines a quantized `block_inject_weight`
+    (`inject_flat` is set only for a dense inject), which costs 44% of decode."""
+
+    def test_the_pack_keeps_a_module_only_the_dense_source_quantizes(self):
+        dense = {"l.0.attn_hyper_connection.block_inject_weight." + x: "d"
+                 for x in ("weight", "scales", "biases")}
+        expert = {"l.0.attn_hyper_connection.block_inject_weight.weight": "p"}
+        plan = plan_compose(dense, expert)
+        self.assertEqual(sorted(plan["carried"]), ["l.0.attn_hyper_connection.block_inject_weight.weight"])
+        self.assertEqual(plan["dense"], {})
+
+    def test_the_dense_source_keeps_a_module_only_the_pack_quantizes(self):
+        dense = {"l.0.mlp.gate.weight": "d"}
+        expert = {"l.0.mlp.gate." + x: "p" for x in ("weight", "scales", "biases")}
+        plan = plan_compose(dense, expert)
+        self.assertEqual(sorted(plan["dense"]), ["l.0.mlp.gate.weight"])
+        self.assertEqual(plan["carried"], {})
+
+    def test_both_quantized_still_comes_from_the_dense_source(self):
+        dense = {"l.0.o_proj." + x: "d" for x in ("weight", "scales", "biases")}
+        expert = {"l.0.o_proj." + x: "p" for x in ("weight", "scales", "biases")}
+        plan = plan_compose(dense, expert)
+        self.assertEqual(len(plan["dense"]), 3)
+        self.assertEqual(plan["carried"], {})
+
+
+class ComposeLayoutTests(unittest.TestCase):
+    def _pack(self, root: Path, keys: dict, cfg: dict) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        wm = {}
+        by_file: dict[str, dict] = {}
+        for key, (fname, dtype, shape, raw) in keys.items():
+            by_file.setdefault(fname, {})[key] = (dtype, shape, raw)
+            wm[key] = fname
+        for fname, named in by_file.items():
+            write_safetensors_raw(str(root / fname), named)
+        (root / "model.safetensors.index.json").write_text(json.dumps({"weight_map": wm}))
+        (root / "config.json").write_text(json.dumps(cfg))
+
+    def test_compose_writes_one_pack_from_two(self):
+        u32 = np.zeros((4, 4), dtype=np.uint32).tobytes()  # 4-bit gs32: in 32, packed 4 u32
+        bf = np.zeros((4, 1), dtype=np.uint16).tobytes()
+        tre = np.zeros((2, 4, 4), dtype=np.uint16).tobytes()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            dense, pack, dst = root / "dense", root / "pack", root / "out"
+            self._pack(dense, {
+                "language_model.lm_head.weight": ("d-00001.safetensors", "U32", (4, 4), u32),
+                "language_model.lm_head.scales": ("d-00001.safetensors", "BF16", (4, 1), bf),
+                "language_model.lm_head.biases": ("d-00001.safetensors", "BF16", (4, 1), bf),
+                "mtp.fc_hidden.weight": ("d-00002.safetensors", "U32", (4, 4), u32),
+                "mtp.fc_hidden.scales": ("d-00002.safetensors", "BF16", (4, 1), bf),
+                "mtp.fc_hidden.biases": ("d-00002.safetensors", "BF16", (4, 1), bf),
+                "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight":
+                    ("d-00002.safetensors", "U32", (4, 4), u32),
+            }, {"quantization": {"bits": 4, "group_size": 32, "mode": "affine",
+                                 "mtp.fc_hidden": {"bits": 4, "group_size": 32, "mode": "affine"},
+                                 "language_model.model.layers.0.mlp.switch_mlp.gate_proj":
+                                     {"bits": 4, "group_size": 32, "mode": "affine"}}})
+            self._pack(pack, {
+                "language_model.lm_head.weight": ("p-00001.safetensors", "U32", (4, 4), u32),
+                "language_model.lm_head.scales": ("p-00001.safetensors", "BF16", (4, 1), bf),
+                "language_model.lm_head.biases": ("p-00001.safetensors", "BF16", (4, 1), bf),
+                "model.visual.patch_embed.proj.weight": ("p-00001.safetensors", "BF16", (4, 1), bf),
+                "language_model.model.layers.0.mlp.switch_mlp.gate_proj.trellis":
+                    ("p-exl3.safetensors", "U16", (2, 4, 4), tre),
+            }, {"expert_quant": expert_quant_block("restack", k=4), "text_config": {"x": 1},
+                "ngram_table": {"file": "ngram_table.bin", "bits": 4, "group_size": 32}})
+            (pack / "tokenizer.json").write_text("{}")
+            ng = root / "ngram_src"
+            ng.mkdir()
+            bits = np.arange(8, dtype=np.uint16).reshape(2, 4)
+            key = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight"
+            write_safetensors_raw(str(ng / "s.safetensors"), {key: ("BF16", (2, 4), bits.tobytes())})
+            (ng / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {key: "s.safetensors"}}))
+
+            out = compose_pack(dense, pack, dst, ngram_src=ng)
+            wm = json.loads((dst / "model.safetensors.index.json").read_text())["weight_map"]
+            self.assertEqual(wm["language_model.lm_head.weight"], "d-00001.safetensors")
+            self.assertEqual(wm["language_model.mtp.fc_hidden.weight"], "d-00002.safetensors")
+            self.assertEqual(wm["language_model.model.layers.0.mlp.switch_mlp.gate_proj.trellis"],
+                             "p-exl3.safetensors")
+            self.assertEqual(wm["model.visual.patch_embed.proj.weight"], "p-00001.safetensors")
+            self.assertNotIn("mtp.fc_hidden.weight", wm)
+            self.assertNotIn("language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight", wm)
+            # the unchanged dense shard is a hard link, the renamed one a rewrite
+            self.assertEqual(os.stat(dst / "d-00001.safetensors").st_ino,
+                             os.stat(dense / "d-00001.safetensors").st_ino)
+            self.assertNotEqual(os.stat(dst / "d-00002.safetensors").st_ino,
+                                os.stat(dense / "d-00002.safetensors").st_ino)
+            self.assertEqual(os.stat(dst / "p-exl3.safetensors").st_ino,
+                             os.stat(pack / "p-exl3.safetensors").st_ino)
+            self.assertTrue((dst / "tokenizer.json").exists())
+            cfg = json.loads((dst / "config.json").read_text())
+            self.assertEqual(cfg["expert_quant"], expert_quant_block("restack", k=4))
+            self.assertEqual(cfg["text_config"], {"x": 1})
+            self.assertEqual(cfg["ngram_table"], {"file": "ngram_table.bin", "bits": 16, "group_size": 0})
+            self.assertEqual(cfg["quantization"]["bits"], 4)
+            self.assertIn("language_model.mtp.fc_hidden", cfg["quantization"])
+            self.assertNotIn("mtp.fc_hidden", cfg["quantization"])
+            self.assertNotIn("language_model.model.layers.0.mlp.switch_mlp.gate_proj", cfg["quantization"])
+            self.assertEqual(out["carried"], ["model.visual.patch_embed.proj.weight"])
+            np.testing.assert_array_equal(read_ngram_bin_row(dst / "ngram_table.bin", 1), bits[1])
+
+
 def pick_real_experts(hf_dir: str | Path, imatrix_path: str | Path, layer: int = 0) -> int:
     import time
     _ensure_lib()
@@ -1374,6 +2082,10 @@ def main():
     ap.add_argument("--bench", action="store_true")
     ap.add_argument("--pick-experts", action="store_true")
     ap.add_argument("--from-exl3", default=None)
+    ap.add_argument("--dense", default=None)
+    ap.add_argument("--ngram-src", default=None)
+    ap.add_argument("--ngram-bin", default=None)
+    ap.add_argument("--ngram-out", default=None)
     ap.add_argument("--layer", type=int, default=0)
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--hf", default=None)
@@ -1386,6 +2098,21 @@ def main():
     args = ap.parse_args()
     if args.bench:
         return bench_batch_quality()
+    if args.ngram_out:
+        if not args.ngram_src:
+            ap.error("--ngram-out needs --ngram-src")
+        print(write_bf16_ngram_table(args.ngram_src, args.ngram_out), flush=True)
+        return 0
+    if args.dense:
+        if not (args.pack and args.dst):
+            ap.error("--dense needs --pack and --dst")
+        if bool(args.ngram_src) == bool(args.ngram_bin):
+            ap.error("--dense needs exactly one of --ngram-src, --ngram-bin")
+        out = compose_pack(args.dense, args.pack, args.dst,
+                           ngram_src=args.ngram_src, ngram_bin=args.ngram_bin)
+        print(f"composed {len(out['weight_map'])} tensors, {out['bytes'] / 1e9:.1f} GB", flush=True)
+        print(f"carried from the expert pack: {len(out['carried'])} tensors", flush=True)
+        return 0
     if args.from_exl3:
         if not (args.pack and args.dst):
             ap.error("--from-exl3 needs --pack and --dst")

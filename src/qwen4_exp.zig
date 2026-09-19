@@ -5,8 +5,9 @@
 //! a token touches 16 rows, so the rows are dequantized from the mmap on the
 //! host and only the [T, 2560] result is sent. Memory cost = page cache.
 //! Format: `ngram_table.bin` is a safetensors-format file holding one merged
-//! 4-bit affine table (`weight` U32 [R, dim*bits/32], `scales`/`biases` BF16
-//! [R, dim/gs]) written by `tests/convert_qwen38_flash_next.py`.
+//! table, written by `tests/convert_qwen38_flash_next*.py`: affine at
+//! `bits` 2..8 (`weight` U32 [R, dim*bits/32], `scales`/`biases` BF16
+//! [R, dim/gs]) or, at `bits` 16, one raw `weight` BF16 [R, dim] region.
 
 const std = @import("std");
 const expert_stream = @import("expert_stream.zig");
@@ -217,6 +218,7 @@ pub const NgramTable = struct {
         if (hlen > size - 8) return error.NgramTableTruncated;
         var t = try parse(map, map[8 .. 8 + hlen], 8 + hlen);
         t.fd = fd;
+        log.info("[qwen4] ngram table: {d} rows x {d} at {d} bits ({d:.1} GB)\n", .{ t.rows, t.dim, t.bits, asGb(size) });
         if (plePrefetchEnabled()) t.pool = PrefetchPool.create() catch null;
         return t;
     }
@@ -324,6 +326,22 @@ pub const NgramTable = struct {
         if (bits_v != .string or gs_v != .string) return error.NgramTableHeader;
         const bits: u32 = std.fmt.parseInt(u32, bits_v.string, 10) catch return error.NgramTableHeader;
         const gs: u32 = std.fmt.parseInt(u32, gs_v.string, 10) catch return error.NgramTableHeader;
+        if (bits == 16) {
+            // A bf16 table is one raw region: the row IS the embedding, no groups.
+            const raw = try headerRegion(obj, "weight", "BF16", 2, map.len, data_off);
+            return .{
+                .map = map,
+                .rows = raw.rows,
+                .dim = @intCast(raw.cols),
+                .bits = 16,
+                .group_size = 0,
+                .w_off = data_off + @as(usize, @intCast(raw.start)),
+                .s_off = 0,
+                .b_off = 0,
+                .wcols = 0,
+                .scols = 0,
+            };
+        }
         if (!bitsSupported(bits)) return error.NgramTableBits;
         if (gs == 0 or gs > 1024) return error.NgramTableBits;
 
@@ -424,10 +442,23 @@ pub const NgramTable = struct {
     /// straddle a word boundary at 3/5/6 bits).
     pub fn row(self: *const NgramTable, r: u64, out: []f32) void {
         std.debug.assert(r < self.rows and out.len >= self.dim);
+        if (self.bits == 16) {
+            decodeBf16Row(self.map[self.w_off + r * self.dim * 2 ..][0 .. self.dim * 2], out[0..self.dim]);
+            return;
+        }
         const words = self.map[self.w_off + r * self.wcols * 4 ..][0 .. self.wcols * 4];
         const scales = self.map[self.s_off + r * self.scols * 2 ..][0 .. self.scols * 2];
         const biases = self.map[self.b_off + r * self.scols * 2 ..][0 .. self.scols * 2];
         self.dequantRow(words, scales, biases, out);
+    }
+
+    fn decodeBf16Row(bytes: []const u8, out: []f32) void {
+        for (out, 0..) |*v, i| v.* = bf16ToF32(std.mem.readInt(u16, bytes[i * 2 ..][0..2], .little));
+    }
+
+    /// Bytes one row occupies across the table's regions.
+    fn rowBytes(self: *const NgramTable) usize {
+        return if (self.bits == 16) self.dim * 2 else self.wcols * 4 + self.scols * 4;
     }
 
     fn dequantRow(self: *const NgramTable, words: []const u8, scales: []const u8, biases: []const u8, out: []f32) void {
@@ -463,7 +494,7 @@ pub const NgramTable = struct {
             }
             return store.gather(row_ids, out) catch return error.NgramReadFailed;
         }
-        const need: usize = self.wcols * 4 + self.scols * 4;
+        const need: usize = self.rowBytes();
         // Prefill-width gathers ride the pool only past `PREFILL_PREFETCH_MIN_KV`: a resident
         // table loses 2-7% to the wake rounds, an evicted one (weights pushed the 32 GB
         // mapping out) went 67.7 -> 267.9 ms per 1000 tokens on the serial walk.
@@ -481,7 +512,11 @@ pub const NgramTable = struct {
                 if (!p.run(self, row_ids[start..end])) break;
                 for (start..end) |i| {
                     const b = &p.bufs[i - start];
-                    self.dequantRow(b[0..wl], b[wl .. wl + sl], b[wl + sl .. wl + 2 * sl], out[i * self.dim ..][0..self.dim]);
+                    if (self.bits == 16) {
+                        decodeBf16Row(b[0 .. self.dim * 2], out[i * self.dim ..][0..self.dim]);
+                    } else {
+                        self.dequantRow(b[0..wl], b[wl .. wl + sl], b[wl + sl .. wl + 2 * sl], out[i * self.dim ..][0..self.dim]);
+                    }
                 }
             }
             if (start >= row_ids.len) return;
@@ -495,6 +530,11 @@ pub const NgramTable = struct {
             if (region != 0) return false;
             store.readRowBytes(@intCast(r), buf[0 .. store.dim * 2]) catch return false;
             return true;
+        }
+        if (self.bits == 16) {
+            if (region != 0) return false;
+            const len = self.dim * 2;
+            return std.c.pread(self.fd, buf.ptr, len, @intCast(self.w_off + r * len)) == @as(isize, @intCast(len));
         }
         const wl: usize = self.wcols * 4;
         const sl: usize = self.scols * 2;
@@ -591,7 +631,7 @@ const PrefetchPool = struct {
             const table = self.table.?;
             const rows = self.rows;
             self.mu.unlock(io);
-            const regions: usize = if (table.bf16 != null) 1 else 3;
+            const regions: usize = if (table.bf16 != null or table.bits == 16) 1 else 3;
             var i = idx;
             while (i < rows.len * regions) : (i += N) {
                 if (!table.preadSite(@intCast(rows[i / regions]), i % regions, &self.bufs[i / regions])) _ = self.failed.fetchAdd(1, .acq_rel);
@@ -947,6 +987,63 @@ test "ngram prefill gather: 4096 rows through the pool equal the direct mmap rea
     try t.gatherChecked(dec, d_got, 0);
     try testing.expectEqualSlices(f32, d_ref, d_got);
     try testing.expectEqual(serial_warm_before, said(0, 0));
+}
+
+test "ngram table: a bf16 .bin gathers rows from the mmap and through the pool" {
+    // bits 16 = raw bf16 rows: one region, no scales or biases.
+    const ROWS: usize = 128;
+    const DIM: usize = 32;
+    const HDR: usize = 256;
+    const buf = try testing.allocator.alloc(u8, 8 + HDR + ROWS * DIM * 2);
+    defer testing.allocator.free(buf);
+    const header = "{\"__metadata__\":{\"format\":\"mlx-serve-ngram\",\"bits\":\"16\",\"group_size\":\"0\"}," ++
+        "\"weight\":{\"dtype\":\"BF16\",\"shape\":[128,32],\"data_offsets\":[0,8192]}}";
+    std.mem.writeInt(u64, buf[0..8], HDR, .little);
+    @memset(buf[8 .. 8 + HDR], ' ');
+    @memcpy(buf[8..][0..header.len], header);
+    for (buf[8 + HDR ..], 0..) |*b, i| b.* = @truncate(i *% 37 +% 11);
+
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try td.dir.writeFile(io, .{ .sub_path = "ngram_table.bin", .data = buf });
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try td.dir.realPath(io, &pbuf);
+    var full: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&full, "{s}/ngram_table.bin", .{pbuf[0..root_len]});
+
+    warm_override = false;
+    defer warm_override = null;
+    var t = try NgramTable.open(path);
+    defer t.close();
+    try testing.expectEqual(@as(u32, DIM), t.dim);
+    try testing.expectEqual(@as(u32, 16), t.bits);
+    try testing.expectEqual(@as(u64, ROWS), t.rows);
+
+    const ids = try testing.allocator.alloc(i64, ROWS);
+    defer testing.allocator.free(ids);
+    for (ids, 0..) |*r, i| r.* = @intCast((i *% 53) % ROWS);
+    const want = try testing.allocator.alloc(f32, ROWS * DIM);
+    defer testing.allocator.free(want);
+    for (ids, 0..) |r, i| {
+        const rowb = buf[8 + HDR + @as(usize, @intCast(r)) * DIM * 2 ..][0 .. DIM * 2];
+        for (0..DIM) |c| want[i * DIM + c] = bf16ToF32(std.mem.readInt(u16, rowb[c * 2 ..][0..2], .little));
+    }
+    const got = try testing.allocator.alloc(f32, ROWS * DIM);
+    defer testing.allocator.free(got);
+
+    ple_prefill_prefetch_override = false;
+    defer ple_prefill_prefetch_override = null;
+    try t.gatherChecked(ids, got, 0);
+    try testing.expectEqualSlices(f32, want, got);
+
+    const pool = t.pool orelse return error.SkipZigTest;
+    ple_prefill_prefetch_override = true;
+    const before = pool.runs.load(.monotonic);
+    @memset(got, 0);
+    try t.gatherChecked(ids, got, 1_000_000);
+    try testing.expectEqual(before + ROWS / PrefetchPool.MAX_ROWS, pool.runs.load(.monotonic));
+    try testing.expectEqualSlices(f32, want, got);
 }
 
 test "qwen4 bf16 ngram table opens checkpoint shards" {
