@@ -20342,7 +20342,7 @@ pub const Transformer = struct {
             }
             break :blk self.pleClaimSpecCapture(entry, n);
         };
-        if (ctx.ple_defer) {
+        if (ctx.ple_defer and pleDeferrable(&self.config, n)) {
             if (ctx.ple_pending != null) return error.PlePendingAlreadySet;
             @memset(pk, 0);
             const emb = mlx.mlx_array_new_data(pk.ptr, &shape, 3, .bfloat16);
@@ -20360,6 +20360,15 @@ pub const Transformer = struct {
         return mlx.mlx_array_new_data(pk.ptr, &shape, 3, .bfloat16);
     }
 
+    /// A build that reads its routing back on the HOST cannot carry a deferred
+    /// leaf: that read evaluates the stream, and an evaluated node never sees
+    /// the fill. The EXL3 sorted GEMM builds its window table from the expert
+    /// ids past `DECODE_ROWS_MAX` rows, so those widths gather eagerly.
+    fn pleDeferrable(cfg: *const ModelConfig, rows: usize) bool {
+        if (cfg.expert_layout != .exl3_k4) return true;
+        return rows <= expert_exl3_kernels.DECODE_ROWS_MAX;
+    }
+
     /// Claim (or clear) `entry`'s fixed spec-PLE token slot for a gather of
     /// `n` ids, reporting whether the verify history fits it. ONE predicate
     /// for the eager and the deferred arm: with `ple_defer` the gather that
@@ -20369,6 +20378,15 @@ pub const Transformer = struct {
     fn pleClaimSpecCapture(self: *Transformer, entry: *SSMCacheEntry, n: usize) bool {
         const ctx_len: usize = self.qwen4.?.hash.ngram_size - 1;
         return claimPleSpecCapture(entry, n, ctx_len, self.expert_stream == null and self.spec_capture_ssm);
+    }
+
+    /// Every eval inside a `ple_defer` build reads the leaf as it stands, and
+    /// an evaluated node is never recomputed when the leaf's buffer is filled:
+    /// a capture the MTP head consumes, and anything a cadence or profiler eval
+    /// freezes on the way to it, must be materialized on a FILLED leaf.
+    fn plePreEval(self: *Transformer, ctx: *ForwardCtx) !void {
+        if (ctx.ple_pending == null) return;
+        try self.flushDeferredPle(ctx);
     }
 
     /// Fill the leaf a `ple_defer` forward was built on: the token ids are
@@ -22849,6 +22867,7 @@ pub const Transformer = struct {
                 try mlx.check(mlx.mlx_add(&h_ple, h, add, self.s));
                 _ = mlx.mlx_array_free(h);
                 h = h_ple;
+                if (prof.timing) try self.plePreEval(ctx);
                 try prof.lap(h, .ple);
             }
 
@@ -22904,12 +22923,16 @@ pub const Transformer = struct {
             }
             if (is_prefill and prefillEvalCadenceApplies(seq_len) and ((layer_idx + 1) % eval_cadence == 0 or layer_idx + 1 == layerCap(cfg.num_hidden_layers))) {
                 try self.hcFlush(&h, batch, seq_len, &pending);
+                try self.plePreEval(ctx);
                 try evalCadencePoint(h, ctx.ssm_entries);
             }
             dt.layer(h, layer_idx);
         }
 
-        if (ctx.capture_stream_all != null or ctx.capture_hidden != null or ctx.capture_hidden_all != null) try self.hcFlush(&h, batch, seq_len, &pending);
+        if (ctx.capture_stream_all != null or ctx.capture_hidden != null or ctx.capture_hidden_all != null) {
+            try self.hcFlush(&h, batch, seq_len, &pending);
+            try self.plePreEval(ctx);
+        }
         ctx.moe_seq_offset.* += @intCast(seq_len);
         dt.end(h);
         prof.report(seq_len, @as(usize, @intCast(offset)) + @as(usize, @intCast(seq_len)), ctx.capture_ssm_seq, cfg.num_hidden_layers - cfg.attnCacheLayerCount(), cfg.attnCacheLayerCount());
@@ -56706,6 +56729,9 @@ test "qwen4 batched decode: one forwardMoeBatchedDecode tick == two serial ticks
 test "qwen4 deferred PLE: pipelined decode AND MTP verify widths match the direct forward (QWEN4_TEST_MODEL)" {
     const model_dir = std.c.getenv("QWEN4_TEST_MODEL") orelse return error.SkipZigTest;
     if (mlx.noGpuBackend()) return error.SkipZigTest;
+    // The profiler's synchronizing lap fills the leaf inside the build, so a
+    // deferral test has nothing left to observe under it.
+    if (diagEnvOn("QWEN4_PROFILE_FWD")) return error.SkipZigTest;
     const allocator = testing.allocator;
     const s = mlx.gpuStream();
     const io = std.Io.Threaded.global_single_threaded.io();
