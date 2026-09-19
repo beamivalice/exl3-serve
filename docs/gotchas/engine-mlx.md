@@ -5155,3 +5155,13 @@ group-padded verify block`.
 **Fix.** The helper writes to fd 2. `zig build test --summary all` completes in about 3 minutes on the PR head and 193 s on `main`.
 
 **Guard.** The rule in `CLAUDE.md` ("A test never writes to stdout"); the tell is a `zig build test` that never returns while the test binary passes on its own, and `sample <test pid>` showing `mainServer` in `readSliceAll`.
+
+## A passing test's stderr is rendered as a failed command (2026-09-19)
+
+**Defect.** `zig build test -Dtest-filter=exl3` ended in `failed command: ./.zig-cache/o/<hash>/test --cache-dir=./.zig-cache --seed=0x… --listen=-` with no Build Summary, while the same binary run standalone said `All 69 tests passed`. It was read as the stdout class above (a protocol corruption) and hunted there.
+
+**Cause.** No test wrote to fd 1. The pinned Zig nightly (0.17.0-dev.1818) prints the step's error block whenever `result_stderr.len > 0` — "No matter the result, we want to display error/warning messages" in `lib/compiler/Maker.zig` — and that block ends with `result_failed_command`, which a passing zig_test run never clears. `printStepFailure`'s stderr-only arm is the bare ` w`. The step SUCCEEDED (exit 0), and the EXL3 tests printed their own benchmark lines unconditionally. A two-test scratch project reproduces it from one `std.debug.print`; a real `write(1, …)` hangs the runner instead, with no output at all.
+
+**Fix.** Every EXL3 bench line goes through `benchPrint`, gated on `MLX_SERVE_EXL3_LAYER_UBENCH` (`ubench_force` became `ubench_mute`, so the warmup silencing survives); the `[study3 ownership]` line moved into its test's failure branch.
+
+**Guard.** `tests/test_test_runner_quiet.sh` (the run-step manifest is dropped first, or a cached success proves nothing) and the `CLAUDE.md` rule "A PASSING test prints NOTHING, on either stream".

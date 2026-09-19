@@ -302,7 +302,7 @@ pub fn freeShardSet(set: *std.StringHashMapUnmanaged(void)) void {
 /// pack keeps its PLE table in `ngram_table.bin` and has none.
 pub fn streamingIndexLayout(allocator: std.mem.Allocator, model_type: []const u8, raw: []const u8, layers: u16, ple_shards: u16) ?expert_quant.Layout {
     const layout = expert_quant.layoutFromIndexJson(allocator, model_type, raw, layers) orelse return null;
-    if (layout == .quantized_split) return layout;
+    if (layout == .quantized_split or layout == .exl3_k4) return layout;
     if (!fusedPleShardsComplete(allocator, raw, ple_shards)) return null;
     return layout;
 }
@@ -382,6 +382,10 @@ pub fn qwen4StreamingIndexComplete(io: std.Io, allocator: std.mem.Allocator, mod
             if (stat.kind != .file) return null;
             var experts = expert_quant.QuantStore.open(allocator, model_dir, geometry) catch return null;
             experts.deinit();
+        },
+        .exl3_k4 => {
+            const stat = dir.statFile(io, "ngram_table.bin", .{}) catch return null;
+            if (stat.kind != .file) return null;
         },
     }
     return layout;

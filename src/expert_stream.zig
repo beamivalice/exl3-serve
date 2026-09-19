@@ -66,7 +66,19 @@ pub fn expertBytesFor(allocator: std.mem.Allocator, model_dir: []const u8, geome
             defer store.deinit();
             return store.expertBytes();
         },
+        .exl3_k4 => return exl3ExpertBytes(geometry),
     }
+}
+
+pub fn exl3ExpertBytes(geometry: Geometry) !u64 {
+    const h: u64 = geometry.hidden;
+    const i: u64 = geometry.intermediate;
+    if (h == 0 or i == 0 or h % 16 != 0 or i % 16 != 0) return error.InvalidExpertGeometry;
+    const tile_words: u64 = 64;
+    const gate_up = (h / 16) * (i / 16) * tile_words * 2 + h * 2 + i * 2;
+    const down = (i / 16) * (h / 16) * tile_words * 2 + i * 2 + h * 2;
+    const both = std.math.mul(u64, gate_up, 2) catch return error.InvalidExpertGeometry;
+    return std.math.add(u64, both, down) catch return error.InvalidExpertGeometry;
 }
 
 pub fn cachePlanBytes(requested_bytes: u64, layers: u16, experts: u16, expert_bytes: u64) !CachePlan {
@@ -1484,6 +1496,17 @@ test "expert stream cache plan uses decimal gigabytes and reserves full workspac
     try t.expectEqual(@as(u64, 48 * 127 * 9_830_400), p.cache_bytes);
     try t.expectEqual(@as(u64, 512 * 9_830_400), p.workspace_bytes);
     try t.expectEqual(@as(u64, 8 * 64 * 1024 * 1024), p.bounce_bytes);
+}
+
+test "exl3 expert bytes at production geometry" {
+    const t = std.testing;
+    const b = try exl3ExpertBytes(.{ .layers = 48, .experts = 512, .hidden = 2560, .intermediate = 640 });
+    const h: u64 = 2560;
+    const i: u64 = 640;
+    const tile: u64 = 64;
+    const gate_up = (h / 16) * (i / 16) * tile * 2 + h * 2 + i * 2;
+    const down = (i / 16) * (h / 16) * tile * 2 + i * 2 + h * 2;
+    try t.expectEqual(gate_up * 2 + down, b);
 }
 
 test "expert stream refuses MTP by name, at load and at request parse" {

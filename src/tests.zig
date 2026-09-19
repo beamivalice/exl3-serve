@@ -9,6 +9,8 @@ test {
     _ = expert_bf16_kernels;
     _ = @import("expert_io.zig");
     _ = @import("expert_quant.zig");
+    _ = @import("expert_exl3.zig");
+    _ = @import("expert_exl3_kernels.zig");
     _ = @import("log.zig");
     _ = @import("version.zig");
     _ = @import("chat.zig");

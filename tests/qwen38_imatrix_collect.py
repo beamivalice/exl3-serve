@@ -39,8 +39,12 @@ import sys
 import time
 from pathlib import Path
 
-import mlx.core as mx
-import mlx.nn as nn
+try:
+    import mlx.core as mx
+    import mlx.nn as nn
+except ImportError:
+    mx = None
+    nn = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qwen38_iq_allocate import classify, read_headers  # noqa: E402
@@ -115,17 +119,16 @@ class Collector:
 
 
 COLLECTOR = Collector()
-_ORIG_LINEAR_CALL = nn.Linear.__call__
+if nn is not None:
+    _ORIG_LINEAR_CALL = nn.Linear.__call__
 
+    def _patched_linear_call(self, x):
+        name = COLLECTOR.by_id.get(id(self))
+        if name is not None:
+            COLLECTOR.observe(name, x)
+        return _ORIG_LINEAR_CALL(self, x)
 
-def _patched_linear_call(self, x):
-    name = COLLECTOR.by_id.get(id(self))
-    if name is not None:
-        COLLECTOR.observe(name, x)
-    return _ORIG_LINEAR_CALL(self, x)
-
-
-nn.Linear.__call__ = _patched_linear_call
+    nn.Linear.__call__ = _patched_linear_call
 
 
 # ============================================================

@@ -317,7 +317,18 @@ def main():
 
     arrays, rows_meta, per_layer, verified = {}, {}, [], {"done": False}
     n_layers = tcfg.num_hidden_layers if args.layers is None else min(args.layers, tcfg.num_hidden_layers)
+    out = Path(os.path.expanduser(args.out)) if args.out else None
+    ckpt_dir = out.with_suffix(out.suffix + ".layers") if out is not None else None
+    if ckpt_dir is not None:
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
     for li in range(n_layers):
+        layer_ckpt = ckpt_dir / f"L{li:02d}.safetensors" if ckpt_dir is not None else None
+        if layer_ckpt is not None and layer_ckpt.is_file():
+            from safetensors.numpy import load_file
+            part = load_file(str(layer_ckpt))
+            arrays.update(part)
+            print(f"layer {li:2d} skip checkpoint {layer_ckpt.name}", flush=True)
+            continue
         tl = time.time()
         lp = f"{PREFIX}layers.{li}."
         # bf16 params like the checkpoint; the default dtype goes back to f32 before the
@@ -386,6 +397,10 @@ def main():
             torch.mps.empty_cache()
         print(f"layer {li:2d} {time.time()-tl:5.0f}s  elapsed {(time.time()-t0)/60:.1f} min  "
               f"experts hit {sum(1 for r in erows if r)}/{E}", flush=True)
+        if layer_ckpt is not None:
+            from safetensors.numpy import save_file as _save_layer
+            lp_keys = {k: arrays[k] for k in arrays if f"layers.{li}." in k}
+            _save_layer(lp_keys, str(layer_ckpt))
 
     if args.dump_hidden:
         torch.save({"ids": seqs[0], "hidden": hidden[0], "per_layer": per_layer}, args.dump_hidden)

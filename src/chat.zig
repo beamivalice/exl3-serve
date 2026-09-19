@@ -13538,7 +13538,7 @@ test "bench: streaming think gate scans BYTES, memoized vs fresh" {
         // more than once (open scan + close scan + two substring scans).
         fresh_bytes += buf.items.len;
     }
-    std.debug.print(
+    errdefer std.debug.print(
         "[think-gate] {d} tokens to {d} KB: fresh >= {d} KB scanned, memoized {d} KB ({d}x)\n",
         .{ 4000, buf.items.len / 1024, fresh_bytes / 1024, memo_bytes / 1024, fresh_bytes / @max(memo_bytes, 1) },
     );

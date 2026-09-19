@@ -134,8 +134,13 @@ pub fn volumeSpace(path: []const u8) ?VolumeSpace {
     const total = bsize *| st.f_blocks;
     // statfs excludes purgeable space the OS releases on demand; ask what a write really gets.
     const granted = msv_volume_free_for_use(buf[0..path.len :0].ptr);
-    const free = if (granted > 0 and granted <= total) granted else bsize *| st.f_bavail;
-    return .{ .free = free, .total = total };
+    return .{ .free = freeForUse(granted, total, bsize *| st.f_bavail), .total = total };
+}
+
+/// Which of the two answers a write really gets: the OS grant when it is one, else statfs.
+fn freeForUse(granted: u64, total: u64, statfs_free: u64) u64 {
+    if (granted > 0 and granted <= total) return granted;
+    return statfs_free;
 }
 
 /// How a `DiskTier` asks what the volume has left. Injectable: with the live probe hard-wired
@@ -6136,15 +6141,14 @@ test "volumeSpace: the live probe is plausible or null (statfs ABI guard)" {
     try testing.expect(vs.total > 1024 * 1024 * 1024); // a macOS root volume
 }
 
-test "volumeSpace: free is what the OS grants, never less than statfs' f_bavail" {
-    // Purgeable space is not in f_bavail; the tier used to refuse a volume with 117 GB usable.
-    var st: DarwinStatfs = undefined;
-    try testing.expect(statfs("/", &st) == 0);
-    const vs = volumeSpace("/") orelse return error.VolumeSpaceProbeFailed;
-    const granted = msv_volume_free_for_use("/");
-    try testing.expect(granted > 0);
-    try testing.expect(vs.free >= @as(u64, st.f_bsize) * st.f_bavail);
-    if (granted <= vs.total) try testing.expectEqual(granted, vs.free);
+test "volumeSpace: free is what the OS grants, never statfs' f_bavail" {
+    // The choice, not the live numbers: two samples of free disk space are never equal under a suite that writes.
+    const GB: u64 = 1024 * 1024 * 1024;
+    try testing.expectEqual(@as(u64, 117 * GB), freeForUse(117 * GB, 500 * GB, 36 * GB));
+    try testing.expectEqual(@as(u64, 36 * GB), freeForUse(0, 500 * GB, 36 * GB));
+    try testing.expectEqual(@as(u64, 36 * GB), freeForUse(500 * GB + 1, 500 * GB, 36 * GB));
+    // The grant probe is wired: absent it, every volume would fall back to f_bavail.
+    try testing.expect(msv_volume_free_for_use("/") > 0);
 }
 
 test "DiskTier: SSD-first declines to store when the VOLUME is short, and says so" {

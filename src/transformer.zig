@@ -3,6 +3,7 @@ const dsv4_mod = @import("deepseek_v4.zig");
 const qwen4_mod = @import("qwen4_exp.zig");
 const expert_stream_mod = @import("expert_stream.zig");
 const expert_bf16 = @import("expert_bf16_kernels.zig");
+const expert_exl3_kernels = @import("expert_exl3_kernels.zig");
 const expert_quant_mod = @import("expert_quant.zig");
 // The qwen4_exp MTP head shares the sidecar head's draft-rerank scheme
 // (`mtp.rerankSelect` + `QLinear`), which reads only the TARGET's lm_head and
@@ -11755,6 +11756,22 @@ pub fn materializedOwnedCopy(s: mlx.mlx_stream, x: mlx.mlx_array) !mlx.mlx_array
     return out;
 }
 
+fn capturePrefillHidden(s: mlx.mlx_stream, dest: *mlx.mlx_array, src: mlx.mlx_array) !void {
+    const owned = try materializedOwnedCopy(s, src);
+    defer _ = mlx.mlx_array_free(owned);
+    try mlx.check(mlx.mlx_array_eval(owned));
+    _ = mlx.mlx_array_set(dest, owned);
+}
+
+fn capturePrefillHiddenLast(s: mlx.mlx_stream, dest: *mlx.mlx_array, src: mlx.mlx_array) !void {
+    const sh = mlx.getShape(src);
+    const last = sh[1] - 1;
+    var sliced = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(sliced);
+    try mlx.check(mlx.mlx_slice(&sliced, src, &[_]c_int{ 0, last, 0 }, 3, &[_]c_int{ sh[0], sh[1], sh[2] }, 3, &[_]c_int{ 1, 1, 1 }, 3, s));
+    try capturePrefillHidden(s, dest, sliced);
+}
+
 /// Test seams (inference thread only): the copy/eval counters let the retention and cadence tests see what the loop did.
 pub var compact_conv_state_override: ?bool = null;
 pub var compact_conv_state_copy_count: u64 = 0;
@@ -17596,6 +17613,10 @@ pub const Transformer = struct {
                     _ = mlx.mlx_vector_array_append_value(vec, e.conv_state);
                     extra += 1;
                 }
+                if (e.initialized and e.ssm_state.ctx != null) {
+                    _ = mlx.mlx_vector_array_append_value(vec, e.ssm_state);
+                    extra += 1;
+                }
             }
         }
         if (extra == 0) {
@@ -18981,18 +19002,10 @@ pub const Transformer = struct {
         // (which needs the post-final-norm hidden as h_prev seed). Mirrors
         // the identical block in forwardMoe.
         if (ctx.capture_hidden) |target| {
-            const fn_shape = mlx.getShape(final_normed);
-            const last = fn_shape[1] - 1;
-            const start = [_]c_int{ 0, last, 0 };
-            const stop = [_]c_int{ fn_shape[0], fn_shape[1], fn_shape[2] };
-            const strides = [_]c_int{ 1, 1, 1 };
-            var sliced = mlx.mlx_array_new();
-            try mlx.check(mlx.mlx_slice(&sliced, final_normed, &start, 3, &stop, 3, &strides, 3, self.s));
-            _ = mlx.mlx_array_set(target, sliced);
-            _ = mlx.mlx_array_free(sliced);
+            try capturePrefillHiddenLast(self.s, target, final_normed);
         }
         if (ctx.capture_hidden_all) |target_all| {
-            _ = mlx.mlx_array_set(target_all, final_normed);
+            try capturePrefillHidden(self.s, target_all, final_normed);
         }
 
         if (self.embedding_mode) return final_normed;
@@ -22014,6 +22027,10 @@ pub const Transformer = struct {
     }
 
     fn mtpMoeRows(self: *Transformer, x: mlx.mlx_array, mw: *const MoeMlpWeights) !mlx.mlx_array {
+        if (self.config.expert_layout == .exl3_k4) {
+            if (expert_exl3_kernels.usesPrefillArm(expert_exl3_kernels.rowsOfShape(mlx.getShape(x))))
+                return error.Exl3MtpRowsExceedDecode;
+        }
         if (mw.shared_ungated or mw.shared_expert_gate_w == null or qwen4Standin().moe_shared) return self.moeMLP(x, mw);
         var routed = mw.*;
         routed.shared_expert_gate_w = null;
@@ -22886,6 +22903,7 @@ pub const Transformer = struct {
                 }
             }
             if (is_prefill and prefillEvalCadenceApplies(seq_len) and ((layer_idx + 1) % eval_cadence == 0 or layer_idx + 1 == layerCap(cfg.num_hidden_layers))) {
+                try self.hcFlush(&h, batch, seq_len, &pending);
                 try evalCadencePoint(h, ctx.ssm_entries);
             }
             dt.layer(h, layer_idx);
@@ -22895,21 +22913,13 @@ pub const Transformer = struct {
         ctx.moe_seq_offset.* += @intCast(seq_len);
         dt.end(h);
         prof.report(seq_len, @as(usize, @intCast(offset)) + @as(usize, @intCast(seq_len)), ctx.capture_ssm_seq, cfg.num_hidden_layers - cfg.attnCacheLayerCount(), cfg.attnCacheLayerCount());
-        if (ctx.capture_stream_all) |target| _ = mlx.mlx_array_set(target, h);
+        if (ctx.capture_stream_all) |target| try capturePrefillHidden(self.s, target, h);
         // On this arch the spec "hidden" IS the pre-mixer stream: the MTP head
         // consumes `[B, L, hc*hidden]`, never the mixed 2560 (vLLM/SGLang).
         if (ctx.capture_hidden) |target| {
-            const hs = mlx.getShape(h);
-            const last = hs[1] - 1;
-            const start = [_]c_int{ 0, last, 0 };
-            const stop = [_]c_int{ hs[0], hs[1], hs[2] };
-            const strides = [_]c_int{ 1, 1, 1 };
-            var sliced = mlx.mlx_array_new();
-            try mlx.check(mlx.mlx_slice(&sliced, h, &start, 3, &stop, 3, &strides, 3, self.s));
-            _ = mlx.mlx_array_set(target, sliced);
-            _ = mlx.mlx_array_free(sliced);
+            try capturePrefillHiddenLast(self.s, target, h);
         }
-        if (ctx.capture_hidden_all) |target_all| _ = mlx.mlx_array_set(target_all, h);
+        if (ctx.capture_hidden_all) |target_all| try capturePrefillHidden(self.s, target_all, h);
 
         const mix = try self.hcReadPending(&h, &self.qwen4_mixer.?, batch, seq_len, &pending);
         // The function-scope errdefer reads `h` at unwind time, so surrender the handle where it is released.
@@ -23227,18 +23237,10 @@ pub const Transformer = struct {
         // Gemma 4 assistant drafter as `h_prev`. Caller frees the captured
         // array.
         if (ctx.capture_hidden) |target| {
-            const fn_shape = mlx.getShape(final_normed);
-            const last = fn_shape[1] - 1;
-            const start = [_]c_int{ 0, last, 0 };
-            const stop = [_]c_int{ fn_shape[0], fn_shape[1], fn_shape[2] };
-            const strides = [_]c_int{ 1, 1, 1 };
-            var sliced = mlx.mlx_array_new();
-            try mlx.check(mlx.mlx_slice(&sliced, final_normed, &start, 3, &stop, 3, &strides, 3, self.s));
-            _ = mlx.mlx_array_set(target, sliced);
-            _ = mlx.mlx_array_free(sliced);
+            try capturePrefillHiddenLast(self.s, target, final_normed);
         }
         if (ctx.capture_hidden_all) |target_all| {
-            _ = mlx.mlx_array_set(target_all, final_normed);
+            try capturePrefillHidden(self.s, target_all, final_normed);
         }
 
         if (self.embedding_mode) return final_normed;
@@ -28639,6 +28641,89 @@ pub const Transformer = struct {
     /// MoE MLP with separate router and expert inputs.
     /// router_x: input for routing (raw hidden states).
     /// expert_x: input for expert computation (possibly normalized).
+    fn moeExl3(self: *Transformer, expert_x: mlx.mlx_array, mw: *const MoeMlpWeights, inds: mlx.mlx_array, scores: mlx.mlx_array) !mlx.mlx_array {
+        const xsh = mlx.getShape(expert_x);
+        const B = xsh[0];
+        const S = xsh[1];
+        const D = xsh[xsh.len - 1];
+        var x2 = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(x2);
+        try mlx.check(mlx.mlx_reshape(&x2, expert_x, &[_]c_int{ B * S, D }, 2, self.s));
+        const ish = mlx.getShape(inds);
+        const K = ish[ish.len - 1];
+        var slots = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(slots);
+        try mlx.check(mlx.mlx_reshape(&slots, inds, &[_]c_int{B * S * K}, 1, self.s));
+        var sc = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(sc);
+        try mlx.check(mlx.mlx_reshape(&sc, scores, &[_]c_int{B * S * K}, 1, self.s));
+        var slots_u = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(slots_u);
+        try mlx.check(mlx.mlx_astype(&slots_u, slots, .uint32, self.s));
+        const rows: usize = @intCast(B * S);
+        if (rows >= 2 and rows <= expert_exl3_kernels.DECODE_ROWS_MAX) {
+            expert_exl3_kernels.dumpUnionHist(slots_u, rows, @intCast(K)) catch {};
+        }
+        if (rows <= expert_exl3_kernels.DECODE_ROWS_MAX) {
+            const xd = mlx.mlx_array_dtype(expert_x);
+            const y = try expert_exl3_kernels.moeSwigluFused(
+                self.s,
+                x2,
+                mw.switch_gate_w,
+                mw.switch_gate_s,
+                mw.switch_gate_b,
+                mw.switch_up_w,
+                mw.switch_up_s,
+                mw.switch_up_b,
+                mw.switch_down_w,
+                mw.switch_down_s,
+                mw.switch_down_b,
+                slots_u,
+                sc,
+                xd,
+            );
+            defer _ = mlx.mlx_array_free(y);
+            var out = mlx.mlx_array_new();
+            errdefer _ = mlx.mlx_array_free(out);
+            try mlx.check(mlx.mlx_reshape(&out, y, xsh.ptr, @intCast(xsh.len), self.s));
+            if (mlx.mlx_array_dtype(out) != xd) {
+                var cast = mlx.mlx_array_new();
+                try mlx.check(mlx.mlx_astype(&cast, out, xd, self.s));
+                _ = mlx.mlx_array_free(out);
+                return cast;
+            }
+            return out;
+        }
+        const y = try expert_exl3_kernels.moePrefill(
+            self.s,
+            x2,
+            mw.switch_gate_w,
+            mw.switch_gate_s,
+            mw.switch_gate_b,
+            mw.switch_up_w,
+            mw.switch_up_s,
+            mw.switch_up_b,
+            mw.switch_down_w,
+            mw.switch_down_s,
+            mw.switch_down_b,
+            slots_u,
+            sc,
+            K,
+        );
+        defer _ = mlx.mlx_array_free(y);
+        var out = mlx.mlx_array_new();
+        errdefer _ = mlx.mlx_array_free(out);
+        try mlx.check(mlx.mlx_reshape(&out, y, xsh.ptr, @intCast(xsh.len), self.s));
+        const xd = mlx.mlx_array_dtype(expert_x);
+        if (mlx.mlx_array_dtype(out) != xd) {
+            var cast = mlx.mlx_array_new();
+            try mlx.check(mlx.mlx_astype(&cast, out, xd, self.s));
+            _ = mlx.mlx_array_free(out);
+            return cast;
+        }
+        return out;
+    }
+
     fn moeMLP2(self: *Transformer, router_x: mlx.mlx_array, expert_x_in: mlx.mlx_array, mw: *const MoeMlpWeights) !mlx.mlx_array {
         return self.moeMLP2WithRouter(router_x, expert_x_in, mw, null, false, null, null);
     }
@@ -28766,6 +28851,12 @@ pub const Transformer = struct {
         }
 
         if (stream_ctx) |info| return self.streamedMoeResult(info, expert_x, inds, norm_scores, mw);
+        if (cfg.expert_layout == .exl3_k4) {
+            const y = try self.moeExl3(expert_x, mw, inds, norm_scores);
+            if (skip_shared or mw.shared_expert_gate_w == null or qwen4Standin().moe_shared) return y;
+            defer _ = mlx.mlx_array_free(y);
+            return self.moeAddGatedShared(y, expert_x, mw);
+        }
 
         // Expert computation. Two paths:
         //
@@ -30561,19 +30652,31 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
             // `[out, in]` → `[in, out]` so `qmatmulBits` can dispatch to plain
             // `mlx_matmul`; they no-op on already-quantized AND on empty handles.
             const stream_bank = shouldStreamExpertBank(&config, prefix);
+            const exl3 = config.expert_layout == .exl3_k4;
+            const switch_bank: SwitchMlpBank = if (stream_bank) .{
+                .gate_w = mlx.mlx_array_new(),
+                .gate_s = mlx.mlx_array_new(),
+                .gate_b = mlx.mlx_array_new(),
+                .up_w = mlx.mlx_array_new(),
+                .up_s = mlx.mlx_array_new(),
+                .up_b = mlx.mlx_array_new(),
+                .down_w = mlx.mlx_array_new(),
+                .down_s = mlx.mlx_array_new(),
+                .down_b = mlx.mlx_array_new(),
+            } else try loadSwitchMlpBank(weights, name_buf, prefix, li, exl3);
             lw.mlp = .{ .moe = .{
                 .router_w = try getLayerWeight(weights, name_buf, prefix, li, "mlp.gate.weight"),
                 .router_s = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.gate.scales") orelse mlx.mlx_array_new(),
                 .router_b = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.gate.biases") orelse mlx.mlx_array_new(),
-                .switch_gate_w = if (stream_bank) mlx.mlx_array_new() else try getLayerWeight(weights, name_buf, prefix, li, "mlp.switch_mlp.gate_proj.weight"),
-                .switch_gate_s = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.switch_mlp.gate_proj.scales") orelse mlx.mlx_array_new(),
-                .switch_gate_b = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.switch_mlp.gate_proj.biases") orelse mlx.mlx_array_new(),
-                .switch_up_w = if (stream_bank) mlx.mlx_array_new() else try getLayerWeight(weights, name_buf, prefix, li, "mlp.switch_mlp.up_proj.weight"),
-                .switch_up_s = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.switch_mlp.up_proj.scales") orelse mlx.mlx_array_new(),
-                .switch_up_b = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.switch_mlp.up_proj.biases") orelse mlx.mlx_array_new(),
-                .switch_down_w = if (stream_bank) mlx.mlx_array_new() else try getLayerWeight(weights, name_buf, prefix, li, "mlp.switch_mlp.down_proj.weight"),
-                .switch_down_s = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.switch_mlp.down_proj.scales") orelse mlx.mlx_array_new(),
-                .switch_down_b = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.switch_mlp.down_proj.biases") orelse mlx.mlx_array_new(),
+                .switch_gate_w = switch_bank.gate_w,
+                .switch_gate_s = switch_bank.gate_s,
+                .switch_gate_b = switch_bank.gate_b,
+                .switch_up_w = switch_bank.up_w,
+                .switch_up_s = switch_bank.up_s,
+                .switch_up_b = switch_bank.up_b,
+                .switch_down_w = switch_bank.down_w,
+                .switch_down_s = switch_bank.down_s,
+                .switch_down_b = switch_bank.down_b,
                 .shared_gate_w = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.shared_expert.gate_proj.weight") orelse mlx.mlx_array_new(),
                 .shared_gate_s = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.shared_expert.gate_proj.scales") orelse mlx.mlx_array_new(),
                 .shared_gate_b = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.shared_expert.gate_proj.biases") orelse mlx.mlx_array_new(),
@@ -30590,9 +30693,11 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
             {
                 const mw = &lw.mlp.moe;
                 try maybeTransposeForBf16(&mw.router_w, mw.router_s, &owned_bf16, allocator, s);
-                try maybeTransposeForBf16(&mw.switch_gate_w, mw.switch_gate_s, &owned_bf16, allocator, s);
-                try maybeTransposeForBf16(&mw.switch_up_w, mw.switch_up_s, &owned_bf16, allocator, s);
-                try maybeTransposeForBf16(&mw.switch_down_w, mw.switch_down_s, &owned_bf16, allocator, s);
+                if (!exl3) {
+                    try maybeTransposeForBf16(&mw.switch_gate_w, mw.switch_gate_s, &owned_bf16, allocator, s);
+                    try maybeTransposeForBf16(&mw.switch_up_w, mw.switch_up_s, &owned_bf16, allocator, s);
+                    try maybeTransposeForBf16(&mw.switch_down_w, mw.switch_down_s, &owned_bf16, allocator, s);
+                }
                 try maybeTransposeForBf16(&mw.shared_gate_w, mw.shared_gate_s, &owned_bf16, allocator, s);
                 try maybeTransposeForBf16(&mw.shared_up_w, mw.shared_up_s, &owned_bf16, allocator, s);
                 try maybeTransposeForBf16(&mw.shared_down_w, mw.shared_down_s, &owned_bf16, allocator, s);
@@ -32560,10 +32665,11 @@ fn envFlagCached(cache: *?bool, name: [*:0]const u8) bool {
 /// The diagnostic-switch decision, split from the `getenv` so it is testable.
 pub fn diagEnvValueOn(raw: ?[*:0]const u8) bool {
     const v = raw orelse return false;
-    return v[0] != '0';
+    return v[0] != 0 and v[0] != '0';
 }
-/// Diagnostic env switch: set and not `0`. `FOO=0` exported by a harness must
-/// never arm a sync profiler (the qwen4 MTP verify once measured 70 ms).
+/// Diagnostic env switch: set to a value that is neither empty nor `0`. A
+/// harness exporting `FOO=0` or `FOO=` must never arm a sync profiler (the
+/// qwen4 MTP verify once measured 70 ms).
 fn diagEnvOn(name: [*:0]const u8) bool {
     return diagEnvValueOn(std.c.getenv(name));
 }
@@ -38219,6 +38325,503 @@ test "a missing weight is a load ERROR, not a process exit (issue #217)" {
     try std.testing.expectError(error.MissingWeight, getWeightFmt(&w, &buf, "{s}.norm.weight", "model"));
 }
 
+test "exl3 MTP switch_mlp binds restacked trellis/suh/svh under the head prefix" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    const put = struct {
+        fn add(w: *Weights, name: []const u8, dtype: mlx.mlx_dtype, shape: []const c_int, st: mlx.mlx_stream) !void {
+            var arr = mlx.mlx_array_new();
+            try mlx.check(mlx.mlx_zeros(&arr, shape.ptr, @intCast(shape.len), dtype, st));
+            try w.map.put(try w.allocator.dupe(u8, name), arr);
+        }
+    }.add;
+    var w = Weights.init(t.allocator);
+    defer w.deinit();
+    const trellis = [_]c_int{ 4, 8, 8, 64 };
+    const suh = [_]c_int{ 4, 128 };
+    const svh = [_]c_int{ 4, 128 };
+    for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+        var tbuf: [96]u8 = undefined;
+        const tk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.trellis", .{proj});
+        try put(&w, tk, .uint16, &trellis, s);
+        const sk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.suh", .{proj});
+        try put(&w, sk, .float16, &suh, s);
+        const vk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.svh", .{proj});
+        try put(&w, vk, .float16, &svh, s);
+    }
+    var buf: [256]u8 = undefined;
+    const bank = try loadSwitchMlpBank(&w, &buf, "language_model.mtp", 0, true);
+    try t.expectEqual(@as(usize, 4), mlx.getShape(bank.gate_w).len);
+    try t.expectEqual(@as(c_int, 4), mlx.getShape(bank.gate_w)[0]);
+    try t.expectEqual(mlx.mlx_dtype.uint16, mlx.mlx_array_dtype(bank.gate_w));
+    try t.expectEqual(mlx.mlx_dtype.float16, mlx.mlx_array_dtype(bank.gate_s));
+    try t.expectEqual(mlx.mlx_dtype.float16, mlx.mlx_array_dtype(bank.gate_b));
+    try t.expectEqualSlices(c_int, mlx.getShape(bank.gate_w), mlx.getShape(bank.up_w));
+    try t.expectEqualSlices(c_int, mlx.getShape(bank.down_s), mlx.getShape(bank.gate_s));
+}
+
+test "exl3 MTP switch_mlp refuses a missing restacked tensor by MissingWeight" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    const put = struct {
+        fn add(w: *Weights, name: []const u8, dtype: mlx.mlx_dtype, shape: []const c_int, st: mlx.mlx_stream) !void {
+            var arr = mlx.mlx_array_new();
+            try mlx.check(mlx.mlx_zeros(&arr, shape.ptr, @intCast(shape.len), dtype, st));
+            try w.map.put(try w.allocator.dupe(u8, name), arr);
+        }
+    }.add;
+    var w = Weights.init(t.allocator);
+    defer w.deinit();
+    const trellis = [_]c_int{ 4, 8, 8, 64 };
+    const svh = [_]c_int{ 4, 128 };
+    for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+        var tbuf: [96]u8 = undefined;
+        const tk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.trellis", .{proj});
+        try put(&w, tk, .uint16, &trellis, s);
+        const vk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.svh", .{proj});
+        try put(&w, vk, .float16, &svh, s);
+    }
+    var buf: [256]u8 = undefined;
+    try t.expectError(error.MissingWeight, loadSwitchMlpBank(&w, &buf, "language_model.mtp", 0, true));
+}
+
+test "exl3 a trellis the kernels cannot decode refuses at load" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    const put = struct {
+        fn add(w: *Weights, name: []const u8, dtype: mlx.mlx_dtype, shape: []const c_int, st: mlx.mlx_stream) !void {
+            var arr = mlx.mlx_array_new();
+            try mlx.check(mlx.mlx_zeros(&arr, shape.ptr, @intCast(shape.len), dtype, st));
+            try w.map.put(try w.allocator.dupe(u8, name), arr);
+        }
+    }.add;
+    const bind = struct {
+        fn run(st: mlx.mlx_stream, trellis: []const c_int) !SwitchMlpBank {
+            var w = Weights.init(std.testing.allocator);
+            defer w.deinit();
+            const suh = [_]c_int{ 4, 128 };
+            for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+                var tbuf: [96]u8 = undefined;
+                const tk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.trellis", .{proj});
+                try put(&w, tk, .uint16, trellis, st);
+                const sk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.suh", .{proj});
+                try put(&w, sk, .float16, &suh, st);
+                const vk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.svh", .{proj});
+                try put(&w, vk, .float16, &suh, st);
+            }
+            var buf: [256]u8 = undefined;
+            return loadSwitchMlpBank(&w, &buf, "language_model.mtp", 0, true);
+        }
+    }.run;
+    _ = try bind(s, &[_]c_int{ 4, 8, 8, 48 });
+    try t.expectError(error.Exl3TrellisGeometry, bind(s, &[_]c_int{ 4, 8, 8, 80 }));
+    try t.expectError(error.Exl3TrellisGeometry, bind(s, &[_]c_int{ 4, 8, 8, 16 }));
+    try t.expectError(error.Exl3TrellisGeometry, bind(s, &[_]c_int{ 4, 8, 64 }));
+}
+
+test "exl3 MTP rows wider than the decode arm refuse by Exl3MtpRowsExceedDecode" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    var xfm: Transformer = undefined;
+    xfm.s = s;
+    xfm.config = .{
+        .expert_layout = .exl3_k4,
+        .num_experts = 4,
+        .num_experts_per_tok = 4,
+        .hidden_size = 8,
+        .moe_intermediate_size = 8,
+        .quant_bits = 0,
+        .quant_group_size = 64,
+        .quant_mode = .affine,
+    };
+    xfm.one = mlx.mlx_array_new_float(1.0);
+    defer _ = mlx.mlx_array_free(xfm.one);
+    xfm.bits_cache = .{};
+    xfm.compiled_moe_routing = null;
+    xfm.cost_trace_active = false;
+    var mw: MoeMlpWeights = .{
+        .router_w = mlx.mlx_array_new(),
+        .router_s = mlx.mlx_array_new(),
+        .router_b = mlx.mlx_array_new(),
+        .switch_gate_w = mlx.mlx_array_new(),
+        .switch_gate_s = mlx.mlx_array_new(),
+        .switch_gate_b = mlx.mlx_array_new(),
+        .switch_up_w = mlx.mlx_array_new(),
+        .switch_up_s = mlx.mlx_array_new(),
+        .switch_up_b = mlx.mlx_array_new(),
+        .switch_down_w = mlx.mlx_array_new(),
+        .switch_down_s = mlx.mlx_array_new(),
+        .switch_down_b = mlx.mlx_array_new(),
+        .shared_gate_w = mlx.mlx_array_new(),
+        .shared_gate_s = mlx.mlx_array_new(),
+        .shared_gate_b = mlx.mlx_array_new(),
+        .shared_up_w = mlx.mlx_array_new(),
+        .shared_up_s = mlx.mlx_array_new(),
+        .shared_up_b = mlx.mlx_array_new(),
+        .shared_down_w = mlx.mlx_array_new(),
+        .shared_down_s = mlx.mlx_array_new(),
+        .shared_down_b = mlx.mlx_array_new(),
+    };
+    defer {
+        const arrs = [_]mlx.mlx_array{
+            mw.router_w,      mw.router_s,      mw.router_b,
+            mw.switch_gate_w, mw.switch_gate_s, mw.switch_gate_b,
+            mw.switch_up_w,   mw.switch_up_s,   mw.switch_up_b,
+            mw.switch_down_w, mw.switch_down_s, mw.switch_down_b,
+            mw.shared_gate_w, mw.shared_gate_s, mw.shared_gate_b,
+            mw.shared_up_w,   mw.shared_up_s,   mw.shared_up_b,
+            mw.shared_down_w, mw.shared_down_s, mw.shared_down_b,
+        };
+        for (arrs) |a| _ = mlx.mlx_array_free(a);
+    }
+    const shape = [_]c_int{ 17, 1, 8 };
+    var x = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(x);
+    try mlx.check(mlx.mlx_zeros(&x, &shape, 3, .float16, s));
+    try t.expectError(error.Exl3MtpRowsExceedDecode, xfm.mtpMoeRows(x, &mw));
+}
+
+test "exl3 MTP fused rows match N solo calls on the same kernel" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const exl3 = @import("expert_exl3.zig");
+    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const header_len = std.mem.readInt(u64, fixture[0..8], .little);
+    const header = fixture[8 .. 8 + header_len];
+    const data = fixture[8 + header_len ..];
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, header, .{});
+    defer parsed.deinit();
+    const trellis_meta = parsed.value.object.get("trellis").?.object;
+    const suh_meta = parsed.value.object.get("suh").?.object;
+    const svh_meta = parsed.value.object.get("svh").?.object;
+    const t0: usize = @intCast(trellis_meta.get("data_offsets").?.array.items[0].integer);
+    const t1: usize = @intCast(trellis_meta.get("data_offsets").?.array.items[1].integer);
+    const s0: usize = @intCast(suh_meta.get("data_offsets").?.array.items[0].integer);
+    const s1: usize = @intCast(suh_meta.get("data_offsets").?.array.items[1].integer);
+    const v0: usize = @intCast(svh_meta.get("data_offsets").?.array.items[0].integer);
+    const v1: usize = @intCast(svh_meta.get("data_offsets").?.array.items[1].integer);
+    const trellis_bits = std.mem.bytesAsSlice(u16, data[t0..t1]);
+    const suh_bits = std.mem.bytesAsSlice(u16, data[s0..s1]);
+    const svh_bits = std.mem.bytesAsSlice(u16, data[v0..v1]);
+    const E: usize = 4;
+    const dim: usize = 128;
+    const rows: usize = 8;
+    const tile_n = 8 * 8 * 64;
+    const stacked_t = try alloc.alloc(u16, E * tile_n);
+    const stacked_suh = try alloc.alloc(u16, E * dim);
+    const stacked_svh = try alloc.alloc(u16, E * dim);
+    for (0..E) |e| {
+        @memcpy(stacked_t[e * tile_n ..][0..tile_n], trellis_bits);
+        @memcpy(stacked_suh[e * dim ..][0..dim], suh_bits);
+        @memcpy(stacked_svh[e * dim ..][0..dim], svh_bits);
+    }
+    var prng = std.Random.DefaultPrng.init(47);
+    const rnd = prng.random();
+    const xh = try alloc.alloc(u16, rows * dim);
+    for (xh) |*v| v.* = exl3.f32ToF16Bits(rnd.float(f32) * 2 - 1);
+    const rw = try alloc.alloc(u16, dim * E);
+    for (rw) |*v| v.* = exl3.f32ToF16Bits(rnd.float(f32) * 0.05);
+    var xfm: Transformer = undefined;
+    xfm.s = s;
+    xfm.config = .{
+        .expert_layout = .exl3_k4,
+        .num_experts = @intCast(E),
+        .num_experts_per_tok = @intCast(E),
+        .hidden_size = @intCast(dim),
+        .moe_intermediate_size = @intCast(dim),
+        .quant_bits = 0,
+        .quant_group_size = 64,
+        .quant_mode = .affine,
+        .hidden_act = .silu,
+    };
+    xfm.one = mlx.mlx_array_new_float(1.0);
+    defer _ = mlx.mlx_array_free(xfm.one);
+    xfm.bits_cache = .{};
+    xfm.compiled_moe_routing = null;
+    xfm.compiled_gelu = null;
+    xfm.compiled_geglu = null;
+    xfm.cost_trace_active = false;
+    const prev_st = qwen4_standin_override;
+    qwen4_standin_override = .{ .moe_shared = true };
+    defer qwen4_standin_override = prev_st;
+    const tr = mlx.mlx_array_new_data(stacked_t.ptr, &[_]c_int{ @intCast(E), 8, 8, 64 }, 4, .uint16);
+    defer _ = mlx.mlx_array_free(tr);
+    const suh = mlx.mlx_array_new_data(stacked_suh.ptr, &[_]c_int{ @intCast(E), @intCast(dim) }, 2, .float16);
+    defer _ = mlx.mlx_array_free(suh);
+    const svh = mlx.mlx_array_new_data(stacked_svh.ptr, &[_]c_int{ @intCast(E), @intCast(dim) }, 2, .float16);
+    defer _ = mlx.mlx_array_free(svh);
+    const router = mlx.mlx_array_new_data(rw.ptr, &[_]c_int{ @intCast(dim), @intCast(E) }, 2, .float16);
+    defer _ = mlx.mlx_array_free(router);
+    const none = mlx.mlx_array{ .ctx = null };
+    const ident = try alloc.alloc(u16, dim * dim);
+    @memset(ident, 0);
+    for (0..dim) |i| ident[i * dim + i] = exl3.f32ToF16Bits(1.0);
+    const sh_gate = mlx.mlx_array_new_data(ident.ptr, &[_]c_int{ @intCast(dim), @intCast(dim) }, 2, .float16);
+    defer _ = mlx.mlx_array_free(sh_gate);
+    const sh_up = mlx.mlx_array_new_data(ident.ptr, &[_]c_int{ @intCast(dim), @intCast(dim) }, 2, .float16);
+    defer _ = mlx.mlx_array_free(sh_up);
+    const sh_down = mlx.mlx_array_new_data(ident.ptr, &[_]c_int{ @intCast(dim), @intCast(dim) }, 2, .float16);
+    defer _ = mlx.mlx_array_free(sh_down);
+    const gbits = try alloc.alloc(u16, dim);
+    @memset(gbits, 0);
+    const sh_eg = mlx.mlx_array_new_data(gbits.ptr, &[_]c_int{ @intCast(dim), 1 }, 2, .float16);
+    defer _ = mlx.mlx_array_free(sh_eg);
+    var mw: MoeMlpWeights = .{
+        .router_w = router,
+        .router_s = none,
+        .router_b = none,
+        .switch_gate_w = tr,
+        .switch_gate_s = suh,
+        .switch_gate_b = svh,
+        .switch_up_w = tr,
+        .switch_up_s = suh,
+        .switch_up_b = svh,
+        .switch_down_w = tr,
+        .switch_down_s = suh,
+        .switch_down_b = svh,
+        .shared_gate_w = sh_gate,
+        .shared_gate_s = none,
+        .shared_gate_b = none,
+        .shared_up_w = sh_up,
+        .shared_up_s = none,
+        .shared_up_b = none,
+        .shared_down_w = sh_down,
+        .shared_down_s = none,
+        .shared_down_b = none,
+        .shared_expert_gate_w = sh_eg,
+        .shared_expert_gate_s = none,
+        .shared_expert_gate_b = none,
+    };
+    const x_arr = mlx.mlx_array_new_data(xh.ptr, &[_]c_int{ @intCast(rows), 1, @intCast(dim) }, 3, .float16);
+    defer _ = mlx.mlx_array_free(x_arr);
+    try mlx.check(mlx.mlx_array_eval(tr));
+    try mlx.check(mlx.mlx_array_eval(suh));
+    try mlx.check(mlx.mlx_array_eval(svh));
+    try mlx.check(mlx.mlx_array_eval(router));
+    try mlx.check(mlx.mlx_array_eval(sh_gate));
+    try mlx.check(mlx.mlx_array_eval(sh_up));
+    try mlx.check(mlx.mlx_array_eval(sh_down));
+    try mlx.check(mlx.mlx_array_eval(sh_eg));
+    try mlx.check(mlx.mlx_array_eval(x_arr));
+    expert_exl3_kernels.resetFusedDispatchCount();
+    expert_exl3_kernels.setPairSplitsForTest(1);
+    defer expert_exl3_kernels.setPairSplitsForTest(null);
+    const fused = try xfm.mtpMoeRows(x_arr, &mw);
+    defer _ = mlx.mlx_array_free(fused);
+    const n_disp = expert_exl3_kernels.fusedDispatchCount();
+    var c_f = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(c_f);
+    try mlx.check(mlx.mlx_contiguous(&c_f, fused, false, s));
+    try mlx.check(mlx.mlx_array_eval(c_f));
+    const sf = mlx.mlx_array_data_float16(c_f) orelse return error.F16Unreadable;
+    var r: usize = 0;
+    while (r < rows) : (r += 1) {
+        const x1 = mlx.mlx_array_new_data(xh[r * dim ..][0..dim].ptr, &[_]c_int{ 1, 1, @intCast(dim) }, 3, .float16);
+        defer _ = mlx.mlx_array_free(x1);
+        const solo = try xfm.mtpMoeRows(x1, &mw);
+        defer _ = mlx.mlx_array_free(solo);
+        var c_s = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(c_s);
+        try mlx.check(mlx.mlx_contiguous(&c_s, solo, false, s));
+        try mlx.check(mlx.mlx_array_eval(c_s));
+        const ss = mlx.mlx_array_data_float16(c_s) orelse return error.F16Unreadable;
+        for (0..dim) |i| {
+            const a: u16 = @bitCast(sf[r * dim + i]);
+            const b: u16 = @bitCast(ss[i]);
+            try t.expectEqual(b, a);
+        }
+    }
+    try t.expectEqual(@as(u32, 4), n_disp);
+}
+
+const Exl3MoeHarness = struct {
+    xfm: Transformer,
+    x: mlx.mlx_array,
+    mw: MoeMlpWeights,
+    owned: [10]mlx.mlx_array,
+
+    const E: usize = 4;
+    const dim: usize = 128;
+
+    fn init(alloc: std.mem.Allocator, s: mlx.mlx_stream, rows: usize, seed: u64) !Exl3MoeHarness {
+        const exl3 = @import("expert_exl3.zig");
+        const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+        const header_len = std.mem.readInt(u64, fixture[0..8], .little);
+        const header = fixture[8 .. 8 + header_len];
+        const data = fixture[8 + header_len ..];
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, header, .{});
+        defer parsed.deinit();
+        const trellis_meta = parsed.value.object.get("trellis").?.object;
+        const suh_meta = parsed.value.object.get("suh").?.object;
+        const svh_meta = parsed.value.object.get("svh").?.object;
+        const t0: usize = @intCast(trellis_meta.get("data_offsets").?.array.items[0].integer);
+        const t1: usize = @intCast(trellis_meta.get("data_offsets").?.array.items[1].integer);
+        const s0: usize = @intCast(suh_meta.get("data_offsets").?.array.items[0].integer);
+        const s1: usize = @intCast(suh_meta.get("data_offsets").?.array.items[1].integer);
+        const v0: usize = @intCast(svh_meta.get("data_offsets").?.array.items[0].integer);
+        const v1: usize = @intCast(svh_meta.get("data_offsets").?.array.items[1].integer);
+        const trellis_bits = std.mem.bytesAsSlice(u16, data[t0..t1]);
+        const suh_bits = std.mem.bytesAsSlice(u16, data[s0..s1]);
+        const svh_bits = std.mem.bytesAsSlice(u16, data[v0..v1]);
+        const tile_n = 8 * 8 * 64;
+        const stacked_t = try alloc.alloc(u16, E * tile_n);
+        const stacked_suh = try alloc.alloc(u16, E * dim);
+        const stacked_svh = try alloc.alloc(u16, E * dim);
+        for (0..E) |e| {
+            @memcpy(stacked_t[e * tile_n ..][0..tile_n], trellis_bits);
+            @memcpy(stacked_suh[e * dim ..][0..dim], suh_bits);
+            @memcpy(stacked_svh[e * dim ..][0..dim], svh_bits);
+        }
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rnd = prng.random();
+        const xh = try alloc.alloc(u16, rows * dim);
+        for (xh) |*v| v.* = exl3.f32ToF16Bits(rnd.float(f32) * 2 - 1);
+        const rw = try alloc.alloc(u16, dim * E);
+        for (rw) |*v| v.* = exl3.f32ToF16Bits(rnd.float(f32) * 0.05);
+        const ident = try alloc.alloc(u16, dim * dim);
+        @memset(ident, 0);
+        for (0..dim) |i| ident[i * dim + i] = exl3.f32ToF16Bits(1.0);
+        const gbits = try alloc.alloc(u16, dim);
+        @memset(gbits, 0);
+        const tr = mlx.mlx_array_new_data(stacked_t.ptr, &[_]c_int{ @intCast(E), 8, 8, 64 }, 4, .uint16);
+        const suh = mlx.mlx_array_new_data(stacked_suh.ptr, &[_]c_int{ @intCast(E), @intCast(dim) }, 2, .float16);
+        const svh = mlx.mlx_array_new_data(stacked_svh.ptr, &[_]c_int{ @intCast(E), @intCast(dim) }, 2, .float16);
+        const router = mlx.mlx_array_new_data(rw.ptr, &[_]c_int{ @intCast(dim), @intCast(E) }, 2, .float16);
+        const sh_gate = mlx.mlx_array_new_data(ident.ptr, &[_]c_int{ @intCast(dim), @intCast(dim) }, 2, .float16);
+        const sh_up = mlx.mlx_array_new_data(ident.ptr, &[_]c_int{ @intCast(dim), @intCast(dim) }, 2, .float16);
+        const sh_down = mlx.mlx_array_new_data(ident.ptr, &[_]c_int{ @intCast(dim), @intCast(dim) }, 2, .float16);
+        const sh_eg = mlx.mlx_array_new_data(gbits.ptr, &[_]c_int{ @intCast(dim), 1 }, 2, .float16);
+        const x = mlx.mlx_array_new_data(xh.ptr, &[_]c_int{ 1, @intCast(rows), @intCast(dim) }, 3, .float16);
+        const one = mlx.mlx_array_new_float(1.0);
+        const none = mlx.mlx_array{ .ctx = null };
+        var h: Exl3MoeHarness = .{
+            .xfm = undefined,
+            .x = x,
+            .owned = .{ tr, suh, svh, router, sh_gate, sh_up, sh_down, sh_eg, x, one },
+            .mw = .{
+                .router_w = router,
+                .router_s = none,
+                .router_b = none,
+                .switch_gate_w = tr,
+                .switch_gate_s = suh,
+                .switch_gate_b = svh,
+                .switch_up_w = tr,
+                .switch_up_s = suh,
+                .switch_up_b = svh,
+                .switch_down_w = tr,
+                .switch_down_s = suh,
+                .switch_down_b = svh,
+                .shared_gate_w = sh_gate,
+                .shared_gate_s = none,
+                .shared_gate_b = none,
+                .shared_up_w = sh_up,
+                .shared_up_s = none,
+                .shared_up_b = none,
+                .shared_down_w = sh_down,
+                .shared_down_s = none,
+                .shared_down_b = none,
+                .shared_expert_gate_w = sh_eg,
+                .shared_expert_gate_s = none,
+                .shared_expert_gate_b = none,
+            },
+        };
+        h.xfm.s = s;
+        h.xfm.config = .{
+            .expert_layout = .exl3_k4,
+            .num_experts = @intCast(E),
+            .num_experts_per_tok = @intCast(E),
+            .hidden_size = @intCast(dim),
+            .moe_intermediate_size = @intCast(dim),
+            .quant_bits = 0,
+            .quant_group_size = 64,
+            .quant_mode = .affine,
+            .hidden_act = .silu,
+        };
+        h.xfm.one = one;
+        h.xfm.bits_cache = .{};
+        h.xfm.compiled_moe_routing = null;
+        h.xfm.compiled_gelu = null;
+        h.xfm.compiled_geglu = null;
+        h.xfm.cost_trace_active = false;
+        for (h.owned) |a| try mlx.check(mlx.mlx_array_eval(a));
+        return h;
+    }
+
+    fn deinit(self: *Exl3MoeHarness) void {
+        for (self.owned) |a| _ = mlx.mlx_array_free(a);
+    }
+};
+
+test "exl3 MoE prefill chunks return live mlx bytes to baseline" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var h = try Exl3MoeHarness.init(arena.allocator(), s, expert_exl3_kernels.DECODE_ROWS_MAX * 2, 53);
+    defer h.deinit();
+    const prev_st = qwen4_standin_override;
+    qwen4_standin_override = .{};
+    defer qwen4_standin_override = prev_st;
+    const chunk = struct {
+        fn run(hh: *Exl3MoeHarness) !void {
+            const y = try hh.xfm.moeMLP(hh.x, &hh.mw);
+            defer _ = mlx.mlx_array_free(y);
+            try mlx.check(mlx.mlx_array_eval(y));
+        }
+    };
+    try chunk.run(&h);
+    try chunk.run(&h);
+    _ = mlx.mlx_clear_cache();
+    var base: usize = 0;
+    try mlx.check(mlx.mlx_get_active_memory(&base));
+    try chunk.run(&h);
+    try chunk.run(&h);
+    try chunk.run(&h);
+    _ = mlx.mlx_clear_cache();
+    var after: usize = 0;
+    try mlx.check(mlx.mlx_get_active_memory(&after));
+    try t.expectEqual(base, after);
+}
+
+test "exl3 MoE answers the shared-expert standin with the routed sum" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var h = try Exl3MoeHarness.init(arena.allocator(), s, expert_exl3_kernels.DECODE_ROWS_MAX * 2, 59);
+    defer h.deinit();
+    const prev_st = qwen4_standin_override;
+    defer qwen4_standin_override = prev_st;
+    qwen4_standin_override = .{};
+    const routed = try h.xfm.moeMLP2WithRouter(h.x, h.x, &h.mw, null, true, null, null);
+    defer _ = mlx.mlx_array_free(routed);
+    qwen4_standin_override = .{ .moe_shared = true };
+    const got = try h.xfm.moeMLP(h.x, &h.mw);
+    defer _ = mlx.mlx_array_free(got);
+    var c_r = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(c_r);
+    var c_g = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(c_g);
+    try mlx.check(mlx.mlx_contiguous(&c_r, routed, false, s));
+    try mlx.check(mlx.mlx_contiguous(&c_g, got, false, s));
+    try mlx.check(mlx.mlx_array_eval(c_r));
+    try mlx.check(mlx.mlx_array_eval(c_g));
+    const pr = mlx.mlx_array_data_float16(c_r) orelse return error.F16Unreadable;
+    const pg = mlx.mlx_array_data_float16(c_g) orelse return error.F16Unreadable;
+    const n = Exl3MoeHarness.dim * expert_exl3_kernels.DECODE_ROWS_MAX * 2;
+    for (0..n) |i| {
+        const a: u16 = @bitCast(pr[i]);
+        const b: u16 = @bitCast(pg[i]);
+        try t.expectEqual(a, b);
+    }
+}
+
 /// `{prefix}.{base}.{suffix}` with a RUNTIME base — the embedding table's name
 /// is the checkpoint's (embed_tokens / word_embeddings / embed / embeddings)
 /// and its three lookups must agree, which a comptime format can't express
@@ -38249,6 +38852,58 @@ fn getLayerWeight(weights: *const Weights, buf: *[256]u8, prefix: []const u8, la
     return weights.get(name) orelse {
         log.err("MISSING WEIGHT: {s}\n", .{name});
         return error.MissingWeight;
+    };
+}
+
+const SwitchMlpBank = struct {
+    gate_w: mlx.mlx_array,
+    gate_s: mlx.mlx_array,
+    gate_b: mlx.mlx_array,
+    up_w: mlx.mlx_array,
+    up_s: mlx.mlx_array,
+    up_b: mlx.mlx_array,
+    down_w: mlx.mlx_array,
+    down_s: mlx.mlx_array,
+    down_b: mlx.mlx_array,
+};
+
+/// A trellis the EXL3 kernels can decode: `[E, in/16, out/16, 16*K]`, K in 2..4.
+/// Anything else is a load refusal, not a per-request 500 from `packedK`.
+fn exl3TrellisAdmitted(shape: []const c_int) bool {
+    if (shape.len != 4) return false;
+    if (@rem(shape[3], 16) != 0) return false;
+    const k = @divExact(shape[3], 16);
+    return k >= 2 and k <= 4;
+}
+
+fn loadSwitchMlpBank(weights: *const Weights, buf: *[256]u8, prefix: []const u8, layer: u32, exl3: bool) error{ MissingWeight, Exl3TrellisGeometry }!SwitchMlpBank {
+    if (exl3) {
+        const bank: SwitchMlpBank = .{
+            .gate_w = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.gate_proj.trellis"),
+            .gate_s = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.gate_proj.suh"),
+            .gate_b = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.gate_proj.svh"),
+            .up_w = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.up_proj.trellis"),
+            .up_s = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.up_proj.suh"),
+            .up_b = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.up_proj.svh"),
+            .down_w = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.down_proj.trellis"),
+            .down_s = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.down_proj.suh"),
+            .down_b = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.down_proj.svh"),
+        };
+        for ([_]mlx.mlx_array{ bank.gate_w, bank.up_w, bank.down_w }) |trellis| {
+            if (!exl3TrellisAdmitted(mlx.getShape(trellis))) return error.Exl3TrellisGeometry;
+        }
+        return bank;
+    }
+    return .{
+        .gate_w = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.gate_proj.weight"),
+        .gate_s = getLayerWeightOpt(weights, buf, prefix, layer, "mlp.switch_mlp.gate_proj.scales") orelse mlx.mlx_array_new(),
+        .gate_b = getLayerWeightOpt(weights, buf, prefix, layer, "mlp.switch_mlp.gate_proj.biases") orelse mlx.mlx_array_new(),
+        .up_w = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.up_proj.weight"),
+        .up_s = getLayerWeightOpt(weights, buf, prefix, layer, "mlp.switch_mlp.up_proj.scales") orelse mlx.mlx_array_new(),
+        .up_b = getLayerWeightOpt(weights, buf, prefix, layer, "mlp.switch_mlp.up_proj.biases") orelse mlx.mlx_array_new(),
+        .down_w = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.down_proj.weight"),
+        .down_s = getLayerWeightOpt(weights, buf, prefix, layer, "mlp.switch_mlp.down_proj.scales") orelse mlx.mlx_array_new(),
+        .down_b = getLayerWeightOpt(weights, buf, prefix, layer, "mlp.switch_mlp.down_proj.biases") orelse mlx.mlx_array_new(),
     };
 }
 
@@ -40244,7 +40899,7 @@ test "batched KV append: per-layer op count is quantize-once plus per-slot write
         const c_bat = mlx.op_count.load(.monotonic);
         try KVCache.appendFromStacked(stacked_k, stacked_v, batched_ptrs, 0, s, 0, true);
         bat_at[ni] = mlx.op_count.load(.monotonic) - c_bat;
-        std.debug.print("batched KV append op-count N={d}: solo {d} batched {d}\n", .{ n, solo_at[ni], bat_at[ni] });
+        errdefer std.debug.print("batched KV append op-count N={d}: solo {d} batched {d}\n", .{ n, solo_at[ni], bat_at[ni] });
         try testing.expectEqual(24 * @as(u64, @intCast(n)), solo_at[ni]);
         try testing.expectEqual(8 + 18 * @as(u64, @intCast(n)), bat_at[ni]);
     }
@@ -40448,6 +41103,50 @@ test "captureSsmCheckpoint materializes state copies (parent-buffer retention cl
 
     // Null ssm_state stays null (LFM2 gated_conv shape).
     try testing.expect(cp.layers[0].ssm_state.ctx == null);
+}
+
+test "two-chunk prefill capture drops the chunk parent after the boundary eval" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const rows: c_int = 2048;
+    const dim: c_int = 2048;
+    const keep: c_int = 8;
+    const parent_bytes: usize = @as(usize, @intCast(rows)) * @as(usize, @intCast(dim)) * 2;
+
+    _ = mlx.mlx_synchronize(s);
+    _ = mlx.mlx_clear_cache();
+    var baseline: usize = 0;
+    _ = mlx.mlx_get_active_memory(&baseline);
+
+    var kept0 = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(kept0);
+    var kept1 = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(kept1);
+    const kept = [_]*mlx.mlx_array{ &kept0, &kept1 };
+
+    var chunk: usize = 0;
+    while (chunk < 2) : (chunk += 1) {
+        var parent = mlx.mlx_array_new();
+        try mlx.check(mlx.mlx_zeros(&parent, &[_]c_int{ 1, rows, dim }, 3, .float16, s));
+        try mlx.check(mlx.mlx_array_eval(parent));
+        var view = mlx.mlx_array_new();
+        try mlx.check(mlx.mlx_slice(&view, parent, &[_]c_int{ 0, 0, 0 }, 3, &[_]c_int{ 1, keep, dim }, 3, &[_]c_int{ 1, 1, 1 }, 3, s));
+        try capturePrefillHidden(s, kept[chunk], view);
+        var dummy = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(dummy);
+        try mlx.check(mlx.mlx_zeros(&dummy, &[_]c_int{1}, 1, .float16, s));
+        try mlx.check(mlx.mlx_array_eval(dummy));
+        _ = mlx.mlx_array_free(view);
+        _ = mlx.mlx_array_free(parent);
+        _ = mlx.mlx_synchronize(s);
+        _ = mlx.mlx_clear_cache();
+    }
+
+    var after: usize = 0;
+    _ = mlx.mlx_get_active_memory(&after);
+    const delta = after -| baseline;
+    try t.expect(delta < parent_bytes);
 }
 
 fn conv1dTailRetentionDelta(batch: c_int, seq: c_int, cdim: c_int, kernel: c_int) !usize {
@@ -42626,8 +43325,10 @@ test "fused hyper-connection read matches the op chain per element" {
                     wg = g;
                 }
             }
-            std.debug.print("fused hc read: n={d} cos={d:.6} worst diff/tol={d:.2} ref={d:.5} got={d:.5}\n", .{ n, dot / @sqrt(nr * ng), worst, wr, wg });
-            if (worst > 0 or dot / @sqrt(nr * ng) < 0.9999) return error.HcFusedParity;
+            if (worst > 0 or dot / @sqrt(nr * ng) < 0.9999) {
+                std.debug.print("fused hc read: n={d} cos={d:.6} worst diff/tol={d:.2} ref={d:.5} got={d:.5}\n", .{ n, dot / @sqrt(nr * ng), worst, wr, wg });
+                return error.HcFusedParity;
+            }
         }
     }.f;
     try checkClose(allocator, s, ref_mixed, got.mixed, @intCast(H));
@@ -43496,7 +44197,6 @@ test "qmatmulBits keeps row-axis MTP kernels out of plain batched projections" {
 test "msv_qmv_rows is mlx_equal per row to stock M=1 qmv at every head shape" {
     if (mlx.noGpuBackend()) return error.SkipZigTest;
     const s = mlx.gpuStream();
-    std.debug.print("[msv_qmv_rows] hermetic start\n", .{});
     var prng = std.Random.DefaultPrng.init(0x51500A01);
     const rnd = prng.random();
     const shapes = [_][2]c_int{
@@ -43565,7 +44265,6 @@ test "msv_qmv_rows is mlx_equal per row to stock M=1 qmv at every head shape" {
                     }
                     try testing.expectEqual(@as(f32, 0.0), diff);
                 }
-                std.debug.print("[msv_qmv_rows] eq bits={d} K={d} N={d} rows={d}\n", .{ bits, K, Nout, nrows });
             }
         }
     }
@@ -48110,7 +48809,7 @@ test "verifyQmmNaxAvailable: false on every non-G17 device (kernel is never buil
     try testing.expect(arch.len > 0);
     var vbuf: [64]u8 = undefined;
     const ver = macosProductVersion(&vbuf) orelse "<none>";
-    std.debug.print("[nax-probe] arch={s} macos={s} available={}\n", .{ arch, ver, verifyQmmNaxAvailable() });
+    errdefer std.debug.print("[nax-probe] arch={s} macos={s} available={}\n", .{ arch, ver, verifyQmmNaxAvailable() });
     if (!naxArchIsG17(arch)) {
         try testing.expect(!verifyQmmNaxAvailable());
     }
@@ -50221,7 +50920,7 @@ fn qsaNaxAssertNoWorseThanStock(
     defer _ = mlx.mlx_array_free(nax);
     const max_stock = try attn256MaxDiff(stock, ref, stream);
     const max_nax = try attn256MaxDiff(nax, ref, stream);
-    std.debug.print("max_stock={e} max_nax={e} floor={e} bar={e}\n", .{ max_stock, max_nax, floor, @max(1.5 * max_stock, floor) });
+    errdefer std.debug.print("max_stock={e} max_nax={e} floor={e} bar={e}\n", .{ max_stock, max_nax, floor, @max(1.5 * max_stock, floor) });
     try std.testing.expect(max_nax <= @max(1.5 * max_stock, floor));
 }
 
@@ -50779,7 +51478,7 @@ test "qsa decode gather: take-then-dequantize equals dequantize-then-take" {
     defer _ = mlx.mlx_array_free(wantc);
     try mlx.check(mlx.mlx_contiguous(&wantc, want, false, s));
     const diff = try maxAbsDiffF32(subc, wantc, s);
-    std.debug.print("[qsa-take-dequant] max abs diff {d}\n", .{diff});
+    errdefer std.debug.print("[qsa-take-dequant] max abs diff {d}\n", .{diff});
     try std.testing.expectEqual(@as(f32, 0), diff);
 }
 
@@ -50837,7 +51536,7 @@ test "qsa decode gather: subset SDPA matches masked full SDPA at decode width" {
     const ref = try attn256Reference(q, dk_full, dv_full, scale, "array", fx.mask, s);
     defer _ = mlx.mlx_array_free(ref);
     const diff = try attn256MaxDiff(got, ref, s);
-    std.debug.print("[qsa-decode-gather] quant path max diff {d:.6}\n", .{diff});
+    errdefer std.debug.print("[qsa-decode-gather] quant path max diff {d:.6}\n", .{diff});
     try std.testing.expect(diff < 0.01);
 
     // Dense path (no triple): same answer off the dense rows.
@@ -50847,7 +51546,7 @@ test "qsa decode gather: subset SDPA matches masked full SDPA at decode width" {
     const ref_dense = try attn256Reference(q, k_dense, v_dense, scale, "array", fx.mask, s);
     defer _ = mlx.mlx_array_free(ref_dense);
     const diff_dense = try attn256MaxDiff(got_dense, ref_dense, s);
-    std.debug.print("[qsa-decode-gather] dense path max diff {d:.6}\n", .{diff_dense});
+    errdefer std.debug.print("[qsa-decode-gather] dense path max diff {d:.6}\n", .{diff_dense});
     try std.testing.expect(diff_dense < 0.01);
 
     // Kill switch + wrong-dtype blocks decline to the mask arm.
@@ -51501,7 +52200,7 @@ test "qsa verify gather: subset SDPA matches masked full SDPA at verify widths (
         defer _ = mlx.mlx_array_free(ref);
         const d_diff = try attn256MaxDiff(got, ref, s);
         const d_cos = try attn256Cosine(got, ref, s);
-        std.debug.print("[qsa-verify-gather] S={d} kv={d} dense: max diff {d:.6} cos {d:.7}\n", .{ c.s, c.kv, d_diff, d_cos });
+        errdefer std.debug.print("[qsa-verify-gather] S={d} kv={d} dense: max diff {d:.6} cos {d:.7}\n", .{ c.s, c.kv, d_diff, d_cos });
         try std.testing.expect(d_diff < 0.005);
         try std.testing.expect(d_cos > 0.9999);
 
@@ -51516,7 +52215,7 @@ test "qsa verify gather: subset SDPA matches masked full SDPA at verify widths (
         defer _ = mlx.mlx_array_free(refq);
         const q_diff = try attn256MaxDiff(gotq, refq, s);
         const q_cos = try attn256Cosine(gotq, refq, s);
-        std.debug.print("[qsa-verify-gather] S={d} kv={d} affine-8: max diff {d:.6} cos {d:.7}\n", .{ c.s, c.kv, q_diff, q_cos });
+        errdefer std.debug.print("[qsa-verify-gather] S={d} kv={d} affine-8: max diff {d:.6} cos {d:.7}\n", .{ c.s, c.kv, q_diff, q_cos });
         try std.testing.expect(q_diff < 0.01);
         try std.testing.expect(q_cos > 0.9999);
     }
@@ -51638,7 +52337,7 @@ test "qsa sparse attn: one fused dispatch equals the union gather at verify widt
             const dd = try attn256MaxDiff(got_d, ref_d, s);
             const dc = try attn256Cosine(got_d, ref_d, s);
             const d_bar = try attn256UlpBar(ref_d, s);
-            std.debug.print("[qsa-attn] S={d} kv={d} kb={d} gqa={d} dense->union gather: max diff {d:.6} cos {d:.7} (bar {d:.6})\n", .{ c.s, c.kv, c.kb, @divExact(c.hq, c.hkv), dd, dc, d_bar });
+            errdefer std.debug.print("[qsa-attn] S={d} kv={d} kb={d} gqa={d} dense->union gather: max diff {d:.6} cos {d:.7} (bar {d:.6})\n", .{ c.s, c.kv, c.kb, @divExact(c.hq, c.hkv), dd, dc, d_bar });
             try std.testing.expect(dc > 0.99999);
             try std.testing.expect(dd <= d_bar);
         }
@@ -51659,7 +52358,7 @@ test "qsa sparse attn: one fused dispatch equals the union gather at verify widt
         const qd = try attn256MaxDiff(got_q, ref_q, s);
         const qc = try attn256Cosine(got_q, ref_q, s);
         const q_bar = try attn256UlpBar(ref_q, s);
-        std.debug.print("[qsa-attn] S={d} kv={d} kb={d} gqa={d} affine-8: max diff {d:.6} cos {d:.7} (bar {d:.6})\n", .{ c.s, c.kv, c.kb, @divExact(c.hq, c.hkv), qd, qc, q_bar });
+        errdefer std.debug.print("[qsa-attn] S={d} kv={d} kb={d} gqa={d} affine-8: max diff {d:.6} cos {d:.7} (bar {d:.6})\n", .{ c.s, c.kv, c.kb, @divExact(c.hq, c.hkv), qd, qc, q_bar });
         try std.testing.expect(qc > 0.99999);
         try std.testing.expect(qd <= q_bar);
 
@@ -51719,7 +52418,7 @@ test "qsa sparse attn: the split-K merge is invariant in the split count (1, 8, 
         defer _ = mlx.mlx_array_free(got);
         const d = try attn256MaxDiff(got, ref, s);
         const c = try attn256Cosine(got, ref, s);
-        std.debug.print("[qsa-attn] nsplit={d}: max diff {d:.6} cos {d:.7} (bar {d:.6})\n", .{ ns, d, c, bar });
+        errdefer std.debug.print("[qsa-attn] nsplit={d}: max diff {d:.6} cos {d:.7} (bar {d:.6})\n", .{ ns, d, c, bar });
         try std.testing.expect(c > 0.99999);
         try std.testing.expect(d <= bar);
         if (base) |b| {
@@ -51922,7 +52621,7 @@ test "qsa sparse attn: one fused dispatch replaces the arm's op chain (>= 100 op
     }
     const gather_ops = mlx.op_count.load(.monotonic) - before_g;
 
-    std.debug.print("[qsa-attn] 12 layers S={d} kv={d}: kernel {d} ops, union gather {d} ops (saved {d})\n", .{ seq, kv, kernel_ops, gather_ops, gather_ops -| kernel_ops });
+    errdefer std.debug.print("[qsa-attn] 12 layers S={d} kv={d}: kernel {d} ops, union gather {d} ops (saved {d})\n", .{ seq, kv, kernel_ops, gather_ops, gather_ops -| kernel_ops });
     try std.testing.expect(gather_ops > kernel_ops);
     try std.testing.expect(gather_ops - kernel_ops >= 100);
 }
@@ -54263,7 +54962,7 @@ test "gdn packed prework: fused at production Hk/Hv serves B=6,8,16 S=1 per row"
         defer _ = mlx.mlx_array_free(beta_ref);
         try mlx.check(mlx.mlx_sigmoid(&beta_ref, b_in, s));
         const db = try attn256MaxDiff(preb.beta, beta_ref, s);
-        if (db != 0) std.debug.print("prework B={d} beta maxdiff={e}\n", .{ batch, db });
+        if (db > 7.7e-6) std.debug.print("prework B={d} beta maxdiff={e}\n", .{ batch, db });
         try std.testing.expect(db <= 7.7e-6);
         var args1 = GdnPreworkArgs{
             .qkv = qkv,
@@ -55169,7 +55868,7 @@ test "ane channel-split GPU complement: axis-0 slice VIEW of a packed weight thr
 
     const copy_err = try maxAbsDiffF32(y_copy, ref_tail, s);
     const view_err = try maxAbsDiffF32(y_view, ref_tail, s);
-    std.debug.print("[ane-chan] qmm slice: copy_err={d} view_err={d}\n", .{ copy_err, view_err });
+    errdefer std.debug.print("[ane-chan] qmm slice: copy_err={d} view_err={d}\n", .{ copy_err, view_err });
     try std.testing.expectEqual(@as(f32, 0), copy_err);
     try std.testing.expectEqual(@as(f32, 0), view_err);
 }
@@ -57356,7 +58055,7 @@ test "mlx check fault injection: the ownership shape releases its array on every
         if (after_ctl != base) std.debug.print("[fault] leaky k={d}: base {d} after {d}\n", .{ k, base, after_ctl });
         try testing.expectEqual(base, after_ctl);
     }
-    std.debug.print("[fault] ownership shape: {d} checked ops, {d} faulted cleanly, leak oracle caught {d}\n", .{ n_ops, fired, caught });
+    errdefer std.debug.print("[fault] ownership shape: {d} checked ops, {d} faulted cleanly, leak oracle caught {d}\n", .{ n_ops, fired, caught });
     try testing.expect(caught >= 1);
 }
 
@@ -57512,7 +58211,7 @@ test "gdn gate: compiled closure vs graph chain vs prework kernel (bit-identity 
     const g_chain = try gdnGateChain(A_log, a, dt_bias, s);
     defer _ = mlx.mlx_array_free(g_chain);
     const d = try attn256MaxDiff(g_compiled, g_chain, s);
-    std.debug.print("[gate probe] compiled vs chain max |diff| = {e}\n", .{d});
+    errdefer std.debug.print("[gate probe] compiled vs chain max |diff| = {e}\n", .{d});
     try std.testing.expectEqual(@as(f32, 0.0), d);
 }
 
@@ -58107,7 +58806,7 @@ test "qsa mask: the all-visible skip must not hand a NULL sheet to an mlx op (kv
             }
         }
     }
-    std.debug.print("[qsa-boundary] all-visible skip exercised in {d} cases\n", .{checked_skip});
+    errdefer std.debug.print("[qsa-boundary] all-visible skip exercised in {d} cases\n", .{checked_skip});
     try std.testing.expect(checked_skip >= 8);
 }
 
@@ -58599,9 +59298,6 @@ test "qsa select kernel: past the bias's f32 resolution the chain's tie rule is 
         std.sort.pdq(f32, sw, {}, std.sort.asc(f32));
         std.sort.pdq(f32, sc, {}, std.sort.asc(f32));
         try testing.expectEqualSlices(f32, sw, sc);
-    }
-    if (diffs > 0) {
-        std.debug.print("[qsa-select] the chain differs from the exact rule in {d}/{d} slots at production magnitude (tied blocks only)\n", .{ diffs, want.len });
     }
 }
 
@@ -60050,9 +60746,10 @@ test "qwen4PleInstalledAt accepts the MTP head's deliberate -1 and still refuses
     try testing.expect(!model_mod.qwen4PleInstalledAt(&.{true}, -1));
 }
 
-test "diagEnvValueOn: absent or 0 is off" {
+test "diagEnvValueOn: absent, empty or 0 is off" {
     try testing.expectEqual(false, diagEnvValueOn(null));
     try testing.expectEqual(false, diagEnvValueOn("0"));
+    try testing.expectEqual(false, diagEnvValueOn(""));
     try testing.expectEqual(true, diagEnvValueOn("1"));
     try testing.expectEqual(true, diagEnvValueOn("on"));
 }
@@ -61972,62 +62669,64 @@ test "streamed expert kernel arm is no worse than the composite arm against fp32
 
         for ([_]c_int{ 1, 2, 4 }) |rows| {
             for (0..SE_DRAWS) |draw| {
-            var dkey = mlx.mlx_array_new();
-            defer _ = mlx.mlx_array_free(dkey);
-            try mlx.check(mlx.mlx_random_key(&dkey, 0xa5a50000 + @as(u64, draw) * 7919 + @as(u64, @intCast(u))));
-            var x = mlx.mlx_array_new();
-            defer _ = mlx.mlx_array_free(x);
-            try mlx.check(mlx.mlx_random_normal(&x, &[_]c_int{ rows, hidden }, 2, .bfloat16, 0.0, 1.0, dkey, s));
-            try mlx.check(mlx.mlx_array_eval(x));
-            var w = mlx.mlx_array_new();
-            defer _ = mlx.mlx_array_free(w);
-            try mlx.check(mlx.mlx_random_normal(&w, &[_]c_int{ rows, topk }, 2, .bfloat16, 0.0, 1.0, dkey, s));
-            try mlx.check(mlx.mlx_array_eval(w));
-            const slots_host = try seSlots(alloc, @intCast(rows), @intCast(topk), @intCast(u));
-            defer alloc.free(slots_host);
-            const slots = mlx.mlx_array_new_data(slots_host.ptr, &[_]c_int{ rows, topk }, 2, .int32);
-            defer _ = mlx.mlx_array_free(slots);
+                var dkey = mlx.mlx_array_new();
+                defer _ = mlx.mlx_array_free(dkey);
+                try mlx.check(mlx.mlx_random_key(&dkey, 0xa5a50000 + @as(u64, draw) * 7919 + @as(u64, @intCast(u))));
+                var x = mlx.mlx_array_new();
+                defer _ = mlx.mlx_array_free(x);
+                try mlx.check(mlx.mlx_random_normal(&x, &[_]c_int{ rows, hidden }, 2, .bfloat16, 0.0, 1.0, dkey, s));
+                try mlx.check(mlx.mlx_array_eval(x));
+                var w = mlx.mlx_array_new();
+                defer _ = mlx.mlx_array_free(w);
+                try mlx.check(mlx.mlx_random_normal(&w, &[_]c_int{ rows, topk }, 2, .bfloat16, 0.0, 1.0, dkey, s));
+                try mlx.check(mlx.mlx_array_eval(w));
+                const slots_host = try seSlots(alloc, @intCast(rows), @intCast(topk), @intCast(u));
+                defer alloc.free(slots_host);
+                const slots = mlx.mlx_array_new_data(slots_host.ptr, &[_]c_int{ rows, topk }, 2, .int32);
+                defer _ = mlx.mlx_array_free(slots);
 
-            const op = StreamedExpertOperands{
-                .x_rows = x,
-                .gate = views.gate,
-                .up = views.up,
-                .down = views.down,
-                .slab_gate_up = gu,
-                .slab_down = dn,
-                .slots = slots,
-                .weights = w,
-            };
-            const truth = try seTruth(
-                alloc,
-                mlx.mlx_array_data_bfloat16(x).?,
-                mlx.mlx_array_data_bfloat16(gu).?,
-                mlx.mlx_array_data_bfloat16(dn).?,
-                slots_host,
-                mlx.mlx_array_data_bfloat16(w).?,
-                @intCast(rows),
-                @intCast(topk),
-                @intCast(hidden),
-                @intCast(inter),
-            );
-            defer alloc.free(truth);
+                const op = StreamedExpertOperands{
+                    .x_rows = x,
+                    .gate = views.gate,
+                    .up = views.up,
+                    .down = views.down,
+                    .slab_gate_up = gu,
+                    .slab_down = dn,
+                    .slots = slots,
+                    .weights = w,
+                };
+                const truth = try seTruth(
+                    alloc,
+                    mlx.mlx_array_data_bfloat16(x).?,
+                    mlx.mlx_array_data_bfloat16(gu).?,
+                    mlx.mlx_array_data_bfloat16(dn).?,
+                    slots_host,
+                    mlx.mlx_array_data_bfloat16(w).?,
+                    @intCast(rows),
+                    @intCast(topk),
+                    @intCast(hidden),
+                    @intCast(inter),
+                );
+                defer alloc.free(truth);
 
-            const composite = try streamedExpertCompute(s, op, rows, false);
-            defer _ = mlx.mlx_array_free(composite);
-            const kernel = try streamedExpertCompute(s, op, rows, true);
-            defer _ = mlx.mlx_array_free(kernel);
-            try std.testing.expectEqualSlices(c_int, &[_]c_int{ rows, hidden }, mlx.getShape(composite));
-            try std.testing.expectEqualSlices(c_int, &[_]c_int{ rows, hidden }, mlx.getShape(kernel));
-            const ce = try seErrStats(alloc, composite, truth);
-            const ke = try seErrStats(alloc, kernel, truth);
-            var tmax: f32 = 0;
-            for (truth) |v| {
-                if (@abs(v) > tmax) tmax = @abs(v);
-            }
-            const allow: f32 = if (expert_bf16.downKernelPreferred(@intCast(rows))) 0 else seUlpBf16(tmax);
-            const bad = ke.max > ce.max + allow or ke.rms > ce.rms;
-            std.debug.print("streamed-expert U={d:>4} R={d} draw={d}: kernel max={e:.3} rms={e:.3} | composite max={e:.3} rms={e:.3} | tmax={e:.3} allow={e:.3} [{s}]\n", .{ u, rows, draw, ke.max, ke.rms, ce.max, ce.rms, tmax, allow, if (bad) "WORSE" else "ok" });
-            if (bad) worse += 1;
+                const composite = try streamedExpertCompute(s, op, rows, false);
+                defer _ = mlx.mlx_array_free(composite);
+                const kernel = try streamedExpertCompute(s, op, rows, true);
+                defer _ = mlx.mlx_array_free(kernel);
+                try std.testing.expectEqualSlices(c_int, &[_]c_int{ rows, hidden }, mlx.getShape(composite));
+                try std.testing.expectEqualSlices(c_int, &[_]c_int{ rows, hidden }, mlx.getShape(kernel));
+                const ce = try seErrStats(alloc, composite, truth);
+                const ke = try seErrStats(alloc, kernel, truth);
+                var tmax: f32 = 0;
+                for (truth) |v| {
+                    if (@abs(v) > tmax) tmax = @abs(v);
+                }
+                const allow: f32 = if (expert_bf16.downKernelPreferred(@intCast(rows))) 0 else seUlpBf16(tmax);
+                const bad = ke.max > ce.max + allow or ke.rms > ce.rms;
+                if (bad) {
+                    std.debug.print("streamed-expert U={d:>4} R={d} draw={d}: kernel max={e:.3} rms={e:.3} | composite max={e:.3} rms={e:.3} | tmax={e:.3} allow={e:.3} [WORSE]\n", .{ u, rows, draw, ke.max, ke.rms, ce.max, ce.rms, tmax, allow });
+                    worse += 1;
+                }
             }
         }
         _ = mlx.mlx_clear_cache();
@@ -62350,7 +63049,7 @@ test "a streamed quantized slab matches the resident bank through the same kerne
         defer prepared.deinit();
         try std.testing.expect(prepared.quantized);
         var slab: [expert_stream_mod.quant.component_count]mlx.mlx_array = undefined;
-        for (&slab, 0..) |*value, ci| value.* = prepared.quantOperand(@enumFromInt(ci));
+        for (&slab, 0..) |*value, ci| value.* = prepared.quantOperand(@fromBackingInt(@intCast(ci)));
 
         const arms = [_]SqArm{
             .{ .gate_w = bank[0], .gate_s = bank[1], .gate_b = bank[2], .up_w = bank[3], .up_s = bank[4], .up_b = bank[5], .down_w = bank[6], .down_s = bank[7], .down_b = bank[8] },
@@ -62430,5 +63129,71 @@ test "a streamed quantized slab matches the resident bank through the same kerne
             try std.testing.expectEqual(gate_hashes[0], gate_hashes[1]);
             try std.testing.expectEqual(down_hashes[0], down_hashes[1]);
         }
+    }
+}
+
+test "exl3 shared add releases routed output study3" {
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var xfm: Transformer = undefined;
+    xfm.config = .{};
+    xfm.bits_cache = .{};
+    xfm.compiled_geglu = null;
+    xfm.allocator = testing.allocator;
+    xfm.s = s;
+    xfm.config.expert_layout = .exl3_k4;
+    xfm.config.hidden_act = .silu;
+    xfm.config.quant_bits = 4;
+    xfm.config.quant_group_size = 64;
+    xfm.config.moe_intermediate_size = 128;
+    var rng = std.Random.DefaultPrng.init(1103);
+    const x = try attn256RandBf16(rng.random(), &.{ 1, 64, 128 }, s);
+    defer _ = mlx.mlx_array_free(x);
+    const shared = try attn256RandBf16(rng.random(), &.{ 128, 128 }, s);
+    defer _ = mlx.mlx_array_free(shared);
+    const gate = try attn256RandBf16(rng.random(), &.{ 128, 1 }, s);
+    defer _ = mlx.mlx_array_free(gate);
+    const trh: [8 * 8 * 64]u16 = @splat(1234);
+    const tr = mlx.mlx_array_new_data(&trh, &.{ 1, 8, 8, 64 }, 4, .uint16);
+    defer _ = mlx.mlx_array_free(tr);
+    const sh: [128]u16 = @splat(0x3c00);
+    const scale = mlx.mlx_array_new_data(&sh, &.{ 1, 128 }, 2, .float16);
+    defer _ = mlx.mlx_array_free(scale);
+    const ih: [64]u32 = @splat(0);
+    const inds = mlx.mlx_array_new_data(&ih, &.{ 1, 64, 1 }, 3, .uint32);
+    defer _ = mlx.mlx_array_free(inds);
+    const sc: [64]u16 = @splat(0x3f80);
+    const scores = mlx.mlx_array_new_data(&sc, &.{ 1, 64, 1 }, 3, .bfloat16);
+    defer _ = mlx.mlx_array_free(scores);
+    var mw = std.mem.zeroes(MoeMlpWeights);
+    mw.switch_gate_w = tr;
+    mw.switch_up_w = tr;
+    mw.switch_down_w = tr;
+    mw.switch_gate_s = scale;
+    mw.switch_up_s = scale;
+    mw.switch_down_s = scale;
+    mw.switch_gate_b = scale;
+    mw.switch_up_b = scale;
+    mw.switch_down_b = scale;
+    mw.shared_gate_w = shared;
+    mw.shared_up_w = shared;
+    mw.shared_down_w = shared;
+    mw.shared_expert_gate_w = gate;
+    mw.shared_expert_gate_s = .{ .ctx = null };
+    mw.shared_expert_gate_b = .{ .ctx = null };
+    var before: usize = 0;
+    var after: usize = 0;
+    for (0..5) |rep| {
+        const out = try xfm.moeMLP2WithRouter(x, x, &mw, null, false, null, .{ .inds = inds, .norm_scores = scores });
+        try mlx.check(mlx.mlx_array_eval(out));
+        _ = mlx.mlx_array_free(out);
+        try mlx.check(mlx.mlx_synchronize(s));
+        _ = mlx.mlx_clear_cache();
+        if (rep == 0) try mlx.check(mlx.mlx_get_active_memory(&before));
+    }
+    try mlx.check(mlx.mlx_get_active_memory(&after));
+    if (after > before + 4096) {
+        std.debug.print("[study3 ownership] before={d} after={d} retained={d}\n", .{ before, after, after -| before });
+        return error.TestUnexpectedResult;
     }
 }

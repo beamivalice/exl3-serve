@@ -42,10 +42,47 @@ pub fn isExpertStreamingArch(model_type: []const u8) bool {
     return std.mem.eql(u8, model_type, "qwen4_exp");
 }
 
+pub const Exl3Spec = struct {
+    k: u8,
+    codebook: []const u8,
+};
+
+pub fn parseExpertQuant(obj: std.json.ObjectMap) !Exl3Spec {
+    const block = obj.get("expert_quant") orelse return error.ExpertLayoutUnsupported;
+    if (block != .object) return error.ExpertLayoutUnsupported;
+    const format = block.object.get("format") orelse return error.ExpertLayoutUnsupported;
+    if (format != .string or !std.mem.eql(u8, format.string, "exl3")) return error.ExpertLayoutUnsupported;
+    const k_v = block.object.get("k") orelse return error.ExpertLayoutUnsupported;
+    const k: u8 = switch (k_v) {
+        .integer => |n| std.math.cast(u8, n) orelse return error.ExpertLayoutUnsupported,
+        else => return error.ExpertLayoutUnsupported,
+    };
+    const cb_v = block.object.get("codebook") orelse return error.ExpertLayoutUnsupported;
+    if (cb_v != .string) return error.ExpertLayoutUnsupported;
+    if (k < 2 or k > 4) return error.ExpertLayoutUnsupported;
+    if (!std.mem.eql(u8, cb_v.string, "mul1")) return error.ExpertLayoutUnsupported;
+    return .{ .k = k, .codebook = cb_v.string };
+}
+
+pub fn kFromPackedDim(last: u64) ?u8 {
+    if (last % 16 != 0) return null;
+    const k = last / 16;
+    return switch (k) {
+        2, 3, 4 => @intCast(k),
+        else => null,
+    };
+}
+
 /// How a qwen4_exp checkpoint stores its ROUTED experts. Both are leading-index
 /// banks: `bf16_fused` is the HF checkpoint's two dense tensors per layer,
 /// `quantized_split` the MLX pack's nine (three projections x weight/scales/biases).
-pub const Layout = enum { bf16_fused, quantized_split };
+pub const Layout = enum { bf16_fused, quantized_split, exl3_k4 };
+
+pub const REDUCE_BANK_TOPK: u32 = 32;
+
+pub fn admitExl3TopK(topk: u32) !void {
+    if (topk > REDUCE_BANK_TOPK) return error.Exl3TopKExceedsReduceBank;
+}
 
 pub const Component = enum(u4) {
     gate_w,
@@ -120,6 +157,9 @@ pub fn isRoutedExpertKey(layout: Layout, key: []const u8) bool {
                 std.mem.endsWith(u8, key, ".mlp.experts.down_proj")),
         .quantized_split => std.mem.startsWith(u8, key, "language_model.model.layers.") and
             std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null,
+        .exl3_k4 => (std.mem.startsWith(u8, key, "language_model.model.layers.") or
+            std.mem.startsWith(u8, key, "language_model.mtp.")) and
+            std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null,
     };
 }
 
@@ -145,6 +185,28 @@ pub fn layoutFromWeightMap(map: std.json.ObjectMap, layers: u16) ?Layout {
         }
     }
     if (fused) return .bf16_fused;
+    var exl3 = true;
+    for (0..layers) |layer| {
+        for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+            const trellis = std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.mlp.switch_mlp.{s}_proj.trellis", .{ layer, proj }) catch return null;
+            if (!stringAt(map, trellis)) {
+                exl3 = false;
+                break;
+            }
+            const suh = std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.mlp.switch_mlp.{s}_proj.suh", .{ layer, proj }) catch return null;
+            if (!stringAt(map, suh)) {
+                exl3 = false;
+                break;
+            }
+            const svh = std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.mlp.switch_mlp.{s}_proj.svh", .{ layer, proj }) catch return null;
+            if (!stringAt(map, svh)) {
+                exl3 = false;
+                break;
+            }
+        }
+        if (!exl3) break;
+    }
+    if (exl3) return .exl3_k4;
     for (0..layers) |layer| {
         for (0..component_count) |ci| {
             const key = tensorKey(&buf, @intCast(layer), @enumFromInt(ci)) catch return null;
@@ -416,6 +478,69 @@ test "routed expert layout is read off the weight map" {
     try t.expect(isRoutedExpertKey(.quantized_split, "language_model.model.layers.3.mlp.switch_mlp.down_proj.scales"));
     try t.expect(!isRoutedExpertKey(.quantized_split, "language_model.model.layers.3.mlp.shared_expert.down_proj.scales"));
     try t.expect(isRoutedExpertKey(.bf16_fused, "model.language_model.layers.3.mlp.experts.down_proj"));
+    const exl3 =
+        \\{"weight_map":{"language_model.model.layers.0.mlp.switch_mlp.gate_proj.trellis":"a","language_model.model.layers.0.mlp.switch_mlp.gate_proj.suh":"a","language_model.model.layers.0.mlp.switch_mlp.gate_proj.svh":"a","language_model.model.layers.0.mlp.switch_mlp.up_proj.trellis":"a","language_model.model.layers.0.mlp.switch_mlp.up_proj.suh":"a","language_model.model.layers.0.mlp.switch_mlp.up_proj.svh":"a","language_model.model.layers.0.mlp.switch_mlp.down_proj.trellis":"a","language_model.model.layers.0.mlp.switch_mlp.down_proj.suh":"a","language_model.model.layers.0.mlp.switch_mlp.down_proj.svh":"a"}}
+    ;
+    try t.expectEqual(Layout.exl3_k4, layoutFromIndexJson(t.allocator, "qwen4_exp", exl3, 1).?);
+    try t.expect(isRoutedExpertKey(.exl3_k4, "language_model.model.layers.3.mlp.switch_mlp.gate_proj.trellis"));
+    try t.expect(isRoutedExpertKey(.exl3_k4, "language_model.mtp.layers.0.mlp.switch_mlp.down_proj.suh"));
+    try t.expect(!isRoutedExpertKey(.exl3_k4, "language_model.model.layers.3.mlp.shared_expert.down_proj.weight"));
+}
+
+test "exl3 top-k above reduce-bank is a named refusal" {
+    const t = std.testing;
+    try admitExl3TopK(10);
+    try admitExl3TopK(16);
+    try admitExl3TopK(32);
+    try t.expectError(error.Exl3TopKExceedsReduceBank, admitExl3TopK(33));
+}
+
+test "exl3 expert_quant admits K2 K3 K4 mul1 and refuses other k or codebook" {
+    const t = std.testing;
+    for ([_]u8{ 2, 3, 4 }) |want_k| {
+        var buf: [80]u8 = undefined;
+        const raw = try std.fmt.bufPrint(&buf, "{{\"expert_quant\":{{\"format\":\"exl3\",\"k\":{d},\"codebook\":\"mul1\"}}}}", .{want_k});
+        const ok = try std.json.parseFromSlice(std.json.Value, t.allocator, raw, .{});
+        defer ok.deinit();
+        const spec = try parseExpertQuant(ok.value.object);
+        try t.expectEqual(want_k, spec.k);
+        try t.expectEqualStrings("mul1", spec.codebook);
+    }
+    const bad_k = try std.json.parseFromSlice(std.json.Value, t.allocator,
+        \\{"expert_quant":{"format":"exl3","k":6,"codebook":"mul1"}}
+    , .{});
+    defer bad_k.deinit();
+    try t.expectError(error.ExpertLayoutUnsupported, parseExpertQuant(bad_k.value.object));
+    const bad_cb = try std.json.parseFromSlice(std.json.Value, t.allocator,
+        \\{"expert_quant":{"format":"exl3","k":4,"codebook":"mcg"}}
+    , .{});
+    defer bad_cb.deinit();
+    try t.expectError(error.ExpertLayoutUnsupported, parseExpertQuant(bad_cb.value.object));
+    const missing = try std.json.parseFromSlice(std.json.Value, t.allocator, "{}", .{});
+    defer missing.deinit();
+    try t.expectError(error.ExpertLayoutUnsupported, parseExpertQuant(missing.value.object));
+}
+
+test "exl3 kFromPackedDim maps last dim 16*K" {
+    const t = std.testing;
+    try t.expectEqual(@as(?u8, 2), kFromPackedDim(32));
+    try t.expectEqual(@as(?u8, 3), kFromPackedDim(48));
+    try t.expectEqual(@as(?u8, 4), kFromPackedDim(64));
+    try t.expectEqual(@as(?u8, null), kFromPackedDim(80));
+    try t.expectEqual(@as(?u8, null), kFromPackedDim(16));
+}
+
+test "exl3 mixed last dims map to per-tensor K in 2,3,4" {
+    const t = std.testing;
+    const last = [_]u64{ 48, 32, 64, 48, 48, 48 };
+    var counts: [5]u32 = @splat(0);
+    for (last) |d| {
+        const k = kFromPackedDim(d) orelse return error.TestUnexpectedResult;
+        counts[k] += 1;
+    }
+    try t.expectEqual(@as(u32, 1), counts[2]);
+    try t.expectEqual(@as(u32, 4), counts[3]);
+    try t.expectEqual(@as(u32, 1), counts[4]);
 }
 
 test "layout resolution is qwen4_exp only: the same index declares nothing for another arch" {

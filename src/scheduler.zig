@@ -3409,14 +3409,14 @@ test "the cold-load LoadRequest re-applies EVERY retained launch setting" {
     // Needles are ++-split so this test's own source can't satisfy the scan.
     const src = @embedFile("scheduler.zig");
     inline for (.{
-        "kv_quant_config",           "prefix_cache_capacity",     "prefix_cache_mem_bytes",
-        "prefix_cache_disk_bytes",   "ssm_checkpoint_stride",     "ssm_checkpoint_max",
-        "mtp_enabled",               "mtp_head_kv_quant",         "mtp_depth",
-        "llama_cache_entries",       "llama_kv_type_k",           "llama_kv_type_v",
-        "ds4_mtp",                   "ds4_dspark",                "ds4_ssd_streaming",
-        "no_drafter",                "draft_block_size",          "draft_block_size_explicit",
-        "ane_prefill",               "ane_chunk_resolver",        "ane_headroom_resolver",
-        "prefix_cache_mem_resolver", "expert_cache_bytes",        "expert_cache_fit_resolver",
+        "kv_quant_config",           "prefix_cache_capacity", "prefix_cache_mem_bytes",
+        "prefix_cache_disk_bytes",   "ssm_checkpoint_stride", "ssm_checkpoint_max",
+        "mtp_enabled",               "mtp_head_kv_quant",     "mtp_depth",
+        "llama_cache_entries",       "llama_kv_type_k",       "llama_kv_type_v",
+        "ds4_mtp",                   "ds4_dspark",            "ds4_ssd_streaming",
+        "no_drafter",                "draft_block_size",      "draft_block_size_explicit",
+        "ane_prefill",               "ane_chunk_resolver",    "ane_headroom_resolver",
+        "prefix_cache_mem_resolver", "expert_cache_bytes",    "expert_cache_fit_resolver",
         "ssd_budget_bytes",
     }) |field| {
         const needle = "." ++ field ++ " = self" ++ "." ++ field ++ ",";
@@ -3734,6 +3734,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         const geometry = streamingGeometryOf(params.config);
         const layout = expert_stream_mod.quant.layoutOfDir(sch.allocator, sch.io, params.config.model_type, params.model_dir, geometry.layers) orelse
             return error.ExpertStreamingUnsupportedLayout;
+        if (layout == .exl3_k4) return error.ExpertLayoutUnsupported;
         params.config.expert_layout = layout;
         const split = try model_mod.streamingResidentSplit(sch.io, sch.allocator, params.model_dir, layout);
         switch (expert_stream_mod.mtpUnderStreaming(params.mtp_enabled, params.config.mtp_override)) {
@@ -4316,7 +4317,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         const warmup_ns: u64 = @intCast(warmup_start.untilNow(sch.io, .awake).nanoseconds);
         log.info("Warmup complete ({d} ms).\n", .{warmup_ns / std.time.ns_per_ms});
         if (mtp_enabled and xfm_ptr.qwen4_mtp != null) {
-            const cap = generate_mod.Generator.resolveMtpDepthCapForProfile(params.mtp_depth, mtp_cost_profile);
+            const cap = mtp_mod.applyExl3DepthCap(ane_mod.chipBrand(), xfm_ptr.config.expert_layout, generate_mod.Generator.resolveMtpDepthCapForProfile(params.mtp_depth, mtp_cost_profile), params.mtp_depth, generate_mod.Generator.mtpAdaptiveEnabled(), generate_mod.Generator.mtpForcedDepth() != null);
             xfm_ptr.warmupSpecVerify(cap, params.kv_quant_config) catch |err| {
                 log.warn("[spec-warmup] failed ({s}); the first round at each width pays its kernel compile inside the round.\n", .{@errorName(err)});
             };
@@ -4349,7 +4350,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         null;
     // Resolve the auto (0) cap here so every downstream reader of
     // `lm.mtp_depth` (server log lines, slot params) sees the real value.
-    entry.mtp_depth = generate_mod.Generator.resolveMtpDepthCapForProfile(params.mtp_depth, mtp_cost_profile);
+    entry.mtp_depth = mtp_mod.applyExl3DepthCap(ane_mod.chipBrand(), xfm_ptr.config.expert_layout, generate_mod.Generator.resolveMtpDepthCapForProfile(params.mtp_depth, mtp_cost_profile), params.mtp_depth, generate_mod.Generator.mtpAdaptiveEnabled(), generate_mod.Generator.mtpForcedDepth() != null);
     xfm_ptr.mtp_depth_free = generate_mod.Generator.mtpDepthCapFree(params.mtp_depth);
     // A MERGED drafter has no `--drafter` to echo, so the reported path comes
     // from what was actually resolved — `drafter_loaded` and `drafter_path`
@@ -7241,7 +7242,10 @@ fn runSingleDecodeTickInner(sch: *Scheduler, slot: *Slot) !void {
 
     // Regular path. A request that never armed MTP teaches the round-cost table what a plain
     // serial token costs; `observeSerialTick` owns the drop rules and `serialCellWanted`.
+    const tick_on = generate_mod.tickUbenchArmed();
+    var tick_sw = if (tick_on) io_util.Stopwatch.init(sch.io) else undefined;
     const tok_opt = try gen.next(slot.allocator);
+    const next_ns: u64 = if (tick_on) tick_sw.read() else 0;
     if (tok_opt == null) {
         finishSlot(sch, slot, gen.finish_reason);
         return;
@@ -7273,6 +7277,13 @@ fn runSingleDecodeTickInner(sch: *Scheduler, slot: *Slot) !void {
     slot.pushTokenWithLogprob(t, lp_take);
     if (t != 0) slot.was_pad_only = false;
     slot.completion_tokens = gen.completion_tokens;
+    if (tick_on) {
+        const rest_ns = tick_sw.read() - next_ns;
+        log.info("[tick-ubench] sched next={d:.3} ms rest={d:.3} ms\n", .{
+            @as(f64, @floatFromInt(next_ns)) / 1e6,
+            @as(f64, @floatFromInt(rest_ns)) / 1e6,
+        });
+    }
 }
 
 test "all speculative blocks publish through one per-token accounting loop" {
@@ -10116,17 +10127,4 @@ test "the ssd budget leaves a positive expert cache on the real quantized pack" 
     const ledger = resolved.ledger orelse return error.MissingLedger;
     try t.expect(ledger.slots_per_layer > 1);
     try t.expect(ledger.cache_bytes > 0);
-    std.debug.print(
-        "[quant ledger] per_expert={d} trunk={d:.2} GiB mtp={d:.2} GiB workspace={d:.2} GiB selected={d:.2} GiB bounce={d:.2} GiB cache={d:.2} GiB slots/layer={d}\n",
-        .{
-            per_expert,
-            @as(f64, @floatFromInt(ledger.trunk_bytes)) / (1 << 30),
-            @as(f64, @floatFromInt(split.mtp)) / (1 << 30),
-            @as(f64, @floatFromInt(ledger.workspace_bytes)) / (1 << 30),
-            @as(f64, @floatFromInt(ledger.selected_bytes)) / (1 << 30),
-            @as(f64, @floatFromInt(ledger.bounce_bytes)) / (1 << 30),
-            @as(f64, @floatFromInt(ledger.cache_bytes)) / (1 << 30),
-            ledger.slots_per_layer,
-        },
-    );
 }

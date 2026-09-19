@@ -9947,7 +9947,7 @@ test "dsv4: fused MoE gate+up kernel is no worse than the composed gathers (GPU)
                 err_f = @max(err_f, @abs(@as(f64, got_f[i]) - truth));
             }
         }
-        std.debug.print("dsv4 moe gate+up bits={d}: err composed={e:.3} fused={e:.3}\n", .{ tc.bits, err_c, err_f });
+        errdefer std.debug.print("dsv4 moe gate+up bits={d}: err composed={e:.3} fused={e:.3}\n", .{ tc.bits, err_c, err_f });
         // no-worse-than-reference (house rule: never kernel-vs-kernel exact)
         try testing.expect(err_f <= err_c * 1.25 + 1e-3);
     }

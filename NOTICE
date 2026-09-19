@@ -431,6 +431,12 @@ and they are listed because they made that work possible.
     at once — summing per-adapter deltas at forward time rather than merging
     them into the base weight, the `lora_paths`/`lora_scales` request shape,
     and splitting a fused QKV up-projection across q/k/v targets.
+  * turboderp/exllamav3 (MIT), the EXL3 weight format served for
+    Qwen3.8-Flash-Next experts (`src/expert_exl3.zig`,
+    `src/expert_exl3_kernels.zig`, `tests/convert_qwen38_flash_next_exl3.py`):
+    the 16x16 trellis tile packing, the MUL1 codebook decode, the tensor-core
+    permutation and the suh/svh Hadamard transforms are re-implemented from its
+    reference; no exllamav3 code is shipped.
 
 Model weights downloaded at runtime carry their own licenses from their
 publishers. mlx-serve does not redistribute them.

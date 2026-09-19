@@ -206,7 +206,7 @@ test "tool traffic replay: captured agent traffic survives parse + schema coerci
         }
     }
 
-    std.debug.print("[replay] {d} records, {d} calls, {d} repaired, {d} non-conforming (broken JSON), {d} soft wrapper-leaks, {d} HARD failures\n", .{ records, total_calls, coerced_calls, unresolved, soft_wrapper_leaks, g_fail_count });
+    errdefer std.debug.print("[replay] {d} records, {d} calls, {d} repaired, {d} non-conforming (broken JSON), {d} soft wrapper-leaks, {d} HARD failures\n", .{ records, total_calls, coerced_calls, unresolved, soft_wrapper_leaks, g_fail_count });
     try testing.expect(records > 0); // an empty fixture is a broken harvest, not a pass
     // Only HARD invariant violations fail the gate. Soft signals (genuinely-broken
     // model output that the layer correctly declines to fabricate) are reported.

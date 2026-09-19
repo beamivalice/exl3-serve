@@ -1758,7 +1758,7 @@ test "expert io import active memory counts an aliased slab once" {
     _ = mlx.mlx_get_active_memory(&after);
     defer _ = mlx.mlx_array_free(operand.array);
     const delta = after -| before;
-    benchPrint("[expert-io] aliased import active memory delta {d} for {d} bytes\n", .{ delta, bytes });
+    errdefer benchPrint("[expert-io] aliased import active memory delta {d} for {d} bytes\n", .{ delta, bytes });
     try t.expect(operand.aliased);
     try t.expect(delta < 2 * bytes);
 }

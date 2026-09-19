@@ -2398,12 +2398,11 @@ test "hermetic conv2d sanity" {
     var o = mlx.mlx_array_new(); defer _ = mlx.mlx_array_free(o);
     try mlx.check(mlx.mlx_conv2d(&o, inp, w, 1, 1, 1, 1, 1, 1, 1, s));
     _ = mlx.mlx_array_eval(o);
-    const sh = mlx.getShape(o);
-    std.debug.print("[conv-sanity] out shape [{d},{d},{d},{d}]\n", .{ sh[0], sh[1], sh[2], sh[3] });
+    try testing.expectEqualSlices(c_int, &[_]c_int{ 1, 4, 4, 3 }, mlx.getShape(o));
     const d = mlx.mlx_array_data_float32(o).?;
     // center pixel (1,1) channel0 = full 3x3x2 window of ones = 18; corner = 2x2x2=8
-    std.debug.print("[conv-sanity] center={d} corner={d}\n", .{ d[(1 * 4 + 1) * 3 + 0], d[0] });
     try testing.expect(@abs(d[(1 * 4 + 1) * 3 + 0] - 18.0) < 0.01);
+    try testing.expect(@abs(d[0] - 8.0) < 0.01);
     // bf16 variant
     const in_bf = try astype(inp, .bfloat16, s); defer _ = mlx.mlx_array_free(in_bf);
     const w_bf = try astype(w, .bfloat16, s); defer _ = mlx.mlx_array_free(w_bf);
@@ -2412,7 +2411,8 @@ test "hermetic conv2d sanity" {
     const o2f = try astype(o2, .float32, s); defer _ = mlx.mlx_array_free(o2f);
     _ = mlx.mlx_array_eval(o2f);
     const d2 = mlx.mlx_array_data_float32(o2f).?;
-    std.debug.print("[conv-sanity-bf16] center={d} corner={d}\n", .{ d2[(1 * 4 + 1) * 3 + 0], d2[0] });
+    try testing.expect(@abs(d2[(1 * 4 + 1) * 3 + 0] - 18.0) < 0.2);
+    try testing.expect(@abs(d2[0] - 8.0) < 0.2);
 }
 
 const testing = std.testing;
@@ -2680,7 +2680,7 @@ test "flux QLinear with inferred sub-4-bit geometry matches the dequantized refe
             nr += @as(f64, rd[i]) * rd[i];
         }
         const cos = dot / (@max(std.math.sqrt(ng * nr), 1e-12));
-        std.debug.print("[flux-qgeo] bits={d} cos={d:.6}\n", .{ bits, cos });
+        errdefer std.debug.print("[flux-qgeo] bits={d} cos={d:.6}\n", .{ bits, cos });
         try testing.expect(cos > 0.999);
     }
 }

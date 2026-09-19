@@ -165,6 +165,7 @@ pub const ModelConfig = struct {
     quant_mode: QuantMode = .affine,
     expert_streaming: bool = false,
     expert_layout: expert_quant.Layout = .bf16_fused,
+    expert_quant_k: u8 = 4,
     expert_source_dir: ?[]u8 = null,
     /// `MLX_SERVE_NGRAM_BF16_DIR`: serve the PLE n-gram table from the ORIGINAL bf16
     /// shards in this HF checkpoint dir instead of the pack's quantized `ngram_table.bin`
@@ -1368,6 +1369,19 @@ pub fn parseConfig(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
         if (std.c.getenv("MLX_SERVE_NGRAM_BF16_DIR")) |raw| {
             const dir = std.mem.span(raw);
             if (dir.len > 0) config.ngram_bf16_dir = try allocator.dupe(u8, dir);
+        }
+        const layers: u16 = std.math.cast(u16, config.num_hidden_layers) orelse return error.InvalidQwen4ConfigField;
+        if (expert_quant.layoutOfDir(allocator, io, config.model_type, model_dir, layers)) |layout| {
+            config.expert_layout = layout;
+            if (layout == .exl3_k4) {
+                const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return error.ExpertLayoutUnsupported;
+                defer parsed.deinit();
+                if (parsed.value != .object) return error.ExpertLayoutUnsupported;
+                const spec = try expert_quant.parseExpertQuant(parsed.value.object);
+                try expert_quant.admitExl3TopK(config.num_experts_per_tok);
+                config.expert_quant_k = spec.k;
+                log.info("[expert-exl3] engaged\n", .{});
+            }
         }
     }
 
@@ -3646,7 +3660,7 @@ pub fn streamingDropsWeightKey(key: []const u8) bool {
 
 pub fn qwen4StreamingWeightKey(layout: expert_quant.Layout, buf: []u8, key: []const u8) ?[]const u8 {
     if (expert_quant.isRoutedExpertKey(layout, key)) return null;
-    if (layout == .quantized_split) return key;
+    if (layout == .quantized_split or layout == .exl3_k4) return key;
     const trunk_prefix = "model.language_model.";
     if (std.mem.indexOf(u8, key, ".ple.ple_embedding.ngram_embedding.shard_") != null) return null;
     if (std.mem.startsWith(u8, key, trunk_prefix)) {

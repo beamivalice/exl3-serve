@@ -39,6 +39,7 @@ const ane_mod = @import("ane.zig");
 const Transformer = transformer_mod.Transformer;
 const KVCache = transformer_mod.KVCache;
 const Weights = model_mod.Weights;
+const expert_quant = @import("expert_quant.zig");
 
 /// Default draft depth (tokens drafted per round). Flipped 1 -> 3 after the
 /// round-v2 rebuild made rejected drafts ~free (scalar-anchor rollback + the
@@ -101,6 +102,25 @@ pub fn adaptiveDepthCapForMachine(chip: []const u8, default_cap: u32) DepthCap {
         std.mem.indexOf(u8, chip, "M5 Max") == null and
         std.mem.indexOf(u8, chip, "M5 Ultra") == null) return .{ .cap = 4, .label = "m5", .measured = true };
     return .{ .cap = default_cap, .label = "default" };
+}
+
+pub fn adaptiveDepthCapForExl3(chip: []const u8, default_cap: u32) DepthCap {
+    if (std.mem.indexOf(u8, chip, "M5 Max") != null)
+        return .{ .cap = 2, .label = "m5-max-exl3", .measured = true };
+    return adaptiveDepthCapForMachine(chip, default_cap);
+}
+
+var exl3_cap_logged: bool = false;
+
+pub fn applyExl3DepthCap(chip: []const u8, layout: expert_quant.Layout, cap: u32, configured: u32, adaptive: bool, force_depth: bool) u32 {
+    if (layout != .exl3_k4) return cap;
+    if (configured != 0 or !adaptive or force_depth) return cap;
+    const row = adaptiveDepthCapForExl3(chip, cap);
+    if (row.measured and row.cap < cap and !exl3_cap_logged) {
+        exl3_cap_logged = true;
+        log.info("[mtp] adaptive depth cap {d} ({s} row, default {d})\n", .{ row.cap, row.label, cap });
+    }
+    return @min(cap, row.cap);
 }
 
 /// Exact full-round cost surfaces known to the adaptive MTP controller.
@@ -173,7 +193,9 @@ pub fn qwen4G17CostProfileForFingerprint(
     trunk_group_size: u32,
     head_packs_match: bool,
     nax_lane_live: bool,
+    expert_layout: expert_quant.Layout,
 ) MtpCostProfile {
+    if (expert_layout != .quantized_split) return .generic;
     if (!trunk_affine or trunk_bits != 4 or trunk_group_size != 64) return .generic;
     if (!head_packs_match) return .generic;
     if (!nax_lane_live) return .generic;
@@ -375,6 +397,7 @@ pub fn qwen4G17CostProfile(target: *const Transformer) MtpCostProfile {
 /// override. The original all-4-bit classifier retains its existing scope.
 pub fn qwen4G17CostProfileForKv(target: *const Transformer, kv: transformer_mod.KVQuantConfig) MtpCostProfile {
     if (!qwen4G17EnvEnabled()) return .generic;
+    if (target.config.expert_layout == .exl3_k4) return .generic;
     const head = if (target.qwen4_mtp) |*h| h else return .generic;
     const cfg = &target.config;
     const geometry = Qwen4MixedGeometry{
@@ -410,6 +433,7 @@ pub fn qwen4G17CostProfileForKv(target: *const Transformer, kv: transformer_mod.
         cfg.quant_group_size,
         packs,
         transformer_mod.naxLaneEnvEnabled() and transformer_mod.verifyQmmNaxAvailable(),
+        cfg.expert_layout,
     );
     if (profile != .generic and !qwen4_g17_profile_logged) {
         qwen4_g17_profile_logged = true;
@@ -2071,6 +2095,13 @@ fn ownWeightOpt(w: *const Weights, key: []const u8) mlx.mlx_array {
 /// the shape the trunk's gather/qmatmul paths expect for MoE tensors.
 fn loadMoeTriple(w: *const Weights, prefix: []const u8) !struct { w: mlx.mlx_array, s: mlx.mlx_array, b: mlx.mlx_array } {
     var key_buf: [256]u8 = undefined;
+    if (w.get(try std.fmt.bufPrint(&key_buf, "{s}.trellis", .{prefix})) != null) {
+        return .{
+            .w = try ownWeight(w, try std.fmt.bufPrint(&key_buf, "{s}.trellis", .{prefix})),
+            .s = ownWeightOpt(w, try std.fmt.bufPrint(&key_buf, "{s}.suh", .{prefix})),
+            .b = ownWeightOpt(w, try std.fmt.bufPrint(&key_buf, "{s}.svh", .{prefix})),
+        };
+    }
     return .{
         .w = try ownWeight(w, try std.fmt.bufPrint(&key_buf, "{s}.weight", .{prefix})),
         .s = ownWeightOpt(w, try std.fmt.bufPrint(&key_buf, "{s}.scales", .{prefix})),
@@ -2156,7 +2187,8 @@ pub fn loadMtp(
 
     // MLP flavor: a `switch_mlp` router/expert pack marks a MoE-trunk sidecar
     // (35B-A3B); plain gate/up/down is the dense one-layer head.
-    const is_moe = weights.get(K.k(&kb, p, "layers.0.mlp.switch_mlp.gate_proj.weight")) != null;
+    const is_moe = weights.get(K.k(&kb, p, "layers.0.mlp.switch_mlp.gate_proj.weight")) != null or
+        weights.get(K.k(&kb, p, "layers.0.mlp.switch_mlp.gate_proj.trellis")) != null;
 
     // Delta-encoded norms (Qwen original layout, oMLX OptiQ) need `+1` folded
     // in at load so the runtime `rmsnorm(x) * w` matches; a natively-folded
@@ -3955,12 +3987,25 @@ test "mtp: M5 NAX cost profiles require exact sidecar and draft-head quant geome
     // never reach the sidecar fingerprint path above. Only the measured
     // uniform affine-4/gs-64 runtime with the NAX lane live is calibrated;
     // every degraded condition falls back to generic, one at a time.
-    try testing.expectEqual(MtpCostProfile.g17_nax_qwen4_q4_gs64, qwen4G17CostProfileForFingerprint(true, 4, 64, true, true));
-    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(false, 4, 64, true, true));
-    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(true, 8, 64, true, true));
-    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(true, 4, 32, true, true));
-    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(true, 4, 64, false, true));
-    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(true, 4, 64, true, false));
+    try testing.expectEqual(MtpCostProfile.g17_nax_qwen4_q4_gs64, qwen4G17CostProfileForFingerprint(true, 4, 64, true, true, .quantized_split));
+    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(false, 4, 64, true, true, .quantized_split));
+    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(true, 8, 64, true, true, .quantized_split));
+    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(true, 4, 32, true, true, .quantized_split));
+    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(true, 4, 64, false, true, .quantized_split));
+    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(true, 4, 64, true, false, .quantized_split));
+    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(true, 4, 64, true, true, .exl3_k4));
+    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForFingerprint(true, 4, 64, true, true, .bf16_fused));
+
+    var xfm: Transformer = undefined;
+    xfm.config = .{
+        .expert_layout = .exl3_k4,
+        .quant_mode = .affine,
+        .quant_bits = 4,
+        .quant_group_size = 64,
+        .hidden_size = 2560,
+    };
+    xfm.qwen4_mtp = null;
+    try testing.expectEqual(MtpCostProfile.generic, qwen4G17CostProfileForKv(&xfm, transformer_mod.KVQuantConfig.affine(8)));
 
     var sidecar = try mk.qlinear(IN, OUT, 8, 32, s);
     defer sidecar.deinit();
@@ -5577,6 +5622,23 @@ test "adaptiveDepthCapForMachine: base M5 caps at 4, Pro/Max/Ultra keep the defa
     try testing.expectEqual(@as(u32, 6), adaptiveDepthCapForMachine("Apple M5 Pro", 6).cap);
     try testing.expectEqual(@as(u32, 6), adaptiveDepthCapForMachine("Apple M5 Max", 6).cap);
     try testing.expectEqual(@as(u32, 6), adaptiveDepthCapForMachine("Apple M5 Ultra", 6).cap);
+}
+
+test "adaptiveDepthCapForExl3: M5 Max cold-start cap is 2" {
+    try testing.expectEqual(@as(u32, 2), adaptiveDepthCapForExl3("Apple M5 Max", 6).cap);
+    try testing.expectEqualStrings("m5-max-exl3", adaptiveDepthCapForExl3("Apple M5 Max", 6).label);
+    try testing.expect(adaptiveDepthCapForExl3("Apple M5 Max", 6).measured);
+    try testing.expectEqual(@as(u32, 6), adaptiveDepthCapForExl3("Apple M5 Pro", 6).cap);
+    try testing.expectEqual(@as(u32, 6), adaptiveDepthCapForMachine("Apple M5 Max", 6).cap);
+    try testing.expectEqual(@as(u32, 2), applyExl3DepthCap("Apple M5 Max", .exl3_k4, 6, 0, true, false));
+    try testing.expectEqual(@as(u32, 6), applyExl3DepthCap("Apple M5 Max", .quantized_split, 6, 0, true, false));
+}
+
+test "applyExl3DepthCap binds only the auto path" {
+    try testing.expectEqual(@as(u32, 3), applyExl3DepthCap("Apple M5 Max", .exl3_k4, 3, 0, false, false));
+    try testing.expectEqual(@as(u32, 5), applyExl3DepthCap("Apple M5 Max", .exl3_k4, 5, 5, true, false));
+    try testing.expectEqual(@as(u32, 4), applyExl3DepthCap("Apple M5 Max", .exl3_k4, 4, 0, true, true));
+    try testing.expectEqual(@as(u32, 2), applyExl3DepthCap("Apple M5 Max", .exl3_k4, 6, 0, true, false));
 }
 
 test "mtpCtxWithinLimit: 0 is unlimited and the ceiling is inclusive" {
