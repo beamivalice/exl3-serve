@@ -56865,6 +56865,109 @@ test "qwen4 deferred PLE: pipelined decode AND MTP verify widths match the direc
     }
 }
 
+/// Value bar for a deferred-PLE forward: everything it publishes must hold the
+/// same bytes as the eager arm, not the graph as it stood while the PLE leaf
+/// was still zero. Reports every arm before the test fails, so one run names
+/// which tensors a regression poisoned.
+fn captureMismatch(a: []const f32, b: []const f32, width: usize, label: []const u8) !bool {
+    try testing.expectEqual(a.len, b.len);
+    var differ: usize = 0;
+    var max_abs: f32 = 0;
+    for (a, b) |x, y| {
+        if (x == y) continue;
+        differ += 1;
+        const d = @abs(x - y);
+        if (d > max_abs) max_abs = d;
+    }
+    if (differ == 0) return false;
+    std.debug.print("[S={d} {s}] {d}/{d} values differ, max abs diff {d}\n", .{ width, label, differ, a.len, max_abs });
+    return true;
+}
+
+test "qwen4 deferred PLE: the captured hidden the MTP head reads matches the eager capture (QWEN4_TEST_MODEL)" {
+    const model_dir = std.c.getenv("QWEN4_TEST_MODEL") orelse return error.SkipZigTest;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const s = mlx.gpuStream();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var config = try model_mod.parseConfig(io, allocator, std.mem.span(model_dir));
+    defer if (config.ngram_table_path) |p| allocator.free(p);
+    var weights = try model_mod.loadWeights(io, allocator, std.mem.span(model_dir));
+    defer weights.deinit();
+    model_mod.resolveWeightPrefix(&config, &weights);
+    var xfm = try Transformer.init(io, allocator, config, &weights);
+    defer xfm.deinit();
+    try testing.expect(xfm.qwen4 != null);
+    xfm.compileQwen4Hc();
+    xfm.compileGdnGate();
+    xfm.compileMoeRouting();
+
+    const eager = try Qwen4TestSlot.init(allocator, config.num_hidden_layers);
+    defer eager.deinit(allocator);
+    const lazy = try Qwen4TestSlot.init(allocator, config.num_hidden_layers);
+    defer lazy.deinit(allocator);
+
+    const prompt = [_]i32{ 5, 17, 42, 9, 23, 8, 31, 2 };
+    for ([_]*Qwen4TestSlot{ eager, lazy }) |sl| {
+        const l = try sl.forward(&xfm, &prompt);
+        defer _ = mlx.mlx_array_free(l);
+        try mlx.check(mlx.mlx_array_eval(l));
+    }
+
+    // A prefill-width chunk (past the eval cadence, which evaluates the stream
+    // mid-layer-loop) and a verify build (per-position SSM capture on, the
+    // shape an MTP round runs). Both captures feed the MTP head.
+    var rows: [40]i32 = undefined;
+    for (&rows, 0..) |*r, i| r.* = @intCast(3 + (i * 37) % 900);
+    var mismatched = false;
+    for ([_]struct { w: usize, ssm: bool }{ .{ .w = 4, .ssm = true }, .{ .w = 40, .ssm = false } }) |arm| {
+        const shape = [_]c_int{ 1, @intCast(arm.w) };
+        const ids = mlx.mlx_array_new_data(&rows, &shape, 2, .int32);
+        defer _ = mlx.mlx_array_free(ids);
+
+        var e_last = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(e_last);
+        var e_all = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(e_all);
+        eager.ctx.capture_ssm_seq = arm.ssm;
+        const e_logits = try xfm.forwardWithCaptureAll(&eager.ctx, ids, &e_last, &e_all);
+        defer _ = mlx.mlx_array_free(e_logits);
+        eager.ctx.capture_ssm_seq = false;
+        try testing.expect(eager.ctx.ple_pending == null);
+
+        var d_last = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(d_last);
+        var d_all = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(d_all);
+        lazy.ctx.capture_ssm_seq = arm.ssm;
+        lazy.ctx.ple_defer = true;
+        const d_logits = try xfm.forwardWithCaptureAll(&lazy.ctx, ids, &d_last, &d_all);
+        defer _ = mlx.mlx_array_free(d_logits);
+        lazy.ctx.ple_defer = false;
+        lazy.ctx.capture_ssm_seq = false;
+        // Filled by an eval inside the build or here: either way the capture
+        // must not be holding the zero leaf.
+        try xfm.flushDeferredPle(&lazy.ctx);
+        try testing.expect(lazy.ctx.ple_pending == null);
+
+        for ([_]struct { e: mlx.mlx_array, d: mlx.mlx_array, label: []const u8 }{
+            .{ .e = e_logits, .d = d_logits, .label = "logits" },
+            .{ .e = e_all, .d = d_all, .label = "hidden all" },
+            .{ .e = e_last, .d = d_last, .label = "hidden last" },
+        }) |cmp| {
+            const a = try qwen4ReadF32(allocator, cmp.e, s);
+            defer allocator.free(a);
+            const b = try qwen4ReadF32(allocator, cmp.d, s);
+            defer allocator.free(b);
+            if (try captureMismatch(a, b, arm.w, cmp.label)) mismatched = true;
+        }
+        for (eager.entries) |*e| ssmFreeSpecCapture(e);
+        for (lazy.entries) |*e| ssmFreeSpecCapture(e);
+    }
+    if (mismatched) return error.DeferredPleCaptureMismatch;
+}
+
 const Qwen4BatchedPleRun = struct {
     logits: mlx.mlx_array,
     pending: bool,
