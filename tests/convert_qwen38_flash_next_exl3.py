@@ -564,6 +564,15 @@ def write_bf16_ngram_table(src_dir: str | Path, out_path: str | Path, *, chunk: 
     return {"rows": rows, "dim": dim, "shards": len(regions), "bytes": 8 + len(hjson) + nbytes}
 
 
+def ngram_bin_geometry(path: str | Path) -> dict:
+    """The `ngram_table` config block for a `.bin` that already exists on disk."""
+    with open(path, "rb") as f:
+        hlen = struct.unpack("<Q", f.read(8))[0]
+        meta = json.loads(f.read(hlen))["__metadata__"]
+    return {"file": "ngram_table.bin", "bits": int(meta["bits"]),
+            "group_size": int(meta["group_size"])}
+
+
 def read_ngram_bin_row(path: str | Path, r: int) -> np.ndarray:
     """One row as the loader's bits-16 arm reads it: raw bf16 at w_off + r * dim * 2."""
     with open(path, "rb") as f:
@@ -859,8 +868,18 @@ def compose_pack(
         for k, v in (cfg.get(block) or {}).items():
             if isinstance(v, dict) and k in carried_modules:
                 out_block[k] = v
+        # A quantized routed expert is described by the pack it came from, not by the
+        # dense source's width (an affine expert pack's 4-bit experts under an 8-bit
+        # dense block); an EXL3 pack quantizes no expert and adds nothing here.
+        top = {k: v for k, v in out_block.items() if not isinstance(v, dict)}
+        for key in plan["experts"]:
+            if not key.endswith(".scales"):
+                continue
+            spec = quant_spec_for(cfg.get(block) or {}, module_of(key))
+            if spec != top:
+                out_block[module_of(key)] = spec
         cfg[block] = out_block
-    cfg["ngram_table"] = {"file": "ngram_table.bin", "bits": 16, "group_size": 0}
+    cfg["ngram_table"] = ngram_bin_geometry(dst / "ngram_table.bin")
     (dst / "config.json").write_text(json.dumps(cfg, indent=2))
     total = sum(os.path.getsize(dst / f) for f in sorted(set(weight_map.values())))
     (dst / "model.safetensors.index.json").write_text(json.dumps(
@@ -1978,6 +1997,73 @@ class ComposeLayoutTests(unittest.TestCase):
             self.assertNotIn("language_model.model.layers.0.mlp.switch_mlp.gate_proj", cfg["quantization"])
             self.assertEqual(out["carried"], ["model.visual.patch_embed.proj.weight"])
             np.testing.assert_array_equal(read_ngram_bin_row(dst / "ngram_table.bin", 1), bits[1])
+
+
+class AffineExpertPackTests(unittest.TestCase):
+    """ddalcu's affine 4/8 pack: routed experts are affine `switch_mlp` tensors, and
+    the pack ships its own quantized n-gram table."""
+
+    def _write_bin(self, path: Path, *, bits: str, gs: str) -> None:
+        rows, dim = 2, 32
+        wcols, scols = dim * int(bits) // 32, dim // int(gs)
+        w = np.zeros((rows, wcols), dtype=np.uint32).tobytes()
+        sc = np.zeros((rows, scols), dtype=np.uint16).tobytes()
+        header = {"__metadata__": {"format": "mlx-serve-ngram", "bits": bits, "group_size": gs},
+                  "weight": {"dtype": "U32", "shape": [rows, wcols], "data_offsets": [0, len(w)]},
+                  "scales": {"dtype": "BF16", "shape": [rows, scols],
+                             "data_offsets": [len(w), len(w) + len(sc)]},
+                  "biases": {"dtype": "BF16", "shape": [rows, scols],
+                             "data_offsets": [len(w) + len(sc), len(w) + 2 * len(sc)]}}
+        hjson = json.dumps(header).encode()
+        hjson += b" " * ((8 - (len(hjson) % 8)) % 8)
+        with open(path, "wb") as f:
+            f.write(struct.pack("<Q", len(hjson)))
+            f.write(hjson)
+            f.write(w)
+            f.write(sc)
+            f.write(sc)
+
+    def _compose(self, td: str, *, ngram_bits: str = "4", ngram_gs: str = "32") -> dict:
+        root = Path(td)
+        dense, pack, dst = root / "dense", root / "pack", root / "out"
+        u32_8 = np.zeros((4, 16), dtype=np.uint32).tobytes()   # 8-bit gs64: in 64
+        u32_4 = np.zeros((4, 8), dtype=np.uint32).tobytes()    # 4-bit gs64: in 64
+        bf = np.zeros((4, 1), dtype=np.uint16).tobytes()
+        expert = "language_model.model.layers.0.mlp.switch_mlp.gate_proj"
+        layout = ComposeLayoutTests()
+        layout._pack(dense, {
+            "language_model.lm_head.weight": ("d-00001.safetensors", "U32", (4, 16), u32_8),
+            "language_model.lm_head.scales": ("d-00001.safetensors", "BF16", (4, 1), bf),
+            "language_model.lm_head.biases": ("d-00001.safetensors", "BF16", (4, 1), bf),
+        }, {"quantization": {"bits": 8, "group_size": 64, "mode": "affine"}})
+        layout._pack(pack, {
+            "language_model.lm_head.weight": ("p-00001.safetensors", "U32", (4, 16), u32_8),
+            "language_model.lm_head.scales": ("p-00001.safetensors", "BF16", (4, 1), bf),
+            "language_model.lm_head.biases": ("p-00001.safetensors", "BF16", (4, 1), bf),
+            expert + ".weight": ("p-00002.safetensors", "U32", (4, 8), u32_4),
+            expert + ".scales": ("p-00002.safetensors", "BF16", (4, 1), bf),
+            expert + ".biases": ("p-00002.safetensors", "BF16", (4, 1), bf),
+        }, {"quantization": {"bits": 4, "group_size": 64, "mode": "affine"},
+            "text_config": {"x": 1},
+            "ngram_table": {"file": "ngram_table.bin", "bits": 4, "group_size": 32}})
+        binp = root / "table.bin"
+        self._write_bin(binp, bits=ngram_bits, gs=ngram_gs)
+        compose_pack(dense, pack, dst, ngram_bin=binp)
+        return json.loads((dst / "config.json").read_text())
+
+    def test_the_ngram_block_describes_the_table_that_landed(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._compose(td, ngram_bits="4", ngram_gs="32")
+        self.assertEqual(cfg["ngram_table"],
+                         {"file": "ngram_table.bin", "bits": 4, "group_size": 32})
+
+    def test_the_routed_experts_keep_the_packs_own_width(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._compose(td)
+        expert = "language_model.model.layers.0.mlp.switch_mlp.gate_proj"
+        self.assertEqual(cfg["quantization"]["bits"], 8)
+        self.assertEqual(cfg["quantization"][expert],
+                         {"bits": 4, "group_size": 64, "mode": "affine"})
 
 
 def pick_real_experts(hf_dir: str | Path, imatrix_path: str | Path, layer: int = 0) -> int:
