@@ -149,6 +149,24 @@ fn warmEnabled() bool {
     return v;
 }
 
+fn ngramCacheLimit() usize {
+    if (@import("builtin").is_test) {
+        if (test_ngram_cache_limit) |limit| return limit;
+    }
+    const S = struct {
+        var limit: ?usize = null;
+    };
+    if (S.limit) |limit| return limit;
+    var physical: u64 = 0;
+    if (@import("builtin").os.tag == .macos) {
+        var len: usize = @sizeOf(u64);
+        _ = std.c.sysctlbyname("hw.memsize", @ptrCast(&physical), &len, null, 0);
+    }
+    const limit: usize = if (physical == 0) std.math.maxInt(usize) else @intCast(physical / 2);
+    S.limit = limit;
+    return limit;
+}
+
 /// What the background page-cache warm has read so far, and the table's total size. Published
 /// by the warm thread, read lock-free by metrics and `/props`; zero when nothing is warming.
 pub var live_warm_bytes = std.atomic.Value(u64).init(0);
@@ -394,16 +412,18 @@ pub const NgramTable = struct {
 
     const WARM_CHUNK: usize = 8 << 20;
 
-    /// Read the whole table through the fd once, in the background, so the
-    /// first prompt's PLE gathers hit a warm page cache. Call only once the
-    /// table sits at its final address (the thread holds `self`). Off via
-    /// MLX_SERVE_NGRAM_WARM=0.
+    /// Call only at the table's final address; the warm thread retains `self`
+    /// until close joins it.
     pub fn startWarm(self: *NgramTable) void {
         if (self.bf16 != null) return;
         if (self.fd < 0 or self.warm_thread != null) return;
         // The off arm says so: a cold first request faults rows off the SSD (38k prompt: 174 s vs 55 s).
         if (!warmEnabled()) {
             log.info("[qwen4] ngram table warm: disabled (MLX_SERVE_NGRAM_WARM=0) - the first long prompt faults the table in from SSD\n", .{});
+            return;
+        }
+        if (self.bits == 16 and self.map.len > ngramCacheLimit()) {
+            log.info("[qwen4] ngram table warm: skipped, {d:.1} GB exceeds the {d:.1} GB residency cap; prefill reads requested rows\n", .{ asGb(self.map.len), asGb(ngramCacheLimit()) });
             return;
         }
         self.warm_stop.store(false, .release);
@@ -479,8 +499,8 @@ pub const NgramTable = struct {
     }
 
     /// Gather + concatenate the `n_heads` rows of each token: `out` is
-    /// `[ids.len / n_heads][n_heads * dim]` row-major. `kv_len` is the context position this
-    /// gather runs at and picks the wide arm; the output is byte-identical either way.
+    /// `[ids.len / n_heads][n_heads * dim]` row-major. `kv_len` is the context position;
+    /// pooled and mapped reads produce identical bytes.
     pub fn gatherChecked(self: *const NgramTable, row_ids: []const i64, out: []f32, kv_len: u64) !void {
         if (self.bf16) |*store| {
             if (self.pool) |pool| {
@@ -495,15 +515,17 @@ pub const NgramTable = struct {
             return store.gather(row_ids, out) catch return error.NgramReadFailed;
         }
         const need: usize = self.rowBytes();
-        // Prefill-width gathers ride the pool only past `PREFILL_PREFETCH_MIN_KV`: a resident
-        // table loses 2-7% to the wake rounds, an evicted one (weights pushed the 32 GB
-        // mapping out) went 67.7 -> 267.9 ms per 1000 tokens on the serial walk.
         const wide = row_ids.len > PrefetchPool.MAX_ROWS;
-        const wide_ok = !wide or plePrefillPrefetchEnabled(kv_len);
+        const oversized_bf16 = self.bits == 16 and self.map.len > ngramCacheLimit();
+        const wide_ok = !wide or plePrefillPrefetchEnabled(kv_len, oversized_bf16);
         // Announce the arm that actually runs, not the lever that permits it.
         const pooled = wide_ok and self.pool != null and self.fd >= 0 and need <= PrefetchPool.ROW_BUF;
-        if (wide) notePrefillGatherArm(pooled, row_ids.len);
-        if (self.pool) |p| if (self.fd >= 0 and need <= PrefetchPool.ROW_BUF and wide_ok) {
+        const whole_chunk = wide and oversized_bf16;
+        if (wide) notePrefillGatherArm(pooled, row_ids.len, if (whole_chunk) row_ids.len else PrefetchPool.MAX_ROWS);
+        if (pooled and whole_chunk) {
+            if (try self.pool.?.runBf16(self, row_ids, out)) return;
+        } else if (pooled) {
+            const p = self.pool.?;
             const wl: usize = self.wcols * 4;
             const sl: usize = self.scols * 2;
             var start: usize = 0;
@@ -520,7 +542,7 @@ pub const NgramTable = struct {
                 }
             }
             if (start >= row_ids.len) return;
-        };
+        }
         for (row_ids, 0..) |r, i| self.row(@intCast(r), out[i * self.dim ..][0..self.dim]);
     }
 
@@ -545,25 +567,30 @@ pub const NgramTable = struct {
         };
         return std.c.pread(self.fd, dst.ptr, dst.len, @intCast(off)) == @as(isize, @intCast(dst.len));
     }
-
 };
 
-/// Persistent gather workers. Every row's three regions are one SSD read on
-/// the cold 32 GB table (~100 us), 48 per token: serial mmap faults were ~5 ms
-/// of every decode step, 16 fault threads ~0.7 ms, and more threads got SLOWER
-/// (faults on one mapping serialize on the VM map lock), so workers `pread`
-/// instead and dequantize their rows in place. Workers wake on a generation
-/// bump and count themselves down; the caller spins (the job is ~100 us).
+/// The caller owns each job's table, rows and output until all workers finish.
 const PrefetchPool = struct {
     const N = 48;
     const MAX_ROWS = 64;
     const ROW_BUF = 512;
+    const RowRead = struct {
+        row: i64,
+        dst: usize,
+
+        fn less(_: void, a: RowRead, b: RowRead) bool {
+            return a.row < b.row;
+        }
+    };
     mu: std.Io.Mutex = .init,
     cv: std.Io.Condition = .init,
     gen: u64 = 0,
     quit: bool = false,
     table: ?*const NgramTable = null,
     rows: []const i64 = &.{},
+    wide_out: ?[]f32 = null,
+    wide_refs: []const RowRead = &.{},
+    wide_preads: std.atomic.Value(u64) = .init(0),
     bufs: [MAX_ROWS][ROW_BUF]u8 = undefined,
     pending: std.atomic.Value(u32) = .init(0),
     failed: std.atomic.Value(u32) = .init(0),
@@ -601,13 +628,32 @@ const PrefetchPool = struct {
         for (self.threads[0..started]) |t| t.join();
     }
 
-    /// Fan the `3 * rows.len` preads over the workers; rows land in `bufs`.
+    /// Rows land in `bufs`; the caller keeps `rows` alive until this returns.
     fn run(self: *PrefetchPool, table: *const NgramTable, rows: []const i64) bool {
+        return self.dispatch(table, rows, null, &.{});
+    }
+
+    fn runBf16(self: *PrefetchPool, table: *const NgramTable, rows: []const i64, out: []f32) !bool {
+        const refs = try std.heap.page_allocator.alloc(RowRead, rows.len);
+        defer std.heap.page_allocator.free(refs);
+        for (refs, rows, 0..) |*ref, row, dst| ref.* = .{ .row = row, .dst = dst };
+        std.mem.sort(RowRead, refs, {}, RowRead.less);
+        const before = self.wide_preads.load(.monotonic);
+        const ok = self.dispatch(table, rows, out, refs);
+        if (std.c.getenv("QWEN4_PROFILE_FWD")) |raw| {
+            if (raw[0] != '0') log.info("[qwen4-prof] ple reads rows={d} preads={d} rounds=1\n", .{ rows.len, self.wide_preads.load(.monotonic) - before });
+        }
+        return ok;
+    }
+
+    fn dispatch(self: *PrefetchPool, table: *const NgramTable, rows: []const i64, out: ?[]f32, refs: []const RowRead) bool {
         _ = self.runs.fetchAdd(1, .monotonic);
         const io = std.Io.Threaded.global_single_threaded.io();
         self.mu.lockUncancelable(io);
         self.table = table;
         self.rows = rows;
+        self.wide_out = out;
+        self.wide_refs = refs;
         self.failed.store(0, .release);
         self.pending.store(N, .release);
         self.gen += 1;
@@ -630,7 +676,29 @@ const PrefetchPool = struct {
             seen = self.gen;
             const table = self.table.?;
             const rows = self.rows;
+            const wide_out = self.wide_out;
+            const refs = self.wide_refs;
             self.mu.unlock(io);
+            if (wide_out) |out| {
+                var buf: [ROW_BUF]u8 = undefined;
+                var decoded: [ROW_BUF / 2]f32 = undefined;
+                var reads: u64 = 0;
+                var i = idx;
+                while (i < refs.len) : (i += N) {
+                    if (i > 0 and refs[i - 1].row == refs[i].row) continue;
+                    reads += 1;
+                    if (table.preadSite(@intCast(refs[i].row), 0, &buf)) {
+                        NgramTable.decodeBf16Row(buf[0 .. table.dim * 2], decoded[0..table.dim]);
+                        var j = i;
+                        while (j < refs.len and refs[j].row == refs[i].row) : (j += 1) {
+                            @memcpy(out[refs[j].dst * table.dim ..][0..table.dim], decoded[0..table.dim]);
+                        }
+                    } else _ = self.failed.fetchAdd(1, .acq_rel);
+                }
+                _ = self.wide_preads.fetchAdd(reads, .monotonic);
+                _ = self.pending.fetchSub(1, .acq_rel);
+                continue;
+            }
             const regions: usize = if (table.bf16 != null or table.bits == 16) 1 else 3;
             var i = idx;
             while (i < rows.len * regions) : (i += N) {
@@ -660,16 +728,16 @@ pub const PREFILL_SAY_MIN_ROWS: usize = 1024;
 pub var ple_prefill_arm_said: [2][2]std.atomic.Value(bool) =
     .{ .{ .init(false), .init(false) }, .{ .init(false), .init(false) } };
 
-fn notePrefillGatherArm(pooled: bool, rows: usize) void {
+fn notePrefillGatherArm(pooled: bool, rows: usize, batch_rows: usize) void {
     const arm: usize = if (pooled) 1 else 0;
     const bucket: usize = if (rows >= PREFILL_SAY_MIN_ROWS) 1 else 0;
     if (ple_prefill_arm_said[arm][bucket].swap(true, .monotonic)) return;
     const width: []const u8 = if (bucket == 1) "prefill width" else "warmup width";
     if (pooled) {
-        const batches = (rows + PrefetchPool.MAX_ROWS - 1) / PrefetchPool.MAX_ROWS;
-        log.info("[qwen4] PLE prefill gather: POOLED ({s}: {d} rows, {d} batches of {d}; past kv {d}, QWEN4_PLE_PREFETCH_PREFILL=0 forces the serial walk)\n", .{ width, rows, batches, PrefetchPool.MAX_ROWS, plePrefillPrefetchMinKv() });
+        const batches = (rows + batch_rows - 1) / batch_rows;
+        log.info("[qwen4] PLE prefill gather: POOLED ({s}: {d} rows, {d} batches of {d}; table-size or kv {d} policy, QWEN4_PLE_PREFETCH_PREFILL=0 forces the serial walk)\n", .{ width, rows, batches, batch_rows, plePrefillPrefetchMinKv() });
     } else {
-        log.info("[qwen4] PLE prefill gather: SERIAL mmap walk ({s}: {d} rows; the pool engages past kv {d}, QWEN4_PLE_PREFETCH_PREFILL_MIN_KV overrides)\n", .{ width, rows, plePrefillPrefetchMinKv() });
+        log.info("[qwen4] PLE prefill gather: SERIAL mmap walk ({s}: {d} rows; table-size or kv {d} policy, QWEN4_PLE_PREFETCH_PREFILL=0 forces serial)\n", .{ width, rows, plePrefillPrefetchMinKv() });
     }
 }
 
@@ -721,7 +789,7 @@ fn plePrefillPrefetchMinKv() u64 {
     return v;
 }
 
-fn plePrefillPrefetchEnabled(kv_len: u64) bool {
+fn plePrefillPrefetchEnabled(kv_len: u64, oversized_bf16: bool) bool {
     if (ple_prefill_prefetch_override) |v| return v;
     const S = struct {
         var v: ?PrefillPrefetchMode = null;
@@ -732,7 +800,7 @@ fn plePrefillPrefetchEnabled(kv_len: u64) bool {
         S.v = m;
         break :blk m;
     };
-    return plePrefillPrefetchWanted(mode, kv_len, plePrefillPrefetchMinKv());
+    return (mode == .kv_gated and oversized_bf16) or plePrefillPrefetchWanted(mode, kv_len, plePrefillPrefetchMinKv());
 }
 
 pub fn bf16ToF32(u: u16) f32 {
@@ -742,6 +810,129 @@ pub fn bf16ToF32(u: u16) f32 {
 // ── tests ──
 
 const testing = std.testing;
+
+var test_ngram_cache_limit: ?usize = null;
+
+const Bf16GatherFixture = struct {
+    const ROWS = 257;
+    const DIM = 160;
+    const DATA = 264;
+    tmp: std.testing.TmpDir,
+    bytes: []u8,
+    table: NgramTable,
+
+    fn init() !Bf16GatherFixture {
+        const bytes = try testing.allocator.alloc(u8, DATA + ROWS * DIM * 2);
+        errdefer testing.allocator.free(bytes);
+        std.mem.writeInt(u64, bytes[0..8], DATA - 8, .little);
+        @memset(bytes[8..DATA], ' ');
+        const header = "{\"__metadata__\":{\"format\":\"mlx-serve-ngram\",\"bits\":\"16\",\"group_size\":\"0\"}," ++
+            "\"weight\":{\"dtype\":\"BF16\",\"shape\":[257,160],\"data_offsets\":[0,82240]}}";
+        @memcpy(bytes[8..][0..header.len], header);
+        for (0..ROWS * DIM) |i| std.mem.writeInt(u16, bytes[DATA + i * 2 ..][0..2], @truncate(i *% 73 +% 11), .little);
+        var tmp = testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const io = std.Io.Threaded.global_single_threaded.io();
+        try tmp.dir.writeFile(io, .{ .sub_path = "ngram_table.bin", .data = bytes });
+        var root: [std.fs.max_path_bytes]u8 = undefined;
+        const len = try tmp.dir.realPath(io, &root);
+        var full: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&full, "{s}/ngram_table.bin", .{root[0..len]});
+        return .{ .tmp = tmp, .bytes = bytes, .table = try NgramTable.open(path) };
+    }
+
+    fn deinit(self: *Bf16GatherFixture) void {
+        self.table.close();
+        self.tmp.cleanup();
+        testing.allocator.free(self.bytes);
+    }
+
+    fn expectRows(self: *const Bf16GatherFixture, ids: []const i64, out: []const f32) !void {
+        for (ids, 0..) |r, i| for (0..DIM) |c| {
+            const at = DATA + (@as(usize, @intCast(r)) * DIM + c) * 2;
+            const want = @as(u32, std.mem.readInt(u16, self.bytes[at..][0..2], .little)) << 16;
+            try testing.expectEqual(want, @as(u32, @bitCast(out[i * DIM + c])));
+        };
+    }
+};
+
+test "ngram oversized bf16: first chunk uses one pool round and preserves every row bit" {
+    var f = try Bf16GatherFixture.init();
+    defer f.deinit();
+    test_ngram_cache_limit = f.bytes.len - 1;
+    defer test_ngram_cache_limit = null;
+    const pool = f.table.pool orelse return error.TestExpectedPool;
+    var ids: [4099]i64 = undefined;
+    for (&ids, 0..) |*r, i| r.* = @intCast((i * 53) % Bf16GatherFixture.ROWS);
+    const out = try testing.allocator.alloc(f32, ids.len * Bf16GatherFixture.DIM);
+    defer testing.allocator.free(out);
+    const before = pool.runs.load(.monotonic);
+    try f.table.gatherChecked(&ids, out, 0);
+    try testing.expectEqual(before + 1, pool.runs.load(.monotonic));
+    try f.expectRows(&ids, out);
+
+    test_ngram_cache_limit = f.bytes.len;
+    const resident = pool.runs.load(.monotonic);
+    try f.table.gatherChecked(&ids, out, 0);
+    try testing.expectEqual(resident, pool.runs.load(.monotonic));
+    try f.expectRows(&ids, out);
+
+    test_ngram_cache_limit = f.bytes.len - 1;
+    ple_prefill_prefetch_override = false;
+    defer ple_prefill_prefetch_override = null;
+    try f.table.gatherChecked(&ids, out, 0);
+    try testing.expectEqual(resident, pool.runs.load(.monotonic));
+    try f.expectRows(&ids, out);
+
+    try f.table.gatherChecked(ids[0..16], out[0 .. 16 * Bf16GatherFixture.DIM], 0);
+    try testing.expectEqual(resident + 1, pool.runs.load(.monotonic));
+    try f.expectRows(ids[0..16], out[0 .. 16 * Bf16GatherFixture.DIM]);
+}
+
+test "ngram oversized bf16: warming stops at the residency cap" {
+    var f = try Bf16GatherFixture.init();
+    defer f.deinit();
+    test_ngram_cache_limit = f.bytes.len - 1;
+    defer test_ngram_cache_limit = null;
+    warm_override = true;
+    defer warm_override = null;
+    f.table.startWarm();
+    try testing.expect(f.table.warm_thread == null);
+    try testing.expectEqual(@as(u64, 0), f.table.warm_bytes.load(.acquire));
+
+    test_ngram_cache_limit = f.bytes.len;
+    f.table.startWarm();
+    try testing.expect(f.table.warm_thread != null);
+}
+
+test "ngram oversized bf16: each unique row is read once and duplicates keep their positions" {
+    var f = try Bf16GatherFixture.init();
+    defer f.deinit();
+    test_ngram_cache_limit = f.bytes.len - 1;
+    defer test_ngram_cache_limit = null;
+    const pool = f.table.pool orelse return error.TestExpectedPool;
+    var ids: [4099]i64 = undefined;
+    for (&ids, 0..) |*r, i| r.* = @intCast((i * 53) % Bf16GatherFixture.ROWS);
+    const out = try testing.allocator.alloc(f32, ids.len * Bf16GatherFixture.DIM);
+    defer testing.allocator.free(out);
+    const before = pool.wide_preads.load(.monotonic);
+    try f.table.gatherChecked(&ids, out, 0);
+    try testing.expectEqual(before + Bf16GatherFixture.ROWS, pool.wide_preads.load(.monotonic));
+    try f.expectRows(&ids, out);
+
+    @memset(&ids, Bf16GatherFixture.ROWS - 1);
+    const next = pool.wide_preads.load(.monotonic);
+    try f.table.gatherChecked(ids[0..65], out[0 .. 65 * Bf16GatherFixture.DIM], 0);
+    try testing.expectEqual(next + 1, pool.wide_preads.load(.monotonic));
+    try f.expectRows(ids[0..65], out[0 .. 65 * Bf16GatherFixture.DIM]);
+
+    const fd = f.table.fd;
+    f.table.fd = -1;
+    defer f.table.fd = fd;
+    try f.table.gatherChecked(&ids, out, 0);
+    try testing.expectEqual(next + 1, pool.wide_preads.load(.monotonic));
+    try f.expectRows(&ids, out);
+}
 
 test "ngram hash reproduces the reference multipliers, primes and offsets" {
     const h = try NgramHash.init(248320, 3, 8, 20_000_000, 128, 1234, 0, 248044);
@@ -1127,6 +1318,15 @@ test "ngram table warm: touches the whole file in the background; close() joins 
     t3.startWarm();
     try testing.expect(t3.warm_thread == null);
     t3.close();
+
+    test_ngram_cache_limit = buf.len - 1;
+    defer test_ngram_cache_limit = null;
+    warm_override = true;
+    var t4 = try NgramTable.open(path);
+    defer t4.close();
+    try testing.expectEqual(@as(u32, 4), t4.bits);
+    t4.startWarm();
+    try testing.expect(t4.warm_thread != null);
 }
 
 /// A whole `ngram_table.bin` image in one page-aligned buffer. Caller frees with the page allocator.
