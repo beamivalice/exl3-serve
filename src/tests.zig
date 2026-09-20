@@ -38,6 +38,7 @@ test {
     _ = @import("dflash.zig");
     _ = @import("mtp.zig");
     _ = @import("mtp_qmv.zig");
+    _ = @import("mtp_dense_rows.zig");
     _ = @import("round_cost.zig");
     _ = @import("mtp_group_planner.zig");
     _ = @import("diffusion.zig");

@@ -1,5 +1,6 @@
 const std = @import("std");
 const mlx = @import("mlx.zig");
+const dense_rows = @import("mtp_dense_rows.zig");
 
 // Each row retains MLX qmv's lane assignment, affine dot, accumulation order and bf16 rounding.
 const SOURCE =
@@ -174,6 +175,9 @@ pub fn denseMatmul(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array) !?mlx.
     if (xs.len < 2 or xs.len > 8 or ws.len != 2 or ws[0] <= 0 or ws[1] <= 0 or xs[xs.len - 1] != ws[0]) return null;
     const rows = mlx.mlx_array_size(x) / @as(usize, @intCast(ws[0]));
     if (rows < 2 or rows > 32) return null;
+    if (dense_rows.enabled()) {
+        if (try dense_rows.matmul(s, x, w)) |out| return out;
+    }
     return try serialRows(s, x, w, .{}, .{}, null, @intCast(rows));
 }
 

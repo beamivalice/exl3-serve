@@ -63662,6 +63662,191 @@ test "qwen4 verify history row and cache identity (QWEN4_TEST_MODEL)" {
     try qwen4LayerIdentityCase(false, true, 8, 24, 1);
 }
 
+test "qwen4 dense rows evaluated verification replay (QWEN4_VERIFY_BENCH)" {
+    const cases_path = std.c.getenv("QWEN4_VERIFY_BENCH") orelse return error.SkipZigTest;
+    const model_dir = std.c.getenv("QWEN4_TEST_MODEL") orelse return error.SkipZigTest;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    if (diagEnvOn("QWEN4_PROFILE_FWD")) return error.ProfilerChangesReplay;
+    const dense = @import("mtp_dense_rows.zig");
+    const old = dense.override;
+    defer dense.override = old;
+    dense.override = false;
+    const a = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const s = mlx.gpuStream();
+    const body = try std.Io.Dir.cwd().readFileAlloc(io, std.mem.span(cases_path), a, .limited(8 << 20));
+    defer a.free(body);
+    const cases = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+    defer cases.deinit();
+    var config = try model_mod.parseConfig(io, a, std.mem.span(model_dir));
+    defer if (config.ngram_table_path) |path| a.free(path);
+    var weights = try model_mod.loadWeights(io, a, std.mem.span(model_dir));
+    defer weights.deinit();
+    model_mod.resolveWeightPrefix(&config, &weights);
+    var xfm = try Transformer.init(io, a, config, &weights);
+    defer xfm.deinit();
+    xfm.compileQwen4Hc();
+    xfm.compileGdnGate();
+    xfm.compileMoeRouting();
+    for (cases.value.array.items) |case| {
+        const name = case.object.get("name").?.string;
+        const selected_width = if (case.object.get("width")) |v| v.integer else 0;
+        const repetitions: usize = if (case.object.get("reps")) |v| @intCast(std.math.clamp(v.integer, 1, 64)) else 8;
+        const reverse = if (case.object.get("reverse")) |v| v.bool else false;
+        const ids_json = case.object.get("ids").?.array.items;
+        const tokens = try a.alloc(i32, ids_json.len);
+        defer a.free(tokens);
+        for (tokens, ids_json) |*out, item| out.* = @intCast(item.integer);
+        try testing.expect(tokens.len > 8);
+        const prefix = tokens.len - 8;
+        const seed = try Qwen4TestSlot.init(a, config.num_hidden_layers);
+        defer seed.deinit(a);
+        try seed.cache.reinit(config.num_hidden_layers, KVQuantConfig.affine(8));
+        seed.ctx.kv_attn_fused = true;
+        seed.ctx.skip_lm_head = true;
+        dense.override = false;
+        var at: usize = 0;
+        while (at < prefix) {
+            const end = @min(prefix, at + 2048);
+            const out = try seed.forward(&xfm, tokens[at..end]);
+            defer _ = mlx.mlx_array_free(out);
+            try Transformer.evalCadencePoint(out, seed.entries);
+            at = end;
+            _ = mlx.mlx_clear_cache();
+        }
+        var kv = try seed.cache.snapshot();
+        defer kv.deinit();
+        const snaps = try a.alloc(SSMCacheEntrySnapshot, seed.entries.len);
+        defer a.free(snaps);
+        for (snaps, seed.entries) |*snap, *entry| snap.* = ssmSnapshot(entry);
+        defer for (snaps) |*snap| ssmSnapshotDeinit(snap);
+        for ([_]usize{ 2, 3, 4, 5, 8 }) |width| {
+            if (selected_width != 0 and selected_width != width) continue;
+            for (0..repetitions + 1) |rep| {
+                var results: [2]DenseVerifyReplay = undefined;
+                var slots: [2]?*Qwen4TestSlot = .{ null, null };
+                var evaluated: [2]bool = .{ false, false };
+                defer for (0..2) |arm| {
+                    if (evaluated[arm]) results[arm].deinit();
+                    if (slots[arm]) |slot| slot.deinit(a);
+                };
+                for (0..2) |order| {
+                    const arm = if ((rep % 2 == 0) != reverse) order else 1 - order;
+                    const slot = try Qwen4TestSlot.init(a, config.num_hidden_layers);
+                    slots[arm] = slot;
+                    try slot.cache.reinit(config.num_hidden_layers, kv.config);
+                    try slot.cache.restore(&kv);
+                    // Remove restore-only KV copies from the evaluated-forward interval.
+                    for (slot.cache.entries) |*entry| {
+                        if (!entry.initialized) continue;
+                        try testing.expect(mlx.getShape(entry.keys)[2] >= prefix + width);
+                        inline for (.{ "keys", "values", "keys_scales", "keys_biases", "values_scales", "values_biases" }) |field| {
+                            const old_arr = @field(entry, field);
+                            if (old_arr.ctx != null) {
+                                const own = try materializedOwnedCopy(s, old_arr);
+                                _ = mlx.mlx_array_free(old_arr);
+                                @field(entry, field) = own;
+                            }
+                        }
+                        entry.shared_view = false;
+                    }
+                    for (slot.entries, snaps) |*entry, *snap| try ssmRestore(entry, snap);
+                    slot.off = prefix;
+                    slot.ctx.kv_attn_fused = true;
+                    try mlx.check(mlx.mlx_synchronize(s));
+                    dense.override = arm == 1;
+                    const before = dense.calls;
+                    results[arm] = try denseVerifyReplay(&xfm, slot, tokens[prefix..][0..width], io);
+                    evaluated[arm] = true;
+                    if (arm == 1) {
+                        try testing.expect(dense.calls[0] >= before[0] + config.num_hidden_layers);
+                        try testing.expect(dense.calls[1] >= before[1] + config.num_hidden_layers);
+                    }
+                }
+                try qkvExpectBitsEqual(s, results[0].logits, results[1].logits);
+                try qkvExpectBitsEqual(s, results[0].last, results[1].last);
+                try qkvExpectBitsEqual(s, results[0].all, results[1].all);
+                for (slots[0].?.entries, slots[1].?.entries) |left, right| {
+                    inline for (.{ "conv_state", "ssm_state", "spec_conv_input", "spec_ple_input", "aux_state", "qsa_pooled" }) |field| {
+                        const l = @field(left, field);
+                        const r = @field(right, field);
+                        try testing.expectEqual(l.ctx == null, r.ctx == null);
+                        if (l.ctx != null) try qkvExpectBitsEqual(s, l, r);
+                    }
+                    try testing.expectEqual(left.spec_state_seq.ctx == null, right.spec_state_seq.ctx == null);
+                    if (left.spec_state_seq.ctx != null) {
+                        const l = try logicalSsmCapture(s, &left);
+                        defer _ = mlx.mlx_array_free(l);
+                        const r = try logicalSsmCapture(s, &right);
+                        defer _ = mlx.mlx_array_free(r);
+                        try qkvExpectBitsEqual(s, l, r);
+                    }
+                    try testing.expectEqual(left.spec_ple_len, right.spec_ple_len);
+                    try testing.expectEqualSlices(u32, &left.spec_ple_tokens, &right.spec_ple_tokens);
+                }
+                for (slots) |maybe_slot| {
+                    const slot = maybe_slot.?;
+                    try slot.cache.truncate(prefix + 1, s);
+                    for (slot.entries) |*entry| try ssmRollbackFromCapture(entry, 0, @intCast(width), s);
+                }
+                for (slots[0].?.entries, slots[1].?.entries) |left, right| {
+                    inline for (.{ "conv_state", "ssm_state", "aux_state", "qsa_pooled" }) |field| {
+                        const l = @field(left, field);
+                        const r = @field(right, field);
+                        try testing.expectEqual(l.ctx == null, r.ctx == null);
+                        if (l.ctx != null) try qkvExpectBitsEqual(s, l, r);
+                    }
+                    try testing.expectEqual(left.ple_prev_valid, right.ple_prev_valid);
+                    try testing.expectEqualSlices(u32, &left.ple_prev, &right.ple_prev);
+                    inline for (.{ "qsa_hist_rows", "qsa_key_rows", "qsa_pooled_blocks" }) |field|
+                        try testing.expectEqual(@field(left, field), @field(right, field));
+                }
+                if (rep > 0) std.debug.print("[dense-verify] case={s} prefix={d} S={d} rep={d} baseline_ns={d} candidate_ns={d} bits=equal\n", .{ name, prefix, width, rep, results[0].ns, results[1].ns });
+            }
+        }
+    }
+}
+
+const DenseVerifyReplay = struct {
+    logits: mlx.mlx_array,
+    last: mlx.mlx_array,
+    all: mlx.mlx_array,
+    ns: u64,
+
+    fn deinit(self: DenseVerifyReplay) void {
+        _ = mlx.mlx_array_free(self.logits);
+        _ = mlx.mlx_array_free(self.last);
+        _ = mlx.mlx_array_free(self.all);
+    }
+};
+
+fn denseVerifyReplay(xfm: *Transformer, slot: *Qwen4TestSlot, tokens: []const i32, io: std.Io) !DenseVerifyReplay {
+    const ids = mlx.mlx_array_new_data(tokens.ptr, &.{ 1, @intCast(tokens.len) }, 2, .int32);
+    defer _ = mlx.mlx_array_free(ids);
+    var last = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(last);
+    var all = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(all);
+    slot.ctx.capture_ssm_seq = true;
+    slot.ctx.ple_defer = true;
+    var watch = @import("io_util.zig").Stopwatch.init(io);
+    const logits = try xfm.forwardWithCaptureAll(&slot.ctx, ids, &last, &all);
+    errdefer _ = mlx.mlx_array_free(logits);
+    slot.ctx.capture_ssm_seq = false;
+    slot.ctx.ple_defer = false;
+    try xfm.flushDeferredPle(&slot.ctx);
+    const evals = mlx.mlx_vector_array_new_data(&.{ logits, last, all }, 3);
+    defer _ = mlx.mlx_vector_array_free(evals);
+    for (slot.entries) |entry| {
+        inline for (.{ "conv_state", "ssm_state", "spec_state_seq", "spec_conv_input", "spec_ple_input", "aux_state", "qsa_pooled" }) |field| {
+            const arr = @field(entry, field);
+            if (arr.ctx != null) try mlx.check(mlx.mlx_vector_array_append_value(evals, arr));
+        }
+    }
+    try mlx.check(mlx.mlx_eval(evals));
+    return .{ .logits = logits, .last = last, .all = all, .ns = watch.read() };
+}
+
 fn qwen4LayerIdentityCase(capture_layers: bool, capture_hidden: bool, width: c_int, prefix: usize, row_index: c_int) !void {
     const model_dir = std.c.getenv("QWEN4_TEST_MODEL") orelse return error.SkipZigTest;
     if (mlx.noGpuBackend()) return error.SkipZigTest;

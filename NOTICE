@@ -208,6 +208,11 @@ The row-identical 8-bit projection kernel in `src/mtp_qmv.zig` adapts
 It shares packed weights across input rows while preserving each serial
 row's lane assignment, reduction order and output rounding.
 
+The row-identical dense projection kernels in `src/mtp_dense_rows.zig`
+adapt MLX v0.32.2 `backend/metal/kernels/gemv.h` and `dot.h`.
+Modifications: independent activation rows share a dispatch, with the
+serial BF16 router and scalar-gate reduction trees preserved.
+
 Several other kernels of ours deliberately reproduce the exact arithmetic of
 MLX ops (reduction order, accumulator dtype, `fast::exp`, the `precise::rsqrt`
 variant) so a fused kernel stays bit-identical to the op chain it replaces.
