@@ -38633,7 +38633,7 @@ test "exl3 MTP fused rows match N solo calls on the same kernel" {
             try t.expectEqual(b, a);
         }
     }
-    try t.expectEqual(@as(u32, 4), n_disp);
+    try t.expectEqual(@as(u32, 3), n_disp);
 }
 
 const Exl3MoeHarness = struct {
