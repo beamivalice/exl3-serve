@@ -1,10 +1,12 @@
 #!/bin/bash
 # Integration tests for the Anthropic Messages API (/v1/messages).
 # Tests both non-streaming and streaming, tool calling, thinking, and error handling.
-# Usage: ./tests/test_anthropic_api.sh [port]
+# Usage: ./tests/test_anthropic_api.sh [port] [launch_max_tokens]
 # Requires a running mlx-serve server with a loaded model.
+# Pass its --max-tokens value when set; otherwise the default is 0 (unset).
 
 PORT=${1:-8080}
+LAUNCH_MAX_TOKENS=${2:-0}
 BASE="http://127.0.0.1:$PORT"
 PASS=0
 FAIL=0
@@ -344,17 +346,28 @@ else
 fi
 echo ""
 
-# ── Test 8: Error handling — missing max_tokens ──
-echo "--- Test 8: Error — missing max_tokens ---"
+# ── Test 8: Missing max_tokens uses the launch default or refuses ──
+echo "--- Test 8: Missing max_tokens ---"
 RESULT=$(curl -s "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "mlx-serve",
     "messages": [{"role": "user", "content": "hi"}]
   }')
-ERR_TYPE=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['error']['type'])" 2>/dev/null)
-assert_eq "error type is invalid_request_error" "invalid_request_error" "$ERR_TYPE"
-assert_contains "error mentions max_tokens" "max_tokens" "$RESULT"
+if [ "$LAUNCH_MAX_TOKENS" -gt 0 ]; then
+    TYPE=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['type'])" 2>/dev/null)
+    assert_eq "omitted max_tokens accepts the launch default" "message" "$TYPE"
+    WITHIN_BUDGET=$(echo "$RESULT" | python3 -c '
+import json,sys
+n = json.load(sys.stdin)["usage"]["output_tokens"]
+print("yes" if 0 < n <= int(sys.argv[1]) else "no")
+' "$LAUNCH_MAX_TOKENS" 2>/dev/null)
+    assert_eq "output stays within the launch token budget" "yes" "$WITHIN_BUDGET"
+else
+    ERR_TYPE=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['error']['type'])" 2>/dev/null)
+    assert_eq "error type is invalid_request_error" "invalid_request_error" "$ERR_TYPE"
+    assert_contains "error mentions max_tokens" "max_tokens" "$RESULT"
+fi
 echo ""
 
 # ── Test 9: Error — missing messages ──
