@@ -22,6 +22,7 @@ the synthetic-test path. Calibration rows, when captured, are the MLP input
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -30,6 +31,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -59,6 +61,48 @@ MCG_MULT = 0xCBAC1FED
 SWITCH = ".mlp.switch_mlp."
 HF_GATE_UP = ".mlp.experts.gate_up_proj"
 HF_DOWN = ".mlp.experts.down_proj"
+
+
+def _load_component_repacker():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "repack_exl3.py"
+    if not path.is_file():
+        raise RuntimeError(f"component repacker not found: {path}")
+    spec = importlib.util.spec_from_file_location("_mlx_serve_repack_exl3", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load component repacker: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(spec.name, None)
+        raise RuntimeError(f"cannot load component repacker {path}: {exc}") from exc
+    if not callable(getattr(module, "repack", None)):
+        raise RuntimeError(f"component repacker has no repack() API: {path}")
+    return module
+
+
+def repack_component_output(
+    source: str | Path,
+    destination: str | Path,
+    share_with: str | Path | None = None,
+):
+    source, destination = Path(source), Path(destination)
+    share = Path(share_with) if share_with is not None else None
+    if not source.is_dir():
+        raise RuntimeError(f"component repack source is not a directory: {source}")
+    if destination.exists() or destination.is_symlink():
+        raise RuntimeError(f"component output destination must not already exist: {destination}")
+    source_real = source.resolve()
+    destination_real = destination.resolve()
+    if destination_real == source_real or source_real in destination_real.parents:
+        raise RuntimeError(
+            f"component output destination must be outside staged source: {destination}"
+        )
+    if share is not None and not share.is_dir():
+        raise RuntimeError(f"--share-with is not an existing directory: {share}")
+    repacker = _load_component_repacker()
+    return repacker.repack(source, destination, share)
 
 
 def is_pack_expert_key(key: str) -> bool:
@@ -2066,6 +2110,194 @@ class AffineExpertPackTests(unittest.TestCase):
                          {"bits": 4, "group_size": 64, "mode": "affine"})
 
 
+class ComponentOutputTests(unittest.TestCase):
+    @staticmethod
+    def _write_component_source(root: Path) -> Path:
+        root.mkdir()
+        tensors = {
+            "language_model.model.embed_tokens.weight":
+                ("U8", (5,), b"embed"),
+            "language_model.lm_head.weight":
+                ("U8", (4,), b"head"),
+            "language_model.model.hyper_connection_mixer.weight":
+                ("U8", (3,), b"mix"),
+            "language_model.mtp.layers.0.norm.weight":
+                ("U8", (3,), b"mtp"),
+            "model.visual.weight":
+                ("U8", (6,), b"vision"),
+        }
+        for layer in range(4):
+            tensors[f"language_model.model.layers.{layer}.norm.weight"] = (
+                "U8", (4,), b"norm"
+            )
+            for proj in ("gate", "up", "down"):
+                for suffix in ("trellis", "suh", "svh"):
+                    key = (
+                        f"language_model.model.layers.{layer}."
+                        f"mlp.switch_mlp.{proj}_proj.{suffix}"
+                    )
+                    tensors[key] = ("U8", (6,), b"expert")
+        tensors["language_model.mtp.layers.0.mlp.switch_mlp.gate_proj.trellis"] = (
+            "U8", (10,), b"mtp-expert"
+        )
+        shard = "source.safetensors"
+        write_safetensors_raw(str(root / shard), tensors)
+        (root / "model.safetensors.index.json").write_text(json.dumps({
+            "metadata": {"total_size": sum(len(raw) for _, _, raw in tensors.values())},
+            "weight_map": {key: shard for key in tensors},
+        }))
+        (root / "config.json").write_text(json.dumps({
+            "model_type": "qwen4_exp",
+            "expert_quant": {"format": "exl3", "k": 3},
+            "ngram_table": {"file": "ngram_table.bin", "bits": 16},
+        }))
+        (root / "ngram_table.bin").write_bytes(b"ngram table bytes")
+        (root / "tokenizer.json").write_text("{}")
+        (root / "config.json.orig-262k").write_text("original config")
+        return root
+
+    @staticmethod
+    def _tensor_signature(root: Path, key: str) -> tuple:
+        index = json.loads((root / "model.safetensors.index.json").read_text())
+        filename = index["weight_map"][key]
+        header, data_off = read_header(root / filename)
+        meta = header[key]
+        raw = read_raw(root / filename, data_off, meta)
+        return meta["dtype"], tuple(meta["shape"]), np.ascontiguousarray(raw).tobytes()
+
+    def test_real_component_repack_preserves_bytes_and_layout(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._write_component_source(root / "staged")
+            destination = root / "components"
+            repack_component_output(source, destination)
+            self.assertEqual(
+                {path.name for path in destination.glob("*.safetensors")},
+                {
+                    "model-embed.safetensors",
+                    "model-lm-head.safetensors",
+                    "model-trunk-00001-of-00002.safetensors",
+                    "model-trunk-00002-of-00002.safetensors",
+                    *(f"model-experts-L{layer:02}.safetensors" for layer in range(4)),
+                    "model-mtp.safetensors",
+                    "model-vision.safetensors",
+                },
+            )
+            source_index = json.loads(
+                (source / "model.safetensors.index.json").read_text()
+            )
+            destination_index = json.loads(
+                (destination / "model.safetensors.index.json").read_text()
+            )
+            self.assertEqual(source_index["weight_map"].keys(),
+                             destination_index["weight_map"].keys())
+            for key in source_index["weight_map"]:
+                self.assertEqual(
+                    self._tensor_signature(source, key),
+                    self._tensor_signature(destination, key),
+                    key,
+                )
+            self.assertEqual(
+                (destination / "ngram_table.bin").read_bytes(),
+                b"ngram table bytes",
+            )
+            self.assertEqual(
+                (destination / "config.json.orig-262k").read_text(),
+                "original config",
+            )
+
+    def test_component_repack_forwards_new_destination_and_share_pack(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "staged"
+            destination = root / "components"
+            share = root / "existing-components"
+            source.mkdir()
+            share.mkdir()
+            repacker = Mock()
+            with patch.object(sys.modules[__name__], "_load_component_repacker",
+                              return_value=repacker):
+                repack_component_output(source, destination, share)
+            repacker.repack.assert_called_once_with(source, destination, share)
+
+    def test_component_repack_refuses_to_reuse_destination(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "staged"
+            destination = root / "components"
+            source.mkdir()
+            destination.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "destination must not already exist"):
+                repack_component_output(source, destination)
+
+    def test_cli_rejects_existing_component_output_before_staging(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            staged = root / "staged"
+            destination = root / "components"
+            staged.mkdir()
+            destination.mkdir()
+            with patch.object(sys, "argv", [
+                "convert_qwen38_flash_next_exl3.py",
+                "--hf", "hf", "--pack", "pack", "--dst", str(staged),
+                "--component-output", str(destination),
+            ]), patch.object(sys.modules[__name__], "convert_pack") as convert:
+                with self.assertRaises(SystemExit) as cm:
+                    main()
+            self.assertEqual(cm.exception.code, 2)
+            convert.assert_not_called()
+
+    def test_normal_convert_repacks_after_staging(self):
+        with patch.object(sys, "argv", [
+            "convert_qwen38_flash_next_exl3.py",
+            "--hf", "hf", "--pack", "pack", "--dst", "staged",
+            "--component-output", "components", "--share-with", "existing",
+        ]), patch.object(sys.modules[__name__], "convert_pack") as convert, \
+                patch.object(sys.modules[__name__], "repack_component_output") as repack:
+            self.assertEqual(main(), 0)
+        convert.assert_called_once_with(
+            "hf", "pack", "staged", quantizer="direct", calibration=None,
+            imatrix=None, batch_size=32,
+        )
+        repack.assert_called_once_with("staged", "components", "existing")
+
+    def test_restack_repacks_after_staging(self):
+        with patch.object(sys, "argv", [
+            "convert_qwen38_flash_next_exl3.py",
+            "--from-exl3", "source", "--pack", "pack", "--dst", "staged",
+            "--component-output", "components",
+        ]), patch.object(sys.modules[__name__], "restack_from_exl3") as restack, \
+                patch.object(sys.modules[__name__], "repack_component_output") as repack:
+            self.assertEqual(main(), 0)
+        restack.assert_called_once_with("source", "pack", "staged")
+        repack.assert_called_once_with("staged", "components", None)
+
+    def test_dense_compose_repacks_after_staging(self):
+        composed = {"weight_map": {}, "bytes": 0, "carried": []}
+        with patch.object(sys, "argv", [
+            "convert_qwen38_flash_next_exl3.py",
+            "--dense", "dense", "--pack", "pack", "--dst", "staged",
+            "--ngram-bin", "ngram.bin", "--component-output", "components",
+        ]), patch.object(sys.modules[__name__], "compose_pack",
+                         return_value=composed) as compose, \
+                patch.object(sys.modules[__name__], "repack_component_output") as repack:
+            self.assertEqual(main(), 0)
+        compose.assert_called_once_with(
+            "dense", "pack", "staged", ngram_src=None, ngram_bin="ngram.bin",
+        )
+        repack.assert_called_once_with("staged", "components", None)
+
+    def test_share_with_requires_component_output(self):
+        with patch.object(sys, "argv", [
+            "convert_qwen38_flash_next_exl3.py",
+            "--hf", "hf", "--pack", "pack", "--dst", "staged",
+            "--share-with", "existing",
+        ]):
+            with self.assertRaises(SystemExit) as cm:
+                main()
+        self.assertEqual(cm.exception.code, 2)
+
+
 def pick_real_experts(hf_dir: str | Path, imatrix_path: str | Path, layer: int = 0) -> int:
     import time
     _ensure_lib()
@@ -2177,11 +2409,32 @@ def main():
     ap.add_argument("--hf", default=None)
     ap.add_argument("--pack", default=None)
     ap.add_argument("--dst", default=None)
+    ap.add_argument("--component-output", default=None,
+                    help="write canonical component shards to this new directory after conversion")
+    ap.add_argument("--share-with", default=None,
+                    help="existing canonical component pack whose unchanged files may be shared")
     ap.add_argument("--quantizer", default="direct", choices=("ldlq", "direct"))
     ap.add_argument("--calibration", default=None)
     ap.add_argument("--imatrix", default=None)
     ap.add_argument("--batch-size", type=int, default=32)
     args = ap.parse_args()
+    if args.share_with and not args.component_output:
+        ap.error("--share-with requires --component-output")
+    if args.component_output and (args.bench or args.pick_experts or args.ngram_out or args.self_test):
+        ap.error("--component-output is only supported for conversion, restack, or dense compose")
+    if args.component_output:
+        component_path = Path(args.component_output)
+        if component_path.exists() or component_path.is_symlink():
+            ap.error("--component-output must be a new directory")
+        if args.dst:
+            staged_path = Path(args.dst).resolve()
+            component_real = component_path.resolve()
+            if (
+                staged_path == component_real
+                or staged_path in component_real.parents
+                or component_real in staged_path.parents
+            ):
+                ap.error("--component-output must be outside the --dst staging directory")
     if args.bench:
         return bench_batch_quality()
     if args.ngram_out:
@@ -2198,11 +2451,15 @@ def main():
                            ngram_src=args.ngram_src, ngram_bin=args.ngram_bin)
         print(f"composed {len(out['weight_map'])} tensors, {out['bytes'] / 1e9:.1f} GB", flush=True)
         print(f"carried from the expert pack: {len(out['carried'])} tensors", flush=True)
+        if args.component_output:
+            repack_component_output(args.dst, args.component_output, args.share_with)
         return 0
     if args.from_exl3:
         if not (args.pack and args.dst):
             ap.error("--from-exl3 needs --pack and --dst")
         restack_from_exl3(args.from_exl3, args.pack, args.dst)
+        if args.component_output:
+            repack_component_output(args.dst, args.component_output, args.share_with)
         return 0
     if args.pick_experts:
         if not (args.hf and args.imatrix):
@@ -2224,6 +2481,8 @@ def main():
         args.hf, args.pack, args.dst, quantizer=args.quantizer, calibration=cal, imatrix=imat,
         batch_size=args.batch_size,
     )
+    if args.component_output:
+        repack_component_output(args.dst, args.component_output, args.share_with)
     return 0
 
 

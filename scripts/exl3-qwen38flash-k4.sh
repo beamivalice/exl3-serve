@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Serve resident EXL3 K4 using the mlx-serve-qwen38flash.sh settings.
+# Extra arguments are appended, e.g. ./exl3-qwen38flash-k4.sh --port 11235.
+set -euo pipefail
+
+binary="$HOME/llm/exl3-serve/zig-out/bin/mlx-serve"
+if [[ ! -x "$binary" ]]; then
+  printf '%s\n' "Missing executable: $binary" \
+    "Build $HOME/llm/exl3-serve first: zig build -Doptimize=ReleaseFast" >&2
+  exit 1
+fi
+
+exec "$binary" serve \
+  --model "$HOME/llm/models/Qwen3.8-Flash-Next-EXL3-K4" \
+  --host 127.0.0.1 \
+  --port 11234 \
+  --ctx-size 1048576 \
+  --prefill-chunk 8192 \
+  --max-concurrent 1 \
+  --kv-quant 8 \
+  --max-tokens 64000 \
+  --mtp \
+  --prefix-cache-mem 12GB \
+  --prefix-cache-entries 1 \
+  --prefix-cache-disk 100GB \
+  --ssm-checkpoint-max 16 \
+  --metrics \
+  "$@"

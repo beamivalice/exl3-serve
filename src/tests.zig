@@ -18,6 +18,7 @@ test {
     _ = @import("tool_traffic_replay_test.zig");
     _ = @import("server.zig");
     _ = @import("model.zig");
+    _ = @import("exl3_flat_layout_test.zig");
     _ = @import("generate.zig");
     _ = @import("transformer.zig");
     _ = @import("vision.zig");
