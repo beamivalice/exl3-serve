@@ -152,7 +152,7 @@ pub fn loadWeights(
     return weights;
 }
 
-/// Exact post-affine-8 resident byte count for the raw source trunk.
+/// Exact resident byte count of the bf16-dequantized raw source trunk.
 pub fn residentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !u64 {
     if (model_dir.len == 0 or !std.fs.path.isAbsolute(model_dir))
         return error.InvalidMimoModelPath;

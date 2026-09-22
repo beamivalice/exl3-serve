@@ -3978,13 +3978,13 @@ pub fn loadWeights(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
 pub fn loadWeightsMimoSource(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !Weights {
     var config = try parseConfig(io, allocator, model_dir);
     defer config.deinit(allocator);
-    log.info("[mimo-source] loading original shards: {s} experts, in-memory affine8 trunk and split QKV\n", .{
+    log.info("[mimo-source] loading original shards: {s} experts, bf16-dequantized trunk and split QKV\n", .{
         if (config.expert_layout == .exl3_k4) "resident EXL3" else "native MXFP4",
     });
     return @import("mimo_source.zig").loadWeights(io, allocator, model_dir, &config);
 }
 
-/// Resident bytes of a MiMo pack the source loader prepares: the affine-8 trunk
+/// Resident bytes of a MiMo pack the source loader prepares: the bf16 trunk
 /// plus, under EXL3, the routed banks it holds resident.
 pub fn mimoSourceResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !u64 {
     return @import("mimo_source.zig").residentBytes(io, allocator, model_dir);
