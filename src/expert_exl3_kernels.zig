@@ -6186,6 +6186,32 @@ test "mimo_v2 EXL3 arms match the f32 SwiGLU on a real pack's own bytes" {
     }
 }
 
+test "exl3 token preparation preserves a subnormal scale on a hot BF16 channel" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var xh: [128]u16 = @splat(0);
+    xh[0] = @truncate(@as(u32, @bitCast(@as(f32, 400))) >> 16);
+    var scales: [128]u16 = @splat(0x3c00);
+    scales[0] = 0x0067;
+    const x = mlx.mlx_array_new_data(&xh, &.{ 1, 128 }, 2, .bfloat16);
+    defer _ = mlx.mlx_array_free(x);
+    const suh = mlx.mlx_array_new_data(&scales, &.{ 1, 128 }, 2, .float16);
+    defer _ = mlx.mlx_array_free(suh);
+    const zero: u32 = 0;
+    const slots = mlx.mlx_array_new_data(&zero, &.{1}, 1, .uint32);
+    defer _ = mlx.mlx_array_free(slots);
+    const prep = try pairPrepareFromTokens(s, x, suh, suh, slots, slots, 128, 1, 1);
+    defer _ = mlx.mlx_array_free(prep[0]);
+    defer _ = mlx.mlx_array_free(prep[1]);
+    const want = 400.0 * exl3.f16BitsToF32(0x0067) / @sqrt(@as(f32, 128));
+    for ([_]mlx.mlx_array{ prep[0], prep[1] }) |a| {
+        try mlx.check(mlx.mlx_array_eval(a));
+        const got = mlx.mlx_array_data_float16(a) orelse return error.F16Unreadable;
+        for (0..128) |i| try t.expectApproxEqAbs(want, @as(f32, @floatCast(got[i])), want * 0.001);
+    }
+}
+
 test "mimo_v2 EXL3 arms stay finite where the SwiGLU product passes the f16 ceiling" {
     for ([_]usize{ 4, 33 }) |rows| {
         try mimoArmMatchesF32(.{
