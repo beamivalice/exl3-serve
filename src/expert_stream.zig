@@ -56,6 +56,10 @@ pub fn moeLayerCount(geometry: Geometry) u16 {
     return geometry.layers - geometry.first_moe_layer;
 }
 
+fn warmSlotCount(slots_per_layer: u16) u16 {
+    return @intCast((@as(u32, slots_per_layer) * 4) / 5);
+}
+
 /// Native MXFP4 bytes per expert: two U32-packed gate/up weights, one U32
 /// down weight, and their U8 e8m0 scale banks. Bias slots are absent.
 pub fn mxfp4ExpertBytes(hidden: u32, intermediate: u32) !u64 {
@@ -1232,6 +1236,10 @@ pub const Engine = struct {
         return layer < self.layers.len and self.layers[layer].active and self.layers[layer].cache.ready[slot];
     }
 
+    pub fn warmSlotsPerLayer(self: *const Engine) u16 {
+        return warmSlotCount(self.plan.slots_per_layer);
+    }
+
     pub fn noteRoute(self: *Engine, layer: u16, full_attn: bool, detail: RouteDetail) void {
         if (layer < self.layers.len) self.layers[layer].stats.host_sync_ns +|= detail.totalNs();
         if (full_attn) self.route_full.add(detail) else self.route_linear.add(detail);
@@ -1379,6 +1387,25 @@ pub const Engine = struct {
 
     pub fn cancelFills(self: *Engine) void {
         if (self.io_pool) |pool| pool.requestCancel();
+    }
+
+    pub fn warmCache(self: *Engine) !void {
+        const warm_count = self.warmSlotsPerLayer();
+        if (warm_count == 0) return;
+
+        const occurrences = try self.allocator.alloc(u16, warm_count);
+        defer self.allocator.free(occurrences);
+        for (occurrences, 0..) |*expert, i| expert.* = @intCast(i);
+
+        for (self.layers, 0..) |*layer, layer_index| {
+            if (!layer.active) continue;
+            {
+                const saved_stats = layer.stats;
+                defer layer.stats = saved_stats;
+                var prepared = try self.prepareHost(@intCast(layer_index), occurrences);
+                prepared.deinit();
+            }
+        }
     }
 
     fn prepareSlab(self: *Engine, layer_index: u16, occurrences: []const u16) !Prepared {
@@ -1882,6 +1909,70 @@ fn writeTinyExpertCheckpoint(allocator: std.mem.Allocator, dir: std.Io.Dir, expe
     return file_bytes;
 }
 
+fn writeTinyExpertCheckpointLayers(allocator: std.mem.Allocator, dir: std.Io.Dir, layers: u16, experts: u16, hidden: u32, inter: u32) ![]u8 {
+    const io = std.testing.io;
+    if (layers == 0 or experts == 0 or hidden == 0 or inter == 0) return error.InvalidTestGeometry;
+    const gate_bytes = @as(usize, experts) * 2 * @as(usize, inter) * @as(usize, hidden) * 2;
+    const down_bytes = @as(usize, experts) * @as(usize, hidden) * @as(usize, inter) * 2;
+    const per_layer = gate_bytes + down_bytes;
+
+    var header: std.ArrayList(u8) = .empty;
+    defer header.deinit(allocator);
+    try header.append(allocator, '{');
+    for (0..layers) |layer_usize| {
+        if (layer_usize != 0) try header.append(allocator, ',');
+        const layer = @as(u16, @intCast(layer_usize));
+        const layer_offset = layer_usize * per_layer;
+        const piece = try std.fmt.allocPrint(
+            allocator,
+            "\"model.language_model.layers.{d}.mlp.experts.gate_up_proj\":{{\"dtype\":\"BF16\",\"shape\":[{d},{d},{d}],\"data_offsets\":[{d},{d}]}},\"model.language_model.layers.{d}.mlp.experts.down_proj\":{{\"dtype\":\"BF16\",\"shape\":[{d},{d},{d}],\"data_offsets\":[{d},{d}]}}",
+            .{
+                layer,
+                experts,
+                2 * inter,
+                hidden,
+                layer_offset,
+                layer_offset + gate_bytes,
+                layer,
+                experts,
+                hidden,
+                inter,
+                layer_offset + gate_bytes,
+                layer_offset + per_layer,
+            },
+        );
+        defer allocator.free(piece);
+        try header.appendSlice(allocator, piece);
+    }
+    try header.append(allocator, '}');
+
+    const payload_bytes = @as(usize, layers) * per_layer;
+    const file_bytes = try allocator.alloc(u8, 8 + header.items.len + payload_bytes);
+    errdefer allocator.free(file_bytes);
+    std.mem.writeInt(u64, file_bytes[0..8], header.items.len, .little);
+    @memcpy(file_bytes[8..][0..header.items.len], header.items);
+    for (file_bytes[8 + header.items.len ..], 0..) |*b, i| b.* = @intCast(i % 251);
+    try dir.writeFile(io, .{ .sub_path = "experts.safetensors", .data = file_bytes });
+
+    var index: std.ArrayList(u8) = .empty;
+    defer index.deinit(allocator);
+    try index.appendSlice(allocator, "{\"weight_map\":{");
+    for (0..layers) |layer_usize| {
+        if (layer_usize != 0) try index.append(allocator, ',');
+        const layer = @as(u16, @intCast(layer_usize));
+        const piece = try std.fmt.allocPrint(
+            allocator,
+            "\"model.language_model.layers.{d}.mlp.experts.gate_up_proj\":\"experts.safetensors\",\"model.language_model.layers.{d}.mlp.experts.down_proj\":\"experts.safetensors\"",
+            .{ layer, layer },
+        );
+        defer allocator.free(piece);
+        try index.appendSlice(allocator, piece);
+    }
+    try index.appendSlice(allocator, "}}");
+    try dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
+    return file_bytes;
+}
+
 fn tinyStream() mlx.mlx_stream {
     return if (std.c.getenv("CODEX_SANDBOX") != null) mlx.mlx_default_cpu_stream_new() else mlx.gpuStream();
 }
@@ -1954,6 +2045,125 @@ const TinyEngine = struct {
         return false;
     }
 };
+
+const TinyLayersEngine = struct {
+    tmp: std.testing.TmpDir,
+    raw: []u8,
+    engine: Engine,
+
+    fn open(slots: u16, layers: u16, first_moe_layer: u16, experts: u16) !TinyLayersEngine {
+        const t = std.testing;
+        var tmp = t.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const raw = try writeTinyExpertCheckpointLayers(t.allocator, tmp.dir, layers, experts, 64, 64);
+        errdefer t.allocator.free(raw);
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_len = try tmp.dir.realPath(t.io, &path_buf);
+        const geom = Geometry{
+            .layers = layers,
+            .experts = experts,
+            .hidden = 64,
+            .intermediate = 64,
+            .first_moe_layer = first_moe_layer,
+        };
+        const requested = @as(u64, slots) * @as(u64, moeLayerCount(geom)) * 24576;
+        const engine = try Engine.initWithOptions(t.allocator, path_buf[0..path_len], geom, requested, tinyStream(), .{ .io_workers = 2, .bounce_size = 1 << 20 });
+        return .{ .tmp = tmp, .raw = raw, .engine = engine };
+    }
+
+    fn close(self: *TinyLayersEngine) void {
+        self.engine.deinit();
+        std.testing.allocator.free(self.raw);
+        self.tmp.cleanup();
+    }
+};
+
+test "expert stream warm cache floors 80 percent, including zero and one slot" {
+    const t = std.testing;
+    try t.expectEqual(@as(u16, 0), warmSlotCount(0));
+    try t.expectEqual(@as(u16, 0), warmSlotCount(1));
+    try t.expectEqual(@as(u16, 1), warmSlotCount(2));
+    try t.expectEqual(@as(u16, 3), warmSlotCount(4));
+    try t.expectEqual(@as(u16, 4), warmSlotCount(5));
+
+    var fixture = try TinyEngine.open(1, 4);
+    defer fixture.close();
+    try t.expectEqual(@as(u16, 0), fixture.engine.warmSlotsPerLayer());
+    try fixture.engine.warmCache();
+    try t.expectEqual(@as(u64, 0), fixture.engine.fill_experts_total);
+    for (fixture.engine.layers[0].cache.ready) |ready| try t.expect(!ready);
+}
+
+test "expert stream warm cache fills lowest experts in every active layer and is a hit thereafter" {
+    const t = std.testing;
+    var fixture = try TinyLayersEngine.open(5, 3, 1, 8);
+    defer fixture.close();
+    const engine = &fixture.engine;
+    try t.expectEqual(@as(u16, 5), engine.plan.slots_per_layer);
+    const warm_count = warmSlotCount(engine.plan.slots_per_layer);
+    try t.expectEqual(warm_count, engine.warmSlotsPerLayer());
+    try t.expectEqual(@as(u16, 4), warm_count);
+
+    engine.layers[1].stats = .{ .groups = 71, .hits = 72, .misses = 73, .fill_bytes = 74, .host_sync_ns = 75, .fill_ns = 76, .compute_ns = 77 };
+    try engine.warmCache();
+    try t.expectEqual(@as(u64, 8), engine.fill_experts_total);
+    try t.expectEqual(@as(usize, 0), engine.layers[0].slabs.len);
+    try t.expect(!engine.layers[0].active);
+    try t.expectEqual(@as(u64, 0), engine.layers[0].cache.tick);
+    try t.expectEqual(@as(u64, 71), engine.layers[1].stats.groups);
+    try t.expectEqual(@as(u64, 72), engine.layers[1].stats.hits);
+    try t.expectEqual(@as(u64, 73), engine.layers[1].stats.misses);
+    try t.expectEqual(@as(u64, 74), engine.layers[1].stats.fill_bytes);
+    try t.expectEqual(@as(u64, 75), engine.layers[1].stats.host_sync_ns);
+    try t.expectEqual(@as(u64, 76), engine.layers[1].stats.fill_ns);
+    try t.expectEqual(@as(u64, 77), engine.layers[1].stats.compute_ns);
+
+    for (1..3) |layer_usize| {
+        const layer: u16 = @intCast(layer_usize);
+        try t.expectEqual(@as(u64, warm_count), engine.layers[layer].cache.tick);
+        for (0..warm_count) |expert_usize| {
+            const expert: u16 = @intCast(expert_usize);
+            const raw_slot = engine.layers[layer].cache.expert_to_slot[expert];
+            try t.expect(raw_slot >= 0);
+            const slot: u16 = @intCast(raw_slot);
+            try t.expect(engine.slotReady(layer, slot));
+            for ([_]Component{ .gate_up, .down }) |component| {
+                const source = engine.store.span(layer, expert, component);
+                const want = fixture.raw[@intCast(source.offset)..][0..@intCast(source.len)];
+                try t.expectEqualSlices(u8, want, engine.cacheSlotBytes(layer, slot, component));
+            }
+        }
+        try t.expectEqual(std.math.maxInt(u16), engine.layers[layer].cache.slot_to_expert[4]);
+        try t.expect(!engine.layers[layer].cache.ready[4]);
+    }
+
+    const fills = engine.fill_experts_total;
+    const fill_bytes = engine.fill_bytes_total;
+    var hit = try engine.prepareHost(1, &.{ 0, 1, 2, 3 });
+    hit.deinit();
+    try engine.warmCache();
+    try t.expectEqual(fills, engine.fill_experts_total);
+    try t.expectEqual(fill_bytes, engine.fill_bytes_total);
+}
+
+test "expert stream warm cache leaves an active layer reusable after a fill error" {
+    const t = std.testing;
+    var fixture = try TinyLayersEngine.open(5, 3, 1, 8);
+    defer fixture.close();
+    const engine = &fixture.engine;
+    const bad_index = (1 * @as(usize, 8) + 0) * 2 + @intFromEnum(Component.down);
+    const good = engine.store.spans[bad_index];
+    engine.store.spans[bad_index] = .{ .file = good.file, .offset = 1 << 40, .len = good.len };
+    try t.expectError(error.FillSpanPastEof, engine.warmCache());
+    engine.store.spans[bad_index] = good;
+
+    try t.expectEqual(@as(u64, 0), engine.fill_experts_total);
+    for (engine.layers[1].cache.ready) |ready| try t.expect(!ready);
+    for (engine.layers[1].cache.expert_to_slot) |slot| try t.expectEqual(@as(i32, -1), slot);
+
+    try engine.warmCache();
+    try t.expectEqual(@as(u64, 8), engine.fill_experts_total);
+}
 
 test "expert stream a failed component fill leaves no ready slot" {
     const t = std.testing;
