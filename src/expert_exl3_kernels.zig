@@ -7415,3 +7415,44 @@ test "exl3 prepared mid production geometry BF16 f32 truth" {
         for (0..3) |seed| try n40Bf16TruthGeometry(318 + seed, 32, rows, true, 4096, 2048);
     }
 }
+
+test "exl3 TINY half pairs preserve every codeword at windows 8 through 16" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const source =
+        \\const uint i = thread_position_in_grid.x;
+        \\result[i] = as_type<uint>(exl3_pairh(uint2(codes[i], codes[65535u - i])));
+    ;
+    const codes = try t.allocator.alloc(u32, 65536);
+    defer t.allocator.free(codes);
+    for (codes, 0..) |*v, i| v.* = @intCast(i);
+    const input = mlx.mlx_array_new_data(codes.ptr, &.{65536}, 1, .uint32);
+    defer _ = mlx.mlx_array_free(input);
+    const inputs = mlx.mlx_vector_array_new_data(&.{input}, 1);
+    defer _ = mlx.mlx_vector_array_free(inputs);
+    const cfg = mlx.mlx_fast_metal_kernel_config_new();
+    defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(cfg, &.{65536}, 1, .uint32));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(cfg, 128, 1, 1));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(cfg, 65536, 1, 1));
+    inline for (8..17) |bits| {
+        const win = comptime exl3.Window.fromBits(bits).?;
+        var slot: ?mlx.mlx_fast_metal_kernel = null;
+        const kernel = try getNamedKernel(&slot, comptime "exl3_tiny_half_pairs" ++ winSuffix(win), &.{"codes"}, &.{"result"}, source, comptime codebookHelpers(.tiny, win));
+        defer _ = mlx.mlx_fast_metal_kernel_free(kernel);
+        var outputs = mlx.mlx_vector_array_new();
+        defer _ = mlx.mlx_vector_array_free(outputs);
+        try mlx.check(mlx.mlx_fast_metal_kernel_apply(&outputs, kernel, inputs, cfg, s));
+        var result = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(result);
+        try mlx.check(mlx.mlx_vector_array_get(&result, outputs, 0));
+        try mlx.check(mlx.mlx_array_eval(result));
+        const got = mlx.mlx_array_data_uint32(result) orelse return error.U32Unreadable;
+        for (codes, 0..) |cw, i| {
+            const lo = exl3.decodeCodeword(@as(u16, @intCast(cw)) & win.mask(), .tiny);
+            const hi = exl3.decodeCodeword(@as(u16, @intCast(65535 - cw)) & win.mask(), .tiny);
+            try t.expectEqual(@as(u32, lo) | (@as(u32, hi) << 16), got[i]);
+        }
+    }
+}
