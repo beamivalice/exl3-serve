@@ -6,17 +6,23 @@ where every routed gate/up/down bank is EXL3 K4 (MUL1), stacked [E, ...] per
 projection so gather kernels index expert e on axis 0. Every non-expert file
 from the 4/8 pack is hard-linked; mixed shards are rewritten with the expert
 tensors dropped and remaining tensors copied as raw bytes. config.json carries
-expert_quant = {format: exl3, k: 4, codebook: mul1}.
+expert_quant = {format: exl3, k, codebook, window}.
 
-Default quantization is LDLQ with a captured Hessian; --quantizer direct is
-the synthetic-test path. Calibration rows, when captured, are the MLP input
-(hidden) for gate/up and the SwiGLU activation (intermediate) for down.
+`--quantizer ldlq` runs LDLQ under the imatrix Hessian ROTATED into the inner
+basis the search works in, preceded by a per-expert global codebook-scale search;
+`--quantizer direct` is the calibration-free path. Calibration rows, when captured,
+are the MLP input (hidden) for gate/up and the SwiGLU activation (intermediate) for
+down. `--window` (default 16) is the codeword width the search hashes; the pack
+records it in `expert_quant.window` and every decoder masks to it (the engine admits
+8..16), so a narrower window trades weight error for search time at the same bits.
+Every shard carries a `__metadata__` stamp of what wrote it and a resume adopts only
+a shard whose whole stamp matches. The shared machinery is `tests/exl3_convert_common.py`.
 
   python3 tests/convert_qwen38_flash_next_exl3.py --self-test
   python3 tests/convert_qwen38_flash_next_exl3.py \\
       --hf /Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next \\
       --pack /Users/beam/llm/models/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit \\
-      --dst /path/to/out
+      --dst /path/to/out --quantizer ldlq --k 3 --window 8 --imatrix <imatrix.safetensors>
 """
 
 from __future__ import annotations
@@ -29,34 +35,53 @@ import shutil
 import struct
 import sys
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from convert_dsv4_weights import write_safetensors_raw  # noqa: E402
+from convert_dsv4_weights import bf16_to_f32, write_safetensors_raw  # noqa: E402
 from convert_qwen38_flash_next import read_header, read_raw, rename  # noqa: E402
+import exl3_convert_common as _common  # noqa: E402
+from exl3_convert_common import (  # noqa: E402,F401
+    HAD_BLOCK, calib_for_expert, codebook_mode, diag_hessian, file_sha256, format_k,
+    imatrix_expert_vector, k_from_packed, launch_tiles_for, load_imatrix, packed_hw,
+    parse_k, prefetch_batches, prepare_expert_bank, quantize_prepared_bank, read_stamp,
+    reset_search_stats, search_stats_snapshot, shard_reuse_refusal, validate_window)
 
 K = 4
 CODEBOOK = "mul1"
+WINDOW_DEFAULT = 16
+BATCH_EXPERTS_DEFAULT = 32
+SCRATCH_GB_DEFAULT = 4.0
+PROJECTIONS = ("gate", "up", "down")
 PACKED_K4 = 256 * K // 16
 
+# Bump on any change to the pack format or to what the quantizer produces — never for a
+# comment or a test. A shard's stamp carries this and resume refuses a shard whose stamp
+# differs, so hashing the file itself would make an editorial change cost a rerun.
+CONVERTER_VERSION = "qwen4-exl3-1-rotated-gss"
 
-def packed_hw(k: int) -> int:
-    return 256 * k // 16
+
+def converter_version() -> str:
+    return CONVERTER_VERSION
 
 
-def k_from_packed(last: int) -> int:
-    if last % 16 != 0:
-        raise RuntimeError(f"packed dim {last} not divisible by 16")
-    k = last // 16
-    if k not in (2, 3, 4):
-        raise RuntimeError(f"unsupported packed K={k} from last dim {last}")
-    return k
-HAD = 128
-MCG_MULT = 0xCBAC1FED
+def shard_stamp(**kw) -> dict[str, str]:
+    """This converter's own version constant, stamped into every shard it writes."""
+    return _common.shard_stamp(converter=converter_version(), **kw)
+
+
+def expert_seed(layer: int, expert: int, proj: str, *, mtp: bool = False) -> int:
+    """Stable per (bank, layer, expert, projection), so a resumed or interrupted run
+    reproduces the same pack as one that wrote every shard in a single pass."""
+    base = (layer * 1_000_003 + expert * 17 + PROJECTIONS.index(proj)) & 0x7FFF_FFFF
+    return (base + 0x4000_0000) & 0x7FFF_FFFF if mtp else base
+
 
 SWITCH = ".mlp.switch_mlp."
 HF_GATE_UP = ".mlp.experts.gate_up_proj"
@@ -160,23 +185,6 @@ def plan_pack(pack_index: dict) -> dict:
     }
 
 
-def diag_hessian(v: np.ndarray) -> np.ndarray:
-    vec = np.asarray(v, dtype=np.float32).reshape(-1)
-    return np.diag(vec)
-
-
-def imatrix_expert_vector(flat: np.ndarray, expert: int, dim: int) -> np.ndarray:
-    arr = np.asarray(flat, dtype=np.float32).reshape(-1)
-    start = expert * dim
-    return arr[start : start + dim].copy()
-
-
-def calib_for_expert(routed_tokens: int, moments: np.ndarray) -> tuple[str, np.ndarray | None]:
-    if routed_tokens <= 0:
-        return "ldlq-gaussian-256", None
-    return "imatrix-diagonal", np.asarray(moments, dtype=np.float32).reshape(-1)
-
-
 def _ensure_lib() -> None:
     lib = os.environ.get("EXL3_CONVERT_LIB", "/Users/beam/llm/ponyexl3")
     if lib not in sys.path:
@@ -203,87 +211,29 @@ def _quantize_direct_batch(inners: list[np.ndarray], k: int, cb) -> list[np.ndar
     return out
 
 
-def _quantize_public(
-    public: np.ndarray,
-    *,
-    k: int,
-    codebook: str,
-    quantizer: str,
-    calibration: np.ndarray | None,
-    seed: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    _ensure_lib()
-    from ponyexl3.convert.direct import quantize_inner_matrix_direct
-    from ponyexl3.convert.hessian import block_ldl, capture_hessian, ldlq_inner_matrix, prepare_hessian_for_ldl
-    from ponyexl3.convert.regularize import regularize_public_weight
-    from ponyexl3.ref.codebook import CodebookMode
+def expert_public(bank: np.ndarray, ei: int, lo: int, hi: int) -> np.ndarray:
+    """One expert's EXL3 public weight [in, out] out of a resident [E, out, in] bank.
 
-    cb = codebook_mode(codebook)
-    reg = regularize_public_weight(public.astype(np.float32), seed=seed)
-    suh = reg.suh.astype(np.float16)
-    svh = reg.svh.astype(np.float16)
-    if quantizer == "direct":
-        packed, _, _ = quantize_inner_matrix_direct(
-            reg.inner, k=k, cb=cb, search_backend="metal", return_states=False
-        )
-        return packed.astype(np.uint16), suh, svh
-    rows = public.shape[0]
-    if calibration is None:
-        rng = np.random.default_rng(seed + 17)
-        acts = rng.standard_normal((256, rows), dtype=np.float32)
-        hessian = capture_hessian(acts)
-    elif calibration.ndim == 1:
-        if calibration.shape[0] != rows:
-            raise ValueError(f"calibration features {calibration.shape[0]} != {rows}")
-        hessian = diag_hessian(calibration)
-    else:
-        acts = np.asarray(calibration, dtype=np.float32)
-        if acts.shape[1] != rows:
-            raise ValueError(f"calibration features {acts.shape[1]} != {rows}")
-        hessian = capture_hessian(acts)
-    prepared = prepare_hessian_for_ldl(hessian)
-    ldl = block_ldl(prepared.hessian)
-    result = ldlq_inner_matrix(
-        reg.inner,
-        ldl.l,
-        k=k,
-        cb=cb,
-        hessian=prepared.hessian,
-        search_backend="metal",
-        collect_states=False,
-        compute_proxy=False,
-    )
-    return result.packed.astype(np.uint16), suh, svh
+    HF shards stay bf16 until here — a whole f32 copy of a routed bank is 6.7 GB on the
+    real checkpoint, and only the batch the GPU is about to search needs to be float."""
+    rows = bank[ei, lo:hi]
+    if rows.dtype == np.uint16:
+        rows = bf16_to_f32(rows)
+    return np.ascontiguousarray(np.asarray(rows, dtype=np.float32).T)
 
 
-def _stack_experts(
-    bank: np.ndarray,
-    *,
-    k: int,
-    codebook: str,
-    quantizer: str,
-    calibration: np.ndarray | None,
-    seed: int,
-    routed_rows: np.ndarray | None = None,
-    imatrix_flat: np.ndarray | None = None,
-    zero_routed: list | None = None,
-    layer_key: str = "",
-    batch_size: int = 32,
-) -> dict[str, tuple[str, tuple[int, ...], bytes]]:
-    _ensure_lib()
-    from ponyexl3.convert.regularize import regularize_public_weight
-    from ponyexl3.ref.codebook import CodebookMode
-    cb = codebook_mode(codebook)
-    e, out_dim, in_dim = bank.shape
-    publics = []
+def bank_calibrations(
+    e: int, in_dim: int, *, calibration, imatrix_flat, routed_rows,
+    zero_routed: list | None, layer_key: str,
+) -> list:
+    """The per-expert calibration diagonal `regularize_public_weight` and the rotated
+    Hessian both read. An expert no calibration token reached takes the flat prior."""
     cals = []
     for ei in range(e):
-        publics.append(np.ascontiguousarray(bank[ei].T))
         cal = calibration
         if imatrix_flat is not None:
-            moments = imatrix_expert_vector(imatrix_flat, ei, in_dim)
             ntok = int(routed_rows[ei]) if routed_rows is not None else 1
-            mode, vec = calib_for_expert(ntok, moments)
+            mode, vec = calib_for_expert(ntok, imatrix_expert_vector(imatrix_flat, ei, in_dim))
             if mode != "imatrix-diagonal":
                 if zero_routed is not None:
                     zero_routed.append(f"{layer_key}#{ei}")
@@ -291,34 +241,7 @@ def _stack_experts(
             else:
                 cal = vec
         cals.append(cal)
-    trellis_list, suh_list, svh_list = [], [], []
-    if quantizer == "direct":
-        regs = [regularize_public_weight(p.astype(np.float32), seed=seed + ei) for ei, p in enumerate(publics)]
-        inners = [r.inner for r in regs]
-        packed_parts: list[np.ndarray] = []
-        bs = max(1, int(batch_size))
-        for start in range(0, e, bs):
-            packed_parts.extend(_quantize_direct_batch(inners[start : start + bs], k, cb))
-        for r, packed in zip(regs, packed_parts):
-            trellis_list.append(packed.astype(np.uint16))
-            suh_list.append(r.suh.astype(np.float16))
-            svh_list.append(r.svh.astype(np.float16))
-    else:
-        for ei, public in enumerate(publics):
-            packed, suh, svh = _quantize_public(
-                public, k=k, codebook=codebook, quantizer=quantizer, calibration=cals[ei], seed=seed + ei
-            )
-            trellis_list.append(packed)
-            suh_list.append(suh)
-            svh_list.append(svh)
-    trellis = np.stack(trellis_list, axis=0)
-    suh = np.stack(suh_list, axis=0)
-    svh = np.stack(svh_list, axis=0)
-    return {
-        "trellis": ("U16", trellis.shape, np.ascontiguousarray(trellis).tobytes()),
-        "suh": ("F16", suh.shape, np.ascontiguousarray(suh).tobytes()),
-        "svh": ("F16", svh.shape, np.ascontiguousarray(svh).tobytes()),
-    }
+    return cals
 
 
 def _copy_raw_tensors(src_file: Path, keys: list[str]) -> dict:
@@ -933,25 +856,13 @@ def compose_pack(
             "from_expert": conv["from_expert"], "delta_norms": conv["delta_norms"]}
 
 
-def codebook_mode(codebook: str):
-    """The converter's codebook names, mapped to the search's modes; the server admits the same three."""
-    from ponyexl3.ref.codebook import CodebookMode
-    try:
-        return {"mcg": CodebookMode.MCG, "mul1": CodebookMode.MUL1, "tiny": CodebookMode.TINY}[codebook]
-    except KeyError:
-        raise RuntimeError(f"unknown codebook {codebook!r}; expected mcg, mul1 or tiny") from None
-
-
 def expert_quant_block(source: str, **extra) -> dict:
-    """The `expert_quant` block the server admits: exl3, K, and one of mul1|tiny|mcg."""
-    block = {"format": "exl3", "k": int(K), "codebook": CODEBOOK, "out_scales": "svh", "source": source}
+    """The `expert_quant` block the server admits: exl3, K, one of mul1|tiny|mcg, and
+    the codeword `window` every decoder must mask to (absent reads as 16)."""
+    block = {"format": "exl3", "k": int(K), "codebook": CODEBOOK, "window": WINDOW_DEFAULT,
+             "out_scales": "svh", "source": source}
     block.update(extra)
     return block
-
-
-def load_imatrix(path: str | Path) -> dict[str, np.ndarray]:
-    from safetensors.numpy import load_file
-    return load_file(str(path))
 
 
 def convert_pack(
@@ -960,15 +871,23 @@ def convert_pack(
     dst: str | Path,
     *,
     quantizer: str = "direct",
-    k: int = K,
+    k=K,
     codebook: str = CODEBOOK,
+    window: int = WINDOW_DEFAULT,
     calibration: np.ndarray | None = None,
     imatrix: dict[str, np.ndarray] | None = None,
-    batch_size: int = 32,
+    imatrix_sha: str | None = None,
+    batch_size: int = BATCH_EXPERTS_DEFAULT,
+    scratch_gb: float = SCRATCH_GB_DEFAULT,
+    g_scale: bool = True,
+    quality: bool = True,
+    resume: bool = True,
 ) -> dict:
     hf_dir = Path(hf_dir)
     pack_dir = Path(pack_dir)
     dst = Path(dst)
+    window = validate_window(window, k)
+    reset_search_stats()
     dst.mkdir(parents=True, exist_ok=True)
     pack_index = json.loads((pack_dir / "model.safetensors.index.json").read_text())
     plan = plan_pack(pack_index)
@@ -1006,64 +925,117 @@ def convert_pack(
     for key, pack_name in list(weight_map.items()):
         if pack_name in plan["drop"]:
             raise RuntimeError(f"keep key {key} pointed at dropped shard {pack_name}")
-    seed = 0
     zero_routed: list[str] = []
     skipped = 0
+    rewritten: list[str] = []
+    werr: dict[str, list[float]] = {}
+    import mlx.core as mx
+    scratch_bytes = max(1, int(scratch_gb * (1 << 30)))
+    # The search's buffer pool is no longer dropped between launches, so cap it instead.
+    mx.set_cache_limit(4 * scratch_bytes)
+    cal_tag = ("imatrix-diagonal" if imatrix is not None else
+               "captured-rows" if calibration is not None else
+               "ldlq-gaussian-256" if quantizer == "ldlq" else "none-direct")
+    stamp = shard_stamp(k=k, codebook=codebook, window=window, quantizer=quantizer,
+                        imatrix_sha=imatrix_sha, g_scale="gss" if g_scale else "one")
 
-    def emit(layer: int, proj: str, base: str, bank: np.ndarray, imat_flat, rows_vec, lkey: str):
-        nonlocal seed, skipped
-        e, out_dim, in_dim = bank.shape
-        shard = layer_proj_shard(layer, proj)
+    def emit(layer: int, proj: str, base: str, bank, lo: int, hi: int,
+             imat_flat, rows_vec, lkey: str, mtp: bool):
+        nonlocal skipped
+        e, in_dim, out_dim = bank.shape[0], bank.shape[2], hi - lo
+        shard = layer_proj_shard(layer, proj, mtp=mtp)
         dest = dst / shard
-        if shard_is_valid(dest, e, in_dim, out_dim, k):
-            skipped += 1
-            print(f"skip {shard}", flush=True)
-            for suffix in (".trellis", ".suh", ".svh"):
-                weight_map[base + suffix] = shard
-            return
-        t0 = __import__("time").perf_counter()
-        stacked = _stack_experts(
-            bank, k=k, codebook=codebook, quantizer=quantizer, calibration=calibration, seed=seed,
-            routed_rows=rows_vec, imatrix_flat=imat_flat, zero_routed=zero_routed, layer_key=lkey,
-            batch_size=batch_size,
-        )
-        seed += e
-        named = {f"{base}.{suffix}": triple for suffix, triple in stacked.items()}
-        write_safetensors_raw(str(dest), named)
+        if resume:
+            refusal = shard_reuse_refusal(dest, e, in_dim, out_dim, k, stamp)
+            if refusal is None:
+                skipped += 1
+                for suffix in (".trellis", ".suh", ".svh"):
+                    weight_map[base + suffix] = shard
+                print(f"skip {shard}", flush=True)
+                return
+            if refusal != "absent":
+                rewritten.append(f"{shard}: {refusal}")
+                print(f"rewrite {shard}: {refusal}", flush=True)
+        t0 = time.perf_counter()
+        before = search_stats_snapshot()
+        trellis = np.empty((e, in_dim // 16, out_dim // 16, packed_hw(k)), dtype=np.uint16)
+        suh = np.empty((e, in_dim), dtype=np.float16)
+        svh = np.empty((e, out_dim), dtype=np.float16)
+        cals = bank_calibrations(e, in_dim, calibration=calibration, imatrix_flat=imat_flat,
+                                 routed_rows=rows_vec, zero_routed=zero_routed, layer_key=lkey)
+        scales: list[float] = []
+        errs: list[float] = []
+        fallbacks = 0
+
+        def load_batch(start: int, stop: int):
+            """Read, dequantize, regularize and LDL-factor one batch — every host stage
+            there is. Runs on the prefetch thread while the GPU searches the previous."""
+            publics = [expert_public(bank, ei, lo, hi) for ei in range(start, stop)]
+            seeds = [expert_seed(layer, ei, proj, mtp=mtp) for ei in range(start, stop)]
+            return (prepare_expert_bank(publics, seeds, cals[start:stop], quantizer=quantizer),
+                    publics, cals[start:stop])
+
+        step = max(1, int(batch_size))
+        spans = [(s, min(e, s + step)) for s in range(0, e, step)]
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="qwen4-exl3-read") as pool:
+            for (start, stop), (prep, publics, bcals) in zip(
+                    spans, prefetch_batches(pool, load_batch, spans)):
+                bt, bsuh, bsvh, bf = quantize_prepared_bank(
+                    prep, publics, bcals, k=k, codebook=codebook, window=window,
+                    scratch_bytes=scratch_bytes, g_scale=g_scale, scale_out=scales,
+                    err_out=errs if quality else None)
+                del prep, publics
+                trellis[start:stop] = bt
+                suh[start:stop] = bsuh
+                svh[start:stop] = bsvh
+                fallbacks += bf
+                del bt, bsuh, bsvh
+        named = {
+            base + ".trellis": ("U16", trellis.shape, trellis.tobytes()),
+            base + ".suh": ("F16", suh.shape, suh.tobytes()),
+            base + ".svh": ("F16", svh.shape, svh.tobytes()),
+        }
+        write_safetensors_raw(str(dest), named, metadata=stamp)
         for key in named:
             weight_map[key] = shard
-        print(f"wrote {shard}  {__import__('time').perf_counter() - t0:.1f}s  e={e} in={in_dim} out={out_dim}", flush=True)
+        if errs:
+            werr[shard] = list(errs)
+        dt = time.perf_counter() - t0
+        after = search_stats_snapshot()
+        gpu = after["seconds"] - before["seconds"]
+        print(f"wrote {shard}  {dt:.1f}s  e={e} in={in_dim} out={out_dim} "
+              f"prior_fallback={fallbacks}  g[{min(scales, default=1.0):.2f},"
+              f"{max(scales, default=1.0):.2f}]  werr {sum(errs) / max(len(errs), 1):.5f}"
+              f"  search {gpu:.1f}s ({100.0 * gpu / max(dt, 1e-9):.1f}% of wall, "
+              f"{(after['tiles'] - before['tiles']) / max(gpu, 1e-9):.0f} tiles/s)", flush=True)
+        del trellis, suh, svh, named
+
+    def read_bank(hf_file: str, hf_key: str):
+        header, data_off = read_header(hf_dir / hf_file)
+        return read_raw(hf_dir / hf_file, data_off, header[hf_key])
 
     for hf_key, hf_file in hf_map.items():
+        mtp = hf_key.startswith(MTP_SRC_PREFIX)
         if hf_key.endswith("experts.gate_up_proj"):
-            header, data_off = read_header(hf_dir / hf_file)
-            arr = read_raw(hf_dir / hf_file, data_off, header[hf_key])
-            if arr.dtype == np.uint16:
-                from convert_dsv4_weights import bf16_to_f32
-                arr = bf16_to_f32(arr)
-            arr = np.asarray(arr, dtype=np.float32)
+            arr = read_bank(hf_file, hf_key)
             half = arr.shape[1] // 2
-            gate = np.ascontiguousarray(arr[:, :half])
-            up = np.ascontiguousarray(arr[:, half:])
             gu_flat = None if imatrix is None else imatrix.get(hf_key)
             gu_rows = None if imatrix is None else imatrix.get(hf_key + ".rows")
             layer = parse_layer_from_hf_key(hf_key)
-            for proj, bank in (("gate", gate), ("up", up)):
+            for proj, lo in (("gate", 0), ("up", half)):
                 base = mlx_switch_base(hf_key, proj)
-                emit(layer, proj, base, bank, gu_flat, gu_rows, hf_key + "." + proj)
+                emit(layer, proj, base, arr, lo, lo + half, gu_flat, gu_rows,
+                     hf_key + "." + proj, mtp)
+            del arr
         elif hf_key.endswith("experts.down_proj"):
-            header, data_off = read_header(hf_dir / hf_file)
-            arr = read_raw(hf_dir / hf_file, data_off, header[hf_key])
-            if arr.dtype == np.uint16:
-                from convert_dsv4_weights import bf16_to_f32
-                arr = bf16_to_f32(arr)
-            arr = np.asarray(arr, dtype=np.float32)
+            arr = read_bank(hf_file, hf_key)
             base = mlx_switch_base(hf_key, "down")
             parent = hf_key.replace("experts.down_proj", "experts.gate_up_proj")
             dn_flat = None if imatrix is None else imatrix.get(hf_key)
             gu_rows = None if imatrix is None else imatrix.get(parent + ".rows")
             layer = parse_layer_from_hf_key(hf_key)
-            emit(layer, "down", base, arr, dn_flat, gu_rows, hf_key)
+            emit(layer, "down", base, arr, 0, arr.shape[1], dn_flat, gu_rows, hf_key, mtp)
+            del arr
     total = 0
     for fname in sorted(set(weight_map.values())):
         total += os.path.getsize(dst / fname)
@@ -1071,24 +1043,24 @@ def convert_pack(
         {"metadata": {"total_size": total}, "weight_map": weight_map}, indent=2
     ))
     cfg = json.loads((pack_dir / "config.json").read_text())
-    if imatrix is not None:
-        cal_tag = "imatrix-diagonal"
-    elif calibration is not None:
-        cal_tag = "captured-rows"
-    elif quantizer == "ldlq":
-        cal_tag = "ldlq-gaussian-256"
-    else:
-        cal_tag = "none-direct"
-    cfg["expert_quant"] = expert_quant_block("convert", k=int(k), codebook=codebook, quantizer=quantizer, calibration=cal_tag)
+    cfg["expert_quant"] = expert_quant_block(
+        "convert", k=k, codebook=codebook, window=int(window), quantizer=stamp["quantizer"],
+        calibration=cal_tag, imatrix_sha256=stamp["imatrix_sha256"], converter=stamp["converter"])
     (dst / "config.json").write_text(json.dumps(cfg, indent=2))
     plan["zero_routed"] = zero_routed
     plan["calibration"] = cal_tag
     plan["skipped"] = skipped
+    plan["rewritten"] = rewritten
+    plan["stamp"] = stamp
+    plan["weighted_rel_err"] = werr
+    plan["search"] = search_stats_snapshot()
     return plan
 
 
-def layer_proj_shard(layer: int, proj: str) -> str:
-    return f"model-exl3-L{layer:02d}-{proj}.safetensors"
+def layer_proj_shard(layer: int, proj: str, *, mtp: bool = False) -> str:
+    """The MTP head carries its OWN `layers.0` MoE bank at the trunk's exact geometry,
+    so the two need different file names or the second silently adopts the first."""
+    return f"model-exl3-{'mtp-' if mtp else ''}L{layer:02d}-{proj}.safetensors"
 
 
 def parse_layer_from_hf_key(hf_key: str) -> int:
@@ -1099,23 +1071,11 @@ def parse_layer_from_hf_key(hf_key: str) -> int:
     return int(m.group(1))
 
 
-def shard_is_valid(path: str | Path, n_experts: int, in_dim: int, out_dim: int, k: int) -> bool:
-    p = Path(path)
-    if not p.is_file():
-        return False
-    try:
-        header, _ = read_header(p)
-    except Exception:
-        return False
-    trellis_keys = [k for k in header if k.endswith(".trellis")]
-    if len(trellis_keys) != 1:
-        return False
-    sh = list(header[trellis_keys[0]]["shape"])
-    if len(sh) != 4:
-        return False
-    if sh[:3] != [n_experts, in_dim // 16, out_dim // 16]:
-        return False
-    return sh[3] == packed_hw(k)
+def shard_is_valid(path: str | Path, n_experts: int, in_dim: int, out_dim: int, k,
+                   stamp: dict[str, str] | None = None) -> bool:
+    """Geometry alone cannot tell a K3/w8/LDLQ shard from a K3/w16/direct one; a resume
+    that adopts by shape ships a pack whose layers were quantized different ways."""
+    return shard_reuse_refusal(path, n_experts, in_dim, out_dim, k, stamp) is None
 
 
 def imatrix_layer_keys(layer: int) -> tuple[str, str, str]:
@@ -1327,22 +1287,22 @@ class RestackTests(unittest.TestCase):
                     self.assertEqual(tuple(header[key]["shape"]), (e, inn // 16, outn // 16, want[proj]))
 
 
-def _write_resume_fixture(hf: Path, pack: Path, rng) -> None:
+def _write_resume_fixture(hf: Path, pack: Path, rng, *, with_mtp: bool = False) -> None:
     hf.mkdir(); pack.mkdir()
     e, hidden, inter = 2, 128, 128
-    write_safetensors_raw(str(hf / "model.safetensors"), {
-        "model.language_model.layers.0.mlp.experts.gate_up_proj": (
-            "F32", (e, 2 * inter, hidden), rng.standard_normal((e, 2 * inter, hidden), dtype=np.float32).tobytes()),
-        "model.language_model.layers.0.mlp.experts.down_proj": (
-            "F32", (e, hidden, inter), rng.standard_normal((e, hidden, inter), dtype=np.float32).tobytes()),
-    })
+    prefixes = ["model.language_model."] + ([MTP_SRC_PREFIX] if with_mtp else [])
+    tensors, hf_map = {}, {}
+    for prefix in prefixes:
+        gu = f"{prefix}layers.0.mlp.experts.gate_up_proj"
+        dn = f"{prefix}layers.0.mlp.experts.down_proj"
+        tensors[gu] = ("F32", (e, 2 * inter, hidden),
+                       rng.standard_normal((e, 2 * inter, hidden), dtype=np.float32).tobytes())
+        tensors[dn] = ("F32", (e, hidden, inter),
+                       rng.standard_normal((e, hidden, inter), dtype=np.float32).tobytes())
+        hf_map[gu] = hf_map[dn] = "model.safetensors"
+    write_safetensors_raw(str(hf / "model.safetensors"), tensors)
     (hf / "config.json").write_text("{}")
-    (hf / "model.safetensors.index.json").write_text(json.dumps({
-        "weight_map": {
-            "model.language_model.layers.0.mlp.experts.gate_up_proj": "model.safetensors",
-            "model.language_model.layers.0.mlp.experts.down_proj": "model.safetensors",
-        }
-    }))
+    (hf / "model.safetensors.index.json").write_text(json.dumps({"weight_map": hf_map}))
     write_safetensors_raw(str(pack / "model-00001.safetensors"), {
         "language_model.model.embed_tokens.weight": ("F32", (4,), np.zeros(4, np.float32).tobytes()),
     })
@@ -2276,10 +2236,14 @@ class ComponentOutputTests(unittest.TestCase):
             "--component-output", "components", "--share-with", "existing",
         ]), patch.object(sys.modules[__name__], "convert_pack") as convert, \
                 patch.object(sys.modules[__name__], "repack_component_output") as repack:
+            convert.return_value = {"search": search_stats_snapshot(), "skipped": 0,
+                                    "rewritten": [], "weighted_rel_err": {}}
             self.assertEqual(main(), 0)
         convert.assert_called_once_with(
-            "hf", "pack", "staged", quantizer="direct", k=4, codebook="mul1", calibration=None,
-            imatrix=None, batch_size=32,
+            "hf", "pack", "staged", quantizer="direct", k=4, codebook="mul1",
+            window=WINDOW_DEFAULT, calibration=None, imatrix=None, imatrix_sha=None,
+            batch_size=BATCH_EXPERTS_DEFAULT, scratch_gb=SCRATCH_GB_DEFAULT,
+            g_scale=True, quality=True, resume=True,
         )
         repack.assert_called_once_with("staged", "components", "existing")
 
@@ -2318,6 +2282,389 @@ class ComponentOutputTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 main()
         self.assertEqual(cm.exception.code, 2)
+
+
+# The rotated-Hessian / global-scale / window battery, at this checkpoint's own geometry:
+# a gate or up expert is public [hidden, inter] = [2560, 640] and a down expert is its
+# transpose, so both axes are multiples of the 128-point Hadamard block. The synthetic
+# shapes below keep that 4:1 aspect at a size the GPU search finishes in milliseconds.
+
+SYN_ROWS = 2 * HAD_BLOCK
+SYN_COLS = HAD_BLOCK // 2
+
+
+def _regularized(rows=SYN_ROWS, cols=4 * SYN_COLS, seed=41):
+    _ensure_lib()
+    from ponyexl3.convert.regularize import regularize_public_weight
+    rng = np.random.default_rng(seed)
+    return regularize_public_weight(rng.standard_normal((rows, cols), dtype=np.float32), seed=1)
+
+
+class RotatedCalibrationTests(unittest.TestCase):
+    """The imatrix diagonal is per PUBLIC input channel; the search runs on the inner
+    matrix. Handing LDLQ the unrotated diagonal silently discards the calibration."""
+
+    def test_the_rotated_hessian_is_what_ponyexl3_builds_from_the_same_statistic(self):
+        _ensure_lib()
+        from ponyexl3.convert.hessian import capture_hessian, public_activations_to_inner
+        rng = np.random.default_rng(31)
+        h = np.abs(rng.standard_normal(SYN_ROWS, dtype=np.float32)) + 0.05
+        suh = rng.standard_normal(SYN_ROWS, dtype=np.float32)
+        want = capture_hessian(public_activations_to_inner(np.diag(np.sqrt(h)).astype(np.float32), suh),
+                               normalize=False)
+        got = _common.inner_hessian_blocks(h, suh)
+        self.assertEqual(got.shape, (SYN_ROWS // HAD_BLOCK, HAD_BLOCK, HAD_BLOCK))
+        for b in range(got.shape[0]):
+            lo = b * HAD_BLOCK
+            self.assertTrue(np.allclose(got[b], want[lo:lo + HAD_BLOCK, lo:lo + HAD_BLOCK],
+                                        rtol=1e-4, atol=1e-4), msg=f"block {b}")
+
+    def test_the_unrotated_public_diagonal_would_have_had_no_feedback_at_all(self):
+        """Red-on-revert for the basis bug this converter shipped: `diag_hessian(v)` ->
+        `prepare_hessian_for_ldl` -> `block_ldl` factors to exactly the identity, so the
+        old `--quantizer ldlq` was a direct search wearing a calibration's name."""
+        rng = np.random.default_rng(33)
+        v = np.abs(rng.standard_normal(HAD_BLOCK, dtype=np.float32)) + 0.05
+        self.assertTrue(_common.ldl_is_feedbackless(_common.ldl_factor(diag_hessian(v))))
+        blocks = _common.inner_hessian_blocks(v, _regularized(rows=HAD_BLOCK).suh)
+        self.assertFalse(_common.ldl_is_feedbackless(_common.inner_ldl_blocks(blocks)))
+
+    def test_rotated_feedback_beats_the_direct_search_on_the_calibrated_objective(self):
+        import mlx.core as mx
+        from ponyexl3.ref.reconstruct import reconstruct_inner
+        rng = np.random.default_rng(35)
+        regs, blocks, diags = [], [], []
+        for i in range(4):
+            reg = _regularized(rows=HAD_BLOCK, cols=4 * HAD_BLOCK, seed=200 + i)
+            h = np.abs(rng.standard_normal(HAD_BLOCK, dtype=np.float32)) + 0.05
+            regs.append(reg)
+            diags.append(h)
+            blocks.append(_common.imatrix_ldl_blocks(h, reg.suh))
+        cb = codebook_mode(CODEBOOK)
+        fed = _common.ldlq_group_mlx(
+            mx.array(np.stack([r.inner for r in regs]), dtype=mx.float32),
+            mx.array(np.stack(blocks), dtype=mx.float32),
+            k=3, cb=cb, window=WINDOW_DEFAULT, scratch_bytes=1 << 29)
+        better = 0
+        for i, reg in enumerate(regs):
+            plain = _common.quantize_inner_direct(reg.inner, k=3, cb=cb,
+                                                  window=WINDOW_DEFAULT, chunk=4096)[0]
+            hb = _common.inner_hessian_blocks(diags[i], reg.suh)[0]
+
+            def weighted(packed):
+                d = np.asarray(reconstruct_inner(packed, 3, mul1=True), np.float32) - reg.inner
+                return float(np.sum(d * (hb @ d)))
+            better += weighted(fed[i]) < weighted(plain)
+        self.assertGreaterEqual(better, 3, "feedback did not help on 3 of 4 experts")
+
+    def test_the_calibration_reaches_regularize_public_weight(self):
+        """`regularize_public_weight(hessian_diag=...)` is what keeps a cancelling gate's
+        suppressed outputs negative; the converter used to call it without one."""
+        _ensure_lib()
+        from ponyexl3.convert.regularize import regularize_public_weight
+        rng = np.random.default_rng(711)
+        public = rng.standard_normal((HAD_BLOCK, HAD_BLOCK), dtype=np.float32)
+        public *= np.linspace(0.1, 3.0, HAD_BLOCK, dtype=np.float32)[None, :]
+        skewed = np.ones(HAD_BLOCK, dtype=np.float32)
+        skewed[0] = 1e8
+        for quantizer in ("direct", "ldlq"):
+            for cal in (None, np.ones(HAD_BLOCK, np.float32), skewed):
+                want = regularize_public_weight(public, seed=713, hessian_diag=cal)
+                got = prepare_expert_bank([public], [713], [cal], quantizer=quantizer)
+                np.testing.assert_array_equal(got.inner[0], want.inner)
+                np.testing.assert_array_equal(got.suh[0], want.suh)
+                np.testing.assert_array_equal(got.svh[0], want.svh)
+        self.assertFalse(np.array_equal(
+            regularize_public_weight(public, seed=713).inner,
+            regularize_public_weight(public, seed=713, hessian_diag=skewed).inner))
+
+    def test_an_expert_no_token_reached_takes_the_rotated_flat_prior(self):
+        rng = np.random.default_rng(51)
+        suh = rng.standard_normal(HAD_BLOCK, dtype=np.float32)
+        prior = _common.prior_ldl_blocks(suh)
+        self.assertGreater(float(np.abs(prior).max()), 0.05,
+                           "a varying suh makes even a FLAT public Hessian dense")
+        cals = bank_calibrations(2, 4, calibration=None,
+                                 imatrix_flat=np.ones(8, np.float32),
+                                 routed_rows=np.array([5.0, 0.0], np.float32),
+                                 zero_routed=(zeros := []), layer_key="L0.gate")
+        self.assertIsNotNone(cals[0])
+        self.assertIsNone(cals[1])
+        self.assertEqual(zeros, ["L0.gate#1"])
+
+
+class GlobalScaleTests(unittest.TestCase):
+    """`regularize_public_weight` divides by MCG's measured RMS, so every other codebook
+    lands off its own scale unless the bounded golden-section search corrects for it."""
+
+    def test_the_search_is_bounded_and_brackets_this_converters_codebook(self):
+        self.assertIn(CODEBOOK, _common.G_SCALE_BRACKET)
+        for low, high in _common.G_SCALE_BRACKET.values():
+            self.assertLessEqual(_common.g_scale_iterations(low, high) + 2,
+                                 _common.G_SCALE_MAX_EVALS)
+
+    def test_the_found_scale_beats_one_on_the_sampled_tiles(self):
+        import mlx.core as mx
+        reg = _regularized(rows=HAD_BLOCK, cols=2 * HAD_BLOCK)
+        rows, cols = reg.inner.shape
+        index = _common.sample_tile_index(rows, cols, count=64)
+        tiles = _common.sample_tiles_mlx(mx.array(reg.inner[None], dtype=mx.float32), index)
+        cb = codebook_mode(CODEBOOK)
+        g = float(np.array(_common.g_scale_search_mlx(
+            tiles, k=3, cb=cb, codebook=CODEBOOK, window=WINDOW_DEFAULT,
+            scratch_bytes=1 << 29))[0])
+        from ponyexl3.convert.direct import _TENSOR_CORE_PERM
+        sample = np.array(tiles)[0][:, _TENSOR_CORE_PERM]
+
+        def mse(scale):
+            _s, decoded = _common.search_tiles(np.ascontiguousarray(sample * np.float32(scale)),
+                                               k=3, cb=cb, window=WINDOW_DEFAULT, chunk=4096,
+                                               want_decoded=True)
+            return float(np.mean((decoded / np.float32(scale) - sample) ** 2, dtype=np.float64))
+        self.assertLess(mse(g), mse(1.0), f"g={g} did not beat the unscaled search")
+
+
+class WindowTests(unittest.TestCase):
+    def _searched(self, window, k=3, rows=HAD_BLOCK, cols=HAD_BLOCK):
+        cb = codebook_mode(CODEBOOK)
+        reg = _regularized(rows=rows, cols=cols, seed=77)
+        to_tiles, from_tiles = _common._tile_helpers()
+        states, decoded = _common.search_tiles(to_tiles(reg.inner), k=k, cb=cb, window=window,
+                                               chunk=4096, want_decoded=True)
+        packed = _common.pack_states(states, k, rows // 16, cols // 16)
+        return packed, from_tiles(decoded, rows, cols)
+
+    def test_a_w8_pack_decodes_to_exactly_what_the_search_chose(self):
+        from ponyexl3.ref.reconstruct import reconstruct_inner
+        packed, want = self._searched(8)
+        got = np.asarray(reconstruct_inner(packed, 3, mul1=True, window=8), np.float32)
+        self.assertTrue(np.allclose(got, want, rtol=0, atol=1e-3),
+                        msg=f"max |diff| {float(np.abs(got - want).max())}")
+
+    def test_a_w8_pack_read_at_w16_is_noise(self):
+        """Red-on-revert for `expert_quant.window`: the window is a DECODE parameter."""
+        from ponyexl3.ref.reconstruct import reconstruct_inner
+        packed, want = self._searched(8)
+        right = np.asarray(reconstruct_inner(packed, 3, mul1=True, window=8), np.float32)
+        wrong = np.asarray(reconstruct_inner(packed, 3, mul1=True, window=16), np.float32)
+        self.assertLess(float(np.mean((right - want) ** 2)), 1e-5)
+        self.assertGreater(float(np.mean((wrong - want) ** 2)), 0.1)
+
+    def test_the_window_must_sit_in_the_searchs_own_range(self):
+        for good in (8, 12, 16):
+            self.assertEqual(validate_window(good, 3), good)
+        for bad in (3, 2, 25):
+            with self.assertRaises(RuntimeError):
+                validate_window(bad, 3)
+
+    def test_the_pack_records_the_window_it_was_searched_at(self):
+        rng = np.random.default_rng(91)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            hf, pack, dst = td / "hf", td / "pack", td / "out"
+            _write_resume_fixture(hf, pack, rng)
+            convert_pack(hf, pack, dst, quantizer="direct", k=3, window=8, quality=False)
+            cfg = json.loads((dst / "config.json").read_text())
+            self.assertEqual(cfg["expert_quant"]["window"], 8)
+            self.assertEqual(cfg["expert_quant"]["k"], 3)
+            self.assertEqual(read_stamp(dst / layer_proj_shard(0, "gate"))["window"], "8")
+
+
+class ConvertedPackTests(unittest.TestCase):
+    """Converter-level red-on-revert: each of these passed on the pre-port converter only
+    because the calibration and the scale search never reached the weights."""
+
+    @staticmethod
+    def _payload(path) -> bytes:
+        header, off = read_header(path)
+        return b"".join(_common.read_raw(path, off, header[key]).tobytes()
+                        for key in sorted(header))
+
+    @staticmethod
+    def _imatrix(rows_vec, e=2, dim=128, *, skew: bool = True) -> dict:
+        """A real capture is SKEWED — a few input channels carry most of the activation
+        energy, which is what makes `regularize_public_weight` drop the output scales."""
+        rng = np.random.default_rng(21)
+        p = "model.language_model.layers.0.mlp.experts."
+        store = {}
+        for name in ("gate_up_proj", "down_proj"):
+            v = np.abs(rng.standard_normal(e * dim, dtype=np.float32)) + 0.1
+            if skew:
+                v.reshape(e, dim)[:, :2] = 1e6
+            store[p + name] = v
+        store[p + "gate_up_proj.rows"] = np.asarray(rows_vec, dtype=np.float32)
+        return store
+
+    def _three(self, td, **kw):
+        td = Path(td)
+        hf, pack = td / "hf", td / "pack"
+        if not hf.exists():
+            _write_resume_fixture(hf, pack, np.random.default_rng(9))
+        out = td / kw.pop("tag")
+        args = dict(quantizer="direct", k=3, quality=False)
+        args.update(kw)
+        convert_pack(hf, pack, out, **args)
+        return [self._payload(out / layer_proj_shard(0, p)) for p in PROJECTIONS]
+
+    def test_an_imatrix_changes_the_weights_even_on_the_direct_path(self):
+        """`regularize_public_weight` takes the calibration diagonal, so an imatrix moves
+        the inner matrix before any search runs; the converter used to drop it there."""
+        with tempfile.TemporaryDirectory() as td:
+            plain = self._three(td, tag="plain")
+            calibrated = self._three(td, tag="cal", imatrix=self._imatrix([8.0, 8.0]),
+                                     imatrix_sha="abc")
+            self.assertEqual([a != b for a, b in zip(plain, calibrated)], [True] * 3)
+
+    def test_ldlq_does_not_collapse_into_the_direct_pack(self):
+        """Feeding LDLQ the raw public diagonal produced an identity factor and a pack
+        byte-identical to `--quantizer direct`. Under the rotated Hessian they differ:
+        that difference IS the calibration."""
+        with tempfile.TemporaryDirectory() as td:
+            imat = self._imatrix([8.0, 8.0])
+            direct = self._three(td, tag="direct", imatrix=imat, imatrix_sha="abc")
+            ldlq = self._three(td, tag="ldlq", quantizer="ldlq", imatrix=imat, imatrix_sha="abc")
+            self.assertEqual([a != b for a, b in zip(direct, ldlq)], [True] * 3)
+
+    def test_the_global_scale_search_changes_the_weights(self):
+        with tempfile.TemporaryDirectory() as td:
+            searched = self._three(td, tag="gss")
+            at_one = self._three(td, tag="one", g_scale=False)
+            self.assertEqual([a != b for a, b in zip(searched, at_one)], [True] * 3)
+
+    def test_the_pack_reconstructs_the_source_bank(self):
+        from ponyexl3.ref.reconstruct import reconstruct_public_weights
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            hf, pack, dst = td / "hf", td / "pack", td / "out"
+            _write_resume_fixture(hf, pack, np.random.default_rng(23))
+            convert_pack(hf, pack, dst, quantizer="ldlq", k=4, window=12,
+                         imatrix=self._imatrix([8.0, 0.0]), imatrix_sha="abc")
+            src_header, src_off = read_header(hf / "model.safetensors")
+            key = "model.language_model.layers.0.mlp.experts.gate_up_proj"
+            want = np.ascontiguousarray(
+                read_raw(hf / "model.safetensors", src_off, src_header[key])[0, :128].T)
+            shard = dst / layer_proj_shard(0, "gate")
+            header, off = read_header(shard)
+            base = "language_model.model.layers.0.mlp.switch_mlp.gate_proj"
+            got = np.asarray(reconstruct_public_weights(
+                _common.read_raw(shard, off, header[base + ".trellis"])[0],
+                _common.read_raw(shard, off, header[base + ".suh"])[0],
+                _common.read_raw(shard, off, header[base + ".svh"])[0], 4, mul1=True,
+                window=12), dtype=np.float32)
+            rel = float(np.sqrt(np.sum((got - want) ** 2) / np.sum(want ** 2)))
+            self.assertTrue(np.all(np.isfinite(got)))
+            self.assertLess(rel, 0.6, msg=f"relative reconstruction error {rel}")
+
+
+class StampedResumeTests(unittest.TestCase):
+    def _convert(self, td, **kw):
+        td = Path(td)
+        hf, pack, dst = td / "hf", td / "pack", td / "out"
+        if not hf.exists():
+            _write_resume_fixture(hf, pack, np.random.default_rng(5))
+        args = dict(quantizer="direct", k=4, quality=False)
+        args.update(kw)
+        return hf, pack, dst, convert_pack(hf, pack, dst, **args)
+
+    def test_every_shard_carries_the_settings_that_wrote_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            _hf, _pack, dst, _plan = self._convert(td, k=3, window=12, codebook="tiny")
+            got = read_stamp(dst / layer_proj_shard(0, "down"))
+            self.assertEqual(got, shard_stamp(k=3, codebook="tiny", window=12,
+                                              quantizer="direct", imatrix_sha=None))
+            self.assertEqual(got["converter"], CONVERTER_VERSION)
+            self.assertNotIn("/", CONVERTER_VERSION)
+
+    def test_a_shard_of_another_codebook_window_or_quantizer_is_not_adopted(self):
+        with tempfile.TemporaryDirectory() as td:
+            hf, pack, dst, first = self._convert(td, k=3, window=16)
+            self.assertEqual(first["skipped"], 0)
+            same = convert_pack(hf, pack, dst, quantizer="direct", k=3, window=16, quality=False)
+            self.assertEqual(same["skipped"], 3)
+            self.assertEqual(same["rewritten"], [])
+            for label, kw, needle in (
+                ("codebook", dict(codebook="tiny"), "codebook=mul1 != tiny"),
+                ("window", dict(window=8), "window=16 != 8"),
+                ("quantizer", dict(quantizer="ldlq"), "quantizer=direct != ldlq-rotated"),
+                ("g_scale", dict(g_scale=False), "g_scale=gss != one"),
+            ):
+                args = dict(quantizer="direct", k=3, window=16, quality=False)
+                args.update(kw)
+                plan = convert_pack(hf, pack, dst, **args)
+                self.assertEqual(plan["skipped"], 0, label)
+                self.assertEqual(len(plan["rewritten"]), 3, label)
+                self.assertIn(needle, plan["rewritten"][0], label)
+                # restore the baseline so the next arm differs in ONE setting
+                convert_pack(hf, pack, dst, quantizer="direct", k=3, window=16, quality=False)
+
+    def test_an_unstamped_shard_is_named_not_adopted(self):
+        with tempfile.TemporaryDirectory() as td:
+            hf, pack, dst, _ = self._convert(td, k=3)
+            shard = dst / layer_proj_shard(0, "gate")
+            header, off = read_header(shard)
+            write_safetensors_raw(str(shard), {
+                key: (meta["dtype"], tuple(meta["shape"]),
+                      _common.read_raw(shard, off, meta).tobytes())
+                for key, meta in header.items()})
+            plan = convert_pack(hf, pack, dst, quantizer="direct", k=3, quality=False)
+            self.assertEqual(plan["skipped"], 2)
+            self.assertEqual(plan["rewritten"],
+                             [f"{layer_proj_shard(0, 'gate')}: no stamp"])
+
+    def test_no_resume_rewrites_a_matching_shard(self):
+        with tempfile.TemporaryDirectory() as td:
+            hf, pack, dst, _ = self._convert(td, k=3)
+            plan = convert_pack(hf, pack, dst, quantizer="direct", k=3, quality=False,
+                                resume=False)
+            self.assertEqual(plan["skipped"], 0)
+            self.assertEqual(plan["rewritten"], [])
+
+    def test_an_imatrix_of_another_capture_is_not_adopted(self):
+        with tempfile.TemporaryDirectory() as td:
+            hf, pack, dst, _ = self._convert(td, k=3)
+            imat = {
+                "model.language_model.layers.0.mlp.experts.gate_up_proj": np.ones(2 * 128, np.float32),
+                "model.language_model.layers.0.mlp.experts.down_proj": np.ones(2 * 128, np.float32),
+                "model.language_model.layers.0.mlp.experts.gate_up_proj.rows": np.array([4.0, 4.0], np.float32),
+            }
+            plan = convert_pack(hf, pack, dst, quantizer="direct", k=3, quality=False,
+                                imatrix=imat, imatrix_sha="deadbeef")
+            self.assertEqual(plan["skipped"], 0)
+            self.assertIn("imatrix_sha256=none != deadbeef", plan["rewritten"][0])
+            self.assertEqual(read_stamp(dst / layer_proj_shard(0, "gate"))["imatrix_sha256"],
+                             "deadbeef")
+
+    def test_the_seed_is_stable_per_bank_layer_expert_and_projection(self):
+        """A seed that counted emissions made `--resume` write a DIFFERENT pack from a
+        single pass, and made the MTP head's experts reuse trunk layer 0's seeds."""
+        self.assertEqual(expert_seed(3, 9, "up"), expert_seed(3, 9, "up"))
+        distinct = {expert_seed(l, e, p, mtp=m)
+                    for l in (0, 3) for e in (0, 9) for p in PROJECTIONS for m in (False, True)}
+        self.assertEqual(len(distinct), 2 * 2 * 3 * 2)
+        for seed in distinct:
+            self.assertTrue(0 <= seed <= 0x7FFF_FFFF)
+
+    def test_the_mtp_bank_does_not_collide_with_trunk_layer_zero(self):
+        """`mtp.layers.0` carries a MoE bank at the trunk's exact [E, 2I, H] geometry, so
+        a shard named by (layer, projection) alone would adopt the trunk's."""
+        self.assertNotEqual(layer_proj_shard(0, "gate"), layer_proj_shard(0, "gate", mtp=True))
+        self.assertTrue(layer_proj_shard(0, "gate", mtp=True).startswith("model-exl3-mtp-"))
+        rng = np.random.default_rng(17)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            hf, pack, dst = td / "hf", td / "pack", td / "out"
+            _write_resume_fixture(hf, pack, rng, with_mtp=True)
+            plan = convert_pack(hf, pack, dst, quantizer="direct", k=3, quality=False)
+            self.assertEqual(plan["skipped"], 0)
+            shards = sorted(p.name for p in dst.glob("model-exl3-*.safetensors"))
+            self.assertEqual(len(shards), 6)
+            wm = json.loads((dst / "model.safetensors.index.json").read_text())["weight_map"]
+            self.assertEqual(wm["language_model.mtp.layers.0.mlp.switch_mlp.gate_proj.trellis"],
+                             layer_proj_shard(0, "gate", mtp=True))
+            self.assertEqual(wm["language_model.model.layers.0.mlp.switch_mlp.gate_proj.trellis"],
+                             layer_proj_shard(0, "gate"))
+            again = convert_pack(hf, pack, dst, quantizer="direct", k=3, quality=False)
+            self.assertEqual(again["skipped"], 6)
 
 
 def pick_real_experts(hf_dir: str | Path, imatrix_path: str | Path, layer: int = 0) -> int:
@@ -2436,11 +2783,22 @@ def main():
     ap.add_argument("--share-with", default=None,
                     help="existing canonical component pack whose unchanged files may be shared")
     ap.add_argument("--quantizer", default="direct", choices=("ldlq", "direct"))
-    ap.add_argument("--k", type=int, default=K, choices=(2, 3, 4), help="trellis bits per expert weight")
+    ap.add_argument("--k", default=str(K), help="trellis rate, any multiple of 1/16 in [2, 8]")
     ap.add_argument("--codebook", default=CODEBOOK, choices=("mul1", "tiny", "mcg"))
+    ap.add_argument("--window", type=int, default=WINDOW_DEFAULT,
+                    help="codeword window the search hashes, 8..16 served; stamped into the pack")
     ap.add_argument("--calibration", default=None)
     ap.add_argument("--imatrix", default=None)
-    ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--batch-size", type=int, default=BATCH_EXPERTS_DEFAULT,
+                    help="experts quantized per GPU batch")
+    ap.add_argument("--scratch-gb", type=float, default=SCRATCH_GB_DEFAULT,
+                    help="Metal search scratch budget; sets the tiles per launch")
+    ap.add_argument("--no-g-scale", action="store_true",
+                    help="skip the global codebook-scale search (regularize at g=1)")
+    ap.add_argument("--no-quality", action="store_true",
+                    help="skip the per-expert imatrix-weighted reconstruction error")
+    ap.add_argument("--no-resume", action="store_true",
+                    help="rewrite every shard, even one whose stamp already matches")
     args = ap.parse_args()
     if args.share_with and not args.component_output:
         ap.error("--share-with requires --component-output")
@@ -2498,13 +2856,29 @@ def main():
     cal = None
     if args.calibration:
         cal = np.load(os.path.expanduser(args.calibration))
-    imat = None
+    imat = imat_sha = None
     if args.imatrix:
-        imat = load_imatrix(os.path.expanduser(args.imatrix))
-    convert_pack(
-        args.hf, args.pack, args.dst, quantizer=args.quantizer, k=args.k, codebook=args.codebook,
-        calibration=cal, imatrix=imat, batch_size=args.batch_size,
+        imatrix_path = os.path.expanduser(args.imatrix)
+        imat = load_imatrix(imatrix_path)
+        imat_sha = file_sha256(imatrix_path)
+    t0 = time.perf_counter()
+    plan = convert_pack(
+        args.hf, args.pack, args.dst, quantizer=args.quantizer, k=parse_k(args.k),
+        codebook=args.codebook, window=args.window, calibration=cal, imatrix=imat,
+        imatrix_sha=imat_sha, batch_size=args.batch_size, scratch_gb=args.scratch_gb,
+        g_scale=not args.no_g_scale, quality=not args.no_quality, resume=not args.no_resume,
     )
+    wall = time.perf_counter() - t0
+    se = plan["search"]
+    print(f"pack {args.dst}: {plan['skipped']} shards skipped, {len(plan['rewritten'])} "
+          f"rewritten, {wall:.1f}s wall; search {se['seconds']:.1f}s GPU "
+          f"({100.0 * se['seconds'] / max(wall, 1e-9):.1f}% of wall), {se['launches']} "
+          f"launches, {se['tiles']} tiles", flush=True)
+    werr = plan.get("weighted_rel_err") or {}
+    if werr:
+        allv = [x for v in werr.values() for x in v]
+        print(f"imatrix-weighted relative reconstruction error: "
+              f"{len(werr)} shards, mean {sum(allv) / len(allv):.5f}", flush=True)
     if args.component_output:
         repack_component_output(args.dst, args.component_output, args.share_with)
     return 0
