@@ -2673,6 +2673,7 @@ pub fn streamingGeometryOf(config: *const model_mod.ModelConfig) expert_stream_m
         .experts = @intCast(config.num_experts),
         .hidden = config.hidden_size,
         .intermediate = config.moe_intermediate_size,
+        .first_moe_layer = @intCast(config.first_k_dense_replace),
     };
 }
 
@@ -2701,13 +2702,28 @@ pub fn resolveExpertCache(
         budget_bytes,
         split.trunk,
         if (mtp_resident) split.mtp else 0,
-        @intCast(config.num_hidden_layers),
+        @intCast(config.expertLayerCount()),
         @intCast(config.num_experts),
         @intCast(config.num_experts_per_tok),
         per_expert,
         expert_stream_mod.BOUNCE_BYTES,
     );
     return .{ .cache_bytes = ledger.cache_bytes, .ledger = ledger, .overridden = false };
+}
+
+test "mimo_v2 expert cache budget excludes the dense prefix" {
+    const per_expert: u64 = 1024 * 1024;
+    const config = model_mod.ModelConfig{
+        .model_type = "mimo_v2",
+        .num_hidden_layers = 4,
+        .first_k_dense_replace = 1,
+        .num_experts = 8,
+        .num_experts_per_tok = 2,
+    };
+    const fixed = per_expert + 8 * per_expert + 2 * per_expert + expert_stream_mod.BOUNCE_BYTES;
+    const result = try resolveExpertCache(0, fixed + 9 * per_expert, &config, .{ .trunk = per_expert, .mtp = 0 }, false, per_expert);
+    try std.testing.expectEqual(@as(u16, 3), result.ledger.?.slots_per_layer);
+    try std.testing.expectEqual(9 * per_expert, result.cache_bytes);
 }
 
 /// Frees the three CPU-state pointers. Does NOT free `s.gguf` — the
@@ -3732,7 +3748,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         const budget = streaming_budget;
         if (params.expert_cache_bytes == 0 and budget.bytes == 0) return error.ExpertStreamingRequired;
         const geometry = streamingGeometryOf(params.config);
-        const layout = expert_stream_mod.quant.layoutOfDir(sch.allocator, sch.io, params.config.model_type, params.model_dir, geometry.layers) orelse
+        const layout = expert_stream_mod.quant.layoutOfDirWithFirstMoe(sch.allocator, sch.io, params.config.model_type, params.model_dir, geometry.layers, geometry.first_moe_layer) orelse
             return error.ExpertStreamingUnsupportedLayout;
         if (layout == .exl3_k4) return error.ExpertLayoutUnsupported;
         params.config.expert_layout = layout;
@@ -3759,7 +3775,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
             });
         const plan = try expert_stream_mod.cachePlanBytes(
             resolved.cache_bytes,
-            geometry.layers,
+            @intCast(params.config.expertLayerCount()),
             geometry.experts,
             per_expert,
         );

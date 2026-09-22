@@ -805,14 +805,14 @@ pub fn loadModel(io: std.Io, allocator: std.mem.Allocator, opts: Options) !*Load
         }
         const mtp_resident = false;
         const geometry = scheduler_mod.streamingGeometryOf(&self.config);
-        self.config.expert_layout = expert_stream_mod.quant.layoutOfDir(allocator, io, self.config.model_type, opts.model_dir, geometry.layers) orelse
+        self.config.expert_layout = expert_stream_mod.quant.layoutOfDirWithFirstMoe(allocator, io, self.config.model_type, opts.model_dir, geometry.layers, geometry.first_moe_layer) orelse
             return error.ExpertStreamingUnsupportedLayout;
         const per_expert = try expert_stream_mod.expertBytesFor(allocator, opts.model_dir, geometry, self.config.expert_layout);
         const split = try model_mod.streamingResidentSplit(io, allocator, opts.model_dir, self.config.expert_layout);
         const resolved = try scheduler_mod.resolveExpertCache(opts.expert_cache_bytes, budget.bytes, &self.config, split, mtp_resident, per_expert);
         const plan = try expert_stream_mod.cachePlanBytes(
             resolved.cache_bytes,
-            geometry.layers,
+            @intCast(self.config.expertLayerCount()),
             geometry.experts,
             per_expert,
         );

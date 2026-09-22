@@ -51,18 +51,41 @@ pub fn expertBytes(gate_up_rows: u32, hidden: u32, intermediate: u32) !u64 {
     return std.math.mul(u64, std.math.add(u64, gate_elems, down_elems) catch return error.InvalidExpertGeometry, 2) catch return error.InvalidExpertGeometry;
 }
 
+pub fn moeLayerCount(geometry: Geometry) u16 {
+    if (geometry.first_moe_layer >= geometry.layers) return 0;
+    return geometry.layers - geometry.first_moe_layer;
+}
+
+/// Native MXFP4 bytes per expert: two U32-packed gate/up weights, one U32
+/// down weight, and their U8 e8m0 scale banks. Bias slots are absent.
+pub fn mxfp4ExpertBytes(hidden: u32, intermediate: u32) !u64 {
+    if (hidden == 0 or intermediate == 0 or hidden % 32 != 0 or intermediate % 32 != 0)
+        return error.InvalidExpertGeometry;
+    const hidden_u: u64 = hidden;
+    const intermediate_u: u64 = intermediate;
+    const gate_weight = std.math.mul(u64, intermediate_u, hidden_u / 8) catch return error.InvalidExpertGeometry;
+    const down_weight = std.math.mul(u64, hidden_u, intermediate_u / 8) catch return error.InvalidExpertGeometry;
+    const gate_scale = std.math.mul(u64, intermediate_u, hidden_u / 32) catch return error.InvalidExpertGeometry;
+    const down_scale = std.math.mul(u64, hidden_u, intermediate_u / 32) catch return error.InvalidExpertGeometry;
+    const weight_elements = gate_weight *| 2 +| down_weight;
+    const weight_bytes = std.math.mul(u64, weight_elements, 4) catch return error.InvalidExpertGeometry;
+    const scale_bytes = gate_scale *| 2 +| down_scale;
+    return weight_bytes +| scale_bytes;
+}
+
 /// Per-expert bytes of whichever routed-expert layout this checkpoint ships:
 /// the fused bf16 pair, or the sum of the nine quantized slices the pack stores.
 pub fn expertBytesFor(allocator: std.mem.Allocator, model_dir: []const u8, geometry: Geometry, layout: quant.Layout) !u64 {
     switch (layout) {
         .bf16_fused => return expertBytes(2 * geometry.intermediate, geometry.hidden, geometry.intermediate),
-        .quantized_split => {
-            var store = try quant.QuantStore.open(allocator, model_dir, .{
+        .quantized_split, .mxfp4_split => {
+            var store = try quant.QuantStore.openForLayout(allocator, model_dir, .{
                 .layers = geometry.layers,
                 .experts = geometry.experts,
                 .hidden = geometry.hidden,
                 .intermediate = geometry.intermediate,
-            });
+                .first_moe_layer = geometry.first_moe_layer,
+            }, layout);
             defer store.deinit();
             return store.expertBytes();
         },
@@ -101,7 +124,11 @@ pub fn cachePlanBytes(requested_bytes: u64, layers: u16, experts: u16, expert_by
     };
 }
 
-pub const MTP_UNSUPPORTED: []const u8 = "MTP speculative decode is not supported under bf16 expert streaming: spec verify captures per-position SSM state the streamed MoE forward declines";
+pub fn cachePlanBytesForGeometry(requested_bytes: u64, geometry: Geometry, expert_bytes: u64) !CachePlan {
+    return cachePlanBytes(requested_bytes, moeLayerCount(geometry), geometry.experts, expert_bytes);
+}
+
+pub const MTP_UNSUPPORTED: []const u8 = "MTP speculative decode is not supported under expert streaming; disable MTP for this model";
 
 /// PURE: why MTP cannot serve a streamed model, or null. Refused at the door — at load for
 /// `--mtp` and at request parse for an explicit `enable_mtp` — because an armed head reaches
@@ -270,6 +297,16 @@ pub const GroupCache = struct {
     ready: []bool,
     tick: u64 = 0,
 
+    fn empty(allocator: std.mem.Allocator) GroupCache {
+        return .{
+            .allocator = allocator,
+            .expert_to_slot = &.{},
+            .slot_to_expert = &.{},
+            .ages = &.{},
+            .ready = &.{},
+        };
+    }
+
     pub fn init(allocator: std.mem.Allocator, capacity: u16, expert_count: u16) !GroupCache {
         if (capacity == 0 or capacity > expert_count) return error.InvalidCacheCapacity;
         const expert_to_slot = try allocator.alloc(i32, expert_count);
@@ -436,6 +473,9 @@ pub const Geometry = struct {
     experts: u16,
     hidden: u32,
     intermediate: u32,
+    /// Absolute first routed-expert layer. Dense-prefix models keep earlier
+    /// indices addressable but do not allocate an expert bank for them.
+    first_moe_layer: u16 = 0,
 };
 
 pub const Component = enum(u1) {
@@ -487,7 +527,7 @@ pub const ExpertStore = struct {
     }
 
     pub fn layout(self: *const ExpertStore) quant.Layout {
-        return if (self.quantized == null) .bf16_fused else .quantized_split;
+        return if (self.quantized) |*q| q.layout else .bf16_fused;
     }
 
     pub fn componentCount(self: *const ExpertStore) usize {
@@ -495,19 +535,35 @@ pub const ExpertStore = struct {
     }
 
     pub fn spanAt(self: *const ExpertStore, layer: u16, expert: u16, ci: usize) SourceSpan {
-        if (self.quantized) |*q| return q.span(layer, expert, @enumFromInt(ci));
+        if (self.quantized) |*q| return q.span(layer, expert, @fromBackingInt(@intCast(ci)));
         return self.spans[(@as(usize, layer) * self.geometry.experts + expert) * 2 + ci];
+    }
+
+    pub fn hasExpertLayer(self: *const ExpertStore, layer: u16) bool {
+        if (self.quantized) |*q| return q.hasExpertLayer(layer);
+        return layer < self.geometry.layers and layer >= self.geometry.first_moe_layer;
+    }
+
+    pub fn componentPresent(self: *const ExpertStore, ci: usize) bool {
+        if (self.quantized) |*q| return q.componentPresent(@fromBackingInt(@intCast(ci)));
+        return ci < 2;
     }
 
     pub fn slabSpec(self: *const ExpertStore, ci: usize) SlabSpec {
         if (self.quantized) |*q| {
-            const c: quant.Component = @enumFromInt(ci);
+            const c: quant.Component = @fromBackingInt(@intCast(ci));
             const dtype: mlx.mlx_dtype = switch (q.dtypeOf(c)) {
                 .bf16 => .bfloat16,
+                .u8 => .uint8,
                 .u32 => .uint32,
                 .other => .bfloat16,
             };
-            const elem: u8 = if (q.dtypeOf(c) == .u32) 4 else 2;
+            const elem: u8 = switch (q.dtypeOf(c)) {
+                .u8 => 1,
+                .u32 => 4,
+                .bf16 => 2,
+                .other => 0,
+            };
             return .{ .rows = q.rowsOf(c), .cols = q.colsOf(c), .dtype = dtype, .elem_bytes = elem, .slot_bytes = q.slotBytes(c) };
         }
         const rows: u32 = if (ci == 0) 2 * self.geometry.intermediate else self.geometry.hidden;
@@ -534,12 +590,13 @@ pub const ExpertStore = struct {
 
     pub fn openLayout(allocator: std.mem.Allocator, model_dir: []const u8, geometry: Geometry, chosen: quant.Layout) !ExpertStore {
         if (chosen == .bf16_fused) return open(allocator, model_dir, geometry);
-        const q = try quant.QuantStore.open(allocator, model_dir, .{
+        const q = try quant.QuantStore.openForLayout(allocator, model_dir, .{
             .layers = geometry.layers,
             .experts = geometry.experts,
             .hidden = geometry.hidden,
             .intermediate = geometry.intermediate,
-        });
+            .first_moe_layer = geometry.first_moe_layer,
+        }, chosen);
         return .{ .allocator = allocator, .geometry = geometry, .files = &.{}, .spans = &.{}, .quantized = q };
     }
 
@@ -815,11 +872,16 @@ pub const Bf16NgramStore = struct {
 pub var slab_release_timeouts: std.atomic.Value(u64) = .init(0);
 
 const SlabOperand = struct {
-    slab: *io_mod.PageSlab,
-    payload: *io_mod.ImportPayload,
-    array: mlx.mlx_array,
+    present: bool = false,
+    slab: ?*io_mod.PageSlab = null,
+    payload: ?*io_mod.ImportPayload = null,
+    array: mlx.mlx_array = .{ .ctx = null },
     stride: usize,
     count: u32,
+
+    fn absent() SlabOperand {
+        return .{ .stride = 0, .count = 0 };
+    }
 
     fn create(allocator: std.mem.Allocator, count: u32, d0: u32, d1: u32) !SlabOperand {
         return createTyped(allocator, count, d0, d1, .bfloat16, 2);
@@ -839,33 +901,39 @@ const SlabOperand = struct {
             _ = mlx.mlx_array_free(operand.array);
             return error.ExpertSlabImportCopied;
         }
-        return .{ .slab = slab, .payload = payload, .array = operand.array, .stride = stride, .count = count };
+        return .{ .present = true, .slab = slab, .payload = payload, .array = operand.array, .stride = stride, .count = count };
     }
 
     fn destroy(self: *SlabOperand, allocator: std.mem.Allocator, s: mlx.mlx_stream) void {
+        if (!self.present) return;
+        const slab = self.slab orelse return;
+        const payload = self.payload orelse return;
         _ = mlx.mlx_array_free(self.array);
         var attempt: usize = 0;
-        while (self.payload.released.load(.acquire) == 0 and attempt < 32) : (attempt += 1) {
+        while (payload.released.load(.acquire) == 0 and attempt < 32) : (attempt += 1) {
             _ = mlx.mlx_synchronize(s);
             _ = mlx.mlx_clear_cache();
             std.Thread.yield() catch {};
         }
-        if (self.payload.released.load(.acquire) == 0) {
+        if (payload.released.load(.acquire) == 0) {
             const timeouts = slab_release_timeouts.fetchAdd(1, .monotonic) + 1;
-            log.warn("[expert-stream] slab release timed out: {d} bytes stay mapped for MLX and are never freed (timeouts so far {d})\n", .{ self.slab.bytes.len, timeouts });
+            log.warn("[expert-stream] slab release timed out: {d} bytes stay mapped for MLX and are never freed (timeouts so far {d})\n", .{ slab.bytes.len, timeouts });
             self.* = undefined;
             return;
         }
-        self.slab.destroy();
-        allocator.destroy(self.payload);
+        slab.destroy();
+        allocator.destroy(payload);
         self.* = undefined;
     }
 
     fn slotBytes(self: *const SlabOperand, slot: usize) []u8 {
-        return self.slab.bytes[slot * self.stride ..][0..self.stride];
+        if (!self.present) return &.{};
+        const slab = self.slab orelse return &.{};
+        return slab.bytes[slot * self.stride ..][0..self.stride];
     }
 
     fn borrow(self: *const SlabOperand) !mlx.mlx_array {
+        if (!self.present) return error.MissingExpertSlab;
         var handle = mlx.mlx_array_new();
         errdefer _ = mlx.mlx_array_free(handle);
         try mlx.check(mlx.mlx_array_set(&handle, self.array));
@@ -921,8 +989,10 @@ const CacheSnapshot = struct {
 };
 
 fn abortFill(operand: *SlabOperand) void {
-    _ = operand.slab.publish() catch {};
-    operand.slab.retire() catch {};
+    if (!operand.present) return;
+    const slab = operand.slab orelse return;
+    _ = slab.publish() catch {};
+    slab.retire() catch {};
 }
 
 const LayerStats = struct {
@@ -938,6 +1008,7 @@ const LayerStats = struct {
 
 const LayerState = struct {
     cache: GroupCache,
+    active: bool = false,
     slabs: []SlabOperand = &.{},
     stats: LayerStats = .{},
 };
@@ -950,9 +1021,20 @@ fn createSlabSet(allocator: std.mem.Allocator, store: *const ExpertStore, count:
     errdefer for (slabs[0..made]) |*operand| operand.destroy(allocator, s);
     while (made < n) : (made += 1) {
         const spec = store.slabSpec(made);
-        slabs[made] = try SlabOperand.createTyped(allocator, count, spec.rows, spec.cols, spec.dtype, spec.elem_bytes);
+        slabs[made] = if (!store.componentPresent(made) or spec.slot_bytes == 0)
+            SlabOperand.absent()
+        else
+            try SlabOperand.createTyped(allocator, count, spec.rows, spec.cols, spec.dtype, spec.elem_bytes);
     }
     return slabs;
+}
+
+fn presentSlabCount(slabs: []const SlabOperand) u64 {
+    var count: u64 = 0;
+    for (slabs) |operand| {
+        if (operand.present) count += 1;
+    }
+    return count;
 }
 
 pub const Prepared = struct {
@@ -1053,7 +1135,7 @@ pub const Engine = struct {
     pub fn initWithOptions(allocator: std.mem.Allocator, model_dir: []const u8, geometry: Geometry, requested_bytes: u64, s: mlx.mlx_stream, opts: Options) !Engine {
         var store = try ExpertStore.openLayout(allocator, model_dir, geometry, opts.layout);
         errdefer store.deinit();
-        const plan = try cachePlanBytes(requested_bytes, geometry.layers, geometry.experts, store.perExpertBytes());
+        const plan = try cachePlanBytesForGeometry(requested_bytes, geometry, store.perExpertBytes());
         var engine = Engine{
             .allocator = allocator,
             .geometry = geometry,
@@ -1074,24 +1156,25 @@ pub const Engine = struct {
         });
         const before_fallback = io_mod.fallback_imports.load(.monotonic);
         const layers = try allocator.alloc(LayerState, geometry.layers);
-        for (layers) |*layer| layer.* = .{ .cache = undefined };
+        for (layers) |*layer| layer.* = .{ .cache = GroupCache.empty(allocator) };
         engine.layers = layers;
         var initialized: usize = 0;
         errdefer {
-            for (layers[0..initialized]) |*layer| layer.cache.deinit();
+            for (layers[0..initialized]) |*layer| if (layer.active) layer.cache.deinit();
             engine.layers = &.{};
             allocator.free(layers);
         }
-        for (layers) |*layer| {
+        for (layers, 0..) |*layer, layer_index| {
+            initialized += 1;
+            if (!engine.store.hasExpertLayer(@intCast(layer_index))) continue;
             var cache = try GroupCache.init(allocator, plan.slots_per_layer, geometry.experts);
             errdefer cache.deinit();
-            layer.* = .{ .cache = cache };
-            initialized += 1;
+            layer.* = .{ .cache = cache, .active = true };
             layer.slabs = try createSlabSet(allocator, &engine.store, plan.slots_per_layer, s);
-            engine.slab_imports += layer.slabs.len;
+            engine.slab_imports += presentSlabCount(layer.slabs);
         }
         engine.union_slabs = try createSlabSet(allocator, &engine.store, geometry.experts, s);
-        engine.slab_imports += engine.union_slabs.len;
+        engine.slab_imports += presentSlabCount(engine.union_slabs);
         engine.fallback_imports = io_mod.fallback_imports.load(.monotonic) - before_fallback;
         log.info("[expert-stream] cache {d:.3} GB, {d} slots/layer, workspace {d:.3} GB, bounce {d:.3} GB, fallback_imports={d}\n", .{
             @as(f64, @floatFromInt(plan.cache_bytes)) / 1e9,
@@ -1121,7 +1204,7 @@ pub const Engine = struct {
     pub fn deinit(self: *Engine) void {
         self.drainPendingReaders();
         self.releaseSlabs();
-        for (self.layers) |*layer| layer.cache.deinit();
+        for (self.layers) |*layer| if (layer.active) layer.cache.deinit();
         self.allocator.free(self.layers);
         self.store.deinit();
         self.* = undefined;
@@ -1132,6 +1215,8 @@ pub const Engine = struct {
     }
 
     pub fn cacheSlotBytesAt(self: *const Engine, layer: u16, slot: u16, ci: usize) []u8 {
+        if (layer >= self.layers.len or !self.layers[layer].active or ci >= self.layers[layer].slabs.len)
+            return &.{};
         return self.layers[layer].slabs[ci].slotBytes(slot);
     }
 
@@ -1144,7 +1229,7 @@ pub const Engine = struct {
     }
 
     pub fn slotReady(self: *const Engine, layer: u16, slot: u16) bool {
-        return self.layers[layer].cache.ready[slot];
+        return layer < self.layers.len and self.layers[layer].active and self.layers[layer].cache.ready[slot];
     }
 
     pub fn noteRoute(self: *Engine, layer: u16, full_attn: bool, detail: RouteDetail) void {
@@ -1260,6 +1345,7 @@ pub const Engine = struct {
 
     pub fn prepareHost(self: *Engine, layer_index: u16, occurrences: []const u16) !Prepared {
         if (layer_index >= self.layers.len) return error.ExpertLayerOutOfRange;
+        if (!self.layers[layer_index].active) return error.ExpertLayerAbsent;
         self.drainPendingReaders();
         return self.prepareSlab(layer_index, occurrences);
     }
@@ -1297,6 +1383,7 @@ pub const Engine = struct {
 
     fn prepareSlab(self: *Engine, layer_index: u16, occurrences: []const u16) !Prepared {
         const layer = &self.layers[layer_index];
+        if (!layer.active) return error.ExpertLayerAbsent;
         const n = self.store.componentCount();
         if (layer.slabs.len != n) return error.MissingExpertSlab;
         var snapshot = try self.snapshotCache(&layer.cache);
@@ -1315,11 +1402,19 @@ pub const Engine = struct {
 
         var read_begun: usize = 0;
         errdefer if (!committed) for (read_set[0..read_begun]) |*operand| abortFill(operand);
-        while (read_begun < n) : (read_begun += 1) _ = try read_set[read_begun].slab.tryBeginFill();
+        while (read_begun < n) : (read_begun += 1) {
+            if (!read_set[read_begun].present) continue;
+            const slab = read_set[read_begun].slab orelse return error.MissingExpertSlab;
+            _ = try slab.tryBeginFill();
+        }
         var cache_begun: usize = 0;
         errdefer if (!committed) for (layer.slabs[0..cache_begun]) |*operand| abortFill(operand);
         if (use_union) {
-            while (cache_begun < n) : (cache_begun += 1) _ = try layer.slabs[cache_begun].slab.tryBeginFill();
+            while (cache_begun < n) : (cache_begun += 1) {
+                if (!layer.slabs[cache_begun].present) continue;
+                const slab = layer.slabs[cache_begun].slab orelse return error.MissingExpertSlab;
+                _ = try slab.tryBeginFill();
+            }
         }
 
         var spans: std.ArrayList(io_mod.FillSpan) = .empty;
@@ -1328,12 +1423,16 @@ pub const Engine = struct {
         for (resolution.bindings, 0..) |binding, position| {
             if (binding.hit and use_union) {
                 const slot = binding.slot orelse return error.ExpertBindingMissing;
-                for (0..n) |ci| @memcpy(read_set[ci].slotBytes(position), layer.slabs[ci].slotBytes(slot));
+                for (0..n) |ci| {
+                    if (!read_set[ci].present) continue;
+                    @memcpy(read_set[ci].slotBytes(position), layer.slabs[ci].slotBytes(slot));
+                }
                 continue;
             }
             if (binding.hit) continue;
             misses += 1;
             for (0..n) |ci| {
+                if (!read_set[ci].present) continue;
                 const source = self.store.spanAt(layer_index, binding.expert, ci);
                 const dst = if (use_union)
                     read_set[ci].slotBytes(position)
@@ -1351,12 +1450,17 @@ pub const Engine = struct {
                 if (binding.hit) continue;
                 const slot = binding.slot orelse continue;
                 wrote_cache = true;
-                for (0..n) |ci| @memcpy(layer.slabs[ci].slotBytes(slot), read_set[ci].slotBytes(position));
+                for (0..n) |ci| {
+                    if (!layer.slabs[ci].present) continue;
+                    @memcpy(layer.slabs[ci].slotBytes(slot), read_set[ci].slotBytes(position));
+                }
                 layer.cache.markReady(slot);
             }
             for (layer.slabs) |*operand| {
-                _ = try operand.slab.publish();
-                try operand.slab.retire();
+                if (!operand.present) continue;
+                const slab = operand.slab orelse return error.MissingExpertSlab;
+                _ = try slab.publish();
+                try slab.retire();
             }
         } else {
             for (resolution.bindings) |binding| {
@@ -1373,8 +1477,10 @@ pub const Engine = struct {
             taken.slab.retire() catch {};
         };
         while (leased < n) : (leased += 1) {
-            _ = try read_set[leased].slab.publish();
-            held[leased] = .{ .slab = read_set[leased].slab, .lease = try read_set[leased].slab.lease() };
+            if (!read_set[leased].present) continue;
+            const slab = read_set[leased].slab orelse return error.MissingExpertSlab;
+            _ = try slab.publish();
+            held[leased] = .{ .slab = slab, .lease = try slab.lease() };
         }
 
         const remapped = try self.allocator.alloc(u16, occurrences.len);
@@ -1496,6 +1602,24 @@ test "expert stream cache plan uses decimal gigabytes and reserves full workspac
     try t.expectEqual(@as(u64, 48 * 127 * 9_830_400), p.cache_bytes);
     try t.expectEqual(@as(u64, 512 * 9_830_400), p.workspace_bytes);
     try t.expectEqual(@as(u64, 8 * 64 * 1024 * 1024), p.bounce_bytes);
+}
+
+test "expert stream MXFP4 byte plan and dense prefix use absolute layers" {
+    const t = std.testing;
+    const geometry = Geometry{
+        .layers = 48,
+        .experts = 256,
+        .hidden = 4096,
+        .intermediate = 2048,
+        .first_moe_layer = 1,
+    };
+    try t.expectEqual(@as(u16, 47), moeLayerCount(geometry));
+    try t.expectEqual(@as(u64, 13_369_344), try mxfp4ExpertBytes(4096, 2048));
+    const plan = try cachePlanBytesForGeometry(60_000_000_000, geometry, try mxfp4ExpertBytes(4096, 2048));
+    try t.expectEqual(@as(u16, 95), plan.slots_per_layer);
+    try t.expectEqual(@as(u64, 47 * 95 * 13_369_344), plan.cache_bytes);
+    try t.expectError(error.InvalidExpertGeometry, mxfp4ExpertBytes(4096, 2050));
+    try t.expectError(error.ExpertCacheTooSmall, cachePlanBytesForGeometry(47 * 13_369_344 - 1, geometry, 13_369_344));
 }
 
 test "exl3 expert bytes at production geometry" {
@@ -1897,7 +2021,7 @@ test "expert stream never serves a hit from a slab that is still filling" {
     refilled.deinit();
     engine.drainPendingReaders();
 
-    _ = try engine.layers[0].slabs[0].slab.tryBeginFill();
+    _ = try engine.layers[0].slabs[0].slab.?.tryBeginFill();
     try t.expectError(error.SlabFilling, engine.prepareHost(0, &.{2}));
     abortFill(&engine.layers[0].slabs[0]);
 }
@@ -1909,10 +2033,10 @@ test "expert stream a failure after the first lease leaves every slab reusable" 
     const engine = &fixture.engine;
 
     var failing = std.testing.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
-    const real = engine.layers[0].slabs[1].slab.allocator;
-    engine.layers[0].slabs[1].slab.allocator = failing.allocator();
+    const real = engine.layers[0].slabs[1].slab.?.allocator;
+    engine.layers[0].slabs[1].slab.?.allocator = failing.allocator();
     try t.expectError(error.OutOfMemory, engine.prepareHost(0, &.{1}));
-    engine.layers[0].slabs[1].slab.allocator = real;
+    engine.layers[0].slabs[1].slab.?.allocator = real;
 
     var after = try engine.prepareHost(0, &.{2});
     defer after.deinit();
@@ -2121,7 +2245,7 @@ test "expert stream a streamed reader holds its slab lease until the next route 
     var fixture = try TinyEngine.open(2, 4);
     defer fixture.close();
     const engine = &fixture.engine;
-    const slab = engine.layers[0].slabs[0].slab;
+    const slab = engine.layers[0].slabs[0].slab.?;
 
     var first = try engine.prepareHost(0, &.{1});
     first.deinit();
@@ -2147,7 +2271,7 @@ pub const TinyQuantPack = struct {
     cols: [quant.component_count]u32,
 
     pub fn dtypeOf(ci: usize) mlx.mlx_dtype {
-        return if (quant.partOf(@enumFromInt(ci)) == .weight) .uint32 else .bfloat16;
+        return if (quant.partOf(@fromBackingInt(@intCast(ci))) == .weight) .uint32 else .bfloat16;
     }
 
     pub fn residentBank(self: *const TinyQuantPack, experts: u16, ci: usize) mlx.mlx_array {
@@ -2194,12 +2318,12 @@ pub fn writeTinyQuantCheckpoint(
     var offset: u64 = 0;
     var key_buf: [192]u8 = undefined;
     for (0..quant.component_count) |ci| {
-        const c: quant.Component = @enumFromInt(ci);
+        const c: quant.Component = @fromBackingInt(@intCast(ci));
         const projection = quant.projectionOf(c);
         const in_dim: u32 = if (projection == .down) inter else hidden;
         const is_weight = quant.partOf(c) == .weight;
         pack.rows[ci] = if (projection == .down) hidden else inter;
-        pack.cols[ci] = if (is_weight) in_dim * bits[@intFromEnum(projection)] / 32 else in_dim / group_size;
+        pack.cols[ci] = if (is_weight) in_dim * bits[@backingInt(projection)] / 32 else in_dim / group_size;
         const elem: u64 = if (is_weight) 4 else 2;
         const span_bytes: usize = @intCast(@as(u64, experts) * pack.rows[ci] * pack.cols[ci] * elem);
         const buffer = try allocator.alignedAlloc(u8, .@"4", span_bytes);
@@ -2244,6 +2368,207 @@ pub fn writeTinyQuantCheckpoint(
     return pack;
 }
 
+pub fn writeTinyMxfp4Checkpoint(
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    experts: u16,
+    hidden: u32,
+    inter: u32,
+) ![]u8 {
+    const io = std.testing.io;
+    const Plan = struct {
+        offset: u64,
+        len: u64,
+        scale: bool,
+    };
+    var header: std.ArrayList(u8) = .empty;
+    defer header.deinit(allocator);
+    var index: std.ArrayList(u8) = .empty;
+    defer index.deinit(allocator);
+    try header.append(allocator, '{');
+    try index.appendSlice(allocator, "{\"weight_map\":{");
+    var plans: [6]Plan = undefined;
+    var plan_count: usize = 0;
+    var offset: u64 = 0;
+    var key_buf: [192]u8 = undefined;
+    for ([_]quant.Projection{ .gate, .up, .down }) |projection| {
+        for ([_]quant.Part{ .weight, .scales }) |part| {
+            const key = try quant.mxfp4TensorKey(&key_buf, 1, projection, part);
+            const in_dim: u64 = if (projection == .down) inter else hidden;
+            const rows: u64 = if (projection == .down) hidden else inter;
+            const cols: u64 = if (part == .weight) in_dim / 8 else in_dim / 32;
+            const elem: u64 = if (part == .weight) 4 else 1;
+            const len = @as(u64, experts) * rows * cols * elem;
+            const sep: []const u8 = if (plan_count == 0) "" else ",";
+            const entry = try std.fmt.allocPrint(allocator, "{s}\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[{d},{d},{d}],\"data_offsets\":[{d},{d}]}}", .{
+                sep,
+                key,
+                if (part == .weight) "U32" else "U8",
+                experts,
+                rows,
+                cols,
+                offset,
+                offset + len,
+            });
+            defer allocator.free(entry);
+            try header.appendSlice(allocator, entry);
+            const mapping = try std.fmt.allocPrint(allocator, "{s}\"{s}\":\"mxfp4.safetensors\"", .{ sep, key });
+            defer allocator.free(mapping);
+            try index.appendSlice(allocator, mapping);
+            plans[plan_count] = .{ .offset = offset, .len = len, .scale = part == .scales };
+            plan_count += 1;
+            offset += len;
+        }
+    }
+    try header.append(allocator, '}');
+    try index.appendSlice(allocator, "}}");
+
+    const file_bytes = try allocator.alloc(u8, 8 + header.items.len + @as(usize, @intCast(offset)));
+    errdefer allocator.free(file_bytes);
+    std.mem.writeInt(u64, file_bytes[0..8], header.items.len, .little);
+    @memcpy(file_bytes[8..][0..header.items.len], header.items);
+    const payload = file_bytes[8 + header.items.len ..];
+    for (plans[0..plan_count], 0..) |plan, component| {
+        const out = payload[@intCast(plan.offset)..][0..@intCast(plan.len)];
+        if (plan.scale) {
+            const codes = [_]u8{ 0, 125, 126, 127, 128, 129, 254, 255 };
+            for (out, 0..) |*byte, i| byte.* = codes[(i + component) % codes.len];
+        } else {
+            for (out, 0..) |*byte, i| byte.* = @truncate(i * 17 + component * 29);
+        }
+    }
+    try dir.writeFile(io, .{ .sub_path = "mxfp4.safetensors", .data = file_bytes });
+    try dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
+    return file_bytes;
+}
+
+test "expert stream MXFP4 header spans and fills preserve native bytes" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw = try writeTinyMxfp4Checkpoint(t.allocator, tmp.dir, 2, 32, 32);
+    defer t.allocator.free(raw);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(t.io, &path_buf);
+    const geometry = Geometry{
+        .layers = 2,
+        .experts = 2,
+        .hidden = 32,
+        .intermediate = 32,
+        .first_moe_layer = 1,
+    };
+    var store = try ExpertStore.openLayout(t.allocator, path_buf[0..path_len], geometry, .mxfp4_split);
+    defer store.deinit();
+
+    try t.expectEqual(quant.Layout.mxfp4_split, store.layout());
+    try t.expect(!store.hasExpertLayer(0));
+    try t.expect(store.hasExpertLayer(1));
+    try t.expectEqual(@as(usize, quant.component_count), store.componentCount());
+    for (0..quant.component_count) |ci| {
+        const c: quant.Component = @fromBackingInt(@intCast(ci));
+        try t.expectEqual(@as(u64, 0), store.spanAt(0, 0, ci).len);
+        if (quant.partOf(c) == .biases) {
+            try t.expect(!store.componentPresent(ci));
+            try t.expectEqual(@as(u64, 0), store.slabSpec(ci).slot_bytes);
+            try t.expectEqual(@as(u8, 0), store.slabSpec(ci).elem_bytes);
+        } else if (quant.partOf(c) == .scales) {
+            try t.expectEqual(mlx.mlx_dtype.uint8, store.slabSpec(ci).dtype);
+            try t.expectEqual(@as(u8, 1), store.slabSpec(ci).elem_bytes);
+        }
+    }
+
+    var destination = try t.allocator.alloc(u8, @intCast(store.perExpertBytes()));
+    defer t.allocator.free(destination);
+    var fills: std.ArrayList(io_mod.FillSpan) = .empty;
+    defer fills.deinit(t.allocator);
+    var at: usize = 0;
+    for (0..quant.component_count) |ci| {
+        if (!store.componentPresent(ci)) continue;
+        const source = store.spanAt(1, 1, ci);
+        const len: usize = @intCast(source.len);
+        try fills.append(t.allocator, .{ .file = source.file, .offset = source.offset, .len = source.len, .dst = destination[at..][0..len].ptr });
+        at += len;
+    }
+    try t.expectEqual(destination.len, at);
+
+    const fds = try t.allocator.alloc(std.c.fd_t, store.fileCount());
+    defer t.allocator.free(fds);
+    for (fds, 0..) |*fd, i| fd.* = store.fdAt(i);
+    var fill_plan = try io_mod.FillPlan.init(t.allocator, fills.items, 64 * 1024 * 1024, 1, false);
+    defer fill_plan.deinit();
+    const pool = try io_mod.FillPool.create(t.allocator, .{ .workers = 1 });
+    defer pool.destroy();
+    try pool.run(fds, &fill_plan);
+
+    at = 0;
+    for (0..quant.component_count) |ci| {
+        if (!store.componentPresent(ci)) continue;
+        const source = store.spanAt(1, 1, ci);
+        const len: usize = @intCast(source.len);
+        try t.expectEqualSlices(u8, raw[@intCast(source.offset)..][0..len], destination[at..][0..len]);
+        at += len;
+    }
+}
+
+test "expert stream MXFP4 keeps nine component ids but imports and leases only six" {
+    const t = std.testing;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw = try writeTinyMxfp4Checkpoint(t.allocator, tmp.dir, 2, 32, 32);
+    defer t.allocator.free(raw);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(t.io, &path_buf);
+    const geometry = Geometry{
+        .layers = 2,
+        .experts = 2,
+        .hidden = 32,
+        .intermediate = 32,
+        .first_moe_layer = 1,
+    };
+    const per_expert = try expertBytesFor(t.allocator, path_buf[0..path_len], geometry, .mxfp4_split);
+    var engine = try Engine.initWithOptions(t.allocator, path_buf[0..path_len], geometry, 2 * per_expert, tinyStream(), .{
+        .io_workers = 1,
+        .bounce_size = 1 << 20,
+        .layout = .mxfp4_split,
+    });
+    defer engine.deinit();
+
+    try t.expectEqual(@as(u64, 12), engine.slab_imports);
+    try t.expectEqual(@as(usize, 0), engine.layers[0].slabs.len);
+    try t.expectEqual(@as(usize, quant.component_count), engine.layers[1].slabs.len);
+    try t.expectError(error.ExpertLayerAbsent, engine.prepareHost(0, &.{1}));
+
+    var prepared = try engine.prepareHost(1, &.{1});
+    const slot = prepared.remapped[0];
+    try t.expect(prepared.quantized);
+    for (0..quant.component_count) |ci| {
+        const c: quant.Component = @fromBackingInt(@intCast(ci));
+        const operand = prepared.quantOperand(c);
+        if (quant.partOf(c) == .biases) {
+            try t.expect(operand.ctx == null);
+            try t.expect(!engine.layers[1].slabs[ci].present);
+        } else {
+            try t.expect(operand.ctx != null);
+            try t.expect(engine.layers[1].slabs[ci].present);
+        }
+    }
+    prepared.deinit();
+    try t.expectEqual(@as(usize, 6), engine.pendingReaders());
+    engine.drainPendingReaders();
+    for (0..quant.component_count) |ci| {
+        if (!engine.store.componentPresent(ci)) continue;
+        const source = engine.store.spanAt(1, 1, ci);
+        try t.expectEqualSlices(
+            u8,
+            raw[@intCast(source.offset)..][0..@intCast(source.len)],
+            engine.cacheSlotBytesAt(1, slot, ci),
+        );
+    }
+}
+
 test "expert stream quantized slabs alias the nine pack tensors and remap ids" {
     const t = std.testing;
     var tmp = t.tmpDir(.{});
@@ -2273,7 +2598,7 @@ test "expert stream quantized slabs alias the nine pack tensors and remap ids" {
     try t.expect(prepared.gate.ctx == null);
     try t.expectEqual(@as(u64, 2), engine.fill_experts_total);
     for (0..quant.component_count) |ci| {
-        const operand = prepared.quantOperand(@enumFromInt(ci));
+        const operand = prepared.quantOperand(@fromBackingInt(@intCast(ci)));
         try t.expect(operand.ctx != null);
         const shape = mlx.getShape(operand);
         try t.expectEqual(@as(usize, 3), shape.len);
@@ -2296,14 +2621,14 @@ test "expert stream quantized slabs alias the nine pack tensors and remap ids" {
     }
 
     var handles: [quant.component_count]?*anyopaque = undefined;
-    for (&handles, 0..) |*handle, ci| handle.* = prepared.quantOperand(@enumFromInt(ci)).ctx;
+    for (&handles, 0..) |*handle, ci| handle.* = prepared.quantOperand(@fromBackingInt(@intCast(ci))).ctx;
     prepared.deinit();
     try t.expectEqual(quant.component_count, engine.pendingReaders());
     engine.beginForward();
     var again = try engine.prepareHost(0, &.{ 0, 2 });
     defer again.deinit();
     try t.expectEqual(@as(u64, 2), engine.fill_experts_total);
-    for (handles, 0..) |handle, ci| try t.expectEqual(handle, again.quantOperand(@enumFromInt(ci)).ctx);
+    for (handles, 0..) |handle, ci| try t.expectEqual(handle, again.quantOperand(@fromBackingInt(@intCast(ci))).ctx);
 }
 
 test "expert stream: under streaming an explicit --mtp refuses, a settings mtp is dropped, else off" {

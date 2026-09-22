@@ -7,6 +7,7 @@ const expert_bf16_kernels = @import("expert_bf16_kernels.zig");
 test {
     _ = expert_stream;
     _ = expert_bf16_kernels;
+    _ = @import("mimo_quant_test.zig");
     _ = @import("expert_io.zig");
     _ = @import("expert_quant.zig");
     _ = @import("expert_exl3.zig");

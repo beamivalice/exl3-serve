@@ -1,6 +1,6 @@
 # EXL3-serve — project context for AI
 
-Fork of ddalcu's mlx-serve, scoped to ONE model: Qwen3.8-Flash-Next (`qwen4_exp`) on Apple Silicon, with its routed experts in EXL3 trellis format, served resident or streamed from SSD. Native Zig, OpenAI/Anthropic-compatible HTTP, no Python at serve time.
+Fork of ddalcu's mlx-serve, serving Qwen3.8-Flash-Next (`qwen4_exp`) on Apple Silicon with EXL3 routed experts, resident or SSD-streamed. MiMo-V2.6-Flash (`mimo_v2`) is an experimental text-only bring-up using native MXFP4 expert streaming. Native Zig, OpenAI/Anthropic-compatible HTTP, no Python at serve time.
 
 Everything else in `src/` (media generation, the other architectures, the Swift app, LAN sharing, providers, ANE, embedded GGUF engines) is INHERITED upstream code: it builds, it is not supported here, and this file does not document it. Upstream's detail docs (`docs/reference.md`, `docs/gotchas/*.md`) are archived in git history: `git show ff1380d:docs/reference.md`.
 
@@ -85,6 +85,15 @@ Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter=
 - **Diffs are read by a human. Keep them small.** A comment says what the code cannot (a non-obvious WHY, a contract, a unit) in one to three lines. Never bug history, measurements, review items, dates, PR numbers or a restatement of the code.
 - **One story per gotcha, one line per rule.** CHANGELOG: one user-facing sentence per change, no provisional numbers.
 - Squash commits, one per PR. No Co-Authored-By attribution.
+
+## MiMo-V2.6-Flash (`mimo_v2`, experimental)
+
+- **Pack**: `tests/convert_mimo_v2.py` restacks native MXFP4 expert bytes into `model.layers.N.mlp.switch_mlp` U32 weights + U8 e8m0/32 scales, without biases; FP8 trunk linears become affine-8 and QKV is split. Raw HF per-expert shards are not a streaming pack.
+- **Packed QKV is rank-local**: dequantize each rank's FP8 tiles independently, then regroup `[Q_rank | K_rank | V_rank]` into global Q/K/V. Extra scale rows belong to partial rank-local tiles, not trailing padding on the full tensor.
+- **Geometry**: `hybrid_layer_pattern` 0 = global, 1 = sliding; read heads, KV heads and K/V widths per layer. Rotate only the first `int(head_dim * partial_rotary_factor)` channels; multiply V by `attention_value_scale` BEFORE caching.
+- **Routing/sinks**: sigmoid routing uses f32 inputs/weights, selection-only correction bias and unbiased normalized scores. A sink is an extra softmax denominator column, not a real key; its presence follows the layer type.
+- **Streaming**: `first_moe_layer` preserves absolute layer indices while excluding dense prefix layers from expert slabs and cache budgets. MXFP4 has six operands in nine stable component slots; absent biases acquire no slab or lease. MTP remains refused while streaming.
+- **Evidence**: `tests/dump_mimo_v2_fixtures.py` supplies the independent HF oracle; `MIMO_V2_SOURCE` tests the downloaded Flash config/template. Native-byte preservation, forward parity, and live serving are separate gates; a header audit proves neither numerical parity nor generation.
 
 ## Qwen3.8-Flash-Next (`qwen4_exp`)
 
@@ -183,6 +192,7 @@ Server log `~/.mlx-serve/logs/mlx-serve-<port>.log` is THE post-mortem file (`--
 - **Think-tag handling**: strip pos-0 unclosed openers; `trimTrailingThinkClosers`; unparsed tool markup never rides out as reasoning OR content (`trimLeakedToolMarkup`, ONE cut). Whether a prompt ends inside a think block is a property of the RENDERED BYTES (`promptOpensThink`), never ANDed with `enable_thinking`; `in_think_block` seeds from `prompt_opened_think` ALONE at every stream site; a model can open its OWN block (`modelThinkOpener`).
 - **Streaming + tools + thinking**: buffer until pattern resolution; reasoning streams INCREMENTALLY on the tools path (`.hold_thinking` + `unstreamedReasoning`, never a resend); the think gate scans with a CURSOR (`ThinkScan`). Thinking-off is enforced in the PROMPT; generated reasoning is ALWAYS delivered (every site splits via `splitThinkBlock(text, true, …)`).
 - **Assistant-history reasoning round-trips** (`Message.reasoning_content`, OMITTED when absent). A contract COMMENT is read as a spec — pin it with a test.
+- **A generic ChatML role header preserves tool roles**: absence of a literal `'tool'` branch does not license rewriting tool results as user text (`templateReferencesToolRole`).
 
 ### Server, HTTP, lifecycle
 

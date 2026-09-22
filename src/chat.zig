@@ -602,9 +602,18 @@ pub fn renderChatTemplate(
     // form so the model still sees the tool context.
     const tpl = chat_config.chat_template;
     const tpl_has_tools = std.mem.indexOf(u8, tpl, "tools") != null;
-    const tpl_has_tool_role = templateReferencesToolRole(tpl);
+    const messages_have_tool_content = messagesHaveToolContent(msgs);
+    const extra_json = try serializeExtraContext(allocator, chat_config, enable_thinking, effort);
+    defer allocator.free(extra_json);
+
+    // A generic role header is not proof that the template emits every role:
+    // some templates guard the header to user/assistant/system. Probe only
+    // tool-bearing requests; explicit tool branches remain the zero-cost path.
+    const tpl_has_tool_role = !messages_have_tool_content or
+        templateReferencesToolRole(tpl) or
+        try templateProbePreservesToolContent(allocator, tpl, extra_json);
     const needs_inject_tools = tools_json != null and !tpl_has_tools;
-    const needs_rewrite_tool_role = !tpl_has_tool_role and messagesHaveToolContent(msgs);
+    const needs_rewrite_tool_role = !tpl_has_tool_role and messages_have_tool_content;
 
     var fallback_arena: ?std.heap.ArenaAllocator = null;
     defer if (fallback_arena) |*a| a.deinit();
@@ -664,10 +673,6 @@ pub fn renderChatTemplate(
         .null_literal;
     const messages_json = try serializeMessagesJsonFor(allocator, effective_messages, empty_content, chat_config);
     defer allocator.free(messages_json);
-
-    // Build extra context (bos_token, eos_token, enable_thinking, effort)
-    const extra_json = try serializeExtraContext(allocator, chat_config, enable_thinking, effort);
-    defer allocator.free(extra_json);
 
     // Null-terminate strings for C
     const tmpl_z = try allocator.dupeSentinel(u8, chat_config.chat_template, 0);
@@ -793,13 +798,54 @@ fn collapseDoubledThinkTags(allocator: std.mem.Allocator, rendered: []const u8) 
     return out.toOwnedSlice(allocator);
 }
 
-/// True if the template contains a branch keyed on the literal `tool` role string
-/// (`'tool'` or `"tool"` as a standalone token, not `tool_calls` / `tool_call_id`).
+/// Explicit tool branches are authoritative and skip the render probe below.
+/// A generic header is not enough: it may be guarded to known non-tool roles.
 fn templateReferencesToolRole(tpl: []const u8) bool {
     const patterns = [_][]const u8{ "'tool'", "\"tool\"" };
     for (patterns) |p| {
         if (std.mem.indexOf(u8, tpl, p) != null) return true;
     }
+    return false;
+}
+
+/// Execute a tiny role probe instead of trying to infer Jinja control flow
+/// from source spelling. A missing marker means the template filtered the tool
+/// message, so the caller rewrites it through the lossless tool fallback.
+fn templateProbePreservesToolContent(
+    allocator: std.mem.Allocator,
+    tpl: []const u8,
+    extra_json: []const u8,
+) !bool {
+    const marker = "__mlx_tool_role_probe__";
+    const probe_messages = [_]Message{
+        .{ .role = "tool", .content = marker },
+    };
+    const messages_json = try serializeMessagesJson(allocator, &probe_messages);
+    defer allocator.free(messages_json);
+
+    const tmpl_z = try allocator.dupeSentinel(u8, tpl, 0);
+    defer allocator.free(tmpl_z);
+    const msgs_z = try allocator.dupeSentinel(u8, messages_json, 0);
+    defer allocator.free(msgs_z);
+    const extra_z = try allocator.dupeSentinel(u8, extra_json, 0);
+    defer allocator.free(extra_z);
+
+    var rendered_len: usize = 0;
+    const result_ptr = jinja_c.jinja_render_chat(
+        tmpl_z.ptr,
+        msgs_z.ptr,
+        null,
+        extra_z.ptr,
+        0,
+        &rendered_len,
+    );
+    if (result_ptr) |ptr| {
+        defer jinja_c.jinja_str_free(ptr);
+        return std.mem.indexOf(u8, ptr[0..rendered_len], marker) != null;
+    }
+
+    // Probe failures are conservative: the real render below will clear the
+    // thread-local Jinja error and either render or log its own failure.
     return false;
 }
 
@@ -6966,6 +7012,32 @@ fn appendToolSystemPrompt(allocator: std.mem.Allocator, result_buf: *std.ArrayLi
 // ── Tests ──
 
 const testing = std.testing;
+
+test "real mimo_v2 template preserves reasoning and XML tool history" {
+    const raw = std.c.getenv("MIMO_V2_SOURCE") orelse return error.SkipZigTest;
+    const a = testing.allocator;
+    var config = try loadChatConfig(testing.io, a, std.mem.span(raw));
+    defer config.deinit();
+    const calls = [_]ToolCall{.{ .id = "call_1", .name = "sum", .arguments = "{\"x\":2}" }};
+    const messages = [_]Message{
+        .{ .role = "user", .content = "Compute." },
+        .{ .role = "assistant", .content = "", .reasoning_content = "Use sum.", .tool_calls = &calls },
+        .{ .role = "tool", .content = "2" },
+        .{ .role = "user", .content = "Continue." },
+    };
+    const expected = "<|im_start|>user\nCompute.<|im_end|>" ++
+        "<|im_start|>assistant\n<think>Use sum.</think>" ++
+        "<tool_call><function=sum><parameter=x>2</parameter></function></tool_call><|im_end|>" ++
+        "<|im_start|>tool\n2<|im_end|>" ++
+        "<|im_start|>user\nContinue.<|im_end|><|im_start|>assistant\n";
+    const thinking = try renderChatTemplate(a, &messages, &config, null, null, true, null, false);
+    defer a.free(thinking);
+    try testing.expectEqualStrings(expected, thinking);
+    try testing.expect(!promptTailOpensThink(thinking));
+    const plain = try renderChatTemplate(a, &messages, &config, null, null, false, null, false);
+    defer a.free(plain);
+    try testing.expectEqualStrings(expected ++ "<think></think>", plain);
+}
 
 test "collapseDoubledThinkTags collapses 2x → 1x" {
     const out = try collapseDoubledThinkTags(testing.allocator, "<|Assistant|></think></think>Hi!");

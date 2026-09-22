@@ -14893,7 +14893,8 @@ pub const Transformer = struct {
         const dense1_b: mlx.mlx_array = weights.get("dense.1.biases") orelse .{};
 
         // Cache for KV (standard models use all entries, MoE only uses full-attn layers)
-        const cache = try KVCache.init(allocator, config.num_hidden_layers);
+        var cache = try KVCache.init(allocator, config.num_hidden_layers);
+        errdefer cache.deinit();
 
         const need_gelu = config.hidden_act == .gelu_approx;
         const need_silu = config.hidden_act == .silu;
@@ -15342,6 +15343,24 @@ pub const Transformer = struct {
                 expert_stream = engine;
             }
             log.info("[qwen4] n-gram table {d} rows x {d} ({d}-bit, {s}), PLE at layer {d}, QSA budget {d}/{d}\n", .{ st.table.rows, st.table.dim, st.table.bits, if (config.expert_streaming) "sharded pread" else "mmapped", config.ple_layer_idx, config.indexer_budget, config.indexer_compress_ratio });
+        } else if (std.mem.eql(u8, config.model_type, "mimo_v2") and config.expert_streaming) {
+            const engine = try allocator.create(expert_stream_mod.Engine);
+            errdefer allocator.destroy(engine);
+            engine.* = try expert_stream_mod.Engine.initWithOptions(
+                allocator,
+                config.expert_source_dir orelse return error.MissingExpertSourceDir,
+                .{
+                    .layers = @intCast(config.num_hidden_layers),
+                    .experts = @intCast(config.num_experts),
+                    .hidden = config.hidden_size,
+                    .intermediate = config.moe_intermediate_size,
+                    .first_moe_layer = @intCast(config.first_k_dense_replace),
+                },
+                config.expert_cache_bytes,
+                s,
+                .{ .layout = config.expert_layout },
+            );
+            expert_stream = engine;
         }
 
         const profile_head_shape = mlx.getShape(lm_head_w);
@@ -16051,6 +16070,42 @@ pub const Transformer = struct {
             router_logits,
             expert_bias,
             @intCast(self.config.num_experts_per_tok),
+            self.config.moe_route_norm,
+            self.config.router_scaling_factor,
+            self.s,
+        );
+    }
+
+    fn computeMimoRouting(self: *const Transformer, router_logits: mlx.mlx_array, expert_bias: mlx.mlx_array) !MoeRouting {
+        const k: c_int = @intCast(self.config.num_experts_per_tok);
+        if (self.config.moe_n_group > 1) {
+            return groupLimitedRouting(
+                router_logits,
+                expert_bias,
+                k,
+                @intCast(self.config.moe_n_group),
+                @intCast(self.config.moe_topk_group),
+                self.config.moe_route_norm,
+                self.config.router_scaling_factor,
+                self.s,
+            );
+        }
+        if (try moeRouterTopK(
+            self.s,
+            router_logits,
+            expert_bias,
+            k,
+            .sigmoid_bias,
+            self.config.moe_route_norm,
+            self.config.router_scaling_factor,
+            .float32,
+            0,
+            0,
+        )) |fused| return fused;
+        return mimoRoutingChain(
+            router_logits,
+            expert_bias,
+            k,
             self.config.moe_route_norm,
             self.config.router_scaling_factor,
             self.s,
@@ -16932,13 +16987,13 @@ pub const Transformer = struct {
         return self.qmatmul(x, w, sc, bi);
     }
 
-    /// Raw embedding-table lookup: gather + dequant to bf16 ONLY — no
+    /// Raw embedding-table lookup: gather + dequant — no
     /// normed-embeddings RMS norm, no emb_scale. The DFlash noise embeds are
     /// contractually the raw table rows (the reference calls `F.embedding`
     /// on the weight directly — the un-foldable embed norm is exactly what
     /// makes this hook possible); the trunk's own forward goes through
     /// `embedding`, which layers the norm/scale on top of this. Returns
-    /// `[B, L, hidden]` bf16, caller frees.
+    /// `[B, L, hidden]` bf16 (MiMo dense tables retain their dtype), caller frees.
     pub fn rawEmbedding(self: *const Transformer, token_ids: mlx.mlx_array) !mlx.mlx_array {
         if (self.emb_w.ctx == null) return error.MissingWeight;
         const id_shape = mlx.getShape(token_ids);
@@ -16957,8 +17012,12 @@ pub const Transformer = struct {
         var emb = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(emb);
         if (self.emb_s.ctx == null) {
-            // Dense bf16 embedding table: the gathered rows ARE the embeddings.
-            try mlx.check(mlx.mlx_astype(&emb, taken_w, .bfloat16, self.s));
+            // MiMo's residual dtype follows its dense embedding table.
+            const dtype = if (std.mem.eql(u8, self.config.model_type, "mimo_v2"))
+                mlx.mlx_array_dtype(taken_w)
+            else
+                mlx.mlx_dtype.bfloat16;
+            try mlx.check(mlx.mlx_astype(&emb, taken_w, dtype, self.s));
         } else {
             var taken_s = mlx.mlx_array_new();
             defer _ = mlx.mlx_array_free(taken_s);
@@ -22939,6 +22998,7 @@ pub const Transformer = struct {
         const is_inkling = cfg.isInkling();
         const is_mla = cfg.isMla();
         const is_gpt_oss = std.mem.eql(u8, cfg.model_type, "gpt_oss");
+        const is_mimo = std.mem.eql(u8, cfg.model_type, "mimo_v2");
 
         // PLD spec-decode: thread the per-position SSM capture flag down to the
         // GatedDeltaNet layers (which don't take the ctx). Reset on exit so it
@@ -22971,6 +23031,13 @@ pub const Transformer = struct {
         const batch: c_int = x_shape[0];
         const seq_len: c_int = x_shape[1];
         const is_prefill = seq_len > 1;
+        if (is_mimo) {
+            if (self.expert_stream != null and ctx.capture_ssm_seq) return error.StreamingSpecCaptureUnsupported;
+            if (self.expert_stream) |engine| engine.beginForward();
+        }
+        defer if (is_mimo) {
+            if (self.expert_stream) |engine| engine.finishForward(@intCast(batch * seq_len));
+        };
         const prof = prof_on and seq_len == 1; // profile decode only
         if (prof) {
             try mlx.check(mlx.mlx_array_eval(h));
@@ -22999,7 +23066,7 @@ pub const Transformer = struct {
         var local_decode_mask = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(local_decode_mask);
 
-        if ((is_gemma4 or is_laguna or is_gpt_oss) and cfg.has_sliding_window) {
+        if ((is_gemma4 or is_laguna or is_gpt_oss or is_mimo) and cfg.has_sliding_window) {
             const sw: c_int = @intCast(cfg.sliding_window);
             const total_kv: c_int = @as(c_int, @intCast(offset)) + seq_len;
             const sliding = slidingViewFor(cfg, total_kv, seq_len);
@@ -23065,6 +23132,8 @@ pub const Transformer = struct {
                     try self.mlaAttnWith(ctx, normed, &fa, li, @intCast(offset), batch, seq_len, is_prefill)
                 else if (is_gpt_oss)
                     try self.gptOssAttnWith(ctx, normed, &fa, li, @intCast(offset), batch, seq_len, is_prefill, &local_prefill_mask, local_decode_mask)
+                else if (is_mimo)
+                    try self.mimoAttnWith(ctx, normed, &fa, li, @intCast(offset), batch, seq_len, is_prefill, &local_prefill_mask, local_decode_mask)
                 else if (is_laguna)
                     try self.lagunaAttnWith(ctx, normed, &fa, li, @intCast(offset), batch, seq_len, is_prefill, &local_prefill_mask, local_decode_mask)
                 else if (is_gemma4)
@@ -23173,7 +23242,10 @@ pub const Transformer = struct {
                     ff_normed = try self.rmsNorm(h, lw.post_attn_norm);
                 }
                 const mlp_out = switch (lw.mlp) {
-                    .moe => |*mw| try self.moeMLP(ff_normed, mw),
+                    .moe => |*mw| if (is_mimo and self.expert_stream != null)
+                        try self.moeMLPStreamed(ctx, ff_normed, mw, @intCast(layer_idx))
+                    else
+                        try self.moeMLP(ff_normed, mw),
                     // ANE prefill split rides here when armed (--ane-prefill);
                     // everything else is plain denseMLP.
                     .dense => |*dw| try self.denseMLPMaybeAne(ff_normed, dw, layer_idx, is_prefill, seq_len),
@@ -25652,6 +25724,182 @@ pub const Transformer = struct {
         return self.attnProjBias(attn_flat, fa.o_w, fa.o_s, fa.o_b, fa.o_bias, decode_shape, layer);
     }
 
+    /// MiMo V2 attention (XiaomiMiMo/MiMo-V2.6-Flash-RL, Apache-2.0):
+    /// per-layer GQA geometry, asymmetric K/V widths, and
+    /// optional sink columns. Keep this on native SDPA; the qwen/hd-256
+    /// fused-KV arms cannot represent a value width different from key width.
+    fn mimoAttnWith(
+        self: *Transformer,
+        ctx: *ForwardCtx,
+        x: mlx.mlx_array,
+        fa: *const FullAttnWeights,
+        layer: u32,
+        offset: c_int,
+        batch: c_int,
+        seq_len: c_int,
+        is_prefill: bool,
+        local_prefill_mask: *mlx.mlx_array,
+        local_decode_mask: mlx.mlx_array,
+    ) !mlx.mlx_array {
+        const cfg = &self.config;
+        const is_global = cfg.isGlobalLayer(layer);
+        const h_count: c_int = @intCast(cfg.layerNumHeads(layer));
+        const kv_h: c_int = @intCast(cfg.layerKVHeads(layer));
+        const hd: c_int = @intCast(cfg.layerHeadDim(layer));
+        const vhd: c_int = @intCast(cfg.layerVHeadDim(layer));
+        const rope_dims: c_int = @intFromFloat(@as(f32, @floatFromInt(hd)) * cfg.partial_rotary_factor);
+        const attn_scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(hd)));
+        const q_shape = [_]c_int{ batch, seq_len, h_count, hd };
+        const k_shape = [_]c_int{ batch, seq_len, kv_h, hd };
+        const v_shape = [_]c_int{ batch, seq_len, kv_h, vhd };
+        const flat_shape = [_]c_int{ batch, seq_len, h_count * vhd };
+        const perm = [_]c_int{ 0, 2, 1, 3 };
+        const none_mask = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(none_mask);
+
+        // Split projection weights are authoritative for both converted packs
+        // and native fused-QKV checkpoints (the latter is split at load).
+        const q_proj = try self.qmatmul(x, fa.q_w, fa.q_s, fa.q_b);
+        defer _ = mlx.mlx_array_free(q_proj);
+        const k_proj = try self.qmatmul(x, fa.k_w, fa.k_s, fa.k_b);
+        defer _ = mlx.mlx_array_free(k_proj);
+        const v_proj = try self.qmatmul(x, fa.v_w, fa.v_s, fa.v_b);
+        defer _ = mlx.mlx_array_free(v_proj);
+
+        var q_r = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(q_r);
+        try mlx.check(mlx.mlx_reshape(&q_r, q_proj, &q_shape, 4, self.s));
+        var q_t = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(q_t);
+        try mlx.check(mlx.mlx_transpose_axes(&q_t, q_r, &perm, 4, self.s));
+        var q_rope = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(q_rope);
+        const rope_base = mlx.mlx_optional_float{
+            .value = if (is_global) cfg.rope_theta else cfg.rope_local_base_freq,
+            .has_value = true,
+        };
+        try mlx.check(mlx.mlx_fast_rope(&q_rope, q_t, rope_dims, false, rope_base, 1.0, offset, .{ .ctx = null }, self.s));
+
+        var k_r = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(k_r);
+        try mlx.check(mlx.mlx_reshape(&k_r, k_proj, &k_shape, 4, self.s));
+        var k_t = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(k_t);
+        try mlx.check(mlx.mlx_transpose_axes(&k_t, k_r, &perm, 4, self.s));
+        var k_rope = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(k_rope);
+        try mlx.check(mlx.mlx_fast_rope(&k_rope, k_t, rope_dims, false, rope_base, 1.0, offset, .{ .ctx = null }, self.s));
+
+        var v_r = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(v_r);
+        try mlx.check(mlx.mlx_reshape(&v_r, v_proj, &v_shape, 4, self.s));
+        var v_t = mlx.mlx_array_new();
+        try mlx.check(mlx.mlx_transpose_axes(&v_t, v_r, &perm, 4, self.s));
+        var v_scaled = v_t;
+        var v_scale: mlx.mlx_array = .{ .ctx = null };
+        const value_scale = cfg.attention_value_scale;
+        if (value_scale != 1.0) {
+            v_scale = try scalarOf(value_scale, mlx.mlx_array_dtype(v_t), self.s);
+            var scaled = mlx.mlx_array_new();
+            try mlx.check(mlx.mlx_multiply(&scaled, v_t, v_scale, self.s));
+            _ = mlx.mlx_array_free(v_t);
+            v_scaled = scaled;
+        }
+        defer {
+            _ = mlx.mlx_array_free(v_scaled);
+            if (v_scale.ctx != null) _ = mlx.mlx_array_free(v_scale);
+        }
+
+        const sliding = slidingViewFor(cfg, offset + seq_len, seq_len);
+        const max_kv: u32 = if (is_global) 0 else sliding.span;
+        var kv_view = try ctx.cache.update(layer, k_rope, v_scaled, self.s, max_kv);
+        defer kv_view.deinit();
+
+        var attn_out = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(attn_out);
+        if (is_global) {
+            try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
+                &attn_out,
+                q_rope,
+                kv_view.k,
+                kv_view.v,
+                attn_scale,
+                if (is_prefill) "causal" else "",
+                none_mask,
+                fa.sinks,
+                false,
+                self.s,
+            ));
+        } else {
+            const sw: c_int = @intCast(cfg.sliding_window);
+            const total_kv = offset + seq_len;
+            if (is_prefill and total_kv <= sw) {
+                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
+                    &attn_out,
+                    q_rope,
+                    kv_view.k,
+                    kv_view.v,
+                    attn_scale,
+                    "causal",
+                    none_mask,
+                    fa.sinks,
+                    false,
+                    self.s,
+                ));
+            } else if (is_prefill) {
+                if (local_prefill_mask.ctx == null) {
+                    local_prefill_mask.* = try self.createSlidingWindowMask(seq_len, sliding.kv_len, sw);
+                }
+                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
+                    &attn_out,
+                    q_rope,
+                    kv_view.k,
+                    kv_view.v,
+                    attn_scale,
+                    "array",
+                    local_prefill_mask.*,
+                    fa.sinks,
+                    false,
+                    self.s,
+                ));
+            } else if (@as(c_int, @intCast(ctx.cache.seqLen(layer))) <= sw) {
+                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
+                    &attn_out,
+                    q_rope,
+                    kv_view.k,
+                    kv_view.v,
+                    attn_scale,
+                    "",
+                    none_mask,
+                    fa.sinks,
+                    false,
+                    self.s,
+                ));
+            } else {
+                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
+                    &attn_out,
+                    q_rope,
+                    kv_view.k,
+                    kv_view.v,
+                    attn_scale,
+                    "array",
+                    local_decode_mask,
+                    fa.sinks,
+                    false,
+                    self.s,
+                ));
+            }
+        }
+
+        var attn_t = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(attn_t);
+        try mlx.check(mlx.mlx_transpose_axes(&attn_t, attn_out, &perm, 4, self.s));
+        var attn_flat = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(attn_flat);
+        try mlx.check(mlx.mlx_reshape(&attn_flat, attn_t, &flat_shape, 3, self.s));
+        return self.qmatmul(attn_flat, fa.o_w, fa.o_s, fa.o_b);
+    }
+
     fn lagunaAttnWith(
         self: *Transformer,
         ctx: *ForwardCtx,
@@ -28086,8 +28334,25 @@ pub const Transformer = struct {
         return out;
     }
 
+    fn mimoRouterLogits(self: *Transformer, router_x: mlx.mlx_array, mw: *const MoeMlpWeights) !mlx.mlx_array {
+        // MiMo routing is defined over f32 activations and f32 router weights,
+        // independently of the residual/expert storage dtype.
+        var x32 = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(x32);
+        try mlx.check(mlx.mlx_astype(&x32, router_x, .float32, self.s));
+        if (mw.router_s.ctx != null) {
+            const qp = self.quantParamsHinted(mw.router_w, mw.router_s, lastDim(x32));
+            return qmatmulBits(x32, mw.router_w, mw.router_s, mw.router_b, qp.bits, qp.group_size, qp.mode, self.s);
+        }
+        var w32 = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(w32);
+        try mlx.check(mlx.mlx_astype(&w32, mw.router_w, .float32, self.s));
+        return qmatmulBits(x32, w32, .{ .ctx = null }, .{ .ctx = null }, 0, 0, .affine, self.s);
+    }
+
     fn moeRouterLogits(self: *Transformer, router_x: mlx.mlx_array, mw: *const MoeMlpWeights) !mlx.mlx_array {
         const cfg = &self.config;
+        if (std.mem.eql(u8, cfg.model_type, "mimo_v2")) return self.mimoRouterLogits(router_x, mw);
         var logits = if (mw.router_scale) |rs| blk: {
             var normed = mlx.mlx_array_new();
             defer _ = mlx.mlx_array_free(normed);
@@ -28384,6 +28649,14 @@ pub const Transformer = struct {
         defer _ = mlx.mlx_array_free(row_out);
         var expert_sum = mlx.mlx_array_new();
         try mlx.check(mlx.mlx_reshape(&expert_sum, row_out, &[_]c_int{ x_shape[0], x_shape[1], mlx.getShape(row_out)[1] }, 3, self.s));
+        if (std.mem.eql(u8, self.config.model_type, "mimo_v2") and
+            mlx.mlx_array_dtype(expert_sum) != mlx.mlx_array_dtype(expert_x))
+        {
+            var narrowed = mlx.mlx_array_new();
+            try mlx.check(mlx.mlx_astype(&narrowed, expert_sum, mlx.mlx_array_dtype(expert_x), self.s));
+            _ = mlx.mlx_array_free(expert_sum);
+            expert_sum = narrowed;
+        }
         if (mw.shared_expert_gate_w == null or qwen4Standin().moe_shared) {
             engine.noteExpertCompute(stream_ctx.layer, compute_clock.lap());
             return expert_sum;
@@ -28792,7 +29065,10 @@ pub const Transformer = struct {
             try mlx.check(mlx.mlx_array_set(&weights, given.norm_scores));
             break :blk .{ .inds = ids, .norm_scores = weights };
         } else if (mw.expert_bias) |bias|
-            try self.computeHy3Routing(router_logits, bias)
+            if (std.mem.eql(u8, cfg.model_type, "mimo_v2"))
+                try self.computeMimoRouting(router_logits, bias)
+            else
+                try self.computeHy3Routing(router_logits, bias)
         else
             try self.computeMoeRouting(router_logits);
         var inds = routed.inds;
@@ -28831,7 +29107,7 @@ pub const Transformer = struct {
         // MoE layer, which then promotes every weight on read for the rest of
         // the forward — a whole-model slowdown that shows up only as a
         // `[dtype-trace] residual widened` line.
-        if (mlx.mlx_array_dtype(norm_scores) != mlx.mlx_array_dtype(expert_x)) {
+        if (!std.mem.eql(u8, cfg.model_type, "mimo_v2") and mlx.mlx_array_dtype(norm_scores) != mlx.mlx_array_dtype(expert_x)) {
             var cast_scores = mlx.mlx_array_new();
             try mlx.check(mlx.mlx_astype(&cast_scores, norm_scores, mlx.mlx_array_dtype(expert_x), self.s));
             _ = mlx.mlx_array_free(norm_scores);
@@ -29175,6 +29451,15 @@ pub const Transformer = struct {
             defer _ = mlx.mlx_array_free(weighted);
             try mlx.check(mlx.mlx_multiply(&weighted, down_out, scores_exp, self.s));
             try mlx.check(mlx.mlx_sum_axis(&expert_sum, weighted, -2, false, self.s)); // [B, S, hidden]
+        }
+
+        if (std.mem.eql(u8, cfg.model_type, "mimo_v2") and
+            mlx.mlx_array_dtype(expert_sum) != mlx.mlx_array_dtype(expert_x))
+        {
+            var narrowed = mlx.mlx_array_new();
+            try mlx.check(mlx.mlx_astype(&narrowed, expert_sum, mlx.mlx_array_dtype(expert_x), self.s));
+            _ = mlx.mlx_array_free(expert_sum);
+            expert_sum = narrowed;
         }
 
         if (skip_shared) return expert_sum;
@@ -29719,7 +30004,9 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
     log.info("Precomputing MoE layer weights...\n", .{});
     const prefix = config.weight_prefix;
     const moe_layers = try allocator.alloc(MoeLayerWeights, config.num_hidden_layers);
+    errdefer allocator.free(moe_layers);
     const ssm_entries = try allocator.alloc(SSMCacheEntry, config.num_hidden_layers);
+    errdefer allocator.free(ssm_entries);
     var owned_bf16: std.ArrayList(mlx.mlx_array) = .empty;
     errdefer {
         for (owned_bf16.items) |a| _ = mlx.mlx_array_free(a);
@@ -29734,6 +30021,7 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
     const is_bailing = std.mem.eql(u8, config.model_type, "bailing_hybrid");
     const is_qwen4 = config.isQwen4();
     const is_gpt_oss = std.mem.eql(u8, config.model_type, "gpt_oss");
+    const is_mimo = std.mem.eql(u8, config.model_type, "mimo_v2");
 
     for (0..config.num_hidden_layers) |i| {
         const li: u32 = @intCast(i);
@@ -30012,6 +30300,79 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
                 try maybeTransposeForBf16(&la.b_w, la.b_s, &owned_bf16, allocator, s);
                 try maybeTransposeForBf16(&la.out_w, la.out_s, &owned_bf16, allocator, s);
             }
+        } else if (is_mimo) {
+            // MiMo V2 supports both converter-split projections and the HF
+            // native fused QKV tensor. The latter is split by explicit row
+            // counts because K and V use different per-head widths.
+            const q_rows: u32 = config.layerNumHeads(li) * config.layerHeadDim(li);
+            const k_rows: u32 = config.layerKVHeads(li) * config.layerHeadDim(li);
+            const v_rows: u32 = config.layerKVHeads(li) * config.layerVHeadDim(li);
+            var q_w: mlx.mlx_array = undefined;
+            var q_s: mlx.mlx_array = undefined;
+            var q_b: mlx.mlx_array = undefined;
+            var k_w: mlx.mlx_array = undefined;
+            var k_s: mlx.mlx_array = undefined;
+            var k_b: mlx.mlx_array = undefined;
+            var v_w: mlx.mlx_array = undefined;
+            var v_s: mlx.mlx_array = undefined;
+            var v_b: mlx.mlx_array = undefined;
+            if (getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.qkv_proj.weight")) |fused_w| {
+                const fused_s = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.qkv_proj.scales") orelse mlx.mlx_array_new();
+                const fused_b = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.qkv_proj.biases") orelse mlx.mlx_array_new();
+                const own_fused_s = fused_s.ctx == null;
+                const own_fused_b = fused_b.ctx == null;
+                defer {
+                    if (own_fused_s) _ = mlx.mlx_array_free(fused_s);
+                    if (own_fused_b) _ = mlx.mlx_array_free(fused_b);
+                }
+                const fused_transpose = fused_s.ctx == null;
+                const parts_w = try splitFusedQkvAsymRows(fused_w, q_rows, k_rows, v_rows, fused_transpose, &owned_bf16, allocator, s);
+                const parts_s = try splitFusedQkvAsymRows(fused_s, q_rows, k_rows, v_rows, false, &owned_bf16, allocator, s);
+                const parts_b = try splitFusedQkvAsymRows(fused_b, q_rows, k_rows, v_rows, false, &owned_bf16, allocator, s);
+                q_w = parts_w[0];
+                k_w = parts_w[1];
+                v_w = parts_w[2];
+                q_s = parts_s[0];
+                k_s = parts_s[1];
+                v_s = parts_s[2];
+                q_b = parts_b[0];
+                k_b = parts_b[1];
+                v_b = parts_b[2];
+            } else {
+                q_w = try getLayerWeight(weights, name_buf, prefix, li, "self_attn.q_proj.weight");
+                q_s = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.q_proj.scales") orelse mlx.mlx_array_new();
+                q_b = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.q_proj.biases") orelse mlx.mlx_array_new();
+                k_w = try getLayerWeight(weights, name_buf, prefix, li, "self_attn.k_proj.weight");
+                k_s = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.k_proj.scales") orelse mlx.mlx_array_new();
+                k_b = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.k_proj.biases") orelse mlx.mlx_array_new();
+                v_w = try getLayerWeight(weights, name_buf, prefix, li, "self_attn.v_proj.weight");
+                v_s = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.v_proj.scales") orelse mlx.mlx_array_new();
+                v_b = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.v_proj.biases") orelse mlx.mlx_array_new();
+                try maybeTransposeForBf16(&q_w, q_s, &owned_bf16, allocator, s);
+                try maybeTransposeForBf16(&k_w, k_s, &owned_bf16, allocator, s);
+                try maybeTransposeForBf16(&v_w, v_s, &owned_bf16, allocator, s);
+            }
+            lw.attn = .{ .full = .{
+                .q_w = q_w,
+                .q_s = q_s,
+                .q_b = q_b,
+                .k_w = k_w,
+                .k_s = k_s,
+                .k_b = k_b,
+                .v_w = v_w,
+                .v_s = v_s,
+                .v_b = v_b,
+                .o_w = try getLayerWeight(weights, name_buf, prefix, li, "self_attn.o_proj.weight"),
+                .o_s = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.o_proj.scales") orelse mlx.mlx_array_new(),
+                .o_b = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.o_proj.biases") orelse mlx.mlx_array_new(),
+                .q_norm = mlx.mlx_array_new(),
+                .k_norm = mlx.mlx_array_new(),
+                .sinks = if (config.layerHasAttnSinks(li))
+                    try getLayerWeight(weights, name_buf, prefix, li, "self_attn.attention_sink_bias")
+                else
+                    mlx.mlx_array_new(),
+            } };
+            try maybeTransposeForBf16(&lw.attn.full.o_w, lw.attn.full.o_s, &owned_bf16, allocator, s);
         } else if (is_bailing) {
             // MLA. There are no q/k/v projections at all — the low-rank Q and
             // the compressed KV latent replace them, and `dense` is the output
@@ -30642,6 +31003,57 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
                 try maybeTransposeForBf16(&mw.switch_gate_w, mw.switch_gate_s, &owned_bf16, allocator, s);
                 try maybeTransposeForBf16(&mw.switch_up_w, mw.switch_up_s, &owned_bf16, allocator, s);
                 try maybeTransposeForBf16(&mw.switch_down_w, mw.switch_down_s, &owned_bf16, allocator, s);
+            }
+        } else if (layer_is_moe and is_mimo) {
+            // MiMo V2: sigmoid/noaux_tc routing with a selection-only
+            // correction bias, no shared expert, and biasless mxfp4 banks.
+            const stream_bank = shouldStreamExpertBank(&config, prefix);
+            const exl3 = config.expert_layout == .exl3_k4;
+            const switch_bank: SwitchMlpBank = if (stream_bank) .{
+                .gate_w = mlx.mlx_array_new(),
+                .gate_s = mlx.mlx_array_new(),
+                .gate_b = mlx.mlx_array_new(),
+                .up_w = mlx.mlx_array_new(),
+                .up_s = mlx.mlx_array_new(),
+                .up_b = mlx.mlx_array_new(),
+                .down_w = mlx.mlx_array_new(),
+                .down_s = mlx.mlx_array_new(),
+                .down_b = mlx.mlx_array_new(),
+            } else try loadSwitchMlpBank(weights, name_buf, prefix, li, exl3);
+            lw.mlp = .{ .moe = .{
+                .router_w = try getLayerWeight(weights, name_buf, prefix, li, "mlp.gate.weight"),
+                .router_s = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.gate.scales") orelse mlx.mlx_array_new(),
+                .router_b = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.gate.biases") orelse mlx.mlx_array_new(),
+                .switch_gate_w = switch_bank.gate_w,
+                .switch_gate_s = switch_bank.gate_s,
+                .switch_gate_b = switch_bank.gate_b,
+                .switch_up_w = switch_bank.up_w,
+                .switch_up_s = switch_bank.up_s,
+                .switch_up_b = switch_bank.up_b,
+                .switch_down_w = switch_bank.down_w,
+                .switch_down_s = switch_bank.down_s,
+                .switch_down_b = switch_bank.down_b,
+                .shared_gate_w = mlx.mlx_array_new(),
+                .shared_gate_s = mlx.mlx_array_new(),
+                .shared_gate_b = mlx.mlx_array_new(),
+                .shared_up_w = mlx.mlx_array_new(),
+                .shared_up_s = mlx.mlx_array_new(),
+                .shared_up_b = mlx.mlx_array_new(),
+                .shared_down_w = mlx.mlx_array_new(),
+                .shared_down_s = mlx.mlx_array_new(),
+                .shared_down_b = mlx.mlx_array_new(),
+                .expert_bias = try getLayerWeight(weights, name_buf, prefix, li, "mlp.gate.e_score_correction_bias"),
+                .route_norm = config.moe_route_norm,
+                .route_scale = config.router_scaling_factor,
+            } };
+            {
+                const mw = &lw.mlp.moe;
+                try maybeTransposeForBf16(&mw.router_w, mw.router_s, &owned_bf16, allocator, s);
+                if (!exl3) {
+                    try maybeTransposeForBf16(&mw.switch_gate_w, mw.switch_gate_s, &owned_bf16, allocator, s);
+                    try maybeTransposeForBf16(&mw.switch_up_w, mw.switch_up_s, &owned_bf16, allocator, s);
+                    try maybeTransposeForBf16(&mw.switch_down_w, mw.switch_down_s, &owned_bf16, allocator, s);
+                }
             }
         } else if (layer_is_moe) {
             // Qwen3.5 MoE — also serves Qwen3-30B-A3B (`qwen3_moe`), which shares
@@ -31876,7 +32288,15 @@ pub fn groupLimitedRouting(
     return .{ .inds = inds, .norm_scores = norm_scores };
 }
 
-fn hy3RoutingChain(router_logits: mlx.mlx_array, expert_bias: mlx.mlx_array, k: c_int, route_norm: bool, route_scale: f32, s: mlx.mlx_stream) !Transformer.MoeRouting {
+fn sigmoidBiasRoutingChain(
+    router_logits: mlx.mlx_array,
+    expert_bias: mlx.mlx_array,
+    k: c_int,
+    route_norm: bool,
+    route_scale: f32,
+    output_dtype: mlx.mlx_dtype,
+    s: mlx.mlx_stream,
+) !Transformer.MoeRouting {
     var logits_f32 = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(logits_f32);
     try mlx.check(mlx.mlx_astype(&logits_f32, router_logits, .float32, s));
@@ -31943,9 +32363,20 @@ fn hy3RoutingChain(router_logits: mlx.mlx_array, expert_bias: mlx.mlx_array, k: 
 
     var norm_scores = mlx.mlx_array_new();
     errdefer _ = mlx.mlx_array_free(norm_scores);
-    try mlx.check(mlx.mlx_astype(&norm_scores, scaled, .bfloat16, s));
+    try mlx.check(mlx.mlx_astype(&norm_scores, scaled, output_dtype, s));
 
     return .{ .inds = inds, .norm_scores = norm_scores };
+}
+
+fn hy3RoutingChain(router_logits: mlx.mlx_array, expert_bias: mlx.mlx_array, k: c_int, route_norm: bool, route_scale: f32, s: mlx.mlx_stream) !Transformer.MoeRouting {
+    return sigmoidBiasRoutingChain(router_logits, expert_bias, k, route_norm, route_scale, .bfloat16, s);
+}
+
+/// MiMo keeps the normalized sigmoid weights in f32 until the expert sum. The
+/// reference only narrows the final residual, so bf16 routing weights change
+/// near-tied expert contributions even when selection is unchanged.
+fn mimoRoutingChain(router_logits: mlx.mlx_array, expert_bias: mlx.mlx_array, k: c_int, route_norm: bool, route_scale: f32, s: mlx.mlx_stream) !Transformer.MoeRouting {
+    return sigmoidBiasRoutingChain(router_logits, expert_bias, k, route_norm, route_scale, .float32, s);
 }
 
 // ── Fused MoE router (top-K selection + weight normalization in ONE kernel) ──
@@ -38983,10 +39414,27 @@ fn getLayerScaleOrEmpty(weights: *const Weights, buf: *[256]u8, prefix: []const 
 /// projection, so the caller must not run maybeTransposeForBf16 on it. An
 /// empty (null-ctx) input yields three empty arrays.
 fn splitFusedQkvRows(arr: mlx.mlx_array, q_rows: u32, kv_rows: u32, transpose: bool, owned: *std.ArrayList(mlx.mlx_array), allocator: std.mem.Allocator, s: mlx.mlx_stream) ![3]mlx.mlx_array {
+    return splitFusedQkvAsymRows(arr, q_rows, kv_rows, kv_rows, transpose, owned, allocator, s);
+}
+
+/// Split a native fused QKV projection whose value width is independent of its
+/// key width. MiMo's `[q | k | v]` rows are `[nq*hd | nkv*hd | nkv*vhd]`;
+/// `splitFusedQkvRows` remains the symmetric compatibility wrapper.
+fn splitFusedQkvAsymRows(
+    arr: mlx.mlx_array,
+    q_rows: u32,
+    k_rows: u32,
+    v_rows: u32,
+    transpose: bool,
+    owned: *std.ArrayList(mlx.mlx_array),
+    allocator: std.mem.Allocator,
+    s: mlx.mlx_stream,
+) ![3]mlx.mlx_array {
     if (arr.ctx == null) return .{ mlx.mlx_array_new(), mlx.mlx_array_new(), mlx.mlx_array_new() };
     const shape = mlx.getShape(arr);
-    if (shape.len != 2 or shape[0] != @as(c_int, @intCast(q_rows + 2 * kv_rows))) return error.BadFusedQkvShape;
-    const bounds = [_]c_int{ 0, @intCast(q_rows), @intCast(q_rows + kv_rows), shape[0] };
+    const total_rows = std.math.add(u32, q_rows, std.math.add(u32, k_rows, v_rows) catch return error.BadFusedQkvShape) catch return error.BadFusedQkvShape;
+    if (shape.len != 2 or shape[0] != @as(c_int, @intCast(total_rows))) return error.BadFusedQkvShape;
+    const bounds = [_]c_int{ 0, @intCast(q_rows), @intCast(q_rows + k_rows), shape[0] };
     var out: [3]mlx.mlx_array = undefined;
     for (0..3) |i| {
         const start = [_]c_int{ bounds[i], 0 };
@@ -64293,6 +64741,302 @@ test "QSA verify preserves serial arithmetic across the sparse budget boundary" 
             const actual = try sliceAttentionSeq(s, together, row, row + 1);
             defer _ = mlx.mlx_array_free(actual);
             try qkvExpectBitsEqual(s, serial, actual);
+        }
+    }
+}
+
+test "mimo v2 fused qkv split keeps asymmetric value rows" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    const allocator = testing.allocator;
+    const q_rows: usize = 4 * 3;
+    const k_rows: usize = 2 * 3;
+    const v_rows: usize = 2 * 2;
+    const in_dim: usize = 5;
+    var raw_data: [((q_rows + k_rows + v_rows) * in_dim)]f32 = undefined;
+    for (&raw_data, 0..) |*v, i| v.* = @floatFromInt(i);
+    const raw = mlx.mlx_array_new_data(
+        raw_data[0..].ptr,
+        &[_]c_int{ @intCast(q_rows + k_rows + v_rows), @intCast(in_dim) },
+        2,
+        .float32,
+    );
+    defer _ = mlx.mlx_array_free(raw);
+    var owned: std.ArrayList(mlx.mlx_array) = .empty;
+    defer {
+        for (owned.items) |arr| _ = mlx.mlx_array_free(arr);
+        owned.deinit(allocator);
+    }
+
+    const parts = try splitFusedQkvAsymRows(
+        raw,
+        @intCast(q_rows),
+        @intCast(k_rows),
+        @intCast(v_rows),
+        false,
+        &owned,
+        allocator,
+        s,
+    );
+    try testing.expectEqualSlices(c_int, &[_]c_int{ @intCast(q_rows), @intCast(in_dim) }, mlx.getShape(parts[0]));
+    try testing.expectEqualSlices(c_int, &[_]c_int{ @intCast(k_rows), @intCast(in_dim) }, mlx.getShape(parts[1]));
+    try testing.expectEqualSlices(c_int, &[_]c_int{ @intCast(v_rows), @intCast(in_dim) }, mlx.getShape(parts[2]));
+}
+
+fn mimoFixtureMaxAbs(a: []const f32, b: []const f32) !f32 {
+    if (a.len != b.len) return error.FixtureShapeMismatch;
+    var max_err: f32 = 0;
+    for (a, b) |x, y| {
+        if (!std.math.isFinite(x) or !std.math.isFinite(y)) return error.NonFiniteFixture;
+        max_err = @max(max_err, @abs(x - y));
+    }
+    return max_err;
+}
+
+fn mimoExpectClose(label: []const u8, actual: []const f32, expected: []const f32, limit: f32) !void {
+    const err = try mimoFixtureMaxAbs(actual, expected);
+    if (err > limit) {
+        var peak: usize = 0;
+        for (actual, expected, 0..) |x, y, i| {
+            if (@abs(x - y) > @abs(actual[peak] - expected[peak])) peak = i;
+        }
+        std.debug.print("{s}: max absolute error {d} exceeds {d}; index {d}, actual {d}, expected {d}; first-row error {d}\n", .{
+            label, err, limit, peak, actual[peak], expected[peak],
+            try mimoFixtureMaxAbs(actual[0..@min(384, actual.len)], expected[0..@min(384, expected.len)]),
+        });
+        return error.TestExpectedEqual;
+    }
+}
+
+/// The HF oracle keeps separate experts; the serving contract uses leading-index banks.
+fn stackMimoFixtureExperts(weights: *Weights, config: ModelConfig, s: mlx.mlx_stream) !void {
+    const a = weights.allocator;
+    for (config.first_k_dense_replace..config.num_hidden_layers) |li| {
+        for ([_][]const u8{ "gate", "up", "down" }) |projection| {
+            const key = try std.fmt.allocPrint(a, "model.layers.{d}.mlp.switch_mlp.{s}_proj.weight", .{ li, projection });
+            errdefer a.free(key);
+            if (weights.get(key) != null) {
+                a.free(key);
+                continue;
+            }
+            const arrays = mlx.mlx_vector_array_new();
+            defer _ = mlx.mlx_vector_array_free(arrays);
+            for (0..config.num_experts) |ei| {
+                var buf: [256]u8 = undefined;
+                const source = try std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.weight", .{ li, ei, projection });
+                try mlx.check(mlx.mlx_vector_array_append_value(arrays, weights.get(source) orelse return error.MissingFixtureTensor));
+            }
+            var bank = mlx.mlx_array_new();
+            errdefer _ = mlx.mlx_array_free(bank);
+            try mlx.check(mlx.mlx_stack_axis(&bank, arrays, 0, s));
+            try weights.map.put(key, bank);
+        }
+    }
+}
+
+test "mimo v2 raw per-expert load failure releases partial construction" {
+    const model_dir = std.c.getenv("MIMO_V2_MODEL") orelse return error.SkipZigTest;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var config = try model_mod.parseConfig(io, allocator, std.mem.span(model_dir));
+    defer config.deinit(allocator);
+    var weights = try model_mod.loadWeights(io, allocator, std.mem.span(model_dir));
+    defer weights.deinit();
+    model_mod.resolveWeightPrefix(&config, &weights);
+
+    // The fixture's dense layer 0 binds before the first MoE layer asks for
+    // packed switch_mlp banks that are absent from the raw HF layout.
+    try testing.expectError(error.MissingWeight, Transformer.init(io, allocator, config, &weights));
+}
+
+test "mimo v2 fixture full and cached forwards track the HF reference (MIMO_V2_MODEL + MIMO_V2_FIXTURE)" {
+    const model_dir = std.c.getenv("MIMO_V2_MODEL") orelse return error.SkipZigTest;
+    const fixture_path = std.c.getenv("MIMO_V2_FIXTURE") orelse return error.SkipZigTest;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const s = mlx.gpuStream();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var config = try model_mod.parseConfig(io, allocator, std.mem.span(model_dir));
+    defer if (config.ngram_table_path) |p| allocator.free(p);
+    try testing.expectEqualStrings("mimo_v2", config.model_type);
+    var weights = try model_mod.loadWeights(io, allocator, std.mem.span(model_dir));
+    defer weights.deinit();
+    try stackMimoFixtureExperts(&weights, config, s);
+    model_mod.resolveWeightPrefix(&config, &weights);
+    var xfm = try Transformer.init(io, allocator, config, &weights);
+    defer xfm.deinit();
+
+    var fx = try model_mod.loadWeightsSingleFile(allocator, std.mem.span(fixture_path));
+    defer fx.deinit();
+    const ids_arr = fx.get("input_ids") orelse return error.MissingFixtureTensor;
+    try mlx.check(mlx.mlx_array_eval(ids_arr));
+    const ids_src = mlx.mlx_array_data_int32(ids_arr) orelse return error.Unreadable;
+    const token_count: usize = mlx.mlx_array_size(ids_arr);
+    const vocab: usize = @intCast(config.vocab_size);
+    const ref_full = try qwen4ReadF32(allocator, fx.get("logits_full") orelse return error.MissingFixtureTensor, s);
+    defer allocator.free(ref_full);
+    const ref_cache = try qwen4ReadF32(allocator, fx.get("cache_logits") orelse return error.MissingFixtureTensor, s);
+    defer allocator.free(ref_cache);
+    try testing.expectEqual(token_count * vocab, ref_full.len);
+    try testing.expectEqual(token_count * vocab, ref_cache.len);
+
+    const full_shape = [_]c_int{ 1, @intCast(token_count) };
+    const full_ids = mlx.mlx_array_new_data(@ptrCast(ids_src), &full_shape, 2, .int32);
+    defer _ = mlx.mlx_array_free(full_ids);
+    const layer_count: usize = @intCast(config.num_hidden_layers);
+    const capture_ids = try allocator.alloc(u32, layer_count);
+    defer allocator.free(capture_ids);
+    const capture_out = try allocator.alloc(mlx.mlx_array, layer_count);
+    defer {
+        for (capture_out) |arr| {
+            if (arr.ctx != null) _ = mlx.mlx_array_free(arr);
+        }
+        allocator.free(capture_out);
+    }
+    for (capture_ids, capture_out, 0..) |*id, *out, i| {
+        id.* = @intCast(i);
+        out.* = mlx.mlx_array_new();
+    }
+    var captures: CaptureLayers = .{ .ids = capture_ids, .out = capture_out };
+    var full_ctx = xfm.defaultCtx();
+    full_ctx.capture_layers = &captures;
+    const full_logits = try xfm.forwardWith(&full_ctx, full_ids);
+    defer _ = mlx.mlx_array_free(full_logits);
+    const ours_full = try qwen4ReadF32(allocator, full_logits, s);
+    defer allocator.free(ours_full);
+
+    const embed = try xfm.embedding(full_ids);
+    defer _ = mlx.mlx_array_free(embed);
+    try testing.expectEqual(mlx.mlx_dtype.float32, mlx.mlx_array_dtype(embed));
+    const ref_embed = try qwen4ReadF32(allocator, fx.get("embed_out") orelse return error.MissingFixtureTensor, s);
+    defer allocator.free(ref_embed);
+    const ours_embed = try qwen4ReadF32(allocator, embed, s);
+    defer allocator.free(ours_embed);
+    try mimoExpectClose("embeddings", ours_embed, ref_embed, 0);
+
+    {
+        var component_xfm = try Transformer.init(io, allocator, config, &weights);
+        defer component_xfm.deinit();
+        var component_ctx = component_xfm.defaultCtx();
+        const lw = &component_xfm.moe_layers.?[0];
+        const normed = try component_xfm.rmsNorm(embed, lw.input_norm);
+        defer _ = mlx.mlx_array_free(normed);
+        const norm_host = try qwen4ReadF32(allocator, normed, s);
+        defer allocator.free(norm_host);
+        const value_proj = try component_xfm.qmatmul(normed, lw.attn.full.v_w, lw.attn.full.v_s, lw.attn.full.v_b);
+        defer _ = mlx.mlx_array_free(value_proj);
+        const value_host = try qwen4ReadF32(allocator, value_proj, s);
+        defer allocator.free(value_host);
+        const source_qkv = try qwen4ReadF32(allocator, weights.get("model.layers.0.self_attn.qkv_proj.weight").?, s);
+        defer allocator.free(source_qkv);
+        const vrows = config.layerKVHeads(0) * config.layerVHeadDim(0);
+        const vstart = (config.layerNumHeads(0) + config.layerKVHeads(0)) * config.layerHeadDim(0);
+        const truth_v = try allocator.alloc(f32, vrows);
+        defer allocator.free(truth_v);
+        for (truth_v, 0..) |*v, i| {
+            var sum: f64 = 0;
+            for (0..config.hidden_size) |j| sum += @as(f64, norm_host[j]) * source_qkv[(vstart + i) * config.hidden_size + j];
+            v.* = @floatCast(sum);
+        }
+        try mimoExpectClose("layer 0 value projection", value_host[0..vrows], truth_v, 5e-4);
+        var local_mask = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(local_mask);
+        const attn = try component_xfm.mimoAttnWith(&component_ctx, normed, &lw.attn.full, 0, 0, 1, @intCast(token_count), true, &local_mask, .{ .ctx = null });
+        defer _ = mlx.mlx_array_free(attn);
+        const ours = try qwen4ReadF32(allocator, attn, s);
+        defer allocator.free(ours);
+        const ref = try qwen4ReadF32(allocator, fx.get("l0_attn_out").?, s);
+        defer allocator.free(ref);
+        try mimoExpectClose("layer 0 attention", ours, ref, 5e-4);
+    }
+
+    for (0..layer_count) |i| {
+        var key_buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "stream_{d}", .{i + 1}) catch unreachable;
+        const ref = try qwen4ReadF32(allocator, fx.get(key) orelse return error.MissingFixtureTensor, s);
+        defer allocator.free(ref);
+        const ours = try qwen4ReadF32(allocator, capture_out[i], s);
+        defer allocator.free(ours);
+        try mimoExpectClose(key, ours, ref, 5e-4);
+    }
+    try mimoExpectClose("full logits", ours_full, ref_full, 5e-3);
+
+    var cache_xfm = try Transformer.init(io, allocator, config, &weights);
+    defer cache_xfm.deinit();
+    const t_prefill: usize = token_count - 6;
+    const pre_shape = [_]c_int{ 1, @intCast(t_prefill) };
+    const pre_ids = mlx.mlx_array_new_data(@ptrCast(ids_src), &pre_shape, 2, .int32);
+    defer _ = mlx.mlx_array_free(pre_ids);
+    var cache_ctx = cache_xfm.defaultCtx();
+    const pre_logits = try cache_xfm.forwardWith(&cache_ctx, pre_ids);
+    defer _ = mlx.mlx_array_free(pre_logits);
+    const pre_rows = try qwen4ReadF32(allocator, pre_logits, s);
+    defer allocator.free(pre_rows);
+    var ours_cache = try allocator.alloc(f32, ref_cache.len);
+    defer allocator.free(ours_cache);
+    @memcpy(ours_cache[0 .. t_prefill * vocab], pre_rows);
+
+    for (t_prefill..token_count) |t| {
+        const step_shape = [_]c_int{ 1, 1 };
+        const step_id = mlx.mlx_array_new_data(@ptrCast(&ids_src[t]), &step_shape, 2, .int32);
+        defer _ = mlx.mlx_array_free(step_id);
+        var step_ctx = cache_xfm.defaultCtx();
+        const step_logits = try cache_xfm.forwardWith(&step_ctx, step_id);
+        defer _ = mlx.mlx_array_free(step_logits);
+        const step_rows = try qwen4ReadF32(allocator, step_logits, s);
+        defer allocator.free(step_rows);
+        @memcpy(ours_cache[t * vocab ..][0..vocab], step_rows);
+    }
+    try mimoExpectClose("cached logits", ours_cache, ref_cache, 5e-3);
+}
+
+test "mimo v2 mixed-precision streamed and resident forwards agree" {
+    const raw = std.c.getenv("MIMO_STREAM_FIXTURE") orelse return error.SkipZigTest;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const a = testing.allocator;
+    const io = testing.io;
+    const path = std.mem.span(raw);
+    var config = try model_mod.parseConfig(io, a, path);
+    defer config.deinit(a);
+    var resident_weights = try model_mod.loadWeights(io, a, path);
+    defer resident_weights.deinit();
+    var streamed_weights = try model_mod.loadWeightsStreaming(io, a, path, .mxfp4_split);
+    defer streamed_weights.deinit();
+    const per_expert = try expert_stream_mod.mxfp4ExpertBytes(config.hidden_size, config.moe_intermediate_size);
+    var stream_config = config;
+    stream_config.expert_streaming = true;
+    stream_config.expert_source_dir = try a.dupe(u8, path);
+    defer a.free(stream_config.expert_source_dir.?);
+    stream_config.expert_cache_bytes = 8 * config.expertLayerCount() * per_expert;
+    for ([_]KVQuantConfig{ KVQuantConfig.dense, KVQuantConfig.affine(8) }) |kv| {
+        var resident = try Transformer.init(io, a, config, &resident_weights);
+        defer resident.deinit();
+        var streamed = try Transformer.init(io, a, stream_config, &streamed_weights);
+        defer streamed.deinit();
+        try resident.cache.reinit(config.num_hidden_layers, kv);
+        try streamed.cache.reinit(config.num_hidden_layers, kv);
+        var tokens: [166]i32 = undefined;
+        for (&tokens, 0..) |*token, i| token.* = @intCast(i % config.vocab_size);
+        var offset: usize = 0;
+        for ([_]usize{ 160, 1, 1, 1, 1, 1, 1 }) |width| {
+            const shape = [_]c_int{ 1, @intCast(width) };
+            const input = mlx.mlx_array_new_data(@ptrCast(tokens[offset..].ptr), &shape, 2, .int32);
+            defer _ = mlx.mlx_array_free(input);
+            var rctx = resident.defaultCtx();
+            const rlogits = try resident.forwardWith(&rctx, input);
+            defer _ = mlx.mlx_array_free(rlogits);
+            const expected = try qwen4ReadF32(a, rlogits, resident.s);
+            defer a.free(expected);
+            var sctx = streamed.defaultCtx();
+            const slogits = try streamed.forwardWith(&sctx, input);
+            defer _ = mlx.mlx_array_free(slogits);
+            const actual = try qwen4ReadF32(a, slogits, streamed.s);
+            defer a.free(actual);
+            try mimoExpectClose("MXFP4 streamed versus resident", actual, expected, 0);
+            offset += width;
         }
     }
 }

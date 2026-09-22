@@ -41,6 +41,65 @@ const testing = std.testing;
 const chat = @import("chat.zig");
 const mtp = @import("mtp.zig");
 
+test "format corpus: generic ChatML role headers preserve tool messages" {
+    const templates = [_][]const u8{
+        "{% for message in messages %}{{ '<|im_start|>' ~ message.role ~ '\\n' ~ message.content ~ '<|im_end|>' }}{% endfor %}",
+        "{% for message in messages %}{{ \"<|im_start|>\"~message['role']~'\\n'~message.content~'<|im_end|>' }}{% endfor %}",
+    };
+    for (templates) |tpl| {
+        var config = chat.ChatConfig{
+            .chat_template = tpl,
+            .bos_token = null,
+            .eos_token = null,
+            .add_bos_token = false,
+            .allocator = testing.allocator,
+        };
+        const messages = [_]chat.Message{
+            .{ .role = "user", .content = "Run." },
+            .{ .role = "tool", .content = "result" },
+        };
+        const rendered = try chat.renderChatTemplate(testing.allocator, &messages, &config, null, null, true, null, false);
+        defer testing.allocator.free(rendered);
+        try testing.expectEqualStrings("<|im_start|>user\nRun.<|im_end|><|im_start|>tool\nresult<|im_end|>", rendered);
+    }
+}
+
+test "format corpus: guarded ChatML headers preserve tool results through fallback" {
+    const templates = [_][]const u8{
+        "{% for message in messages %}" ++
+            "{% if message.role == 'user' or message.role == 'assistant' or message.role == 'system' %}" ++
+            "{{ '<|im_start|>' ~ message.role ~ '\\n' ~ message.content ~ '<|im_end|>' }}" ++
+            "{% endif %}" ++
+            "{% endfor %}" ++
+            "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}",
+        "{% for message in messages %}" ++
+            "{% if message['role'] == 'user' or message['role'] == 'assistant' or message['role'] == 'system' %}" ++
+            "{{ '<|im_start|>' + message['role'] + '\\n' + message.content + '<|im_end|>' }}" ++
+            "{% endif %}" ++
+            "{% endfor %}" ++
+            "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}",
+    };
+    for (templates) |tpl| {
+        var config = chat.ChatConfig{
+            .chat_template = tpl,
+            .bos_token = null,
+            .eos_token = null,
+            .add_bos_token = false,
+            .allocator = testing.allocator,
+        };
+        const messages = [_]chat.Message{
+            .{ .role = "user", .content = "Run." },
+            .{ .role = "tool", .content = "UNIQUE_RESULT" },
+        };
+        const rendered = try chat.renderChatTemplate(testing.allocator, &messages, &config, null, null, true, null, false);
+        defer testing.allocator.free(rendered);
+        try testing.expectEqualStrings(
+            "<|im_start|>user\nRun.<|im_end|><|im_start|>user\n<tool_response>\nUNIQUE_RESULT\n</tool_response><|im_end|><|im_start|>assistant\n",
+            rendered,
+        );
+    }
+}
+
 test "format corpus: MTP cost profiles classify full target tensor surfaces" {
     const Case = struct {
         bits: u32,

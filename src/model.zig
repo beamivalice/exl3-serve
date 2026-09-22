@@ -142,6 +142,9 @@ pub const ModelConfig = struct {
     num_attention_heads: u32 = 16,
     num_key_value_heads: u32 = 8,
     head_dim: u32 = 256,
+    v_head_dim: u32 = 0, // 0 = the layer's query/key width
+    global_v_head_dim: u32 = 0,
+    attention_value_scale: f32 = 1.0, // Applied before the KV cache write.
     rms_norm_eps: f32 = 1e-6,
     /// K2-Horizon: every RMS norm normalizes `hidden_size / norm_groups`-wide channel groups on their own rms, then applies the full weight.
     norm_groups: u32 = 1,
@@ -194,6 +197,8 @@ pub const ModelConfig = struct {
     // this flag is what makes the loader fetch the weight and the forward
     // pass it instead of the null array.
     has_attn_sinks: bool = false,
+    attn_sinks_global: bool = true,
+    attn_sinks_sliding: bool = true,
     // gpt_oss clamped SwiGLU. Non-zero limit selects
     //   clip(gate, max=limit) * sigmoid(alpha*gate) * (clip(up, ±limit) + 1)
     // over the standard silu(gate)*up. The `+ 1` on the linear branch and the
@@ -715,6 +720,16 @@ pub const ModelConfig = struct {
         return self.head_dim;
     }
 
+    pub fn layerVHeadDim(self: ModelConfig, layer_idx: u32) u32 {
+        if (self.global_v_head_dim > 0 and self.isGlobalLayer(layer_idx)) return self.global_v_head_dim;
+        return if (self.v_head_dim > 0) self.v_head_dim else self.layerHeadDim(layer_idx);
+    }
+
+    pub fn layerHasAttnSinks(self: ModelConfig, layer_idx: u32) bool {
+        return self.has_attn_sinks and
+            (if (self.isGlobalLayer(layer_idx)) self.attn_sinks_global else self.attn_sinks_sliding);
+    }
+
     /// Per-layer Q-head count (Laguna: 48 on full-attention layers, 72 on
     /// sliding). Every other arch has uniform heads, so this falls back to
     /// num_attention_heads. KV heads stay uniform (layerKVHeads).
@@ -888,6 +903,10 @@ pub const ModelConfig = struct {
         return self.num_experts > 0;
     }
 
+    pub fn expertLayerCount(self: *const ModelConfig) u32 {
+        return self.num_hidden_layers -| self.first_k_dense_replace;
+    }
+
     /// True when the full-attention layers are Multi-head Latent Attention
     /// (compressed KV latent + low-rank Q), not plain GQA projections.
     pub fn isMla(self: *const ModelConfig) bool {
@@ -949,7 +968,7 @@ pub const ModelConfig = struct {
     /// its precision: both the dense HF layout and an MLX pack's per-projection
     /// banks stream. The disk-side half of the answer is the discovery layout probe.
     pub fn supportsExpertStreaming(self: *const ModelConfig) bool {
-        return isExpertStreamingArch(self.model_type) and self.num_hidden_layers > 0 and self.num_experts > 0 and
+        return isExpertStreamingArch(self.model_type) and self.expertLayerCount() > 0 and self.num_experts > 0 and
             self.num_experts_per_tok > 0 and self.hidden_size > 0 and self.moe_intermediate_size > 0;
     }
 
@@ -1370,8 +1389,11 @@ pub fn parseConfig(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
             const dir = std.mem.span(raw);
             if (dir.len > 0) config.ngram_bf16_dir = try allocator.dupe(u8, dir);
         }
+    }
+    if (config.supportsExpertStreaming()) {
         const layers: u16 = std.math.cast(u16, config.num_hidden_layers) orelse return error.InvalidQwen4ConfigField;
-        if (expert_quant.layoutOfDir(allocator, io, config.model_type, model_dir, layers)) |layout| {
+        const first_moe: u16 = @intCast(config.first_k_dense_replace);
+        if (expert_quant.layoutOfDirWithFirstMoe(allocator, io, config.model_type, model_dir, layers, first_moe)) |layout| {
             config.expert_layout = layout;
             if (layout == .exl3_k4) {
                 const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return error.ExpertLayoutUnsupported;
@@ -3484,6 +3506,8 @@ pub fn parseConfigFromJson(allocator: std.mem.Allocator, content: []const u8) !M
         // main.zig / Swift app). Fall through to the unknown-arch error
         // path so the failure message points at the right thing.
         return error.UnsupportedDsv4MlxFormat;
+    } else if (std.mem.eql(u8, model_type, "mimo_v2")) {
+        try parseMimoConfig(&config, cfg_obj);
     } else if (std.mem.eql(u8, model_type, "bert")) {
         config.model_type = "bert";
         config.is_encoder_only = true;
@@ -3564,6 +3588,120 @@ pub fn parseConfigFromJson(allocator: std.mem.Allocator, content: []const u8) !M
     }
 
     return config;
+}
+
+fn mimoUint(obj: std.json.ObjectMap, key: []const u8, fallback: u32) !u32 {
+    const v = obj.get(key) orelse return fallback;
+    if (v != .integer or v.integer < 0 or v.integer > std.math.maxInt(u32))
+        return error.UnsupportedMimoV2Config;
+    return @intCast(v.integer);
+}
+
+fn mimoFloat(obj: std.json.ObjectMap, key: []const u8, fallback: f32) !f32 {
+    const v = obj.get(key) orelse return fallback;
+    if (v != .integer and v != .float) return error.UnsupportedMimoV2Config;
+    const f = jsonFloat(v);
+    if (!std.math.isFinite(f)) return error.UnsupportedMimoV2Config;
+    return f;
+}
+
+fn mimoBool(obj: std.json.ObjectMap, key: []const u8, fallback: bool) !bool {
+    const v = obj.get(key) orelse return fallback;
+    if (v != .bool) return error.UnsupportedMimoV2Config;
+    return v.bool;
+}
+
+fn parseMimoConfig(c: *ModelConfig, obj: std.json.ObjectMap) !void {
+    c.model_type = "mimo_v2";
+    c.weight_prefix = "model";
+    c.norm_has_offset = false;
+    c.scale_embeddings = false;
+    c.has_pre_ff_norm = false;
+    c.has_qk_norm = false;
+    c.hidden_act = .silu;
+    c.has_vision = false; // The text engine does not implement MiMo's towers.
+    c.has_sliding_window = true;
+    c.has_explicit_layer_types = true;
+    c.rope_scaling_factor = 1;
+    c.rms_norm_eps = try mimoFloat(obj, "layernorm_epsilon", c.rms_norm_eps);
+    c.partial_rotary_factor = try mimoFloat(obj, "partial_rotary_factor", c.partial_rotary_factor);
+    c.rope_local_base_freq = try mimoFloat(obj, "swa_rope_theta", 10000);
+    c.attention_value_scale = try mimoFloat(obj, "attention_value_scale", 1);
+    c.sliding_window = try mimoUint(obj, "sliding_window", try mimoUint(obj, "sliding_window_size", 128));
+    if (c.num_hidden_layers == 0 or c.num_hidden_layers > c.layer_is_global.len or
+        c.sliding_window == 0 or c.hidden_size == 0 or c.rms_norm_eps <= 0 or
+        c.rope_theta <= 0 or c.rope_local_base_freq <= 0 or
+        c.partial_rotary_factor <= 0 or c.partial_rotary_factor > 1)
+        return error.UnsupportedMimoV2Config;
+
+    const pattern = obj.get("hybrid_layer_pattern") orelse return error.UnsupportedMimoV2Config;
+    if (pattern != .array or pattern.array.items.len != c.num_hidden_layers)
+        return error.UnsupportedMimoV2Config;
+    for (pattern.array.items, 0..) |v, i| {
+        if (v != .integer or (v.integer != 0 and v.integer != 1)) return error.UnsupportedMimoV2Config;
+        c.layer_is_global[i] = v.integer == 0;
+    }
+
+    // The config's plain geometry is global; our layer helpers use sliding defaults.
+    c.global_head_dim = c.head_dim;
+    c.global_v_head_dim = try mimoUint(obj, "v_head_dim", c.head_dim);
+    c.num_global_key_value_heads = c.num_key_value_heads;
+    c.head_dim = try mimoUint(obj, "swa_head_dim", c.global_head_dim);
+    c.v_head_dim = try mimoUint(obj, "swa_v_head_dim", c.global_v_head_dim);
+    c.num_key_value_heads = try mimoUint(obj, "swa_num_key_value_heads", c.num_global_key_value_heads);
+    const swa_heads = try mimoUint(obj, "swa_num_attention_heads", c.num_attention_heads);
+    if (c.global_head_dim == 0 or c.global_v_head_dim == 0 or c.num_global_key_value_heads == 0 or
+        c.head_dim == 0 or c.v_head_dim == 0 or c.num_key_value_heads == 0 or
+        c.num_attention_heads == 0 or swa_heads == 0)
+        return error.UnsupportedMimoV2Config;
+    c.has_per_layer_heads = true;
+    for (0..c.num_hidden_layers) |i| {
+        c.num_attention_heads_per_layer[i] = if (c.layer_is_global[i]) c.num_attention_heads else swa_heads;
+        const li: u32 = @intCast(i);
+        const heads = c.layerNumHeads(li);
+        const kv = c.layerKVHeads(li);
+        const hd = c.layerHeadDim(li);
+        if (heads == 0 or kv == 0 or heads % kv != 0 or hd == 0 or c.layerVHeadDim(li) == 0)
+            return error.UnsupportedMimoV2Config;
+        const rd: u32 = @intFromFloat(@as(f64, @floatFromInt(hd)) * c.partial_rotary_factor);
+        if (rd == 0 or rd % 2 != 0) return error.UnsupportedMimoV2Config;
+    }
+    c.query_pre_attn_scalar = c.global_head_dim;
+    c.attn_sinks_sliding = try mimoBool(obj, "add_swa_attention_sink_bias", true);
+    c.attn_sinks_global = try mimoBool(obj, "add_full_attention_sink_bias", false);
+    c.has_attn_sinks = c.attn_sinks_sliding or c.attn_sinks_global;
+    if (obj.get("attention_projection_layout")) |v| {
+        if (v != .string) return error.UnsupportedMimoV2Config;
+        c.attn_fused_qkv = std.mem.eql(u8, v.string, "fused_qkv");
+        if (!c.attn_fused_qkv and !std.mem.eql(u8, v.string, "split_qkv") and
+            !std.mem.eql(u8, v.string, "split"))
+            return error.UnsupportedMimoV2Config;
+    }
+
+    c.num_experts = try mimoUint(obj, "n_routed_experts", c.num_experts);
+    c.moe_sigmoid_router = true;
+    c.moe_n_group = try mimoUint(obj, "n_group", 1);
+    c.moe_topk_group = try mimoUint(obj, "topk_group", 1);
+    c.moe_route_norm = try mimoBool(obj, "norm_topk_prob", true);
+    if (obj.get("routed_scaling_factor")) |v| {
+        if (v != .null) c.router_scaling_factor = try mimoFloat(obj, "routed_scaling_factor", 1);
+    }
+    for ([_][]const u8{ "scoring_func", "topk_method", "hidden_act" }, [_][]const u8{ "sigmoid", "noaux_tc", "silu" }) |key, expected| {
+        if (obj.get(key)) |v| {
+            if (v != .string or !std.mem.eql(u8, v.string, expected)) return error.UnsupportedMimoV2Config;
+        }
+    }
+    if (obj.get("n_shared_experts")) |v| {
+        if (v != .null and (v != .integer or v.integer != 0)) return error.UnsupportedMimoV2Config;
+    }
+    if (c.num_experts == 0 or c.num_experts_per_tok == 0 or c.num_experts_per_tok > c.num_experts or
+        c.moe_intermediate_size == 0 or c.moe_n_group == 0 or c.num_experts % c.moe_n_group != 0 or
+        c.moe_topk_group == 0 or c.moe_topk_group > c.moe_n_group or
+        c.num_experts_per_tok > c.num_experts / c.moe_n_group * c.moe_topk_group or
+        (c.moe_n_group > 1 and c.num_experts / c.moe_n_group < 2))
+        return error.UnsupportedMimoV2Config;
+    const freq = obj.get("moe_layer_freq") orelse return error.UnsupportedMimoV2Config;
+    c.first_k_dense_replace = try model_discovery.denseMoePrefix(freq, c.num_hidden_layers);
 }
 
 fn jsonFloat(v: std.json.Value) f32 {
@@ -3660,6 +3798,10 @@ pub fn streamingDropsWeightKey(key: []const u8) bool {
 
 pub fn qwen4StreamingWeightKey(layout: expert_quant.Layout, buf: []u8, key: []const u8) ?[]const u8 {
     if (expert_quant.isRoutedExpertKey(layout, key)) return null;
+    if (layout == .mxfp4_split) {
+        if (std.mem.startsWith(u8, key, "mtp.") or std.mem.startsWith(u8, key, "model.mtp.")) return null;
+        return key;
+    }
     if (layout == .quantized_split or layout == .exl3_k4) return key;
     const trunk_prefix = "model.language_model.";
     if (std.mem.indexOf(u8, key, ".ple.ple_embedding.ngram_embedding.shard_") != null) return null;
@@ -7777,9 +7919,10 @@ test "ModelConfig parses k2_horizon (K2-Horizon-7B): llama trunk with grouped RM
     try testing.expect(!config.has_pre_ff_norm);
 }
 
-test "isExpertStreamingArch is the ONE arch gate and only qwen4_exp passes it" {
+test "isExpertStreamingArch admits only implemented streaming families" {
     const t = std.testing;
     try t.expect(isExpertStreamingArch("qwen4_exp"));
+    try t.expect(isExpertStreamingArch("mimo_v2"));
     for ([_][]const u8{ "qwen4_exp_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next", "hy_v3", "laguna", "llama", "deepseek_v4", "gguf", "" }) |mt| {
         try t.expect(!isExpertStreamingArch(mt));
         var c = ModelConfig{
@@ -7804,6 +7947,12 @@ test "isExpertStreamingArch is the ONE arch gate and only qwen4_exp passes it" {
         .moe_intermediate_size = 640,
     };
     try t.expect(q4.supportsExpertStreaming() and q4.expertStreamingRequired());
+    q4.model_type = "mimo_v2";
+    q4.first_k_dense_replace = 1;
+    q4.quant_bits = 4;
+    try t.expect(q4.supportsExpertStreaming() and !q4.expertStreamingRequired());
+    q4.first_k_dense_replace = q4.num_hidden_layers;
+    try t.expect(!q4.supportsExpertStreaming());
 }
 
 test "the n-gram table source: the bf16 override outranks streaming, streaming outranks the pack table" {
@@ -7819,4 +7968,173 @@ test "the n-gram table source: the bf16 override outranks streaming, streaming o
     try std.testing.expectEqual(ModelConfig.NgramTableSource.bf16_override, c.ngramTableSource());
     c.expert_streaming = false;
     try std.testing.expectEqual(ModelConfig.NgramTableSource.bf16_override, c.ngramTableSource());
+}
+
+test "ModelConfig parses mimo_v2 hybrid geometry and sigmoid routing" {
+    const json =
+        \\{
+        \\  "model_type": "mimo_v2", "hidden_size": 384, "vocab_size": 128,
+        \\  "num_hidden_layers": 4, "intermediate_size": 1536,
+        \\  "num_attention_heads": 4, "num_key_value_heads": 2,
+        \\  "head_dim": 192, "v_head_dim": 128,
+        \\  "swa_num_attention_heads": 6, "swa_num_key_value_heads": 3,
+        \\  "swa_head_dim": 192, "swa_v_head_dim": 128,
+        \\  "hybrid_layer_pattern": [0,1,1,0], "sliding_window": 128,
+        \\  "rope_theta": 10000000, "swa_rope_theta": 10000,
+        \\  "partial_rotary_factor": 0.334, "attention_value_scale": 0.707,
+        \\  "add_swa_attention_sink_bias": true, "add_full_attention_sink_bias": false,
+        \\  "attention_projection_layout": "split_qkv", "layernorm_epsilon": 0.00001,
+        \\  "n_routed_experts": 16, "num_experts_per_tok": 4,
+        \\  "moe_intermediate_size": 192, "moe_layer_freq": [0,1,1,1],
+        \\  "scoring_func": "sigmoid", "topk_method": "noaux_tc",
+        \\  "n_group": 1, "topk_group": 1, "norm_topk_prob": true,
+        \\  "routed_scaling_factor": null, "n_shared_experts": null,
+        \\  "eos_token_id": 17, "tie_word_embeddings": false,
+        \\  "quantization": {"bits": 4, "group_size": 32, "mode": "mxfp4"}
+        \\}
+    ;
+    const c = try parseConfigFromJson(testing.allocator, json);
+    try testing.expectEqualStrings("mimo_v2", c.model_type);
+    try testing.expectEqualStrings("model", c.weight_prefix);
+    try testing.expect(c.has_explicit_layer_types);
+    try testing.expect(c.isGlobalLayer(0) and c.isGlobalLayer(3));
+    try testing.expect(!c.isGlobalLayer(1) and !c.isGlobalLayer(2));
+    try testing.expectEqual(@as(u32, 4), c.layerNumHeads(0));
+    try testing.expectEqual(@as(u32, 6), c.layerNumHeads(1));
+    try testing.expectEqual(@as(u32, 2), c.layerKVHeads(0));
+    try testing.expectEqual(@as(u32, 3), c.layerKVHeads(1));
+    try testing.expectEqual(@as(u32, 192), c.layerHeadDim(0));
+    try testing.expectEqual(@as(u32, 128), c.layerVHeadDim(0));
+    try testing.expectEqual(@as(u32, 128), c.layerVHeadDim(1));
+    try testing.expect(!c.layerHasAttnSinks(0) and c.layerHasAttnSinks(1));
+    try testing.expectEqual(@as(f32, 0.707), c.attention_value_scale);
+    try testing.expect(!c.attn_fused_qkv);
+    try testing.expectEqual(@as(f32, 0.334), c.partial_rotary_factor);
+    try testing.expectEqual(@as(f32, 1e7), c.rope_theta);
+    try testing.expectEqual(@as(f32, 1e4), c.rope_local_base_freq);
+    try testing.expectEqual(@as(f32, 1e-5), c.rms_norm_eps);
+    try testing.expectEqual(@as(u32, 16), c.num_experts);
+    try testing.expectEqual(@as(u32, 1), c.first_k_dense_replace);
+    try testing.expect(c.moe_sigmoid_router and c.moe_route_norm);
+    try testing.expectEqual(@as(f32, 1), c.router_scaling_factor);
+    try testing.expectEqual(QuantMode.mxfp4, c.quant_mode);
+    try testing.expect(!c.norm_has_offset and !c.scale_embeddings and !c.has_qk_norm);
+    try testing.expect(!c.has_pre_ff_norm and !c.has_vision);
+    try testing.expect(c.isEosToken(17));
+}
+
+test "mimo_v2 config rejects unsupported routing and malformed layer geometry" {
+    const base =
+        \\{"model_type":"mimo_v2", "num_hidden_layers":2, "hidden_size":384,
+        \\ "num_attention_heads":4, "num_key_value_heads":2, "head_dim":192,
+        \\ "v_head_dim":128, "partial_rotary_factor":0.334,
+        \\ "hybrid_layer_pattern":[0,1], "moe_layer_freq":[0,1],
+        \\ "n_routed_experts":16, "num_experts_per_tok":4, "moe_intermediate_size":192}
+    ;
+    const good = try parseConfigFromJson(testing.allocator, base);
+    try testing.expectEqualStrings("mimo_v2", good.model_type);
+    for ([_][]const u8{
+        \\{"scoring_func":"softmax"}
+        ,
+        \\{"topk_method":"greedy"}
+        ,
+        \\{"hidden_act":"gelu"}
+        ,
+        \\{"n_shared_experts":1}
+        ,
+        \\{"hybrid_layer_pattern":[0]}
+        ,
+        \\{"hybrid_layer_pattern":[0,2]}
+        ,
+        \\{"moe_layer_freq":[1,0]}
+        ,
+        \\{"moe_layer_freq":2}
+        ,
+        \\{"swa_num_attention_heads":3}
+        ,
+        \\{"swa_v_head_dim":0}
+        ,
+        \\{"partial_rotary_factor":0.34}
+        ,
+        \\{"partial_rotary_factor":2}
+        ,
+        \\{"attention_projection_layout":"interleaved"}
+        ,
+        \\{"sliding_window":0}
+        ,
+        \\{"n_group":0}
+        ,
+        \\{"n_group":3}
+        ,
+        \\{"n_group":4,"topk_group":5}
+        ,
+        \\{"n_group":16,"topk_group":4}
+        ,
+        \\{"layernorm_epsilon":0}
+        ,
+    }) |override| {
+        const json = try mergeConfigJson(testing.allocator, base, override);
+        defer testing.allocator.free(json);
+        try testing.expectError(error.UnsupportedMimoV2Config, parseConfigFromJson(testing.allocator, json));
+    }
+    const fused_json = try mergeConfigJson(testing.allocator, base,
+        \\{"attention_projection_layout":"fused_qkv","routed_scaling_factor":2.5,
+        \\ "norm_topk_prob":false,"add_swa_attention_sink_bias":false,
+        \\ "add_full_attention_sink_bias":true}
+    );
+    defer testing.allocator.free(fused_json);
+    const fused = try parseConfigFromJson(testing.allocator, fused_json);
+    try testing.expect(fused.attn_fused_qkv and !fused.moe_route_norm);
+    try testing.expectEqual(@as(f32, 2.5), fused.router_scaling_factor);
+    try testing.expect(fused.layerHasAttnSinks(0) and !fused.layerHasAttnSinks(1));
+}
+
+test "layer value width and sink placement preserve existing defaults" {
+    var c = ModelConfig{ .has_attn_sinks = true };
+    try testing.expectEqual(c.layerHeadDim(0), c.layerVHeadDim(0));
+    try testing.expect(c.layerHasAttnSinks(0));
+    c.has_sliding_window = false;
+    c.global_head_dim = 128;
+    try testing.expectEqual(@as(u32, 128), c.layerVHeadDim(0));
+    try testing.expect(c.layerHasAttnSinks(0));
+    c.has_attn_sinks = false;
+    try testing.expect(!c.layerHasAttnSinks(0));
+}
+
+test "real mimo_v2 Flash config agrees with source geometry" {
+    const raw = std.c.getenv("MIMO_V2_SOURCE") orelse return error.SkipZigTest;
+    var c = try parseConfig(testing.io, testing.allocator, std.mem.span(raw));
+    defer c.deinit(testing.allocator);
+    try testing.expectEqualStrings("mimo_v2", c.model_type);
+    try testing.expectEqual(@as(u32, 48), c.num_hidden_layers);
+    try testing.expectEqual(@as(u32, 256), c.num_experts);
+    try testing.expectEqual(@as(u32, 8), c.num_experts_per_tok);
+    try testing.expectEqual(@as(u32, 1), c.first_k_dense_replace);
+    var global: u32 = 0;
+    for (0..c.num_hidden_layers) |i| {
+        const li: u32 = @intCast(i);
+        global += @intFromBool(c.isGlobalLayer(li));
+        try testing.expectEqual(@as(u32, 64), c.layerNumHeads(li));
+        try testing.expectEqual(@as(u32, if (c.isGlobalLayer(li)) 4 else 8), c.layerKVHeads(li));
+        try testing.expectEqual(@as(u32, 192), c.layerHeadDim(li));
+        try testing.expectEqual(@as(u32, 128), c.layerVHeadDim(li));
+        try testing.expectEqual(!c.isGlobalLayer(li), c.layerHasAttnSinks(li));
+    }
+    try testing.expectEqual(@as(u32, 9), global);
+    try testing.expectEqual(@as(f32, 0.707), c.attention_value_scale);
+    try testing.expect(c.isEosToken(151643) and c.isEosToken(151645) and c.isEosToken(151672));
+}
+
+test "mimo_v2 streaming leaves trunk keys intact and excludes only routed banks" {
+    var buf: [256]u8 = undefined;
+    for ([_][]const u8{
+        "lm_head.weight",
+        "model.embed_tokens.weight",
+        "model.layers.0.mlp.gate_proj.weight",
+        "model.layers.1.mlp.gate.e_score_correction_bias",
+    }) |key| {
+        try testing.expectEqualStrings(key, qwen4StreamingWeightKey(.mxfp4_split, &buf, key).?);
+    }
+    try testing.expect(qwen4StreamingWeightKey(.mxfp4_split, &buf, "model.layers.1.mlp.switch_mlp.gate_proj.weight") == null);
+    try testing.expect(qwen4StreamingWeightKey(.mxfp4_split, &buf, "model.layers.1.mlp.switch_mlp.down_proj.scales") == null);
 }

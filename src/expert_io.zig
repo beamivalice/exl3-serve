@@ -551,7 +551,7 @@ pub const FillPool = struct {
         while (done < dst.len) {
             const got = std.c.pread(fd, dst[done..].ptr, dst.len - done, @intCast(offset + done));
             if (got < 0) {
-                if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+                if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
                 return .{ .done = done, .reason = if (done < required) .read_failed else null };
             }
             if (got == 0) return .{ .done = done, .reason = if (done < required) .past_eof else null };
@@ -576,7 +576,14 @@ pub const FillPool = struct {
             }
             read_offset = pageRoundDown(job.offset);
             head = @intCast(job.offset - read_offset);
-            const want: usize = @intCast(pageRoundUp(@as(u64, head) + job.len));
+            var want: usize = @intCast(pageRoundUp(@as(u64, head) + job.len));
+            // Alignment padding must not reject a payload that fits the buffer.
+            // F_NOCACHE permits an exact positioned read at an unaligned offset.
+            if (want > self.opts.bounce_cap) {
+                read_offset = job.offset;
+                head = 0;
+                want = len;
+            }
             self.mu.lockUncancelable(io);
             const buf = self.bounceFor(worker, want);
             self.mu.unlock(io);
@@ -1105,6 +1112,32 @@ test "expert io fill attributes a span past eof while other spans complete" {
     try t.expectEqualSlices(u8, file.bytes[0..256], &good);
 }
 
+test "expert io unaligned coalesced payload fits at the bounce capacity" {
+    const t = std.testing;
+    const cap = pageSize();
+    var file = try TestFile.make(t.allocator, "boundary.bin", cap * 2, 0x941);
+    defer file.deinit(t.allocator);
+    const fd = try file.open(t.allocator);
+    defer _ = std.c.close(fd);
+    const left = try t.allocator.alloc(u8, cap / 2);
+    defer t.allocator.free(left);
+    const right = try t.allocator.alloc(u8, cap / 2);
+    defer t.allocator.free(right);
+    const spans = [_]FillSpan{
+        .{ .file = 0, .offset = 17, .len = cap / 2, .dst = left.ptr },
+        .{ .file = 0, .offset = 17 + cap / 2, .len = cap / 2, .dst = right.ptr },
+    };
+    var plan = try FillPlan.init(t.allocator, &spans, cap, 1, false);
+    defer plan.deinit();
+    try t.expectEqual(@as(usize, 1), plan.jobs.len);
+    const pool = try FillPool.create(t.allocator, .{ .workers = 1, .bounce_cap = cap });
+    defer pool.destroy();
+    try pool.run(&.{fd}, &plan);
+    try t.expectEqualSlices(u8, file.bytes[17..][0 .. cap / 2], left);
+    try t.expectEqualSlices(u8, file.bytes[17 + cap / 2 ..][0 .. cap / 2], right);
+    try t.expect(pool.workers[0].bounce.len <= cap);
+}
+
 const Canceller = struct {
     pool: *FillPool,
     fn main(self: *Canceller) void {
@@ -1191,7 +1224,7 @@ test "expert io file cache reopens a replaced shard and reuses a stable one" {
     try t.expectEqualSlices(u8, replacement, &got);
 }
 
-pub const Dtype = enum { bf16, u32, other };
+pub const Dtype = enum { bf16, u8, u32, other };
 
 pub const TensorRegion = struct {
     data_offset: u64,
@@ -1207,7 +1240,7 @@ pub fn readExact(fd: std.c.fd_t, dst: []u8, offset: u64) !void {
     while (done < dst.len) {
         const got = std.c.pread(fd, dst[done..].ptr, dst.len - done, @intCast(offset + done));
         if (got < 0) {
-            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
             return error.FillReadFailed;
         }
         if (got == 0) return error.FillShortRead;
@@ -1233,6 +1266,8 @@ pub fn tensorRegion(allocator: std.mem.Allocator, fd: std.c.fd_t, key: []const u
     if (dtype != .string) return error.InvalidSafetensorsTensor;
     const dt: Dtype = if (std.mem.eql(u8, dtype.string, "BF16"))
         .bf16
+    else if (std.mem.eql(u8, dtype.string, "U8") or std.mem.eql(u8, dtype.string, "UINT8"))
+        .u8
     else if (std.mem.eql(u8, dtype.string, "U32") or std.mem.eql(u8, dtype.string, "UINT32"))
         .u32
     else
@@ -1569,7 +1604,6 @@ test "expert io ssd microbench" {
     }
 }
 
-
 test "expert io slab blocks a refill while a reader holds the epoch" {
     const t = std.testing;
     const slab = try PageSlab.create(t.allocator, 4096);
@@ -1647,6 +1681,32 @@ test "expert io slab names an error for every illegal transition" {
     try t.expectError(error.SlabNotReady, slab.lease());
     try t.expectError(error.SlabNotFilling, slab.writable());
     _ = try slab.tryBeginFill();
+}
+
+test "expert io safetensors header preserves U8 element width and byte span" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const header =
+        "{\"mxfp4.scales\":{\"dtype\":\"U8\",\"shape\":[2,3,4],\"data_offsets\":[0,24]}}";
+    const file_bytes = try t.allocator.alloc(u8, 8 + header.len + 24);
+    defer t.allocator.free(file_bytes);
+    std.mem.writeInt(u64, file_bytes[0..8], header.len, .little);
+    @memcpy(file_bytes[8..][0..header.len], header);
+    for (file_bytes[8 + header.len ..], 0..) |*byte, i| byte.* = @truncate(i);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "u8.safetensors", .data = file_bytes });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(t.io, &path_buf);
+    const path = try std.fmt.allocPrintSentinel(t.allocator, "{s}/u8.safetensors", .{path_buf[0..path_len]}, 0);
+    defer t.allocator.free(path);
+    const fd = try openHinted(path, .{});
+    defer _ = std.c.close(fd);
+    const region = try tensorRegion(t.allocator, fd, "mxfp4.scales");
+    try t.expectEqual(Dtype.u8, region.dtype);
+    try t.expectEqual(@as(u8, 3), region.rank);
+    try t.expectEqual(@as(u64, 24), region.tensor_bytes);
+    try t.expectEqual(@as(u64, 4), region.shape[2]);
 }
 
 test "expert io import aliases a page slab and sees the bytes written while filling" {

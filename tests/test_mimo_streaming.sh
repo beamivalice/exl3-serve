@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+MODEL=${MIMO_STREAM_MODEL:-}
+PORT=${1:-}
+BUDGET=${MIMO_SSD_BUDGET_GB:-60}
+if [[ -z "$MODEL" || ! -f "$MODEL/config.json" || ! -f "$MODEL/model.safetensors.index.json" ]]; then
+    echo "SKIP: set MIMO_STREAM_MODEL to a converted MiMo MXFP4 pack"
+    exit 0
+fi
+if [[ ! "$PORT" =~ ^[0-9]+$ || "$PORT" -lt 1 || "$PORT" -gt 65535 ]]; then
+    echo "usage: MIMO_STREAM_MODEL=<pack> $0 PORT" >&2
+    exit 2
+fi
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | grep -q LISTEN; then
+    echo "port $PORT is already in use" >&2
+    exit 1
+fi
+BIN="$ROOT/zig-out/bin/mlx-serve"
+[[ -x "$BIN" ]] || { echo "Build ReleaseFast first" >&2; exit 1; }
+mkdir -p "$ROOT/.zig-cache"
+OUT=$(mktemp -d "$ROOT/.zig-cache/mimo-http.XXXXXX")
+PID=
+cleanup() {
+    if [[ -n "$PID" ]]; then
+        kill "$PID" 2>/dev/null || true
+        wait "$PID" 2>/dev/null || true
+    fi
+    rm -rf "$OUT"
+}
+trap cleanup EXIT
+trap 'cat "$OUT/server.log" >&2' ERR
+mkdir "$OUT/home"
+HOME="$OUT/home" "$BIN" --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" \
+    --ssd-budget-gb "$BUDGET" --no-mtp --no-pld --no-vision --kv-quant off \
+    --ctx-size 4096 --prefill-chunk 512 --prefix-cache-entries 0 --metrics \
+    --log-file "$OUT/server.log" >"$OUT/console.log" 2>&1 &
+PID=$!
+BASE="http://127.0.0.1:$PORT"
+for ((i=0; i<1200; i++)); do
+    if curl --connect-timeout 1 --max-time 2 -fsS "$BASE/health" >/dev/null 2>&1; then break; fi
+    kill -0 "$PID"
+    sleep 1
+done
+curl --connect-timeout 2 --max-time 5 -fsS "$BASE/health" >/dev/null
+curl --max-time 10 -fsS "$BASE/v1/models" >"$OUT/models.json"
+ID=$(jq -er '.data[] | select(.loaded == true and .streaming == true and .input_modalities == ["text"]) | .id' "$OUT/models.json")
+jq -nc --arg model "$ID" '{model:$model,messages:[{role:"user",content:"Write one short sentence about rain."}],temperature:0,seed:1234,max_tokens:16,enable_thinking:false,stream:false}' >"$OUT/request.json"
+for n in 1 2; do
+    curl --connect-timeout 5 --max-time 1800 -fsS -H 'Content-Type: application/json' \
+        -d @"$OUT/request.json" "$BASE/v1/chat/completions" >"$OUT/reply$n.json"
+    jq -e '.choices[0].message.content | type == "string"' "$OUT/reply$n.json" >/dev/null
+    jq -S '.choices[0].message | {content,reasoning_content}' "$OUT/reply$n.json" >"$OUT/text$n.json"
+done
+cmp "$OUT/text1.json" "$OUT/text2.json"
+
+jq -nc --arg model "$ID" '{model:$model,messages:[{role:"user",content:([range(64)|"word\(.): rain falls."]|join(" "))}],temperature:0,max_tokens:4,enable_thinking:false,stream:false}' |
+    curl --connect-timeout 5 --max-time 1800 -fsS -H 'Content-Type: application/json' \
+        -d @- "$BASE/v1/chat/completions" >"$OUT/long.json"
+jq -e '.usage.prompt_tokens > 128 and (.choices[0].message.content | type == "string")' "$OUT/long.json" >/dev/null
+
+jq '.enable_mtp=true' "$OUT/request.json" >"$OUT/mtp-request.json"
+STATUS=$(curl --max-time 30 -sS -o "$OUT/mtp.json" -w '%{http_code}' \
+    -H 'Content-Type: application/json' -d @"$OUT/mtp-request.json" "$BASE/v1/chat/completions")
+[[ "$STATUS" == 400 ]]
+jq -e '.error.type == "invalid_request_error" and (.error.message | contains("MTP speculative decode is not supported"))' "$OUT/mtp.json" >/dev/null
+grep -q '\[expert-stream\] ssd budget' "$OUT/server.log"
+grep -q '\[expert-stream\] cache' "$OUT/server.log"
+echo "PASS: MiMo streaming discovery, greedy determinism, window-crossing prefill, and MTP refusal"

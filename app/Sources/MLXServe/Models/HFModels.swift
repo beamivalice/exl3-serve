@@ -57,6 +57,7 @@ let supportedModelTypes: Set<String> = [
     "bailing_hybrid", // inclusionAI Ling 3.0 (KDA + MLA hybrid MoE)
     "spark2_5", // XHToken Spark-X2.5 (dense sliding/full GQA, per-head attn gate)
     "k2_horizon", // IFM K2-Horizon dense (Llama trunk, grouped RMS norms)
+    "mimo_v2", // Experimental text-only MXFP4 streaming packs.
     "bert", // encoder-only; serves /v1/embeddings (GPU document indexing)
     // GGUF engines: "gguf" = any model via the embedded llama.cpp engine;
     // "deepseek_v4" = DeepSeek-V4-Flash via the ds4 engine. Both are served, so

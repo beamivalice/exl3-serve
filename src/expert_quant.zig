@@ -6,6 +6,9 @@ pub const Geometry = struct {
     experts: u16,
     hidden: u32,
     intermediate: u32,
+    /// Absolute layer at which routed expert banks begin. Qwen4 starts at zero;
+    /// sparse MoE packs such as MiMo keep a dense layer zero.
+    first_moe_layer: u16 = 0,
 };
 
 pub const SourceSpan = struct {
@@ -38,8 +41,27 @@ pub fn affineGeomFromShapes(w_cols: u64, s_cols: u64, in_dim: u64) ?QuantGeom {
     return .{ .bits = @intCast(bits), .group_size = @intCast(gs) };
 }
 
+/// Native MiMo MXFP4 is a biasless packed pair, not affine quantization:
+/// U32 weights carry four-bit values and U8 e8m0 scales cover groups of 32.
+/// Keep this proof at the store boundary so a same-shaped affine tensor cannot
+/// silently enter the native byte-preserving path.
+pub fn mxfp4GeomFromShapes(
+    w_cols: u64,
+    s_cols: u64,
+    in_dim: u64,
+    weight_dtype: io_mod.Dtype,
+    scale_dtype: io_mod.Dtype,
+    bias_present: bool,
+) ?QuantGeom {
+    if (bias_present or weight_dtype != .u32 or scale_dtype != .u8) return null;
+    const geom = affineGeomFromShapes(w_cols, s_cols, in_dim) orelse return null;
+    if (geom.bits != 4 or geom.group_size != 32) return null;
+    return geom;
+}
+
 pub fn isExpertStreamingArch(model_type: []const u8) bool {
-    return std.mem.eql(u8, model_type, "qwen4_exp");
+    return std.mem.eql(u8, model_type, "qwen4_exp") or
+        std.mem.eql(u8, model_type, "mimo_v2");
 }
 
 pub const Exl3Spec = struct {
@@ -73,10 +95,10 @@ pub fn kFromPackedDim(last: u64) ?u8 {
     };
 }
 
-/// How a qwen4_exp checkpoint stores its ROUTED experts. Both are leading-index
-/// banks: `bf16_fused` is the HF checkpoint's two dense tensors per layer,
-/// `quantized_split` the MLX pack's nine (three projections x weight/scales/biases).
-pub const Layout = enum { bf16_fused, quantized_split, exl3_k4 };
+/// How a checkpoint stores its ROUTED experts. All banks use leading expert
+/// index; MXFP4 keeps the nine component ids for interleaved loader contracts,
+/// with its three bias slots intentionally absent.
+pub const Layout = enum { bf16_fused, quantized_split, exl3_k4, mxfp4_split };
 
 pub const REDUCE_BANK_TOPK: u32 = 32;
 
@@ -148,6 +170,15 @@ pub fn fusedTensorKey(buf: []u8, layer: u16, down: bool) ![]const u8 {
     });
 }
 
+pub fn mxfp4TensorKey(buf: []u8, layer: u16, projection: Projection, part: Part) ![]const u8 {
+    if (part == .biases) return error.Mxfp4BiasUnsupported;
+    return std.fmt.bufPrint(buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.{s}", .{
+        layer,
+        @tagName(projection),
+        @tagName(part),
+    });
+}
+
 /// True when `key` names a routed-expert bank of `layout` — the tensors the
 /// streamed loader must NOT fault into RAM.
 pub fn isRoutedExpertKey(layout: Layout, key: []const u8) bool {
@@ -160,6 +191,8 @@ pub fn isRoutedExpertKey(layout: Layout, key: []const u8) bool {
         .exl3_k4 => (std.mem.startsWith(u8, key, "language_model.model.layers.") or
             std.mem.startsWith(u8, key, "language_model.mtp.")) and
             std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null,
+        .mxfp4_split => std.mem.startsWith(u8, key, "model.layers.") and
+            std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null,
     };
 }
 
@@ -168,9 +201,46 @@ fn stringAt(map: std.json.ObjectMap, key: []const u8) bool {
     return v == .string;
 }
 
-pub fn layoutFromWeightMap(map: std.json.ObjectMap, layers: u16) ?Layout {
+fn mxfp4BankCompleteFromFirst(map: std.json.ObjectMap, layers: u16, first_moe_layer: u16) bool {
+    if (layers == 0 or first_moe_layer == 0 or first_moe_layer >= layers) return false;
+    var buf: [192]u8 = undefined;
+    for (first_moe_layer..layers) |layer_usize| {
+        const layer: u16 = @intCast(layer_usize);
+        for ([_]Projection{ .gate, .up, .down }) |projection| {
+            const weight = mxfp4TensorKey(&buf, layer, projection, .weight) catch return false;
+            if (!stringAt(map, weight)) return false;
+            const scales = mxfp4TensorKey(&buf, layer, projection, .scales) catch return false;
+            if (!stringAt(map, scales)) return false;
+            const bias = std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.biases", .{
+                layer,
+                @tagName(projection),
+            }) catch return false;
+            if (map.get(bias) != null) return false;
+        }
+    }
+    // A converter-produced pack has a dense layer zero. Seeing a switch bank
+    // there would make the absolute layer map ambiguous, so decline it.
+    for (0..first_moe_layer) |layer_usize| {
+        const layer: u16 = @intCast(layer_usize);
+        for ([_]Projection{ .gate, .up, .down }) |projection| {
+            for ([_]Part{ .weight, .scales }) |part| {
+                const key = mxfp4TensorKey(&buf, layer, projection, part) catch return false;
+                if (map.get(key) != null) return false;
+            }
+            const bias = std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.biases", .{
+                layer,
+                @tagName(projection),
+            }) catch return false;
+            if (map.get(bias) != null) return false;
+        }
+    }
+    return true;
+}
+
+fn layoutFromWeightMapWithFirstMoe(map: std.json.ObjectMap, layers: u16, first_moe_layer: u16) ?Layout {
     if (layers == 0) return null;
     var buf: [192]u8 = undefined;
+    if (mxfp4BankCompleteFromFirst(map, layers, first_moe_layer)) return .mxfp4_split;
     var fused = true;
     for (0..layers) |layer| {
         const gate = fusedTensorKey(&buf, @intCast(layer), false) catch return null;
@@ -209,30 +279,63 @@ pub fn layoutFromWeightMap(map: std.json.ObjectMap, layers: u16) ?Layout {
     if (exl3) return .exl3_k4;
     for (0..layers) |layer| {
         for (0..component_count) |ci| {
-            const key = tensorKey(&buf, @intCast(layer), @enumFromInt(ci)) catch return null;
+            const key = tensorKey(&buf, @intCast(layer), @fromBackingInt(@intCast(ci))) catch return null;
             if (!stringAt(map, key)) return null;
         }
     }
     return .quantized_split;
 }
 
-pub fn layoutFromIndexJson(allocator: std.mem.Allocator, model_type: []const u8, raw: []const u8, layers: u16) ?Layout {
+pub fn layoutFromWeightMapForFirstMoe(map: std.json.ObjectMap, layers: u16, first_moe_layer: u16) ?Layout {
+    return layoutFromWeightMapWithFirstMoe(map, layers, first_moe_layer);
+}
+
+pub fn layoutFromWeightMap(map: std.json.ObjectMap, layers: u16) ?Layout {
+    return layoutFromWeightMapWithFirstMoe(map, layers, 1);
+}
+
+pub fn layoutFromIndexJsonWithFirstMoe(
+    allocator: std.mem.Allocator,
+    model_type: []const u8,
+    raw: []const u8,
+    layers: u16,
+    first_moe_layer: u16,
+) ?Layout {
     if (!isExpertStreamingArch(model_type)) return null;
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch return null;
     defer parsed.deinit();
     if (parsed.value != .object) return null;
     const map = parsed.value.object.get("weight_map") orelse return null;
     if (map != .object) return null;
-    return layoutFromWeightMap(map.object, layers);
+    const layout = layoutFromWeightMapWithFirstMoe(map.object, layers, first_moe_layer) orelse return null;
+    if (layout == .mxfp4_split) {
+        return if (std.mem.eql(u8, model_type, "mimo_v2")) layout else null;
+    }
+    return if (std.mem.eql(u8, model_type, "mimo_v2")) null else layout;
 }
 
-pub fn layoutOfDir(allocator: std.mem.Allocator, io: std.Io, model_type: []const u8, model_dir: []const u8, layers: u16) ?Layout {
+pub fn layoutFromIndexJson(allocator: std.mem.Allocator, model_type: []const u8, raw: []const u8, layers: u16) ?Layout {
+    return layoutFromIndexJsonWithFirstMoe(allocator, model_type, raw, layers, 1);
+}
+
+pub fn layoutOfDirWithFirstMoe(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    model_type: []const u8,
+    model_dir: []const u8,
+    layers: u16,
+    first_moe_layer: u16,
+) ?Layout {
     if (!isExpertStreamingArch(model_type)) return null;
     var dir = std.Io.Dir.openDirAbsolute(io, model_dir, .{}) catch return null;
     defer dir.close(io);
     const raw = dir.readFileAlloc(io, "model.safetensors.index.json", allocator, .limited(64 * 1024 * 1024)) catch return null;
     defer allocator.free(raw);
-    return layoutFromIndexJson(allocator, model_type, raw, layers);
+    return layoutFromIndexJsonWithFirstMoe(allocator, model_type, raw, layers, first_moe_layer);
+}
+
+pub fn layoutOfDir(allocator: std.mem.Allocator, io: std.Io, model_type: []const u8, model_dir: []const u8, layers: u16) ?Layout {
+    return layoutOfDirWithFirstMoe(allocator, io, model_type, model_dir, layers, 1);
 }
 
 const SourceFile = struct {
@@ -240,13 +343,18 @@ const SourceFile = struct {
     fd: std.c.fd_t,
 };
 
-/// The nine leading-index banks of an MLX-quantized qwen4_exp pack, resolved to
-/// per-expert byte spans. Per-tensor (bits, group_size) come from the PACKED
-/// shapes against the activation dim the projection consumes — never from the
-/// model-wide `quantization` block, which a mixed pack contradicts.
+pub fn moeLayerCount(geometry: Geometry) u16 {
+    if (geometry.first_moe_layer >= geometry.layers) return 0;
+    return geometry.layers - geometry.first_moe_layer;
+}
+
+/// The nine leading-index banks of a streamed quantized expert pack, resolved
+/// to per-expert byte spans. Per-tensor geometry comes from PACKED shapes and
+/// dtypes against the activation dim, never from a model-wide quantization hint.
 pub const QuantStore = struct {
     allocator: std.mem.Allocator,
     geometry: Geometry,
+    layout: Layout,
     files: []SourceFile,
     spans: []SourceSpan,
     slot_bytes: [component_count]u64,
@@ -259,7 +367,16 @@ pub const QuantStore = struct {
         return ((@as(usize, layer) * self.geometry.experts) + expert) * component_count + @backingInt(c);
     }
 
+    pub fn hasExpertLayer(self: *const QuantStore, layer: u16) bool {
+        return layer < self.geometry.layers and layer >= self.geometry.first_moe_layer;
+    }
+
+    pub fn componentPresent(self: *const QuantStore, c: Component) bool {
+        return self.layout != .mxfp4_split or partOf(c) != .biases;
+    }
+
     pub fn span(self: *const QuantStore, layer: u16, expert: u16, c: Component) SourceSpan {
+        if (!self.hasExpertLayer(layer) or !self.componentPresent(c)) return .{ .file = 0, .offset = 0, .len = 0 };
         return self.spans[self.sourceIndex(layer, expert, c)];
     }
 
@@ -290,8 +407,22 @@ pub const QuantStore = struct {
     }
 
     pub fn open(allocator: std.mem.Allocator, model_dir: []const u8, geometry: Geometry) !QuantStore {
-        if (geometry.layers == 0 or geometry.experts == 0 or geometry.hidden == 0 or geometry.intermediate == 0)
+        return openForLayout(allocator, model_dir, geometry, .quantized_split);
+    }
+
+    pub fn openForLayout(
+        allocator: std.mem.Allocator,
+        model_dir: []const u8,
+        geometry: Geometry,
+        chosen: Layout,
+    ) !QuantStore {
+        if (geometry.layers == 0 or geometry.experts == 0 or geometry.hidden == 0 or geometry.intermediate == 0 or
+            geometry.first_moe_layer > geometry.layers)
             return error.InvalidExpertGeometry;
+        if (chosen == .mxfp4_split and
+            (geometry.first_moe_layer == 0 or moeLayerCount(geometry) == 0))
+            return error.Mxfp4DensePrefixMismatch;
+
         const io = std.Io.Threaded.global_single_threaded.io();
         var dir = try std.Io.Dir.openDirAbsolute(io, model_dir, .{});
         defer dir.close(io);
@@ -316,10 +447,12 @@ pub const QuantStore = struct {
         const span_count = std.math.mul(usize, geometry.layers, per_layer) catch return error.InvalidExpertGeometry;
         const spans = try allocator.alloc(SourceSpan, span_count);
         errdefer allocator.free(spans);
+        for (spans) |*span_value| span_value.* = .{ .file = 0, .offset = 0, .len = 0 };
 
         var store = QuantStore{
             .allocator = allocator,
             .geometry = geometry,
+            .layout = chosen,
             .files = &.{},
             .spans = spans,
             .slot_bytes = @splat(0),
@@ -330,11 +463,43 @@ pub const QuantStore = struct {
         };
 
         var key_buf: [192]u8 = undefined;
-        for (0..geometry.layers) |layer_usize| {
+        const first_layer: u16 = if (chosen == .mxfp4_split) geometry.first_moe_layer else 0;
+        if (chosen == .mxfp4_split) {
+            // Banks before first_moe_layer must be absent. A dense layer with a
+            // stray switch tensor is not safe to reinterpret as a routed bank.
+            for (0..first_layer) |layer_usize| {
+                const layer: u16 = @intCast(layer_usize);
+                for ([_]Projection{ .gate, .up, .down }) |projection| {
+                    for ([_]Part{ .weight, .scales }) |part| {
+                        const key = mxfp4TensorKey(&key_buf, layer, projection, part) catch return error.InvalidExpertGeometry;
+                        if (weight_map.get(key) != null) return error.Mxfp4DensePrefixMismatch;
+                    }
+                    const bias = std.fmt.bufPrint(&key_buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.biases", .{
+                        layer,
+                        @tagName(projection),
+                    }) catch return error.InvalidExpertGeometry;
+                    if (weight_map.get(bias) != null) return error.Mxfp4BiasUnsupported;
+                }
+            }
+        }
+
+        var metadata_ready = false;
+        for (first_layer..geometry.layers) |layer_usize| {
             const layer: u16 = @intCast(layer_usize);
             for (0..component_count) |ci| {
-                const c: Component = @enumFromInt(ci);
-                const key = tensorKey(&key_buf, layer, c) catch return error.InvalidExpertGeometry;
+                const c: Component = @fromBackingInt(@intCast(ci));
+                if (chosen == .mxfp4_split and partOf(c) == .biases) {
+                    const bias_key = std.fmt.bufPrint(&key_buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.biases", .{
+                        layer,
+                        @tagName(projectionOf(c)),
+                    }) catch return error.InvalidExpertGeometry;
+                    if (weight_map.get(bias_key) != null) return error.Mxfp4BiasUnsupported;
+                    continue;
+                }
+                const key = if (chosen == .mxfp4_split)
+                    mxfp4TensorKey(&key_buf, layer, projectionOf(c), partOf(c)) catch return error.InvalidExpertGeometry
+                else
+                    tensorKey(&key_buf, layer, c) catch return error.InvalidExpertGeometry;
                 const mapped = weight_map.get(key) orelse return error.MissingExpertTensor;
                 if (mapped != .string) return error.InvalidSafetensorsIndex;
                 const file = try openSource(allocator, &files_list, model_dir, mapped.string);
@@ -348,13 +513,16 @@ pub const QuantStore = struct {
                 if (region.shape[2] == 0 or region.shape[2] > std.math.maxInt(u32)) return error.InvalidExpertTensor;
                 const elem: u64 = switch (region.dtype) {
                     .bf16 => 2,
+                    .u8 => 1,
                     .u32 => 4,
                     .other => return error.InvalidExpertTensor,
                 };
-                const expected_bytes = elem * region.shape[0] * region.shape[1] * region.shape[2];
+                const expected_rows = std.math.mul(u64, region.shape[0], region.shape[1]) catch return error.InvalidExpertTensor;
+                const expected_elems = std.math.mul(u64, expected_rows, region.shape[2]) catch return error.InvalidExpertTensor;
+                const expected_bytes = std.math.mul(u64, elem, expected_elems) catch return error.InvalidExpertTensor;
                 if (region.tensor_bytes != expected_bytes) return error.InvalidExpertTensor;
                 const per_expert = region.tensor_bytes / geometry.experts;
-                if (layer == 0) {
+                if (!metadata_ready) {
                     store.rows[ci] = @intCast(region.shape[1]);
                     store.cols[ci] = @intCast(region.shape[2]);
                     store.dtypes[ci] = region.dtype;
@@ -368,27 +536,54 @@ pub const QuantStore = struct {
                 for (0..geometry.experts) |expert| {
                     spans[(layer_usize * geometry.experts + expert) * component_count + ci] = .{
                         .file = file,
-                        .offset = base + @as(u64, expert) * per_expert,
+                        .offset = std.math.add(u64, base, @as(u64, expert) * per_expert) catch return error.InvalidExpertTensor,
                         .len = per_expert,
                     };
                 }
+                // The first layer establishes all component metadata; later
+                // layers are checked against it above.
+                if (ci + 1 == component_count or
+                    (chosen == .mxfp4_split and ci == @backingInt(Component.down_s)))
+                    metadata_ready = true;
             }
         }
 
+        if (!metadata_ready) return error.MissingExpertTensor;
         for ([_]Projection{ .gate, .up, .down }) |p| {
             const in_dim: u64 = if (p == .down) geometry.intermediate else geometry.hidden;
             const out_rows: u64 = if (p == .down) geometry.hidden else geometry.intermediate;
             const w = weightOf(p);
             const sc = scalesOf(p);
-            if (store.dtypes[@backingInt(w)] != .u32) return error.InvalidExpertTensor;
-            if (store.dtypes[@backingInt(sc)] != .bf16) return error.InvalidExpertTensor;
-            if (store.rows[@backingInt(w)] != out_rows or store.rows[@backingInt(sc)] != out_rows) return error.InvalidExpertTensor;
-            const geom = affineGeomFromShapes(store.cols[@backingInt(w)], store.cols[@backingInt(sc)], in_dim) orelse
-                return error.UnsupportedExpertQuant;
-            for ([_]Component{ w, sc, biasesOf(p) }) |c| store.geoms[@backingInt(c)] = geom;
-            const b = biasesOf(p);
-            if (store.dtypes[@backingInt(b)] != .bf16 or store.cols[@backingInt(b)] != store.cols[@backingInt(sc)] or
-                store.rows[@backingInt(b)] != out_rows) return error.InvalidExpertTensor;
+            if (store.rows[@backingInt(w)] != out_rows or store.rows[@backingInt(sc)] != out_rows)
+                return error.InvalidExpertTensor;
+            if (chosen == .mxfp4_split) {
+                if (store.dtypes[@backingInt(w)] != .u32 or store.dtypes[@backingInt(sc)] != .u8)
+                    return error.InvalidExpertTensor;
+                const geom = mxfp4GeomFromShapes(
+                    store.cols[@backingInt(w)],
+                    store.cols[@backingInt(sc)],
+                    in_dim,
+                    store.dtypes[@backingInt(w)],
+                    store.dtypes[@backingInt(sc)],
+                    false,
+                ) orelse return error.UnsupportedExpertQuant;
+                store.geoms[@backingInt(w)] = geom;
+                store.geoms[@backingInt(sc)] = geom;
+                const bias_key = std.fmt.bufPrint(&key_buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.biases", .{
+                    first_layer,
+                    @tagName(p),
+                }) catch return error.InvalidExpertGeometry;
+                if (weight_map.get(bias_key) != null) return error.Mxfp4BiasUnsupported;
+            } else {
+                if (store.dtypes[@backingInt(w)] != .u32 or store.dtypes[@backingInt(sc)] != .bf16)
+                    return error.InvalidExpertTensor;
+                const geom = affineGeomFromShapes(store.cols[@backingInt(w)], store.cols[@backingInt(sc)], in_dim) orelse
+                    return error.UnsupportedExpertQuant;
+                for ([_]Component{ w, sc, biasesOf(p) }) |c| store.geoms[@backingInt(c)] = geom;
+                const b = biasesOf(p);
+                if (store.dtypes[@backingInt(b)] != .bf16 or store.cols[@backingInt(b)] != store.cols[@backingInt(sc)] or
+                    store.rows[@backingInt(b)] != out_rows) return error.InvalidExpertTensor;
+            }
         }
 
         store.files = try files_list.toOwnedSlice(allocator);
@@ -416,7 +611,8 @@ pub const QuantStore = struct {
         if (dst.len != self.expertBytes()) return error.InvalidExpertRead;
         var at: usize = 0;
         for (0..component_count) |ci| {
-            const c: Component = @enumFromInt(ci);
+            const c: Component = @fromBackingInt(@intCast(ci));
+            if (!self.componentPresent(c)) continue;
             const s = self.span(layer, expert, c);
             const len: usize = @intCast(s.len);
             try self.readSpan(s, dst[at..][0..len]);
@@ -559,6 +755,61 @@ test "layout resolution is qwen4_exp only: the same index declares nothing for a
     }
 }
 
+test "mxfp4 geometry proves native U32/U8 biasless 4-bit group-32 storage" {
+    const t = std.testing;
+    try t.expectEqual(
+        QuantGeom{ .bits = 4, .group_size = 32 },
+        mxfp4GeomFromShapes(512, 128, 4096, .u32, .u8, false).?,
+    );
+    try t.expect(mxfp4GeomFromShapes(512, 128, 4096, .bf16, .u8, false) == null);
+    try t.expect(mxfp4GeomFromShapes(512, 128, 4096, .u32, .bf16, false) == null);
+    try t.expect(mxfp4GeomFromShapes(512, 128, 4096, .u32, .u8, true) == null);
+    try t.expect(mxfp4GeomFromShapes(256, 128, 4096, .u32, .u8, false) == null);
+    try t.expect(mxfp4GeomFromShapes(512, 64, 4096, .u32, .u8, false) == null);
+}
+
+test "mxfp4 layout requires the complete converter bank and never claims the raw HF source" {
+    const t = std.testing;
+    const mxfp4_index =
+        \\{"weight_map":{
+        \\ "model.layers.1.mlp.switch_mlp.gate_proj.weight":"experts.safetensors",
+        \\ "model.layers.1.mlp.switch_mlp.gate_proj.scales":"experts.safetensors",
+        \\ "model.layers.1.mlp.switch_mlp.up_proj.weight":"experts.safetensors",
+        \\ "model.layers.1.mlp.switch_mlp.up_proj.scales":"experts.safetensors",
+        \\ "model.layers.1.mlp.switch_mlp.down_proj.weight":"experts.safetensors",
+        \\ "model.layers.1.mlp.switch_mlp.down_proj.scales":"experts.safetensors"
+        \\}}
+    ;
+    const missing_scale =
+        \\{"weight_map":{
+        \\ "model.layers.1.mlp.switch_mlp.gate_proj.weight":"experts.safetensors",
+        \\ "model.layers.1.mlp.switch_mlp.gate_proj.scales":"experts.safetensors",
+        \\ "model.layers.1.mlp.switch_mlp.up_proj.weight":"experts.safetensors",
+        \\ "model.layers.1.mlp.switch_mlp.up_proj.scales":"experts.safetensors",
+        \\ "model.layers.1.mlp.switch_mlp.down_proj.weight":"experts.safetensors"
+        \\}}
+    ;
+    const raw_hf =
+        \\{"weight_map":{
+        \\ "model.layers.1.mlp.experts.0.gate_proj.weight":"experts.safetensors"
+        \\}}
+    ;
+    try t.expectEqual(Layout.mxfp4_split, layoutFromIndexJson(t.allocator, "mimo_v2", mxfp4_index, 2).?);
+    try t.expect(layoutFromIndexJson(t.allocator, "mimo_v2", missing_scale, 2) == null);
+    try t.expect(layoutFromIndexJson(t.allocator, "mimo_v2", raw_hf, 2) == null);
+    try t.expect(layoutFromIndexJson(t.allocator, "qwen4_exp", mxfp4_index, 2) == null);
+    try t.expect(isRoutedExpertKey(.mxfp4_split, "model.layers.1.mlp.switch_mlp.down_proj.scales"));
+    try t.expect(!isRoutedExpertKey(.mxfp4_split, "model.layers.1.mlp.experts.0.down_proj.weight"));
+}
+
+test "mimo_v2 is the only additional expert streaming architecture" {
+    const t = std.testing;
+    try t.expect(isExpertStreamingArch("qwen4_exp"));
+    try t.expect(isExpertStreamingArch("mimo_v2"));
+    try t.expect(!isExpertStreamingArch("mimo_v2_text"));
+    try t.expect(!isExpertStreamingArch("qwen3_5_moe"));
+}
+
 test "real quantized pack resolves nine regions per layer and the per expert bill" {
     const t = std.testing;
     const path = "/Users/beam/llm/models/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit";
@@ -597,7 +848,7 @@ test "real quantized pack resolves nine regions per layer and the per expert bil
     const weight_map = index_parsed.value.object.get("weight_map").?.object;
     var at: usize = 0;
     for (0..component_count) |ci| {
-        const c: Component = @enumFromInt(ci);
+        const c: Component = @fromBackingInt(@intCast(ci));
         var key_buf: [192]u8 = undefined;
         const key = try tensorKey(&key_buf, layer, c);
         const shard = try std.fmt.allocPrintSentinel(t.allocator, "{s}/{s}", .{ path, weight_map.get(key).?.string }, 0);

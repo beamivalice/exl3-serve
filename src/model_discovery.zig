@@ -57,6 +57,7 @@ const supported_model_types = [_][]const u8{
     "gpt_oss", // OpenAI gpt-oss (20B-A3.6B / 120B-A5.1B MoE, harmony format)
     "spark2_5", // XHToken Spark-X2.5 (dense sliding/full GQA, per-head attn gate)
     "k2_horizon", // IFM K2-Horizon dense (Llama trunk, grouped RMS norms)
+    "mimo_v2", // Experimental text-only MXFP4 streaming packs.
 };
 
 /// Native media-generation archs (image / audio / video / 3D), served by the
@@ -301,8 +302,13 @@ pub fn freeShardSet(set: *std.StringHashMapUnmanaged(void)) void {
 /// neither. A dense (fused) index must also name every PLE shard; the quantized
 /// pack keeps its PLE table in `ngram_table.bin` and has none.
 pub fn streamingIndexLayout(allocator: std.mem.Allocator, model_type: []const u8, raw: []const u8, layers: u16, ple_shards: u16) ?expert_quant.Layout {
-    const layout = expert_quant.layoutFromIndexJson(allocator, model_type, raw, layers) orelse return null;
-    if (layout == .quantized_split or layout == .exl3_k4) return layout;
+    const first_moe: u16 = if (std.mem.eql(u8, model_type, "mimo_v2")) 1 else 0;
+    return streamingIndexLayoutWithFirstMoe(allocator, model_type, raw, layers, first_moe, ple_shards);
+}
+
+fn streamingIndexLayoutWithFirstMoe(allocator: std.mem.Allocator, model_type: []const u8, raw: []const u8, layers: u16, first_moe: u16, ple_shards: u16) ?expert_quant.Layout {
+    const layout = expert_quant.layoutFromIndexJsonWithFirstMoe(allocator, model_type, raw, layers, first_moe) orelse return null;
+    if (layout != .bf16_fused) return layout;
     if (!fusedPleShardsComplete(allocator, raw, ple_shards)) return null;
     return layout;
 }
@@ -351,12 +357,13 @@ pub fn qwen4StreamingIndexComplete(io: std.Io, allocator: std.mem.Allocator, mod
         .experts = @intCast(meta.num_experts),
         .hidden = meta.hidden_size,
         .intermediate = meta.moe_intermediate_size,
+        .first_moe_layer = @intCast(meta.first_moe_layer),
     };
     var dir = std.Io.Dir.openDirAbsolute(io, model_dir, .{}) catch return null;
     defer dir.close(io);
     const raw = dir.readFileAlloc(io, "model.safetensors.index.json", allocator, .limited(64 * 1024 * 1024)) catch return null;
     defer allocator.free(raw);
-    const layout = streamingIndexLayout(allocator, meta.modelType(), raw, geometry.layers, 128) orelse return null;
+    const layout = streamingIndexLayoutWithFirstMoe(allocator, meta.modelType(), raw, geometry.layers, geometry.first_moe_layer, 128) orelse return null;
     var shards = indexShardSet(io, dir) orelse return null;
     defer freeShardSet(&shards);
     var keys = shards.keyIterator();
@@ -381,6 +388,10 @@ pub fn qwen4StreamingIndexComplete(io: std.Io, allocator: std.mem.Allocator, mod
             const stat = dir.statFile(io, "ngram_table.bin", .{}) catch return null;
             if (stat.kind != .file) return null;
             var experts = expert_quant.QuantStore.open(allocator, model_dir, geometry) catch return null;
+            experts.deinit();
+        },
+        .mxfp4_split => {
+            var experts = expert_quant.QuantStore.openForLayout(allocator, model_dir, geometry, layout) catch return null;
             experts.deinit();
         },
         .exl3_k4 => {
@@ -1156,6 +1167,7 @@ pub const StubMeta = struct {
     num_experts: u32 = 0,
     num_experts_per_tok: u32 = 0,
     moe_intermediate_size: u32 = 0,
+    first_moe_layer: u32 = 0,
     has_vision: bool = false,
     /// Qwen3-VL-family video input: a `video_token_id` alongside `has_vision`
     /// (video piggybacks the vision tower — see src/qwen_vision.zig).
@@ -1231,6 +1243,8 @@ pub fn parseStubMeta(allocator: std.mem.Allocator, config_json: []const u8, has_
         cfgU32(root, text_cfg, "num_local_experts") > 0 or
         cfgU32(root, text_cfg, "n_routed_experts") > 0;
     meta.num_experts = cfgU32(root, text_cfg, "num_experts");
+    if (meta.num_experts == 0) meta.num_experts = cfgU32(root, text_cfg, "n_routed_experts");
+    if (meta.num_experts == 0) meta.num_experts = cfgU32(root, text_cfg, "num_local_experts");
     meta.num_experts_per_tok = cfgU32(root, text_cfg, "num_experts_per_tok");
     meta.moe_intermediate_size = cfgU32(root, text_cfg, "moe_intermediate_size");
     const mt: []const u8 = if (root.get("model_type")) |v|
@@ -1241,9 +1255,15 @@ pub fn parseStubMeta(allocator: std.mem.Allocator, config_json: []const u8, has_
         @memcpy(meta.model_type_buf[0..mt.len], mt);
         meta.model_type_len = @intCast(mt.len);
     }
+    if (std.mem.eql(u8, mt, "mimo_v2")) {
+        const cfg = text_cfg orelse root;
+        const freq = cfg.get("moe_layer_freq") orelse return .{};
+        meta.first_moe_layer = denseMoePrefix(freq, meta.num_hidden_layers) catch return .{};
+    }
     // Vision: a `vision_config` block on a non-`_text` arch (the `_text` guard
     // skips text-only quantized checkpoints with a vestigial block).
-    meta.has_vision = root.get("vision_config") != null and !std.mem.endsWith(u8, mt, "_text");
+    meta.has_vision = root.get("vision_config") != null and !std.mem.endsWith(u8, mt, "_text") and
+        !std.mem.eql(u8, mt, "mimo_v2");
     meta.has_video = meta.has_vision and cfgU32(root, text_cfg, "video_token_id") > 0;
     const bidirectional = blk: {
         const cfgBool = struct {
@@ -1268,6 +1288,23 @@ pub fn parseStubMeta(allocator: std.mem.Allocator, config_json: []const u8, has_
         if (v == .string) meta.has_embedding = true;
     }
     return meta;
+}
+
+/// The dense-prefix representation cannot describe interspersed dense/MoE layers.
+pub fn denseMoePrefix(freq: std.json.Value, layers: u32) !u32 {
+    if (freq != .array or freq.array.items.len != layers) return error.UnsupportedMimoV2Config;
+    var dense: u32 = 0;
+    var seen_moe = false;
+    for (freq.array.items) |v| {
+        if (v != .integer or (v.integer != 0 and v.integer != 1)) return error.UnsupportedMimoV2Config;
+        if (v.integer == 1) {
+            seen_moe = true;
+        } else {
+            if (seen_moe) return error.UnsupportedMimoV2Config;
+            dense += 1;
+        }
+    }
+    return dense;
 }
 
 /// Read `StubMeta` for the model directory at `abs_path` (config.json + a
@@ -2097,6 +2134,43 @@ test "isSupportedQuantMode accepts nvfp4 (issue #24), rejects unknown" {
     try testing.expect(isSupportedQuantMode("mxfp4"));
     try testing.expect(isSupportedQuantMode("mxfp8"));
     try testing.expect(!isSupportedQuantMode("fp99"));
+}
+
+test "parseStubMeta mimo_v2 reports routed count and text-only capabilities" {
+    const m = parseStubMeta(testing.allocator,
+        \\{"model_type":"mimo_v2", "num_hidden_layers":4, "hidden_size":384,
+        \\ "n_routed_experts":16, "num_experts_per_tok":4, "moe_intermediate_size":192,
+        \\ "moe_layer_freq":[0,1,1,1], "quantization":{"bits":4,"mode":"mxfp4"},
+        \\ "vision_config":{}, "audio_config":{}, "video_token_id":151656}
+    , true);
+    try testing.expect(m.found and m.has_chat and m.is_moe);
+    try testing.expectEqual(@as(u32, 16), m.num_experts);
+    try testing.expectEqual(@as(u32, 1), m.first_moe_layer);
+    try testing.expectEqual(@as(u32, 4), m.quant_bits);
+    try testing.expect(!m.has_vision and !m.has_video and !m.has_mtp);
+}
+
+test "mimo_v2 streaming discovery validates MXFP4 headers without a PLE table" {
+    const a = testing.allocator;
+    try testing.expect(isSupportedModelType("mimo_v2"));
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const bytes = try expert_stream.writeTinyMxfp4Checkpoint(a, tmp.dir, 4, 64, 32);
+    defer a.free(bytes);
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.json",
+        .data =
+        \\{"model_type":"mimo_v2", "num_hidden_layers":2, "hidden_size":64,
+        \\ "n_routed_experts":4, "num_experts_per_tok":2, "moe_intermediate_size":32,
+        \\ "moe_layer_freq":[0,1], "quantization":{"bits":4,"mode":"mxfp4"}}
+        ,
+    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(testing.io, &path_buf);
+    const path = path_buf[0..n];
+    try testing.expectEqual(expert_quant.Layout.mxfp4_split, qwen4StreamingIndexComplete(testing.io, a, path).?);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "mxfp4.safetensors", .data = bytes[0..16] });
+    try testing.expect(qwen4StreamingIndexComplete(testing.io, a, path) == null);
 }
 
 test "parseStubMeta extracts dims/ctx/quant/MoE + chat/vision capabilities" {

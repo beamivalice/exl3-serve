@@ -5,6 +5,36 @@ A fork from ddalcu's MLX-serve, focus only to support selected EXL3 models in Ap
 ## Model support list
 
 * Qwen3.8-Flash-Next
+* MiMo-V2.6-Flash-RL — experimental text-only native MXFP4 expert streaming
+
+## MiMo-V2.6-Flash-RL streaming
+
+The raw HF download is not directly loadable. Repack it into a **separate**
+directory; routed expert bytes remain native MXFP4. The converter reconstructs
+rank-local FP8 QKV weights, splits Q/K/V, and converts FP8 trunk linears to
+affine 8-bit. Vision/audio are omitted. Python is needed only for conversion.
+
+```sh
+uv run --with mlx==0.32.2 --with numpy python tests/convert_mimo_v2.py \
+  --src /path/to/MiMo-V2.6-Flash-RL \
+  --dst /path/to/MiMo-V2.6-Flash-RL-MXFP4-stream
+
+./.zig-toolchain/zig build -Doptimize=ReleaseFast
+./zig-out/bin/mlx-serve run /path/to/MiMo-V2.6-Flash-RL-MXFP4-stream \
+  --host 127.0.0.1 --ssd-budget-gb 100 --kv-quant 8 \
+  --ctx-size 4096 --prefill-chunk 512 --max-tokens 512 \
+  --no-mtp --no-pld --no-vision --prefix-cache-entries 0
+```
+
+`--ssd-budget-gb` is a total resident target in GiB, including the trunk,
+expert cache, and streaming workspaces. It must leave room for KV and serving
+transients under the machine's wired limit. Reduce the budget if admission
+refuses a longer conversation. MTP and multimodal input are not supported in
+this bring-up; decode is serial.
+
+`tests/test_mimo_streaming.sh` is the live smoke test.
+`tests/bench_mimo_streaming.py` records server-side prefill/decode timings with
+one warm-up and three measured repeats, without prefix reuse or speculation.
 
 ## Component-sharded EXL3 packs
 
