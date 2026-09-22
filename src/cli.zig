@@ -12,11 +12,8 @@
 //! `~/.mlx-serve/models/<org>/<repo>` — the single source of truth shared
 //! with the app's DownloadManager and the server's media-dep resolution.
 //!
-//! Transport is the system `curl` (always present on macOS): rock-solid
-//! TLS/redirect/HTTP2 handling, `-C -` resume, `--create-dirs`, and a free
-//! progress bar on the CLI path. Pure helpers (alias resolution, tree-JSON
-//! parsing, file filtering, REPL body/line codecs) are hermetically tested
-//! here; only the thin curl/spawn wrappers need a live network.
+//! Downloads use system curl for TLS and resume. The embedded REPL uses an
+//! in-process HTTP client: spawning curl would fork the resident MLX process.
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -769,16 +766,22 @@ pub fn parseReplLine(allocator: std.mem.Allocator, line: []const u8) ?ReplDelta 
 pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
     const health_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/health", .{port});
     defer allocator.free(health_url);
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
     // Big checkpoints take a while to fault in; poll patiently.
     var waited_ms: u64 = 0;
+    var ready = false;
     while (waited_ms < 15 * 60 * 1000) {
-        if (curlFetch(allocator, io, health_url)) |body| {
-            allocator.free(body);
-            break;
+        if (client.fetch(.{ .location = .{ .url = health_url }, .keep_alive = false })) |response| {
+            if (response.status == .ok) {
+                ready = true;
+                break;
+            }
         } else |_| {}
         std.Io.sleep(io, .fromMilliseconds(500), .real) catch {};
         waited_ms += 500;
     }
+    if (!ready) return error.ReplServerNotReady;
 
     const chat_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/api/chat", .{port});
     defer allocator.free(chat_url);
@@ -837,29 +840,37 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
 /// POST the body, stream NDJSON, print content deltas as they arrive.
 /// Returns the full assistant reply (owned).
 fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body: []const u8, w: *std.Io.Writer) ![]u8 {
-    var child = std.process.spawn(io, .{
-        .argv = &.{ "curl", "-sN", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", url },
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .ignore,
-    }) catch return error.CurlSpawnFailed;
-    defer child.kill(io);
-
-    {
-        var in_buf: [4096]u8 = undefined;
-        var stdin_w = child.stdin.?.writer(io, &in_buf);
-        try stdin_w.interface.writeAll(body);
-        try stdin_w.interface.flush();
-        child.stdin.?.close(io);
-        child.stdin = null;
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var req = try client.request(.POST, try std.Uri.parse(url), .{
+        .keep_alive = false,
+        .redirect_behavior = .unhandled,
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+            .accept_encoding = .{ .override = "identity" },
+        },
+    });
+    defer req.deinit();
+    req.transfer_encoding = .{ .content_length = body.len };
+    var request_body = try req.sendBodyUnflushed(&.{});
+    try request_body.writer.writeAll(body);
+    try request_body.end();
+    try req.connection.?.flush();
+    var head_buffer: [8192]u8 = undefined;
+    var response = try req.receiveHead(&head_buffer);
+    var out_buf: [64 * 1024]u8 = undefined;
+    const r = response.reader(&out_buf);
+    if (response.head.status != .ok) {
+        const detail = try r.allocRemaining(allocator, .limited(64 * 1024));
+        defer allocator.free(detail);
+        try w.print("[server error HTTP {d}: {s}]\n", .{ @backingInt(response.head.status), detail });
+        try w.flush();
+        return error.ReplHttpStatus;
     }
 
     var full = std.ArrayList(u8).empty;
     errdefer full.deinit(allocator);
 
-    var out_buf: [64 * 1024]u8 = undefined;
-    var stdout_r = child.stdout.?.reader(io, &out_buf);
-    const r = &stdout_r.interface;
     while (true) {
         const line = r.takeDelimiter('\n') catch break orelse break;
         if (line.len == 0) continue;
@@ -884,7 +895,6 @@ fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body
             break;
         }
     }
-    _ = child.wait(io) catch {};
     return full.toOwnedSlice(allocator);
 }
 
