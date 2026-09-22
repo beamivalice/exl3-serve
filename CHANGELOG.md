@@ -4,6 +4,8 @@
 
 - **The original bf16 Qwen3.8 Flash Next serves from a 128 GB Mac by streaming experts from SSD.** Point `--model` at the HF checkpoint and set `--ssd-budget-gb <GiB>` (the total resident target), `--expert-cache-gb`, or the per-model `ssd_budget_gb` in Model Settings; the app shows an `SSD` badge and an SSD budget row for such a checkpoint. Speculative decoding is refused by name on a streamed model.
 - **A load the server refuses by name no longer restarts it from the tray**; the selection reverts to the model still being served and the refusal shows as an error card.
+- **Two EXL3 packs on different codebooks can be loaded at once**; each model's forward now decodes with its own codebook instead of the one the most recent load installed.
+- **An EXL3 pack whose routed-expert trellis disagrees with its `config.json` is refused by name at load**, rather than serving under a memory plan that under-counts the expert bytes.
 
 ## Exl3-serve - v26.9.5
 

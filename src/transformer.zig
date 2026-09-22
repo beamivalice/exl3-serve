@@ -28945,6 +28945,10 @@ pub const Transformer = struct {
     /// router_x: input for routing (raw hidden states).
     /// expert_x: input for expert computation (possibly normalized).
     fn moeExl3(self: *Transformer, expert_x: mlx.mlx_array, mw: *const MoeMlpWeights, inds: mlx.mlx_array, scores: mlx.mlx_array, verify_rows: bool) !mlx.mlx_array {
+        // Which kernel a dispatch picks is read off ONE process-global
+        // codebook, and several EXL3 packs can be resident at once: assert
+        // this model's here, not once at its load.
+        expert_exl3_kernels.setCodebook(self.config.expert_quant_codebook);
         const xsh = mlx.getShape(expert_x);
         const B = xsh[0];
         const S = xsh[1];
@@ -31042,7 +31046,6 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
             // correction bias, no shared expert, and biasless mxfp4 banks.
             const stream_bank = shouldStreamExpertBank(&config, prefix);
             const exl3 = config.expert_layout == .exl3_k4;
-            if (exl3) expert_exl3_kernels.setCodebook(config.expert_quant_codebook);
             const switch_bank: SwitchMlpBank = if (stream_bank) .{
                 .gate_w = mlx.mlx_array_new(),
                 .gate_s = mlx.mlx_array_new(),
@@ -31053,7 +31056,7 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
                 .down_w = mlx.mlx_array_new(),
                 .down_s = mlx.mlx_array_new(),
                 .down_b = mlx.mlx_array_new(),
-            } else try loadSwitchMlpBank(weights, name_buf, prefix, li, exl3);
+            } else try loadSwitchMlpBank(weights, name_buf, prefix, li, exl3, &config);
             lw.mlp = .{ .moe = .{
                 .router_w = try getLayerWeight(weights, name_buf, prefix, li, "mlp.gate.weight"),
                 .router_s = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.gate.scales") orelse mlx.mlx_array_new(),
@@ -31106,7 +31109,6 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
             // `mlx_matmul`; they no-op on already-quantized AND on empty handles.
             const stream_bank = shouldStreamExpertBank(&config, prefix);
             const exl3 = config.expert_layout == .exl3_k4;
-            if (exl3) expert_exl3_kernels.setCodebook(config.expert_quant_codebook);
             const switch_bank: SwitchMlpBank = if (stream_bank) .{
                 .gate_w = mlx.mlx_array_new(),
                 .gate_s = mlx.mlx_array_new(),
@@ -31117,7 +31119,7 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
                 .down_w = mlx.mlx_array_new(),
                 .down_s = mlx.mlx_array_new(),
                 .down_b = mlx.mlx_array_new(),
-            } else try loadSwitchMlpBank(weights, name_buf, prefix, li, exl3);
+            } else try loadSwitchMlpBank(weights, name_buf, prefix, li, exl3, &config);
             lw.mlp = .{ .moe = .{
                 .router_w = try getLayerWeight(weights, name_buf, prefix, li, "mlp.gate.weight"),
                 .router_s = getLayerWeightOpt(weights, name_buf, prefix, li, "mlp.gate.scales") orelse mlx.mlx_array_new(),
@@ -38886,7 +38888,8 @@ test "exl3 MTP switch_mlp binds restacked trellis/suh/svh under the head prefix"
         try put(&w, vk, .float16, &svh, s);
     }
     var buf: [256]u8 = undefined;
-    const bank = try loadSwitchMlpBank(&w, &buf, "language_model.mtp", 0, true);
+    const config = exl3SwitchBankConfig(.{ .n = 64 });
+    const bank = try loadSwitchMlpBank(&w, &buf, "language_model.mtp", 0, true, &config);
     try t.expectEqual(@as(usize, 4), mlx.getShape(bank.gate_w).len);
     try t.expectEqual(@as(c_int, 4), mlx.getShape(bank.gate_w)[0]);
     try t.expectEqual(mlx.mlx_dtype.uint16, mlx.mlx_array_dtype(bank.gate_w));
@@ -38918,44 +38921,68 @@ test "exl3 MTP switch_mlp refuses a missing restacked tensor by MissingWeight" {
         try put(&w, vk, .float16, &svh, s);
     }
     var buf: [256]u8 = undefined;
-    try t.expectError(error.MissingWeight, loadSwitchMlpBank(&w, &buf, "language_model.mtp", 0, true));
+    const config = exl3SwitchBankConfig(.{ .n = 64 });
+    try t.expectError(error.MissingWeight, loadSwitchMlpBank(&w, &buf, "language_model.mtp", 0, true, &config));
+}
+
+/// The 4-expert 128x128 pack the synthetic switch_mlp binds answer to.
+fn exl3SwitchBankConfig(rate: expert_exl3.Rate) ModelConfig {
+    return .{
+        .expert_layout = .exl3_k4,
+        .expert_quant_rate = rate,
+        .num_experts = 4,
+        .hidden_size = 128,
+        .moe_intermediate_size = 128,
+    };
+}
+
+/// Bind an EXL3 switch_mlp bank whose three trellises carry `trellis`, against
+/// a config that names `rate`.
+fn bindExl3SwitchBank(st: mlx.mlx_stream, trellis: []const c_int, rate: expert_exl3.Rate) !SwitchMlpBank {
+    var w = Weights.init(std.testing.allocator);
+    defer w.deinit();
+    const scales = [_]c_int{ 4, 128 };
+    for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+        for ([_]struct { leaf: []const u8, dtype: mlx.mlx_dtype, shape: []const c_int }{
+            .{ .leaf = "trellis", .dtype = .uint16, .shape = trellis },
+            .{ .leaf = "suh", .dtype = .float16, .shape = &scales },
+            .{ .leaf = "svh", .dtype = .float16, .shape = &scales },
+        }) |part| {
+            var tbuf: [96]u8 = undefined;
+            const key = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.{s}", .{ proj, part.leaf });
+            var arr = mlx.mlx_array_new();
+            try mlx.check(mlx.mlx_zeros(&arr, part.shape.ptr, @intCast(part.shape.len), part.dtype, st));
+            try w.map.put(try w.allocator.dupe(u8, key), arr);
+        }
+    }
+    var buf: [256]u8 = undefined;
+    const config = exl3SwitchBankConfig(rate);
+    return loadSwitchMlpBank(&w, &buf, "language_model.mtp", 0, true, &config);
 }
 
 test "exl3 a trellis the kernels cannot decode refuses at load" {
     const t = std.testing;
     const s = mlx.gpuStream();
-    const put = struct {
-        fn add(w: *Weights, name: []const u8, dtype: mlx.mlx_dtype, shape: []const c_int, st: mlx.mlx_stream) !void {
-            var arr = mlx.mlx_array_new();
-            try mlx.check(mlx.mlx_zeros(&arr, shape.ptr, @intCast(shape.len), dtype, st));
-            try w.map.put(try w.allocator.dupe(u8, name), arr);
-        }
-    }.add;
-    const bind = struct {
-        fn run(st: mlx.mlx_stream, trellis: []const c_int) !SwitchMlpBank {
-            var w = Weights.init(std.testing.allocator);
-            defer w.deinit();
-            const suh = [_]c_int{ 4, 128 };
-            for ([_][]const u8{ "gate", "up", "down" }) |proj| {
-                var tbuf: [96]u8 = undefined;
-                const tk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.trellis", .{proj});
-                try put(&w, tk, .uint16, trellis, st);
-                const sk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.suh", .{proj});
-                try put(&w, sk, .float16, &suh, st);
-                const vk = try std.fmt.bufPrint(&tbuf, "language_model.mtp.layers.0.mlp.switch_mlp.{s}_proj.svh", .{proj});
-                try put(&w, vk, .float16, &suh, st);
-            }
-            var buf: [256]u8 = undefined;
-            return loadSwitchMlpBank(&w, &buf, "language_model.mtp", 0, true);
-        }
-    }.run;
-    _ = try bind(s, &[_]c_int{ 4, 8, 8, 48 });
-    _ = try bind(s, &[_]c_int{ 4, 8, 8, 40 });
-    _ = try bind(s, &[_]c_int{ 4, 8, 8, 44 });
-    try t.expectError(error.Exl3TrellisGeometry, bind(s, &[_]c_int{ 4, 8, 8, 80 }));
-    try t.expectError(error.Exl3TrellisGeometry, bind(s, &[_]c_int{ 4, 8, 8, 16 }));
-    try t.expectError(error.Exl3TrellisGeometry, bind(s, &[_]c_int{ 4, 8, 8, 41 }));
-    try t.expectError(error.Exl3TrellisGeometry, bind(s, &[_]c_int{ 4, 8, 64 }));
+    _ = try bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 48 }, .{ .n = 48 });
+    _ = try bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 40 }, .{ .n = 40 });
+    _ = try bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 44 }, .{ .n = 44 });
+    try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 80 }, .{ .n = 80 }));
+    try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 16 }, .{ .n = 16 }));
+    try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 41 }, .{ .n = 41 }));
+    try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 64 }, .{ .n = 64 }));
+}
+
+test "exl3 a trellis the config's rate or expert geometry does not name refuses at load" {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    // The streaming bill prices n from the config, so a config that names a
+    // narrower (or wider) rate than the shards carry must never load.
+    try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 48 }, .{ .n = 40 }));
+    try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 40 }, .{ .n = 48 }));
+    try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 8, 8, 8, 64 }, .{ .n = 64 }));
+    try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 4, 8, 64 }, .{ .n = 64 }));
+    try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 16, 64 }, .{ .n = 64 }));
+    _ = try bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 64 }, .{ .n = 64 });
 }
 
 test "exl3 MTP rows wider than the decode arm refuse by Exl3MtpRowsExceedDecode" {
@@ -39345,13 +39372,14 @@ const MimoExl3MoeHarness = struct {
     suh_i: []u16,
     svh_h: []u16,
     xf: []f32,
+    cb: expert_exl3.Codebook,
+    rows: usize,
 
     const E: usize = 4;
     const hidden: usize = 128;
     const inter: usize = 256;
 
-    fn init(alloc: std.mem.Allocator, s: mlx.mlx_stream, rate: expert_exl3.Rate, rows: usize, seed: u64) !MimoExl3MoeHarness {
-        expert_exl3_kernels.setCodebook(.tiny);
+    fn init(alloc: std.mem.Allocator, s: mlx.mlx_stream, rate: expert_exl3.Rate, rows: usize, seed: u64, cb: expert_exl3.Codebook) !MimoExl3MoeHarness {
         const packed_n = rate.halfwords();
         const gu_tile = (hidden / 16) * (inter / 16) * packed_n;
         const d_tile = (inter / 16) * (hidden / 16) * packed_n;
@@ -39419,6 +39447,8 @@ const MimoExl3MoeHarness = struct {
             .suh_i = suh_i,
             .svh_h = svh_h,
             .xf = xf,
+            .cb = cb,
+            .rows = rows,
             .mw = .{
                 .router_w = router,
                 .router_s = none,
@@ -39451,7 +39481,7 @@ const MimoExl3MoeHarness = struct {
             .model_type = "mimo_v2",
             .expert_layout = .exl3_k4,
             .expert_quant_rate = rate,
-            .expert_quant_codebook = .tiny,
+            .expert_quant_codebook = cb,
             .num_experts = @intCast(E),
             .num_experts_per_tok = 2,
             .hidden_size = @intCast(hidden),
@@ -39491,15 +39521,43 @@ const MimoExl3MoeHarness = struct {
         defer alloc.free(up_y);
         const gu_tile = (hidden / 16) * (inter / 16) * rate.halfwords();
         const d_tile = (inter / 16) * (hidden / 16) * rate.halfwords();
-        expert_exl3.project(x, self.gate_t[0..gu_tile], self.suh_h[0..hidden], self.svh_i[0..inter], hidden, inter, rate, .tiny, t_hidden, inner, gate_y);
-        expert_exl3.project(x, self.gate_t[0..gu_tile], self.suh_h[0..hidden], self.svh_i[0..inter], hidden, inter, rate, .tiny, t_hidden, inner, up_y);
+        expert_exl3.project(x, self.gate_t[0..gu_tile], self.suh_h[0..hidden], self.svh_i[0..inter], hidden, inter, rate, self.cb, t_hidden, inner, gate_y);
+        expert_exl3.project(x, self.gate_t[0..gu_tile], self.suh_h[0..hidden], self.svh_i[0..inter], hidden, inter, rate, self.cb, t_hidden, inner, up_y);
         for (gate_y, up_y) |*g, u| g.* = (g.* / (1.0 + @exp(-g.*))) * u;
-        expert_exl3.project(gate_y, self.down_t[0..d_tile], self.suh_i[0..inter], self.svh_h[0..hidden], inter, hidden, rate, .tiny, t_inter, inner, out);
+        expert_exl3.project(gate_y, self.down_t[0..d_tile], self.suh_i[0..inter], self.svh_h[0..hidden], inter, hidden, rate, self.cb, t_inter, inner, out);
+    }
+
+    /// One forward through the engine, scored against this harness's own
+    /// codebook on the host.
+    fn expectMatchesHost(self: *MimoExl3MoeHarness, alloc: std.mem.Allocator, rate: expert_exl3.Rate) !void {
+        const y = try self.xfm.moeMLP(self.x, &self.mw);
+        defer _ = mlx.mlx_array_free(y);
+        var c = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(c);
+        try mlx.check(mlx.mlx_contiguous(&c, y, false, self.xfm.s));
+        try mlx.check(mlx.mlx_array_eval(c));
+        const got = mlx.mlx_array_data_float16(c) orelse return error.F16Unreadable;
+        const want = try alloc.alloc(f32, hidden);
+        defer alloc.free(want);
+        var ss: f64 = 0;
+        var ref: f64 = 0;
+        for (0..self.rows) |r| {
+            try self.hostRow(alloc, rate, r, want);
+            for (want, 0..) |w, i| {
+                const a: f64 = @floatCast(got[r * hidden + i]);
+                ss += (a - w) * (a - w);
+                ref += @as(f64, w) * @as(f64, w);
+            }
+        }
+        const rel = @sqrt(ss / @max(ref, 1e-20));
+        if (!(rel < 0.01)) {
+            std.debug.print("mimo exl3 forward codebook={s} rel_rms={d:.6}\n", .{ @tagName(self.cb), rel });
+            return error.TestExpectedEqual;
+        }
     }
 
     fn deinit(self: *MimoExl3MoeHarness) void {
         for (self.owned) |a| _ = mlx.mlx_array_free(a);
-        expert_exl3_kernels.setCodebook(.mul1);
     }
 };
 
@@ -39510,31 +39568,37 @@ fn mimoExl3ForwardMatchesHost(rate: expert_exl3.Rate, rows: usize, seed: u64) !v
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var h = try MimoExl3MoeHarness.init(alloc, s, rate, rows, seed);
+    var h = try MimoExl3MoeHarness.init(alloc, s, rate, rows, seed, .tiny);
     defer h.deinit();
-    const y = try h.xfm.moeMLP(h.x, &h.mw);
-    defer _ = mlx.mlx_array_free(y);
-    var c = mlx.mlx_array_new();
-    defer _ = mlx.mlx_array_free(c);
-    try mlx.check(mlx.mlx_contiguous(&c, y, false, s));
-    try mlx.check(mlx.mlx_array_eval(c));
-    const got = mlx.mlx_array_data_float16(c) orelse return error.F16Unreadable;
-    const want = try alloc.alloc(f32, MimoExl3MoeHarness.hidden);
-    var ss: f64 = 0;
-    var ref: f64 = 0;
-    for (0..rows) |r| {
-        try h.hostRow(alloc, rate, r, want);
-        for (want, 0..) |w, i| {
-            const a: f64 = @floatCast(got[r * MimoExl3MoeHarness.hidden + i]);
-            ss += (a - w) * (a - w);
-            ref += @as(f64, w) * @as(f64, w);
-        }
+    try h.expectMatchesHost(alloc, rate);
+}
+
+/// Two EXL3 packs on different codebooks, resident together and dispatching
+/// alternately: every forward must decode with ITS OWN model's codebook.
+fn exl3CodebookFollowsModel(rows: usize) !void {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const rate: expert_exl3.Rate = .{ .n = 40 };
+    var mul1 = try MimoExl3MoeHarness.init(alloc, s, rate, rows, 101, .mul1);
+    defer mul1.deinit();
+    var tiny = try MimoExl3MoeHarness.init(alloc, s, rate, rows, 103, .tiny);
+    defer tiny.deinit();
+    for (0..2) |_| {
+        try mul1.expectMatchesHost(alloc, rate);
+        try tiny.expectMatchesHost(alloc, rate);
     }
-    const rel = @sqrt(ss / @max(ref, 1e-20));
-    if (!(rel < 0.01)) {
-        std.debug.print("mimo exl3 forward rel_rms={d:.6}\n", .{rel});
-        return error.TestExpectedEqual;
-    }
+}
+
+test "exl3 decode rows follow their own model's codebook with two packs resident" {
+    try exl3CodebookFollowsModel(4);
+}
+
+test "exl3 prefill rows follow their own model's codebook with two packs resident" {
+    try exl3CodebookFollowsModel(expert_exl3_kernels.DECODE_ROWS_MAX * 2);
 }
 
 test "mimo_v2 EXL3 resident MoE decode rows match the host SwiGLU oracle at K2.5 TINY" {
@@ -39624,14 +39688,21 @@ const SwitchMlpBank = struct {
     down_b: mlx.mlx_array,
 };
 
-/// A trellis the EXL3 kernels can decode: `[E, in/16, out/16, 16*K]`, K in 2..4.
-/// Anything else is a load refusal, not a per-request 500 from `packedK`.
-fn exl3TrellisAdmitted(shape: []const c_int) bool {
-    if (shape.len != 4 or shape[3] < 0) return false;
-    return expert_exl3.kFromPackedDim(@intCast(shape[3])) != null;
+/// A trellis the EXL3 kernels can decode AND the memory plan can price:
+/// `[E, in/16, out/16, n]` at the rate the CONFIG names. Decode reads n off the
+/// tensor while the streaming bill reads it off the config, so a pack whose two
+/// disagree under-bills — and an under-bill here is an uncatchable Metal OOM.
+fn exl3TrellisAdmitted(shape: []const c_int, experts: u32, in_dim: u32, out_dim: u32, rate: expert_exl3.Rate) bool {
+    if (shape.len != 4) return false;
+    for (shape) |d| if (d <= 0) return false;
+    if (in_dim % 16 != 0 or out_dim % 16 != 0) return false;
+    const want = [3]u32{ experts, in_dim / 16, out_dim / 16 };
+    for (want, 0..) |w, i| if (w != @as(u32, @intCast(shape[i]))) return false;
+    const packed_rate = expert_exl3.kFromPackedDim(@intCast(shape[3])) orelse return false;
+    return packed_rate.n == rate.n;
 }
 
-fn loadSwitchMlpBank(weights: *const Weights, buf: *[256]u8, prefix: []const u8, layer: u32, exl3: bool) error{ MissingWeight, Exl3TrellisGeometry }!SwitchMlpBank {
+fn loadSwitchMlpBank(weights: *const Weights, buf: *[256]u8, prefix: []const u8, layer: u32, exl3: bool, config: *const ModelConfig) error{ MissingWeight, Exl3TrellisGeometry }!SwitchMlpBank {
     if (exl3) {
         const bank: SwitchMlpBank = .{
             .gate_w = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.gate_proj.trellis"),
@@ -39644,8 +39715,20 @@ fn loadSwitchMlpBank(weights: *const Weights, buf: *[256]u8, prefix: []const u8,
             .down_s = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.down_proj.suh"),
             .down_b = try getLayerWeight(weights, buf, prefix, layer, "mlp.switch_mlp.down_proj.svh"),
         };
-        for ([_]mlx.mlx_array{ bank.gate_w, bank.up_w, bank.down_w }) |trellis| {
-            if (!exl3TrellisAdmitted(mlx.getShape(trellis))) return error.Exl3TrellisGeometry;
+        const h = config.hidden_size;
+        const inter = config.moe_intermediate_size;
+        const projs = [_]struct { w: mlx.mlx_array, in: u32, out: u32 }{
+            .{ .w = bank.gate_w, .in = h, .out = inter },
+            .{ .w = bank.up_w, .in = h, .out = inter },
+            .{ .w = bank.down_w, .in = inter, .out = h },
+        };
+        for (projs) |p| {
+            if (exl3TrellisAdmitted(mlx.getShape(p.w), config.num_experts, p.in, p.out, config.expert_quant_rate)) continue;
+            var kbuf: [8]u8 = undefined;
+            log.err("EXL3 TRELLIS GEOMETRY: {s}.layers.{d} packs {any}, config names [{d}, {d}, {d}, k={s}]\n", .{
+                prefix, layer, mlx.getShape(p.w), config.num_experts, p.in / 16, p.out / 16, config.expert_quant_rate.kText(&kbuf),
+            });
+            return error.Exl3TrellisGeometry;
         }
         return bank;
     }

@@ -682,8 +682,9 @@ var finish_kernel: ?mlx.mlx_fast_metal_kernel = null;
 var gemv_kernel: KernelSlots = no_kernels;
 var gemv_engaged: bool = false;
 
-/// The pack's codebook, set at load (`setCodebook`). Every weight kernel is
-/// built per codebook, so the slots below are arrays indexed by it.
+/// The codebook the next dispatch decodes with. Every weight kernel is built
+/// per codebook, so the slots below are arrays indexed by it; the model's own
+/// is asserted at each dispatch entry, since several packs can be resident.
 var active_codebook: exl3.Codebook = .mul1;
 pub fn setCodebook(cb: exl3.Codebook) void {
     active_codebook = cb;
