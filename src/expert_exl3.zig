@@ -382,36 +382,6 @@ pub fn innerGemv(
     for (out) |*v| v.* = f16BitsToF32(f32ToF16Bits(v.*));
 }
 
-pub fn innerGemvF32(
-    trellis: []const u16,
-    transformed: []const f32,
-    in_features: usize,
-    out_features: usize,
-    rate: Rate,
-    dec: Decode,
-    out: []f32,
-) void {
-    const in_tiles = in_features / TILE;
-    const out_tiles = out_features / TILE;
-    const packed_n = rate.halfwords();
-    @memset(out, 0);
-    var tile_w: [TILE_VALUES]u16 = undefined;
-    for (0..in_tiles) |tk| {
-        for (0..out_tiles) |tn| {
-            const off = (tk * out_tiles + tn) * packed_n;
-            decodeTile(trellis[off..][0..packed_n], rate, dec, &tile_w);
-            const xbase = tk * TILE;
-            const ybase = tn * TILE;
-            for (0..TILE) |r| {
-                const xv = transformed[xbase + r];
-                for (0..TILE) |c| {
-                    out[ybase + c] += xv * f16BitsToF32(tile_w[r * TILE + c]);
-                }
-            }
-        }
-    }
-}
-
 pub fn finishOutput(inner: []const f32, svh: []const u16, out: []f32) void {
     @memcpy(out, inner);
     var block: usize = 0;

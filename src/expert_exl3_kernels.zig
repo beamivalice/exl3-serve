@@ -2814,7 +2814,7 @@ test "exl3 Metal inner GEMV matches the host tile decode at a narrowed codeword 
     try metalInnerGemvFixture(exl3.fixtures.k4, exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w12 });
 }
 
-fn indexedParity(rate: exl3.Rate, in_dim: usize, out_dim: usize, e: usize, topk: usize, seed: u64, dec: exl3.Decode) !void {
+fn indexedParityStats(rate: exl3.Rate, in_dim: usize, out_dim: usize, e: usize, topk: usize, seed: u64, dec: exl3.Decode, mutate: Exl3Mutation) !Exl3GemmParityStats {
     setDecodeParams(dec);
     defer setDecodeParams(.mul1);
     const t = std.testing;
@@ -2848,44 +2848,12 @@ fn indexedParity(rate: exl3.Rate, in_dim: usize, out_dim: usize, e: usize, topk:
     try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
     try mlx.check(mlx.mlx_array_eval(contig));
     const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
-    const xf = try alloc.alloc(f32, in_dim);
-    const host16 = try alloc.alloc(f32, out_dim);
-    const host32 = try alloc.alloc(f32, out_dim);
-    const pos_acc = try alloc.alloc(f32, out_dim * 16);
-    const host_pos = try alloc.alloc(f32, out_dim);
-    for (0..topk) |row| {
-        for (0..in_dim) |i| xf[i] = exl3.f16BitsToF32(xh[row * in_dim + i]);
-        const eid: usize = slots_h[row];
-        const trellis = stacked[eid * tile_n ..][0..tile_n];
-        exl3.innerGemv(trellis, xf, in_dim, out_dim, rate, dec, host16);
-        exl3.innerGemvF32(trellis, xf, in_dim, out_dim, rate, dec, host32);
-        @memset(pos_acc, 0);
-        var tile_w: [exl3.TILE_VALUES]u16 = undefined;
-        for (0..in_tiles) |tk| {
-            for (0..out_tiles) |tn| {
-                const off = (tk * out_tiles + tn) * packed_n;
-                exl3.decodeTile(trellis[off..][0..packed_n], rate, dec, &tile_w);
-                for (0..16) |r| {
-                    const xv = xf[tk * 16 + r];
-                    for (0..16) |c| {
-                        pos_acc[(tn * 16 + c) * 16 + r] += xv * exl3.f16BitsToF32(tile_w[r * 16 + c]);
-                    }
-                }
-            }
-        }
-        for (0..out_dim) |o| {
-            var psum: f32 = 0;
-            for (0..16) |r| psum += pos_acc[o * 16 + r];
-            host_pos[o] = psum;
-        }
-        for (0..out_dim) |o| {
-            const gpu = @as(f32, @floatCast(src[row * out_dim + o]));
-            expectGemvEnvelope(gpu, host16[o], host32[o]) catch {
-                const hp16 = exl3.f16BitsToF32(exl3.f32ToF16Bits(host_pos[o]));
-                try expectGemvEnvelope(gpu, hp16, host_pos[o]);
-            };
-        }
-    }
+    if (mutate == .codeword) stacked[tile_n / 2] ^= 0x40;
+    return measureInnerGemmParity(alloc, s, src[0 .. topk * out_dim], xh, slots_h, stacked, in_dim, out_dim, rate, mutatedDecode(dec, mutate));
+}
+
+fn indexedParity(rate: exl3.Rate, in_dim: usize, out_dim: usize, e: usize, topk: usize, seed: u64, dec: exl3.Decode) !void {
+    try reportGemmParity(try indexedParityStats(rate, in_dim, out_dim, e, topk, seed, dec, .none));
 }
 
 test "exl3 K3 cooperative indexed GEMV matches host MUL1 tile decode" {
@@ -2915,8 +2883,6 @@ test "exl3 K3 Metal inner GEMV matches host on production shape" {
     for (trellis) |*v| v.* = @truncate(rnd.int(u32));
     const xf16 = try alloc.alloc(u16, in_dim);
     for (xf16) |*v| v.* = exl3.f32ToF16Bits(rnd.float(f32) * 2 - 1);
-    const xf = try alloc.alloc(f32, in_dim);
-    for (xf16, xf) |b, *v| v.* = exl3.f16BitsToF32(b);
     const x_arr = mlx.mlx_array_new_data(xf16.ptr, &[_]c_int{@intCast(in_dim)}, 1, .float16);
     defer _ = mlx.mlx_array_free(x_arr);
     const tr_arr = mlx.mlx_array_new_data(trellis.ptr, &[_]c_int{ @intCast(in_tiles), @intCast(out_tiles), @intCast(packed_n) }, 3, .uint16);
@@ -2928,14 +2894,7 @@ test "exl3 K3 Metal inner GEMV matches host on production shape" {
     try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
     try mlx.check(mlx.mlx_array_eval(contig));
     const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
-    const host16 = try alloc.alloc(f32, out_dim);
-    const host32 = try alloc.alloc(f32, out_dim);
-    exl3.innerGemv(trellis, xf, in_dim, out_dim, exl3.Rate.fromK(k), .mul1, host16);
-    exl3.innerGemvF32(trellis, xf, in_dim, out_dim, exl3.Rate.fromK(k), .mul1, host32);
-    for (0..out_dim) |o| {
-        const gpu = @as(f32, @floatCast(src[o]));
-        try expectGemvEnvelope(gpu, host16[o], host32[o]);
-    }
+    try expectInnerGemmParity(alloc, s, src[0..out_dim], xf16, &.{0}, trellis, in_dim, out_dim, exl3.Rate.fromK(k), .mul1);
 }
 
 test "exl3 K3 cooperative indexed GEMV matches host MUL1 on production shape" {
@@ -3365,28 +3324,7 @@ test "exl3 K4 cooperative indexed GEMV matches host MUL1 tile decode" {
     try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
     try mlx.check(mlx.mlx_array_eval(contig));
     const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
-    const xf = try alloc.alloc(f32, dim);
-    const host16 = try alloc.alloc(f32, dim);
-    const host32 = try alloc.alloc(f32, dim);
-    for (0..topk) |k| {
-        for (0..dim) |i| xf[i] = exl3.f16BitsToF32(xh[k * dim + i]);
-        const e: usize = slots_h[k];
-        exl3.innerGemv(stacked[e * tile_n ..][0..tile_n], xf, dim, dim, exl3.Rate.fromK(4), .mul1, host16);
-        exl3.innerGemvF32(stacked[e * tile_n ..][0..tile_n], xf, dim, dim, exl3.Rate.fromK(4), .mul1, host32);
-        for (0..dim) |o| {
-            const gpu = @as(f32, @floatCast(src[k * dim + o]));
-            try expectGemvEnvelope(gpu, host16[o], host32[o]);
-        }
-    }
-}
-
-fn f16Ulp(v: f32) f32 {
-    const h: f16 = @floatCast(v);
-    const bits: u16 = @bitCast(h);
-    if ((bits & 0x7fff) >= 0x7c00) return 0.5;
-    const up: u16 = bits + 1;
-    const hu: f16 = @bitCast(up);
-    return @abs(@as(f32, @floatCast(hu)) - @as(f32, @floatCast(h)));
+    try expectInnerGemmParity(alloc, s, src[0 .. topk * dim], xh, slots_h, stacked, dim, dim, exl3.Rate.fromK(4), .mul1);
 }
 
 /// Two renderings of the same chain agree to `bar` in relative RMS. The chains
@@ -3407,12 +3345,238 @@ fn expectRelRms(got: []const f16, want: []const f16, bar: f64) !void {
     return error.TestExpectedEqual;
 }
 
-fn expectGemvEnvelope(gpu: f32, host_f16: f32, ref: f32) !void {
-    const eg = @abs(gpu - ref);
-    const eh = @abs(host_f16 - ref);
-    if (eg <= eh) return;
-    if (eg <= 2 * f16Ulp(@max(@abs(ref), 1e-8))) return;
-    return error.TestExpectedEqual;
+/// What a GEMM/GEMV arm's output may differ from the exact dot product of the
+/// same decoded weights.
+///
+/// A trellis dot product cancels: the result lands about four orders below
+/// sum|w_i x_i|, so a bar written against the RESULT measures noise and passes
+/// or fails on the seed. Every bar here is relative to the SUMMANDS, which is
+/// the scale the arithmetic runs at.
+const Exl3GemmParity = struct {
+    /// f16 unit roundoff. An arm rounds its result to f16 exactly once and
+    /// |result| <= sum|w_i x_i|, so that store costs at most U_F16 of the sum.
+    const U_F16: f64 = 0x1p-11;
+    /// f32 unit roundoff. Every arm accumulates its products in f32 planes, so
+    /// a `depth`-long accumulation costs at most depth * U_F32 of the sum.
+    const U_F32: f64 = 0x1p-24;
+    /// How much of the composite's RMS error the arm may carry.
+    const RMS_FACTOR: f64 = 3.0;
+
+    /// Ceiling on one element's error as a fraction of sum|w_i x_i|.
+    fn elemCeiling(depth: usize) f64 {
+        return U_F16 + @as(f64, @floatFromInt(depth)) * U_F32;
+    }
+};
+
+/// A defect injected between the arm and its reference, so the bar is shown to
+/// FAIL on a wrong arm and not only to pass on a right one. `.none` is the
+/// real test; the others make the arm's decode disagree with the reference's
+/// exactly as a miscoded kernel would.
+const Exl3Mutation = enum {
+    none,
+    /// The arm reads the codeword window the pack names, the reference reads
+    /// another — the same defect as a kernel built for the wrong mask.
+    window,
+    /// One bit of one trellis halfword, which moves the weights whose sliding
+    /// window covers it.
+    codeword,
+};
+
+fn mutatedDecode(dec: exl3.Decode, mutate: Exl3Mutation) exl3.Decode {
+    if (mutate != .window) return dec;
+    return .{ .codebook = dec.codebook, .window = if (dec.window == .w16) .w15 else .w16 };
+}
+
+/// Why a GEMM parity check failed, or null when it passed. Pure, so the
+/// decision is unit-testable without a GPU.
+const Exl3GemmParityFail = enum { nonfinite, gross_element, systematic };
+
+fn exl3GemmParityVerdict(
+    finite: bool,
+    kern_max: f64,
+    rms_kern: f64,
+    rms_comp: f64,
+    ceiling: f64,
+) ?Exl3GemmParityFail {
+    if (!finite) return .nonfinite;
+    if (kern_max > ceiling) return .gross_element;
+    // A zero composite RMS means f16 represents every truth exactly on this
+    // data; the arm then owes the same, which is the strictest reading.
+    if (rms_kern > Exl3GemmParity.RMS_FACTOR * rms_comp) return .systematic;
+    return null;
+}
+
+const Exl3GemmParityStats = struct {
+    n: usize = 0,
+    finite: bool = true,
+    kern_max: f64 = 0,
+    comp_max: f64 = 0,
+    rms_kern: f64 = 0,
+    rms_comp: f64 = 0,
+    ceiling: f64 = 0,
+};
+
+/// Every expert's trellis decoded into a dense `[E, in_dim, out_dim]` f16
+/// bank — the one decode both the truth and the composite read.
+fn dequantStacked(
+    alloc: std.mem.Allocator,
+    stacked: []const u16,
+    in_dim: usize,
+    out_dim: usize,
+    rate: exl3.Rate,
+    dec: exl3.Decode,
+) ![]u16 {
+    const in_tiles = in_dim / 16;
+    const out_tiles = out_dim / 16;
+    const packed_n = rate.halfwords();
+    const tile_n = in_tiles * out_tiles * packed_n;
+    const w = try alloc.alloc(u16, (stacked.len / tile_n) * in_dim * out_dim);
+    var tile_w: [exl3.TILE_VALUES]u16 = undefined;
+    for (0..stacked.len / tile_n) |e| {
+        const trellis = stacked[e * tile_n ..][0..tile_n];
+        for (0..in_tiles) |tk| {
+            for (0..out_tiles) |tn| {
+                exl3.decodeTile(trellis[(tk * out_tiles + tn) * packed_n ..][0..packed_n], rate, dec, &tile_w);
+                for (0..16) |r| {
+                    const row = w[e * in_dim * out_dim + (tk * 16 + r) * out_dim ..];
+                    for (0..16) |c| row[tn * 16 + c] = tile_w[r * 16 + c];
+                }
+            }
+        }
+    }
+    return w;
+}
+
+/// Score one arm's output and mlx's own f16 matmul over the same decoded
+/// weights, both against the exact dot product of those weights. Never
+/// kernel-vs-kernel: the composite supplies a SCALE for the aggregate, never
+/// a per-element answer.
+fn measureInnerGemmParity(
+    alloc: std.mem.Allocator,
+    s: mlx.mlx_stream,
+    got: []const f16,
+    xh: []const u16,
+    eids: []const u32,
+    stacked: []const u16,
+    in_dim: usize,
+    out_dim: usize,
+    rate: exl3.Rate,
+    dec: exl3.Decode,
+) !Exl3GemmParityStats {
+    const rows = eids.len;
+    const w = try dequantStacked(alloc, stacked, in_dim, out_dim, rate, dec);
+
+    const w_arr = mlx.mlx_array_new_data(w.ptr, &[_]c_int{ @intCast(w.len / (in_dim * out_dim)), @intCast(in_dim), @intCast(out_dim) }, 3, .float16);
+    defer _ = mlx.mlx_array_free(w_arr);
+    const eid_arr = mlx.mlx_array_new_data(eids.ptr, &[_]c_int{@intCast(rows)}, 1, .uint32);
+    defer _ = mlx.mlx_array_free(eid_arr);
+    const x_arr = mlx.mlx_array_new_data(xh.ptr, &[_]c_int{ @intCast(rows), 1, @intCast(in_dim) }, 3, .float16);
+    defer _ = mlx.mlx_array_free(x_arr);
+    var w_sel = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(w_sel);
+    try mlx.check(mlx.mlx_take_axis(&w_sel, w_arr, eid_arr, 0, s));
+    var comp = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(comp);
+    try mlx.check(mlx.mlx_matmul(&comp, x_arr, w_sel, s));
+    var comp_c = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(comp_c);
+    try mlx.check(mlx.mlx_contiguous(&comp_c, comp, false, s));
+    try mlx.check(mlx.mlx_array_eval(comp_c));
+    const comp_h = mlx.mlx_array_data_float16(comp_c) orelse return error.F16Unreadable;
+
+    const truth = try alloc.alloc(f64, out_dim);
+    const amag = try alloc.alloc(f64, out_dim);
+    var st = Exl3GemmParityStats{ .n = rows * out_dim, .ceiling = Exl3GemmParity.elemCeiling(in_dim) };
+    var se_k: f64 = 0;
+    var se_c: f64 = 0;
+    for (0..rows) |r| {
+        @memset(truth, 0);
+        @memset(amag, 0);
+        const wb = w[@as(usize, eids[r]) * in_dim * out_dim ..];
+        for (0..in_dim) |k| {
+            // An f16 product is exact in f64, so this sum IS the dot product.
+            const xv: f64 = exl3.f16BitsToF32(xh[r * in_dim + k]);
+            const wrow = wb[k * out_dim ..][0..out_dim];
+            for (0..out_dim) |o| {
+                const p = xv * @as(f64, exl3.f16BitsToF32(wrow[o]));
+                truth[o] += p;
+                amag[o] += @abs(p);
+            }
+        }
+        for (0..out_dim) |o| {
+            const g: f64 = @floatCast(got[r * out_dim + o]);
+            const c: f64 = @floatCast(comp_h[r * out_dim + o]);
+            if (!std.math.isFinite(g) or !std.math.isFinite(c) or !std.math.isFinite(truth[o])) {
+                st.finite = false;
+                return st;
+            }
+            const denom = if (amag[o] > 0) amag[o] else 1.0;
+            const ek = @abs(g - truth[o]) / denom;
+            const ec = @abs(c - truth[o]) / denom;
+            st.kern_max = @max(st.kern_max, ek);
+            st.comp_max = @max(st.comp_max, ec);
+            se_k += ek * ek;
+            se_c += ec * ec;
+        }
+    }
+    const n: f64 = @floatFromInt(rows * out_dim);
+    st.rms_kern = @sqrt(se_k / n);
+    st.rms_comp = @sqrt(se_c / n);
+    return st;
+}
+
+/// The verdict on measured stats, with one failure line naming both sides and
+/// the bars.
+fn reportGemmParity(st: Exl3GemmParityStats) !void {
+    if (exl3GemmParityVerdict(st.finite, st.kern_max, st.rms_kern, st.rms_comp, st.ceiling)) |why| {
+        std.debug.print(
+            "exl3 GEMM parity FAIL ({s}): n={d} kernel max={d:.7} rms={d:.7}; composite max={d:.7} rms={d:.7}; " ++
+                "bars: max<={d:.7} rms<={d:.1}x\n",
+            .{ @tagName(why), st.n, st.kern_max, st.rms_kern, st.comp_max, st.rms_comp, st.ceiling, Exl3GemmParity.RMS_FACTOR },
+        );
+        return error.TestExpectedApproxEq;
+    }
+}
+
+fn expectInnerGemmParity(
+    alloc: std.mem.Allocator,
+    s: mlx.mlx_stream,
+    got: []const f16,
+    xh: []const u16,
+    eids: []const u32,
+    stacked: []const u16,
+    in_dim: usize,
+    out_dim: usize,
+    rate: exl3.Rate,
+    dec: exl3.Decode,
+) !void {
+    try reportGemmParity(try measureInnerGemmParity(alloc, s, got, xh, eids, stacked, in_dim, out_dim, rate, dec));
+}
+
+test "exl3GemmParityVerdict: cancellation noise passes, a wrong weight or a systematic drift does not" {
+    const ceiling = Exl3GemmParity.elemCeiling(128);
+    // The arm's own rounding: a worst element inside the f16 store's share of
+    // the bar, an RMS that matches the composite's.
+    try std.testing.expect(exl3GemmParityVerdict(true, 2.19e-4, 2.65e-5, 2.65e-5, ceiling) == null);
+    // One decoded weight wrong moves a single element far past the ceiling
+    // while the RMS barely stirs: the element bar is the one that sees it.
+    try std.testing.expectEqual(
+        Exl3GemmParityFail.gross_element,
+        exl3GemmParityVerdict(true, 8.0e-3, 2.7e-5, 2.65e-5, ceiling).?,
+    );
+    // Noisier everywhere without one gross element: the RMS ratio sees it.
+    try std.testing.expectEqual(
+        Exl3GemmParityFail.systematic,
+        exl3GemmParityVerdict(true, 4.0e-4, 1.0e-4, 2.65e-5, ceiling).?,
+    );
+    try std.testing.expectEqual(
+        Exl3GemmParityFail.nonfinite,
+        exl3GemmParityVerdict(false, 0, 0, 0, ceiling).?,
+    );
+    // An arm better than the composite is never a failure.
+    try std.testing.expect(exl3GemmParityVerdict(true, 1.0e-5, 1.0e-6, 2.65e-5, ceiling) == null);
+    // The ceiling follows the accumulation depth.
+    try std.testing.expect(Exl3GemmParity.elemCeiling(2560) > ceiling);
 }
 
 test "exl3 K4 cooperative indexed GEMV matches host MUL1 on production shape" {
@@ -3450,19 +3614,7 @@ test "exl3 K4 cooperative indexed GEMV matches host MUL1 on production shape" {
     try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
     try mlx.check(mlx.mlx_array_eval(contig));
     const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
-    const xf = try alloc.alloc(f32, in_dim);
-    const host16 = try alloc.alloc(f32, out_dim);
-    const host32 = try alloc.alloc(f32, out_dim);
-    for (0..topk) |k| {
-        for (0..in_dim) |i| xf[i] = exl3.f16BitsToF32(xh[k * in_dim + i]);
-        const e: usize = slots_h[k];
-        exl3.innerGemv(stacked[e * tile_n ..][0..tile_n], xf, in_dim, out_dim, exl3.Rate.fromK(4), .mul1, host16);
-        exl3.innerGemvF32(stacked[e * tile_n ..][0..tile_n], xf, in_dim, out_dim, exl3.Rate.fromK(4), .mul1, host32);
-        for (0..out_dim) |o| {
-            const gpu = @as(f32, @floatCast(src[k * out_dim + o]));
-            try expectGemvEnvelope(gpu, host16[o], host32[o]);
-        }
-    }
+    try expectInnerGemmParity(alloc, s, src[0 .. topk * out_dim], xh, slots_h, stacked, in_dim, out_dim, exl3.Rate.fromK(4), .mul1);
 }
 
 test "exl3 K4 cooperative indexed GEMV runs at production shape" {
@@ -4124,19 +4276,7 @@ fn sortedGemmSmallShape(dec: exl3.Decode) !void {
     try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
     try mlx.check(mlx.mlx_array_eval(contig));
     const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
-    const xf = try alloc.alloc(f32, dim);
-    const host16 = try alloc.alloc(f32, dim);
-    const host32 = try alloc.alloc(f32, dim);
-    for (0..n) |r| {
-        for (0..dim) |i| xf[i] = exl3.f16BitsToF32(xh[r * dim + i]);
-        const e: usize = eids[r];
-        exl3.innerGemv(stacked[e * tile_n ..][0..tile_n], xf, dim, dim, exl3.Rate.fromK(4), dec, host16);
-        exl3.innerGemvF32(stacked[e * tile_n ..][0..tile_n], xf, dim, dim, exl3.Rate.fromK(4), dec, host32);
-        for (0..dim) |o| {
-            const gpu = @as(f32, @floatCast(src[r * dim + o]));
-            try expectGemvEnvelope(gpu, host16[o], host32[o]);
-        }
-    }
+    try expectInnerGemmParity(alloc, s, src[0 .. n * dim], xh, &eids, stacked, dim, dim, exl3.Rate.fromK(4), dec);
 }
 
 test "exl3 sorted GEMM matches host MUL1 on small shape" {
@@ -4201,19 +4341,7 @@ test "exl3 K3 sorted GEMM matches host MUL1 on small shape" {
     try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
     try mlx.check(mlx.mlx_array_eval(contig));
     const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
-    const xf = try alloc.alloc(f32, dim);
-    const host16 = try alloc.alloc(f32, dim);
-    const host32 = try alloc.alloc(f32, dim);
-    for (0..n) |r| {
-        for (0..dim) |i| xf[i] = exl3.f16BitsToF32(xh[r * dim + i]);
-        const e: usize = eids[r];
-        exl3.innerGemv(stacked[e * tile_n ..][0..tile_n], xf, dim, dim, exl3.Rate.fromK(3), .mul1, host16);
-        exl3.innerGemvF32(stacked[e * tile_n ..][0..tile_n], xf, dim, dim, exl3.Rate.fromK(3), .mul1, host32);
-        for (0..dim) |o| {
-            const gpu = @as(f32, @floatCast(src[r * dim + o]));
-            try expectGemvEnvelope(gpu, host16[o], host32[o]);
-        }
-    }
+    try expectInnerGemmParity(alloc, s, src[0 .. n * dim], xh, &eids, stacked, dim, dim, exl3.Rate.fromK(3), .mul1);
 }
 
 test "exl3 K4 sorted GEMM matches host MUL1 when a run half-fills the second block" {
@@ -4262,18 +4390,7 @@ test "exl3 K4 sorted GEMM matches host MUL1 when a run half-fills the second blo
     try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
     try mlx.check(mlx.mlx_array_eval(contig));
     const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
-    const xf = try alloc.alloc(f32, dim);
-    const host16 = try alloc.alloc(f32, dim);
-    const host32 = try alloc.alloc(f32, dim);
-    for (0..n) |r| {
-        for (0..dim) |j| xf[j] = exl3.f16BitsToF32(xh[r * dim + j]);
-        const e: usize = eids[r];
-        exl3.innerGemv(stacked[e * tile_n ..][0..tile_n], xf, dim, dim, exl3.Rate.fromK(4), .mul1, host16);
-        exl3.innerGemvF32(stacked[e * tile_n ..][0..tile_n], xf, dim, dim, exl3.Rate.fromK(4), .mul1, host32);
-        for (0..dim) |o| {
-            try expectGemvEnvelope(@as(f32, @floatCast(src[r * dim + o])), host16[o], host32[o]);
-        }
-    }
+    try expectInnerGemmParity(alloc, s, src[0 .. n * dim], xh, &eids, stacked, dim, dim, exl3.Rate.fromK(4), .mul1);
 }
 
 test "exl3 K3 sorted GEMM matches host MUL1 on 20-40 row runs" {
@@ -4321,49 +4438,7 @@ test "exl3 K3 sorted GEMM matches host MUL1 on 20-40 row runs" {
     try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
     try mlx.check(mlx.mlx_array_eval(contig));
     const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
-    const xf = try alloc.alloc(f32, dim);
-    const host16 = try alloc.alloc(f32, dim);
-    const host32 = try alloc.alloc(f32, dim);
-    const pos_acc = try alloc.alloc(f32, dim * 16);
-    const host_pos = try alloc.alloc(f32, dim);
-    const in_tiles = dim / 16;
-    const out_tiles = dim / 16;
-    const packed_n = tile_n / (in_tiles * out_tiles);
-    for (0..n) |r| {
-        for (0..dim) |j| xf[j] = exl3.f16BitsToF32(xh[r * dim + j]);
-        const e: usize = eids[r];
-        const trellis = stacked[e * tile_n ..][0..tile_n];
-        exl3.innerGemv(trellis, xf, dim, dim, exl3.Rate.fromK(3), .mul1, host16);
-        exl3.innerGemvF32(trellis, xf, dim, dim, exl3.Rate.fromK(3), .mul1, host32);
-        @memset(pos_acc, 0);
-        var tile_w: [exl3.TILE_VALUES]u16 = undefined;
-        for (0..in_tiles) |tk| {
-            for (0..out_tiles) |tn| {
-                const off = (tk * out_tiles + tn) * packed_n;
-                exl3.decodeTile(trellis[off..][0..packed_n], exl3.Rate.fromK(3), .mul1, &tile_w);
-                for (0..16) |tr| {
-                    const xv = xf[tk * 16 + tr];
-                    for (0..16) |c| {
-                        pos_acc[(tn * 16 + c) * 16 + tr] += xv * exl3.f16BitsToF32(tile_w[tr * 16 + c]);
-                    }
-                }
-            }
-        }
-        for (0..dim) |o| {
-            var psum: f32 = 0;
-            for (0..16) |tr| psum += pos_acc[o * 16 + tr];
-            host_pos[o] = psum;
-        }
-        for (0..dim) |o| {
-            const gpu = @as(f32, @floatCast(src[r * dim + o]));
-            expectGemvEnvelope(gpu, host16[o], host32[o]) catch {
-                const hp16 = exl3.f16BitsToF32(exl3.f32ToF16Bits(host_pos[o]));
-                expectGemvEnvelope(gpu, hp16, host_pos[o]) catch {
-                    try expectGemvEnvelope(gpu, host16[o], host_pos[o]);
-                };
-            };
-        }
-    }
+    try expectInnerGemmParity(alloc, s, src[0 .. n * dim], xh, &eids, stacked, dim, dim, exl3.Rate.fromK(3), .mul1);
 }
 
 test "exl3 sorted GEMM matches host MUL1 with the NAX arm forced off" {
@@ -4415,15 +4490,6 @@ test "exl3 sorted GEMM matches host MUL1 with the NAX arm forced off" {
     defer _ = mlx.mlx_array_free(tr_arr);
     const eid_a = mlx.mlx_array_new_data(eids.ptr, &[_]c_int{@intCast(n)}, 1, .uint32);
     defer _ = mlx.mlx_array_free(eid_a);
-    const xf = try alloc.alloc(f32, dim);
-    const host16 = try alloc.alloc(f32, dim);
-    const host32 = try alloc.alloc(f32, dim);
-    // `host_pos` is the same sum in the kernel's reduction order: 16 per-k-tile partials, not the host's sequential one.
-    const pos_acc = try alloc.alloc(f32, dim * 16);
-    const host_pos = try alloc.alloc(f32, dim);
-    const in_tiles = dim / 16;
-    const out_tiles = dim / 16;
-    const packed_n = tile_n / (in_tiles * out_tiles);
     for ([_]bool{ true, false }) |aligned| {
         const got = try innerGemmSortedWinAlign(s, x_arr, tr_arr, eid_a, 32, aligned);
         defer _ = mlx.mlx_array_free(got);
@@ -4432,39 +4498,8 @@ test "exl3 sorted GEMM matches host MUL1 with the NAX arm forced off" {
         try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
         try mlx.check(mlx.mlx_array_eval(contig));
         const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
-        for (0..n) |r| {
-            for (0..dim) |j| xf[j] = exl3.f16BitsToF32(xh[r * dim + j]);
-            const e: usize = eids[r];
-            exl3.innerGemv(stacked[e * tile_n ..][0..tile_n], xf, dim, dim, exl3.Rate.fromK(4), .mul1, host16);
-            exl3.innerGemvF32(stacked[e * tile_n ..][0..tile_n], xf, dim, dim, exl3.Rate.fromK(4), .mul1, host32);
-            @memset(pos_acc, 0);
-            var tile_w: [exl3.TILE_VALUES]u16 = undefined;
-            for (0..in_tiles) |tk| {
-                for (0..out_tiles) |tn| {
-                    const off = (tk * out_tiles + tn) * packed_n;
-                    exl3.decodeTile(stacked[e * tile_n ..][0..tile_n][off..][0..packed_n], exl3.Rate.fromK(4), .mul1, &tile_w);
-                    for (0..16) |tr| {
-                        const xv = xf[tk * 16 + tr];
-                        for (0..16) |cc| {
-                            pos_acc[(tn * 16 + cc) * 16 + tr] += xv * exl3.f16BitsToF32(tile_w[tr * 16 + cc]);
-                        }
-                    }
-                }
-            }
-            for (0..dim) |o| {
-                var psum: f32 = 0;
-                for (0..16) |tr| psum += pos_acc[o * 16 + tr];
-                host_pos[o] = psum;
-            }
-            for (0..dim) |o| {
-                const gpu = @as(f32, @floatCast(src[r * dim + o]));
-                errdefer std.debug.print("[exl3-simd-arm] aligned={} row={d} col={d} gpu={e} host={e} host_pos={e}\n", .{ aligned, r, o, gpu, host32[o], host_pos[o] });
-                expectGemvEnvelope(gpu, host16[o], host32[o]) catch {
-                    const hp16 = exl3.f16BitsToF32(exl3.f32ToF16Bits(host_pos[o]));
-                    try expectGemvEnvelope(gpu, hp16, host_pos[o]);
-                };
-            }
-        }
+        errdefer std.debug.print("[exl3-simd-arm] aligned={}\n", .{aligned});
+        try expectInnerGemmParity(alloc, s, src[0 .. n * dim], xh, eids, stacked, dim, dim, exl3.Rate.fromK(4), .mul1);
     }
 }
 
@@ -5440,28 +5475,34 @@ test "exl3 fused decode chain matches the host SwiGLU reference at a narrowed co
 }
 
 test "exl3 cooperative indexed GEMV matches host TINY tile decode at K4 K3 K2" {
-    try indexedParity(exl3.Rate.fromK(4), 128, 128, 4, 10, 23, .tiny);
-    try indexedParity(exl3.Rate.fromK(3), 128, 128, 4, 10, 29, .tiny);
-    try indexedParity(exl3.Rate.fromK(2), 128, 128, 4, 10, 31, .tiny);
+    for (0..PARITY_SEEDS) |i| {
+        try indexedParity(exl3.Rate.fromK(4), 128, 128, 4, 10, 23 + i, .tiny);
+        try indexedParity(exl3.Rate.fromK(3), 128, 128, 4, 10, 1201 + i, .tiny);
+        try indexedParity(exl3.Rate.fromK(2), 128, 128, 4, 10, 1301 + i, .tiny);
+    }
 }
 
 test "exl3 cooperative indexed GEMV matches the host tile decode at a fractional rate" {
-    try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 37, .tiny);
-    try indexedParity(.{ .n = 44 }, 128, 128, 4, 10, 41, .tiny);
+    for (0..PARITY_SEEDS) |i| {
+        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1401 + i, .tiny);
+        try indexedParity(.{ .n = 44 }, 128, 128, 4, 10, 1501 + i, .tiny);
+    }
     try indexedParity(.{ .n = 40 }, 2560, 640, 4, 10, 43, .mul1);
     try indexedParity(.{ .n = 44 }, 2560, 640, 4, 10, 47, .mul1);
 }
 
 test "exl3 cooperative indexed GEMV matches the host tile decode at a narrowed codeword window" {
-    try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 137, .{ .codebook = .tiny, .window = .w12 });
-    // K4 takes the packed fast branch, which decodes through the same helper.
-    try indexedParity(exl3.Rate.fromK(4), 128, 128, 4, 10, 139, .{ .codebook = .mul1, .window = .w12 });
-    try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 141, .{ .codebook = .tiny, .window = .w14 });
+    for (0..PARITY_SEEDS) |i| {
+        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1601 + i, .{ .codebook = .tiny, .window = .w12 });
+        // K4 takes the packed fast branch, which decodes through the same helper.
+        try indexedParity(exl3.Rate.fromK(4), 128, 128, 4, 10, 1701 + i, .{ .codebook = .mul1, .window = .w12 });
+        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1801 + i, .{ .codebook = .tiny, .window = .w14 });
+    }
 }
 
 /// One sorted-GEMM arm (NAX where the shape and silicon allow, else the SIMD
 /// body) against the host tile decode, at whatever rate the trellis names.
-fn sortedGemmParity(rate: exl3.Rate, dec: exl3.Decode, win: c_int, seed: u64) !void {
+fn sortedGemmParityStats(rate: exl3.Rate, dec: exl3.Decode, win: c_int, seed: u64, mutate: Exl3Mutation) !Exl3GemmParityStats {
     setDecodeParams(dec);
     defer setDecodeParams(.mul1);
     const t = std.testing;
@@ -5506,52 +5547,24 @@ fn sortedGemmParity(rate: exl3.Rate, dec: exl3.Decode, win: c_int, seed: u64) !v
     try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
     try mlx.check(mlx.mlx_array_eval(contig));
     const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
-    const xf = try alloc.alloc(f32, dim);
-    const host16 = try alloc.alloc(f32, dim);
-    const host32 = try alloc.alloc(f32, dim);
-    const pos_acc = try alloc.alloc(f32, dim * 16);
-    const host_pos = try alloc.alloc(f32, dim);
-    for (0..rows) |r| {
-        for (0..dim) |j| xf[j] = exl3.f16BitsToF32(xh[r * dim + j]);
-        const e: usize = eids[r];
-        const trellis = stacked[e * tile_n ..][0..tile_n];
-        exl3.innerGemv(trellis, xf, dim, dim, rate, dec, host16);
-        exl3.innerGemvF32(trellis, xf, dim, dim, rate, dec, host32);
-        @memset(pos_acc, 0);
-        var tile_w: [exl3.TILE_VALUES]u16 = undefined;
-        for (0..tiles) |tk| {
-            for (0..tiles) |tn| {
-                const off = (tk * tiles + tn) * packed_n;
-                exl3.decodeTile(trellis[off..][0..packed_n], rate, dec, &tile_w);
-                for (0..16) |tr| {
-                    const xv = xf[tk * 16 + tr];
-                    for (0..16) |c| {
-                        pos_acc[(tn * 16 + c) * 16 + tr] += xv * exl3.f16BitsToF32(tile_w[tr * 16 + c]);
-                    }
-                }
-            }
-        }
-        for (0..dim) |o| {
-            var psum: f32 = 0;
-            for (0..16) |tr| psum += pos_acc[o * 16 + tr];
-            host_pos[o] = psum;
-        }
-        for (0..dim) |o| {
-            const gpu = @as(f32, @floatCast(src[r * dim + o]));
-            expectGemvEnvelope(gpu, host16[o], host32[o]) catch {
-                const hp16 = exl3.f16BitsToF32(exl3.f32ToF16Bits(host_pos[o]));
-                expectGemvEnvelope(gpu, hp16, host_pos[o]) catch {
-                    try expectGemvEnvelope(gpu, host16[o], host_pos[o]);
-                };
-            };
-        }
-    }
+    if (mutate == .codeword) stacked[tile_n / 2] ^= 0x40;
+    return measureInnerGemmParity(alloc, s, src[0 .. rows * dim], xh, eids, stacked, dim, dim, rate, mutatedDecode(dec, mutate));
 }
 
+fn sortedGemmParity(rate: exl3.Rate, dec: exl3.Decode, win: c_int, seed: u64) !void {
+    try reportGemmParity(try sortedGemmParityStats(rate, dec, win, seed, .none));
+}
+
+/// Seeds are a sample, not a choice: the bar holds for any trellis, so every
+/// case sweeps a fixed run of them rather than one that happened to pass.
+const PARITY_SEEDS: usize = 8;
+
 test "exl3 sorted GEMM matches the host tile decode at a fractional rate" {
-    try sortedGemmParity(.{ .n = 40 }, .tiny, 32, 101);
-    try sortedGemmParity(.{ .n = 44 }, .mul1, 32, 103);
-    try sortedGemmParity(exl3.Rate.fromK(4), .mul1, 32, 105);
+    for (0..PARITY_SEEDS) |i| {
+        try sortedGemmParity(.{ .n = 40 }, .tiny, 32, 101 + i);
+        try sortedGemmParity(.{ .n = 44 }, .mul1, 32, 201 + i);
+        try sortedGemmParity(exl3.Rate.fromK(4), .mul1, 16, 301 + i);
+    }
 }
 
 test "exl3 sorted GEMM matches the host tile decode at a fractional rate with the NAX arm off" {
@@ -5561,13 +5574,33 @@ test "exl3 sorted GEMM matches the host tile decode at a fractional rate with th
     _ = setenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
     defer _ = unsetenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK");
     try t.expect(!gemmNaxOn());
-    try sortedGemmParity(.{ .n = 40 }, .tiny, 32, 107);
-    try sortedGemmParity(.{ .n = 44 }, .mul1, 16, 109);
+    for (0..PARITY_SEEDS) |i| {
+        try sortedGemmParity(.{ .n = 40 }, .tiny, 32, 401 + i);
+        try sortedGemmParity(.{ .n = 44 }, .mul1, 16, 501 + i);
+    }
 }
 
 test "exl3 sorted GEMM matches the host tile decode at a narrowed codeword window" {
-    try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 }, 32, 204);
-    try sortedGemmParity(exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w12 }, 32, 200);
+    for (0..PARITY_SEEDS) |i| {
+        try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 }, 32, 601 + i);
+        try sortedGemmParity(exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w12 }, 16, 701 + i);
+        try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .tiny, .window = .w14 }, 16, 801 + i);
+    }
+}
+
+test "exl3 the GEMM parity bar convicts a wrong window and a wrong codeword" {
+    // The bar has to fail on a wrong arm, not only pass on a right one: run
+    // the real kernel and give the reference a decode the arm did not use.
+    if (!mlx.streamIsGpu(mlx.gpuStream())) return error.SkipZigTest;
+    for ([_]Exl3Mutation{ .window, .codeword }) |m| {
+        for ([_]exl3.Decode{ .tiny, .{ .codebook = .mul1, .window = .w12 } }) |dec| {
+            const st = try sortedGemmParityStats(.{ .n = 40 }, dec, 16, 901, m);
+            try std.testing.expect(exl3GemmParityVerdict(st.finite, st.kern_max, st.rms_kern, st.rms_comp, st.ceiling) != null);
+        }
+        // Again at the production reduction width, where the ceiling is widest.
+        const wide = try indexedParityStats(exl3.Rate.fromK(4), 2560, 640, 4, 10, 907, .mul1, m);
+        try std.testing.expect(exl3GemmParityVerdict(wide.finite, wide.kern_max, wide.rms_kern, wide.rms_comp, wide.ceiling) != null);
+    }
 }
 
 test "exl3 sorted GEMM matches the host tile decode at a narrowed window with the NAX arm off" {
@@ -5577,8 +5610,10 @@ test "exl3 sorted GEMM matches the host tile decode at a narrowed window with th
     _ = setenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
     defer _ = unsetenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK");
     try t.expect(!gemmNaxOn());
-    try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 }, 32, 147);
-    try sortedGemmParity(exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w14 }, 16, 149);
+    for (0..PARITY_SEEDS) |i| {
+        try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 }, 32, 1001 + i);
+        try sortedGemmParity(exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w14 }, 16, 1101 + i);
+    }
 }
 
 test "exl3 decode and prefill arms agree with the indexed chain at production geometry" {
@@ -6097,3 +6132,4 @@ test "exl3 codebook A/B at production shape" {
         std.debug.print("{d:5} {d:10.3} {d:10.3} {d:9.3}\n", .{ R, a, b, b / a });
     }
 }
+
