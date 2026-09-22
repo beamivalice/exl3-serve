@@ -371,8 +371,25 @@ const GEMM_NAX_FRAGS: [:0]const u8 =
     \\  const uint funnel = uint(concat >> w.sh);
     \\  return exl3_pairh(uint2((funnel >> w.fresh) & 0xffffu, funnel & 0xffffu));
     \\}
+    \\static inline uint nax_n40_funnel(const device uint *words, uint end) {
+    \\  const uint last = (end - 1u) >> 5u;
+    \\  const uint prev = last == 0u ? 19u : last - 1u;
+    \\  const ulong merged = ((ulong)words[prev] << 32u) | (ulong)words[last];
+    \\  return uint(merged >> ((0u - end) & 31u));
+    \\}
+    \\static inline nfrag nax_wfrag_n40(const device uint *words, uint lane) {
+    \\  const uint end = 320u * (lane >> 4u) + 40u * (lane & 7u) + 5u * ((lane >> 3u) & 1u) + 15u;
+    \\  const uint lo = nax_n40_funnel(words, end);
+    \\  const uint hi = nax_n40_funnel(words, end + 20u);
+    \\  const half2 p0 = exl3_pairh(uint2((lo >> 13u) & 0xffffu, (lo >> 10u) & 0xffffu));
+    \\  const half2 p1 = exl3_pairh(uint2((lo >> 3u) & 0xffffu, lo & 0xffffu));
+    \\  const half2 p2 = exl3_pairh(uint2((hi >> 13u) & 0xffffu, (hi >> 10u) & 0xffffu));
+    \\  const half2 p3 = exl3_pairh(uint2((hi >> 3u) & 0xffffu, hi & 0xffffu));
+    \\  return nfrag(p0.x, p0.y, p2.x, p2.y, p1.x, p1.y, p3.x, p3.y);
+    \\}
     \\template<uint N>
     \\static inline nfrag nax_wfrag_k(const device uint *words, uint lane) {
+    \\  if (N == 40u) return nax_wfrag_n40(words, lane);
     \\  const uint tau_0 = 64u * (lane >> 4u) + ((lane & 7u) << 3u) + ((lane >> 3u) & 1u);
     \\  const half2 p0 = nax_funnel_pair<N>(words, tau_0);
     \\  const half2 p1 = nax_funnel_pair<N>(words, tau_0 + 2u);
@@ -695,7 +712,7 @@ const N_WIN = exl3.Window.count;
 const KernelSlots = [N_CB][N_WIN]?mlx.mlx_fast_metal_kernel;
 const no_kernels: KernelSlots = @splat(@splat(null));
 fn cbIndex(comptime cb: exl3.Codebook) usize {
-    return @intFromEnum(cb);
+    return @backingInt(cb);
 }
 fn winSuffix(comptime win: exl3.Window) [:0]const u8 {
     return comptime if (win == .w16) "" else std.fmt.comptimePrint("_w{d}", .{win.bits()});
@@ -874,6 +891,7 @@ var gemm_nax_cfgs: CfgCache(GemmSortedKey, 8) = .{};
 var gemm_nax_kernel: KernelSlots = no_kernels;
 var gemm_nax_failed: bool = false;
 var gemm_nax_cached: ?bool = null;
+var gemm_n40_engaged: bool = false;
 const PairPrepKey = struct { in_dim: c_int, nslots: c_int, topk: c_int };
 const PairGemvKey = struct { in_dim: c_int, out_dim: c_int, nslots: c_int, nsplit: c_int, topk: c_int, n: u32 };
 const DownFusedKey = struct { in_dim: c_int, out_dim: c_int, nslots: c_int, nsplit: c_int, n: u32 };
@@ -1275,6 +1293,10 @@ fn innerGemmSortedTable(
                 var nout = mlx.mlx_array_new();
                 errdefer _ = mlx.mlx_array_free(nout);
                 try mlx.check(mlx.mlx_vector_array_get(&nout, noutputs, 0));
+                if (rate.n == 40 and !gemm_n40_engaged) {
+                    gemm_n40_engaged = true;
+                    log.info("[exl3-gemm] n40 two-funnel reader engaged dtype={s}\n", .{@tagName(mlx.mlx_array_dtype(x))});
+                }
                 return nout;
             }
             gemm_nax_failed = true;
@@ -6792,3 +6814,142 @@ test "exl3 codebook A/B at production shape" {
     }
 }
 
+fn n40NaxReaderExact(comptime cb: exl3.Codebook, comptime win: exl3.Window, comptime raw: bool) !void {
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const source =
+        \\const uint lane = thread_position_in_grid.x % 32u;
+        \\const uint tile = thread_position_in_grid.x / 32u;
+        \\const nfrag f = nax_wfrag_k<40u>((const device uint *)trellis + tile * 20u, lane);
+        \\for (uint j = 0u; j < 8u; j++) result[tile * 256u + lane * 8u + j] = as_type<ushort>(f[j]);
+    ;
+    const identity =
+        \\static inline half2 exl3_raw_pair(uint2 cw) { return as_type<half2>(ushort2(cw)); }
+        \\#define exl3_pairh exl3_raw_pair
+        \\
+    ;
+    const header = comptime GEMM_NAX_INCLUDES ++ codebookHelpers(cb, win) ++ (if (raw) identity else "") ++ GEMM_NAX_FRAGS;
+    var kernel: ?mlx.mlx_fast_metal_kernel = null;
+    const k = try getNamedKernel(&kernel, comptime "exl3_n40_reader_exact" ++ cbSuffix(cb) ++ winSuffix(win) ++ (if (raw) "_raw" else "_weights"), &.{"trellis"}, &.{"result"}, source, header);
+    defer _ = mlx.mlx_fast_metal_kernel_free(k);
+    var trellis_data: [128 * 40]u16 = undefined;
+    var prng = std.Random.DefaultPrng.init(430);
+    for (&trellis_data) |*v| v.* = prng.random().int(u16);
+    if (std.c.getenv("REAL_BLOB")) |path| {
+        const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
+        if (fd < 0) return error.RealBlobOpen;
+        defer _ = std.c.close(fd);
+        try readAll(fd, std.mem.sliceAsBytes(&trellis_data));
+    }
+    const tr = mlx.mlx_array_new_data(&trellis_data, &.{ 128, 40 }, 2, .uint16);
+    defer _ = mlx.mlx_array_free(tr);
+    const cfg = mlx.mlx_fast_metal_kernel_config_new();
+    defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(cfg, &.{ 128, 256 }, 2, .uint32));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(cfg, 128, 1, 1));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(cfg, 128 * 32, 1, 1));
+    const inputs = mlx.mlx_vector_array_new_data(&.{tr}, 1);
+    defer _ = mlx.mlx_vector_array_free(inputs);
+    var outputs = mlx.mlx_vector_array_new();
+    defer _ = mlx.mlx_vector_array_free(outputs);
+    try mlx.check(mlx.mlx_fast_metal_kernel_apply(&outputs, k, inputs, cfg, s));
+    var result = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(result);
+    try mlx.check(mlx.mlx_vector_array_get(&result, outputs, 0));
+    try mlx.check(mlx.mlx_array_eval(result));
+    const got = mlx.mlx_array_data_uint32(result) orelse return error.U16Unreadable;
+    for (0..128) |tile| {
+        var codes: [256]u16 = undefined;
+        exl3.unpackTile(trellis_data[tile * 40 ..][0..40], .{ .n = 40 }, &codes);
+        for (0..32) |lane| {
+            const tau = 64 * (lane >> 4) + ((lane & 7) << 3) + ((lane >> 3) & 1);
+            for ([_]usize{ 0, 1, 8, 9, 4, 5, 12, 13 }, 0..) |offset, j| {
+                const code = codes[2 * tau + offset];
+                const want = if (raw) code else exl3.decodeCodeword(code & win.mask(), cb);
+                try t.expectEqual(want, got[tile * 256 + lane * 8 + j]);
+            }
+        }
+    }
+}
+
+test "exl3 n40 NAX codewords and decoded weights are exact" {
+    try n40NaxReaderExact(.tiny, .w12, true);
+    try n40NaxReaderExact(.tiny, .w12, false);
+    try n40NaxReaderExact(.mul1, .w8, false);
+    try n40NaxReaderExact(.mul1, .w16, false);
+}
+
+fn n40PrefillBf16Truth(seed: u64, win: c_int) !void {
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s) or !gemmNaxOn()) return error.SkipZigTest;
+    const c = MimoMoeCase{ .e = 8, .hidden = 256, .inter = 128, .topk = 8, .rows = 65, .rate = .{ .n = 40 }, .dec = .{ .codebook = .tiny, .window = .w12 }, .seed = seed, .banks = MIMO_BANKS, .x_scale = 3 };
+    setDecodeParams(c.dec);
+    defer setDecodeParams(.mul1);
+    const saved_win = gemm_win_cached;
+    gemm_win_cached = win;
+    defer gemm_win_cached = saved_win;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var f = try mimoMoeFixture(alloc, c);
+    defer f.deinit();
+    const xb = try alloc.alloc(u16, f.xf.len);
+    for (f.xf, xb) |*v, *b| {
+        b.* = @truncate(@as(u32, @bitCast(v.*)) >> 16);
+        v.* = @bitCast(@as(u32, b.*) << 16);
+    }
+    _ = mlx.mlx_array_free(f.arrays[8]);
+    f.arrays[8] = mlx.mlx_array_new_data(xb.ptr, &.{ 65, 256 }, 2, .bfloat16);
+    const y = try mimoPrefillArm(s, &f, c.topk);
+    defer _ = mlx.mlx_array_free(y);
+    try std.testing.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(y));
+    var yf = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(yf);
+    try mlx.check(mlx.mlx_astype(&yf, y, .float32, s));
+    try mlx.check(mlx.mlx_array_eval(yf));
+    const got = mlx.mlx_array_data_float32(yf) orelse return error.F32Unreadable;
+    var peaks: Exl3F32Peaks = .{};
+    var err_new: f64 = 0;
+    var err_comp: f64 = 0;
+    const truth = try alloc.alloc(f32, c.hidden);
+    for (0..c.rows) |r| {
+        const slots = f.slots[r * c.topk ..][0..c.topk];
+        const scores = f.scores[r * c.topk ..][0..c.topk];
+        try exl3SwigluF32(alloc, f.xf[r * c.hidden ..][0..c.hidden], &f, c, slots, scores, &peaks, truth);
+        const xr = mlx.mlx_array_new_data(xb[r * c.hidden ..].ptr, &.{256}, 1, .bfloat16);
+        defer _ = mlx.mlx_array_free(xr);
+        const sr = mlx.mlx_array_new_data(slots.ptr, &.{8}, 1, .uint32);
+        defer _ = mlx.mlx_array_free(sr);
+        const cr = mlx.mlx_array_new_data(scores.ptr, &.{8}, 1, .float32);
+        defer _ = mlx.mlx_array_free(cr);
+        const a = f.arrays;
+        const composite = try moeSwigluIndexed(s, xr, a[0], a[3], a[4], a[1], a[3], a[4], a[2], a[5], a[6], sr, cr);
+        defer _ = mlx.mlx_array_free(composite);
+        var cb = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(cb);
+        try mlx.check(mlx.mlx_astype(&cb, composite, .bfloat16, s));
+        var cf = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(cf);
+        try mlx.check(mlx.mlx_astype(&cf, cb, .float32, s));
+        try mlx.check(mlx.mlx_array_eval(cf));
+        const comp = mlx.mlx_array_data_float32(cf) orelse return error.F32Unreadable;
+        for (truth, 0..) |v, j| {
+            const g: f64 = got[r * c.hidden + j];
+            const b: f64 = comp[j];
+            try std.testing.expect(std.math.isFinite(g) and std.math.isFinite(b) and std.math.isFinite(v));
+            err_new += (g - v) * (g - v);
+            err_comp += (b - v) * (b - v);
+        }
+    }
+    if (err_new > err_comp) {
+        std.debug.print("n40 bf16 truth seed={d} win={d}: squared error {d:.9} > composite {d:.9}\n", .{ seed, win, err_new, err_comp });
+        return error.PrefillWorseThanComposite;
+    }
+}
+
+test "exl3 n40 NAX BF16 prefill no worse than composite against f32 truth" {
+    for ([_]c_int{32}) |win| {
+        for (0..3) |seed| try n40PrefillBf16Truth(318 + seed, win);
+    }
+}
