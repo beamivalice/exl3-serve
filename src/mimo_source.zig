@@ -40,6 +40,18 @@ const SourceIndex = struct {
     weight_map: std.StringHashMap([]const u8),
     files: std.StringHashMap(void),
     tensors: std.StringHashMap(TensorMeta),
+    /// Per shard, what the converter stamped into `__metadata__`.
+    stamps: std.StringHashMap(ShardStamp),
+};
+
+/// The decoder a shard was written for, as `tests/convert_mimo_v26_exl3.py`
+/// stamps it. Every value is a string there. A shard naming none predates the
+/// stamp and is admitted; one that names a decoder the config does not is
+/// refused, because the same bytes decode to different weights under each.
+const ShardStamp = struct {
+    k: ?[]const u8 = null,
+    codebook: ?[]const u8 = null,
+    window: ?[]const u8 = null,
 };
 
 const TensorKind = enum {
@@ -375,6 +387,7 @@ fn loadSourceIndex(io: std.Io, allocator: Allocator, model_dir: []const u8) !Sou
         .weight_map = std.StringHashMap([]const u8).init(allocator),
         .files = std.StringHashMap(void).init(allocator),
         .tensors = std.StringHashMap(TensorMeta).init(allocator),
+        .stamps = std.StringHashMap(ShardStamp).init(allocator),
     };
     var it = weight_map_value.object.iterator();
     while (it.next()) |entry| {
@@ -400,6 +413,7 @@ fn loadSourceIndex(io: std.Io, allocator: Allocator, model_dir: []const u8) !Sou
             .{},
         ) catch return error.InvalidSafetensorsHeader;
         if (header_root != .object) return error.InvalidSafetensorsHeader;
+        try source.stamps.put(filename, try readShardStamp(allocator, header_root.object));
 
         // Index iteration is deliberate. It leaves all header-name slices in
         // the short-lived arena and copies only shapes for indexed tensors.
@@ -434,6 +448,44 @@ fn loadSourceIndex(io: std.Io, allocator: Allocator, model_dir: []const u8) !Sou
             return error.MissingIndexedSafetensorsTensor;
     }
     return source;
+}
+
+fn readShardStamp(allocator: Allocator, header: std.json.ObjectMap) !ShardStamp {
+    const meta = header.get("__metadata__") orelse return .{};
+    if (meta != .object) return .{};
+    var out: ShardStamp = .{};
+    inline for (.{ "k", "codebook", "window" }) |field| {
+        if (meta.object.get(field)) |v| {
+            if (v == .string) @field(out, field) = try allocator.dupe(u8, v.string);
+        }
+    }
+    return out;
+}
+
+fn validateShardStamps(source: *const SourceIndex, config: *const model.ModelConfig) !void {
+    if (config.expert_layout != .exl3_k4) return;
+    var it = source.stamps.valueIterator();
+    while (it.next()) |stamp| {
+        if (stamp.codebook) |name| {
+            const cb = expert_exl3.Codebook.fromName(name) orelse return error.Exl3ShardStampMismatch;
+            if (cb != config.expert_quant_codebook) return error.Exl3ShardStampMismatch;
+        }
+        if (stamp.window) |bits| {
+            const parsed = std.fmt.parseInt(i64, bits, 10) catch return error.Exl3ShardStampMismatch;
+            const w = expert_exl3.Window.fromBits(parsed) orelse return error.Exl3ShardStampMismatch;
+            if (w != config.expert_quant_window) return error.Exl3ShardStampMismatch;
+        }
+        if (stamp.k) |text| {
+            // The stamp spells a rate ("2.5", "4"); the engine keys on the
+            // halfwords per tile it implies.
+            const k = std.fmt.parseFloat(f64, text) catch return error.Exl3ShardStampMismatch;
+            const scaled = @round(k * 16.0);
+            if (@abs(k * 16.0 - scaled) > 1e-6) return error.Exl3ShardStampMismatch;
+            if (scaled < 0 or scaled > 1024) return error.Exl3ShardStampMismatch;
+            if (@as(u32, @intFromFloat(scaled)) != config.expert_quant_rate.n)
+                return error.Exl3ShardStampMismatch;
+        }
+    }
 }
 
 fn layerKey(key: []const u8) ?struct { layer: u32, rest: []const u8 } {
@@ -834,6 +886,7 @@ fn validateRequired(
 }
 
 fn validatePlan(source: *const SourceIndex, allocator: Allocator, config: *const model.ModelConfig) !void {
+    try validateShardStamps(source, config);
     try validateRequired(source, allocator, config);
     var it = source.tensors.iterator();
     while (it.next()) |entry| {
@@ -1221,9 +1274,21 @@ fn writeTestShard(
     filename: []const u8,
     tensors: []const TestTensor,
 ) !void {
+    return writeTestShardStamped(io, allocator, dir, filename, tensors, null);
+}
+
+fn writeTestShardStamped(
+    io: std.Io,
+    allocator: Allocator,
+    dir: std.Io.Dir,
+    filename: []const u8,
+    tensors: []const TestTensor,
+    stamp: ?[]const u8,
+) !void {
     var header: std.ArrayList(u8) = .empty;
     defer header.deinit(allocator);
     try header.append(allocator, '{');
+    if (stamp) |body| try appendTestFormat(allocator, &header, "\"__metadata__\":{{{s}}},", .{body});
     var data_size: usize = 0;
     for (tensors, 0..) |tensor, i| {
         if (i != 0) try header.append(allocator, ',');
@@ -1452,22 +1517,29 @@ fn makeTinySourceFixture(
 /// `n` packed halfwords, or an affine bank at (bits, group_size).
 const TinyAffine = struct { bits: u64, group_size: u64 };
 
+/// `stamp` is the shard's `__metadata__` body, as the converter writes it.
+const TinyExl3 = struct { n: u64, stamp: ?[]const u8 = null };
+
 const TinyBank = union(enum) {
     none,
-    exl3: u64,
+    exl3: TinyExl3,
     affine: TinyAffine,
 };
 
 fn writeTinyExl3Source(io: std.Io, allocator: Allocator, dir: std.Io.Dir, n: u64) !void {
-    return writeTinySource(io, allocator, dir, if (n == 0) .none else .{ .exl3 = n });
+    return writeTinySource(io, allocator, dir, if (n == 0) .none else .{ .exl3 = .{ .n = n } });
 }
 
 fn writeTinySource(io: std.Io, allocator: Allocator, dir: std.Io.Dir, bank: TinyBank) !void {
     const dim: u64 = 128;
     const tiles = dim / 16;
     const n: u64 = switch (bank) {
-        .exl3 => |v| v,
+        .exl3 => |v| v.n,
         else => 0,
+    };
+    const stamp: ?[]const u8 = switch (bank) {
+        .exl3 => |v| v.stamp,
+        else => null,
     };
     try dir.writeFile(io, .{ .sub_path = "config.json", .data =
         \\{"model_type":"mimo_v2","vocab_size":2,"hidden_size":128,
@@ -1624,7 +1696,7 @@ fn writeTinySource(io: std.Io, allocator: Allocator, dir: std.Io.Dir, bank: Tiny
         }
     }
     for (tensors.items) |tensor| try entries.append(allocator, .{ .key = tensor.key, .file = "model-00001.safetensors" });
-    try writeTestShard(io, allocator, dir, "model-00001.safetensors", tensors.items);
+    try writeTestShardStamped(io, allocator, dir, "model-00001.safetensors", tensors.items, stamp);
     try writeTestIndex(io, allocator, dir, entries.items);
 }
 
@@ -1767,6 +1839,41 @@ test "mimo source refuses an EXL3 trellis the kernels cannot decode" {
     defer config.deinit(t.allocator);
     config.expert_layout = .exl3_k4;
     try t.expectError(error.Exl3TrellisGeometry, residentBytesWithConfig(io, t.allocator, path, &config));
+}
+
+test "mimo source refuses an EXL3 shard whose stamp disagrees with the config" {
+    const t = std.testing;
+    const io = t.io;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // The config every arm parses names k 2.5 / tiny / w16.
+    const Case = struct { dir: []const u8, stamp: ?[]const u8, window: expert_exl3.Window, want: ?anyerror };
+    const cases = [_]Case{
+        .{ .dir = "stamp-matches", .stamp = "\"k\":\"2.5\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w16, .want = null },
+        .{ .dir = "stamp-window", .stamp = "\"k\":\"2.5\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w12, .want = error.Exl3ShardStampMismatch },
+        .{ .dir = "stamp-codebook", .stamp = "\"k\":\"2.5\",\"codebook\":\"mul1\",\"window\":\"16\"", .window = .w16, .want = error.Exl3ShardStampMismatch },
+        .{ .dir = "stamp-k", .stamp = "\"k\":\"3\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w16, .want = error.Exl3ShardStampMismatch },
+        // A pack written before the stamp existed is admitted as legacy.
+        .{ .dir = "stamp-absent", .stamp = null, .window = .w12, .want = null },
+    };
+    for (cases) |case| {
+        try tmp.dir.createDirPath(io, case.dir);
+        var dir = try tmp.dir.openDir(io, case.dir, .{});
+        defer dir.close(io);
+        try writeTinySource(io, alloc, dir, .{ .exl3 = .{ .n = 40, .stamp = case.stamp } });
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_len = try dir.realPath(io, &path_buf);
+        const path = path_buf[0..path_len];
+        var config = try model.parseConfig(io, t.allocator, path);
+        defer config.deinit(t.allocator);
+        config.expert_quant_window = case.window;
+        const got = residentBytesWithConfig(io, t.allocator, path, &config);
+        if (case.want) |want| try t.expectError(want, got) else _ = try got;
+    }
 }
 
 test "mimo source FP8 E4M3FN decodes all 256 codes" {
