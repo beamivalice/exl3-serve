@@ -29,6 +29,52 @@ pub const Codebook = enum(u8) {
     }
 };
 
+/// A trellis rate K = n/16 bits per weight, `n` being the halfwords a packed
+/// 256-weight tile carries. Weight t's codeword is the 16-bit window ending at
+/// `bitEnd(t)`, so it takes `bitEnd(t) - bitEnd(t-1)` fresh bits; the pattern
+/// follows from n and is never stored. An integer K is the uniform case.
+pub const Rate = struct {
+    n: u32,
+
+    pub const min_n: u32 = 32;
+    pub const max_n: u32 = 64;
+
+    pub fn fromK(k: u32) Rate {
+        return .{ .n = k * @as(u32, TILE) };
+    }
+
+    pub fn halfwords(self: Rate) usize {
+        return self.n;
+    }
+
+    pub fn words(self: Rate) usize {
+        return self.n / 2;
+    }
+
+    pub fn totalBits(self: Rate) usize {
+        return TILE * @as(usize, self.n);
+    }
+
+    /// One past the last bit of weight t's codeword window: floor((t+1)*K).
+    pub fn bitEnd(self: Rate, t: usize) usize {
+        return ((t + 1) * @as(usize, self.n)) >> 4;
+    }
+
+    pub fn freshBits(self: Rate, t: usize) usize {
+        return self.bitEnd(t) - if (t == 0) 0 else self.bitEnd(t - 1);
+    }
+
+    pub fn isInteger(self: Rate) bool {
+        return self.n % TILE == 0;
+    }
+
+    /// The rate as a human reads it ("2.5"), never the packed halfword count.
+    pub fn kText(self: Rate, buf: []u8) []const u8 {
+        const k = @as(f64, @floatFromInt(self.n)) / 16.0;
+        return std.fmt.bufPrint(buf, "{d}", .{k}) catch "?";
+    }
+};
+
 pub fn packedWords(k: u32) usize {
     return TILE_VALUES * @as(usize, k) / 32;
 }
@@ -37,13 +83,12 @@ pub fn packedHalfwords(k: u32) usize {
     return TILE_VALUES * @as(usize, k) / 16;
 }
 
-pub fn kFromPackedDim(packed_hw: usize) ?u32 {
-    if (packed_hw % TILE != 0) return null;
-    const k = packed_hw / TILE;
-    return switch (k) {
-        2, 3, 4 => @intCast(k),
-        else => null,
-    };
+/// K2 to K4 in 1/8-bit steps. An odd n would leave a tile's bitstream short of
+/// a whole uint32 word, which every reader indexes by.
+pub fn kFromPackedDim(packed_hw: usize) ?Rate {
+    if (packed_hw % 2 != 0) return null;
+    if (packed_hw < Rate.min_n or packed_hw > Rate.max_n) return null;
+    return .{ .n = @intCast(packed_hw) };
 }
 
 pub fn f16BitsToF32(bits: u16) f32 {
@@ -93,26 +138,30 @@ fn wordU32(words: []const u16, index: usize) u32 {
     return @as(u32, words[index * 2]) | (@as(u32, words[index * 2 + 1]) << 16);
 }
 
-pub fn unpackTile(words: []const u16, k: u32, out: *[TILE_VALUES]u16) void {
-    const bits: usize = k;
-    const word_count = bits * TILE_VALUES / 32;
+pub fn unpackTile(words: []const u16, rate: Rate, out: *[TILE_VALUES]u16) void {
+    const word_count = rate.words();
+    const total = rate.totalBits();
     var thread: usize = 0;
     while (thread < 128) : (thread += 1) {
-        const bit0 = thread * 2 * bits + bits + TILE_VALUES * bits - 16;
-        const bit2 = bit0 + bits + 16;
+        const e0 = rate.bitEnd(thread * 2);
+        const e1 = rate.bitEnd(thread * 2 + 1);
+        // Tail-biting: the pair's window starts 16 bits before e0, one lap up.
+        const bit0 = e0 + total - 16;
+        const bit2 = e1 + total;
         const index0 = bit0 / 32;
         const index1 = (bit2 - 1) / 32;
         const shift: u6 = @intCast((index1 + 1) * 32 - bit2);
         const merged = (@as(u64, wordU32(words, index0 % word_count)) << 32) | @as(u64, wordU32(words, index1 % word_count));
         const funnel: u32 = @truncate(merged >> shift);
-        out[thread * 2] = @truncate((funnel >> @intCast(bits)) & 0xFFFF);
+        const fresh: u5 = @intCast(e1 - e0);
+        out[thread * 2] = @truncate((funnel >> fresh) & 0xFFFF);
         out[thread * 2 + 1] = @truncate(funnel & 0xFFFF);
     }
 }
 
-pub fn decodeTile(words: []const u16, k: u32, codebook: Codebook, out: *[TILE_VALUES]u16) void {
+pub fn decodeTile(words: []const u16, rate: Rate, codebook: Codebook, out: *[TILE_VALUES]u16) void {
     var codewords: [TILE_VALUES]u16 = undefined;
-    unpackTile(words, k, &codewords);
+    unpackTile(words, rate, &codewords);
     var perm: [TILE_VALUES]usize = undefined;
     tensorCorePerm(&perm);
     for (codewords, 0..) |cw, i| {
@@ -161,18 +210,18 @@ pub fn reconstructInner(
     trellis: []const u16,
     in_features: usize,
     out_features: usize,
-    k: u32,
+    rate: Rate,
     codebook: Codebook,
     out: []u16,
 ) void {
     const in_tiles = in_features / TILE;
     const out_tiles = out_features / TILE;
-    const packed_n = packedHalfwords(k);
+    const packed_n = rate.halfwords();
     var tile_out: [TILE_VALUES]u16 = undefined;
     for (0..in_tiles) |tk| {
         for (0..out_tiles) |tn| {
             const off = (tk * out_tiles + tn) * packed_n;
-            decodeTile(trellis[off..][0..packed_n], k, codebook, &tile_out);
+            decodeTile(trellis[off..][0..packed_n], rate, codebook, &tile_out);
             for (0..TILE) |r| {
                 const dst = (tk * TILE + r) * out_features + tn * TILE;
                 @memcpy(out[dst .. dst + TILE], tile_out[r * TILE ..][0..TILE]);
@@ -188,13 +237,13 @@ pub fn reconstructPublic(
     svh: []const u16,
     in_features: usize,
     out_features: usize,
-    k: u32,
+    rate: Rate,
     codebook: Codebook,
     out: []u16,
 ) !void {
     const inner = try allocator.alloc(u16, in_features * out_features);
     defer allocator.free(inner);
-    reconstructInner(trellis, in_features, out_features, k, codebook, inner);
+    reconstructInner(trellis, in_features, out_features, rate, codebook, inner);
     const w = try allocator.alloc(f32, in_features * out_features);
     defer allocator.free(w);
     for (inner, 0..) |bits, i| w[i] = f16BitsToF32(bits);
@@ -249,19 +298,19 @@ pub fn innerGemv(
     transformed: []const f32,
     in_features: usize,
     out_features: usize,
-    k: u32,
+    rate: Rate,
     codebook: Codebook,
     out: []f32,
 ) void {
     const in_tiles = in_features / TILE;
     const out_tiles = out_features / TILE;
-    const packed_n = packedHalfwords(k);
+    const packed_n = rate.halfwords();
     @memset(out, 0);
     var tile_w: [TILE_VALUES]u16 = undefined;
     for (0..in_tiles) |tk| {
         for (0..out_tiles) |tn| {
             const off = (tk * out_tiles + tn) * packed_n;
-            decodeTile(trellis[off..][0..packed_n], k, codebook, &tile_w);
+            decodeTile(trellis[off..][0..packed_n], rate, codebook, &tile_w);
             const xbase = tk * TILE;
             const ybase = tn * TILE;
             for (0..TILE) |r| {
@@ -280,19 +329,19 @@ pub fn innerGemvF32(
     transformed: []const f32,
     in_features: usize,
     out_features: usize,
-    k: u32,
+    rate: Rate,
     codebook: Codebook,
     out: []f32,
 ) void {
     const in_tiles = in_features / TILE;
     const out_tiles = out_features / TILE;
-    const packed_n = packedHalfwords(k);
+    const packed_n = rate.halfwords();
     @memset(out, 0);
     var tile_w: [TILE_VALUES]u16 = undefined;
     for (0..in_tiles) |tk| {
         for (0..out_tiles) |tn| {
             const off = (tk * out_tiles + tn) * packed_n;
-            decodeTile(trellis[off..][0..packed_n], k, codebook, &tile_w);
+            decodeTile(trellis[off..][0..packed_n], rate, codebook, &tile_w);
             const xbase = tk * TILE;
             const ybase = tn * TILE;
             for (0..TILE) |r| {
@@ -324,14 +373,14 @@ pub fn project(
     svh: []const u16,
     in_features: usize,
     out_features: usize,
-    k: u32,
+    rate: Rate,
     codebook: Codebook,
     transformed: []f32,
     inner: []f32,
     out: []f32,
 ) void {
     prepareInput(x, suh, transformed);
-    innerGemv(trellis, transformed, in_features, out_features, k, codebook, inner);
+    innerGemv(trellis, transformed, in_features, out_features, rate, codebook, inner);
     finishOutput(inner, svh, out);
 }
 
@@ -381,16 +430,64 @@ fn asU16(view: TensorView) []const u16 {
     return @alignCast(std.mem.bytesAsSlice(u16, view.bytes));
 }
 
-test "exl3 packed dim 16 times K is K in 2,3,4" {
+test "exl3 packed dim is an even halfword count from K2 to K4 and prints as a rate" {
     const t = std.testing;
-    try t.expectEqual(@as(?u32, 2), kFromPackedDim(32));
-    try t.expectEqual(@as(?u32, 3), kFromPackedDim(48));
-    try t.expectEqual(@as(?u32, 4), kFromPackedDim(64));
-    try t.expectEqual(@as(?u32, null), kFromPackedDim(16));
-    try t.expectEqual(@as(?u32, null), kFromPackedDim(80));
+    var buf: [8]u8 = undefined;
+    try t.expectEqual(@as(u32, 32), kFromPackedDim(32).?.n);
+    try t.expectEqual(@as(u32, 40), kFromPackedDim(40).?.n);
+    try t.expectEqual(@as(u32, 44), kFromPackedDim(44).?.n);
+    try t.expectEqual(@as(u32, 64), kFromPackedDim(64).?.n);
+    try t.expectEqual(@as(?Rate, null), kFromPackedDim(16));
+    try t.expectEqual(@as(?Rate, null), kFromPackedDim(80));
+    try t.expectEqual(@as(?Rate, null), kFromPackedDim(41));
+    try t.expectEqualStrings("2", kFromPackedDim(32).?.kText(&buf));
+    try t.expectEqualStrings("2.5", kFromPackedDim(40).?.kText(&buf));
+    try t.expectEqualStrings("2.75", kFromPackedDim(44).?.kText(&buf));
+    try t.expectEqualStrings("3", kFromPackedDim(48).?.kText(&buf));
+    try t.expectEqualStrings("4", kFromPackedDim(64).?.kText(&buf));
+    try t.expect(kFromPackedDim(48).?.isInteger());
+    try t.expect(!kFromPackedDim(40).?.isInteger());
     try t.expectEqual(@as(usize, 32), packedHalfwords(2));
     try t.expectEqual(@as(usize, 48), packedHalfwords(3));
     try t.expectEqual(@as(usize, 64), packedHalfwords(4));
+}
+
+test "exl3 bit ends match a hand-computed table at n 40, 44, 48 and 64" {
+    const t = std.testing;
+    const Case = struct { n: u32, ends: [8]usize, fresh: [16]usize };
+    const cases = [_]Case{
+        .{
+            .n = 40,
+            .ends = .{ 2, 5, 7, 10, 12, 15, 17, 20 },
+            .fresh = .{ 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3 },
+        },
+        .{
+            .n = 44,
+            .ends = .{ 2, 5, 8, 11, 13, 16, 19, 22 },
+            .fresh = .{ 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3 },
+        },
+        .{
+            .n = 48,
+            .ends = .{ 3, 6, 9, 12, 15, 18, 21, 24 },
+            .fresh = .{ 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3 },
+        },
+        .{
+            .n = 64,
+            .ends = .{ 4, 8, 12, 16, 20, 24, 28, 32 },
+            .fresh = .{ 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 },
+        },
+    };
+    for (cases) |c| {
+        const rate = Rate{ .n = c.n };
+        for (c.ends, 0..) |want, i| try t.expectEqual(want, rate.bitEnd(i));
+        for (c.fresh, 0..) |want, i| try t.expectEqual(want, rate.freshBits(i));
+        try t.expectEqual(@as(usize, 16 * c.n), rate.bitEnd(255));
+        try t.expectEqual(@as(usize, 16 * c.n), rate.totalBits());
+        try t.expectEqual(@as(usize, c.n / 2), rate.words());
+        var sum: usize = 0;
+        for (0..256) |i| sum += rate.freshBits(i);
+        try t.expectEqual(rate.totalBits(), sum);
+    }
 }
 
 test "exl3 MUL1 codebook pins known codewords" {
@@ -463,10 +560,10 @@ test "exl3 K4 packed fixture decodes to the library inner and public f16" {
     const in_features: usize = 128;
     const out_features: usize = 128;
     const got_inner = try alloc.alloc(u16, in_features * out_features);
-    reconstructInner(asU16(trellis), in_features, out_features, K4, .mul1, got_inner);
+    reconstructInner(asU16(trellis), in_features, out_features, Rate.fromK(K4), .mul1, got_inner);
     try t.expectEqualSlices(u16, asU16(inner), got_inner);
     const got_public = try alloc.alloc(u16, in_features * out_features);
-    try reconstructPublic(alloc, asU16(trellis), asU16(suh), asU16(svh), in_features, out_features, K4, .mul1, got_public);
+    try reconstructPublic(alloc, asU16(trellis), asU16(suh), asU16(svh), in_features, out_features, Rate.fromK(K4), .mul1, got_public);
     try t.expectEqualSlices(u16, asU16(public), got_public);
 
     var x: [128]f32 = undefined;
@@ -476,7 +573,7 @@ test "exl3 K4 packed fixture decodes to the library inner and public f16" {
     const transformed = try alloc.alloc(f32, 128);
     const inner_y = try alloc.alloc(f32, 128);
     const y = try alloc.alloc(f32, 128);
-    project(&x, asU16(trellis), asU16(suh), asU16(svh), 128, 128, K4, .mul1, transformed, inner_y, y);
+    project(&x, asU16(trellis), asU16(suh), asU16(svh), 128, 128, Rate.fromK(K4), .mul1, transformed, inner_y, y);
     const dense = try alloc.alloc(f32, 128);
     @memset(dense, 0);
     const pub_w = asU16(public);
@@ -502,8 +599,8 @@ const fixture_k2_bytes = @embedFile("fixtures/exl3_k2_linear.safetensors");
 fn decodePackedFixture(
     alloc: std.mem.Allocator,
     raw: []const u8,
-    k: u32,
-    packed_hw: usize,
+    rate: Rate,
+    codebook: Codebook,
 ) !void {
     const t = std.testing;
     var tensors = try parseSafetensors(alloc, raw);
@@ -516,14 +613,14 @@ fn decodePackedFixture(
     try t.expectEqual(@as(usize, 3), trellis.shape.len);
     try t.expectEqual(@as(usize, 8), trellis.shape[0]);
     try t.expectEqual(@as(usize, 8), trellis.shape[1]);
-    try t.expectEqual(packed_hw, trellis.shape[2]);
+    try t.expectEqual(rate.halfwords(), trellis.shape[2]);
     const in_features: usize = 128;
     const out_features: usize = 128;
     const got_inner = try alloc.alloc(u16, in_features * out_features);
-    reconstructInner(asU16(trellis), in_features, out_features, k, .mul1, got_inner);
+    reconstructInner(asU16(trellis), in_features, out_features, rate, codebook, got_inner);
     try t.expectEqualSlices(u16, asU16(inner), got_inner);
     const got_public = try alloc.alloc(u16, in_features * out_features);
-    try reconstructPublic(alloc, asU16(trellis), asU16(suh), asU16(svh), in_features, out_features, k, .mul1, got_public);
+    try reconstructPublic(alloc, asU16(trellis), asU16(suh), asU16(svh), in_features, out_features, rate, codebook, got_public);
     try t.expectEqualSlices(u16, asU16(public), got_public);
 }
 
@@ -531,12 +628,29 @@ test "exl3 K3 packed fixture decodes to the library inner and public f16" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    try decodePackedFixture(arena.allocator(), fixture_k3_bytes, 3, 48);
+    try decodePackedFixture(arena.allocator(), fixture_k3_bytes, Rate.fromK(3), .mul1);
 }
 
 test "exl3 K2 packed fixture decodes to the library inner and public f16" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    try decodePackedFixture(arena.allocator(), fixture_k2_bytes, 2, 32);
+    try decodePackedFixture(arena.allocator(), fixture_k2_bytes, Rate.fromK(2), .mul1);
+}
+
+const fixture_k2p5_tiny_bytes = @embedFile("fixtures/exl3_k2p5_tiny_linear.safetensors");
+const fixture_k3_tiny_bytes = @embedFile("fixtures/exl3_k3_tiny_linear.safetensors");
+
+test "exl3 K2.5 TINY packed fixture decodes to the library inner and public f16" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    try decodePackedFixture(arena.allocator(), fixture_k2p5_tiny_bytes, .{ .n = 40 }, .tiny);
+}
+
+test "exl3 K3 TINY packed fixture decodes to the library inner and public f16" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    try decodePackedFixture(arena.allocator(), fixture_k3_tiny_bytes, .{ .n = 48 }, .tiny);
 }

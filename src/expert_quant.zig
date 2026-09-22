@@ -1,6 +1,6 @@
 const std = @import("std");
 const io_mod = @import("expert_io.zig");
-const expert_exl3 = @import("expert_exl3.zig");
+pub const expert_exl3 = @import("expert_exl3.zig");
 
 pub const Geometry = struct {
     layers: u16,
@@ -66,9 +66,23 @@ pub fn isExpertStreamingArch(model_type: []const u8) bool {
 }
 
 pub const Exl3Spec = struct {
-    k: u8,
+    rate: expert_exl3.Rate,
     codebook: expert_exl3.Codebook,
 };
+
+/// `k` is a rate, integer or fractional: admitted only when 16k is an even
+/// whole number of halfwords per tile, which is what every reader indexes by.
+fn rateFromConfigK(k_v: std.json.Value) ?expert_exl3.Rate {
+    const scaled: f64 = switch (k_v) {
+        .integer => |i| @as(f64, @floatFromInt(i)) * 16.0,
+        .float => |f| f * 16.0,
+        else => return null,
+    };
+    const rounded = @round(scaled);
+    if (@abs(scaled - rounded) > 1e-6) return null;
+    if (rounded < 0 or rounded > 1024) return null;
+    return expert_exl3.kFromPackedDim(@intFromFloat(rounded));
+}
 
 pub fn parseExpertQuant(obj: std.json.ObjectMap) !Exl3Spec {
     const block = obj.get("expert_quant") orelse return error.ExpertLayoutUnsupported;
@@ -76,24 +90,16 @@ pub fn parseExpertQuant(obj: std.json.ObjectMap) !Exl3Spec {
     const format = block.object.get("format") orelse return error.ExpertLayoutUnsupported;
     if (format != .string or !std.mem.eql(u8, format.string, "exl3")) return error.ExpertLayoutUnsupported;
     const k_v = block.object.get("k") orelse return error.ExpertLayoutUnsupported;
-    const k: u8 = switch (k_v) {
-        .integer => |n| std.math.cast(u8, n) orelse return error.ExpertLayoutUnsupported,
-        else => return error.ExpertLayoutUnsupported,
-    };
+    const rate = rateFromConfigK(k_v) orelse return error.ExpertLayoutUnsupported;
     const cb_v = block.object.get("codebook") orelse return error.ExpertLayoutUnsupported;
     if (cb_v != .string) return error.ExpertLayoutUnsupported;
-    if (k < 2 or k > 4) return error.ExpertLayoutUnsupported;
     const codebook = expert_exl3.Codebook.fromName(cb_v.string) orelse return error.ExpertLayoutUnsupported;
-    return .{ .k = k, .codebook = codebook };
+    return .{ .rate = rate, .codebook = codebook };
 }
 
-pub fn kFromPackedDim(last: u64) ?u8 {
-    if (last % 16 != 0) return null;
-    const k = last / 16;
-    return switch (k) {
-        2, 3, 4 => @intCast(k),
-        else => null,
-    };
+pub fn kFromPackedDim(last: u64) ?expert_exl3.Rate {
+    if (last > std.math.maxInt(u32)) return null;
+    return expert_exl3.kFromPackedDim(@intCast(last));
 }
 
 /// Routed experts are leading-index banks or individual source tensors.
@@ -281,7 +287,8 @@ pub fn isRoutedExpertKey(layout: Layout, key: []const u8) bool {
         .quantized_split => std.mem.startsWith(u8, key, "language_model.model.layers.") and
             std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null,
         .exl3_k4 => (std.mem.startsWith(u8, key, "language_model.model.layers.") or
-            std.mem.startsWith(u8, key, "language_model.mtp.")) and
+            std.mem.startsWith(u8, key, "language_model.mtp.") or
+            std.mem.startsWith(u8, key, "model.layers.")) and
             std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null,
         .mxfp4_split => std.mem.startsWith(u8, key, "model.layers.") and
             std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null,
@@ -394,6 +401,57 @@ fn mxfp4IndividualBankCompleteFromFirst(
     return true;
 }
 
+/// `language_model.model.layers.` is the qwen4 pack's nesting, `model.layers.`
+/// MiMo's; a pack uses one of them for every routed layer it owns.
+const EXL3_PREFIXES = [_][]const u8{ "language_model.model.layers.", "model.layers." };
+
+fn exl3BankComplete(map: std.json.ObjectMap, prefix: []const u8, first_moe_layer: u16, layers: u16) bool {
+    if (first_moe_layer >= layers) return false;
+    var buf: [192]u8 = undefined;
+    var layer: u16 = first_moe_layer;
+    while (layer < layers) : (layer += 1) {
+        for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+            for ([_][]const u8{ "trellis", "suh", "svh" }) |part| {
+                const key = std.fmt.bufPrint(&buf, "{s}{d}.mlp.switch_mlp.{s}_proj.{s}", .{
+                    prefix, layer, proj, part,
+                }) catch return false;
+                if (!stringAt(map, key)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn hasAnyExl3Key(map: std.json.ObjectMap, layers: u16) bool {
+    var buf: [192]u8 = undefined;
+    for (EXL3_PREFIXES) |prefix| {
+        for (0..layers) |layer| {
+            for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+                for ([_][]const u8{ "trellis", "suh", "svh" }) |part| {
+                    const key = std.fmt.bufPrint(&buf, "{s}{d}.mlp.switch_mlp.{s}_proj.{s}", .{
+                        prefix, layer, proj, part,
+                    }) catch return true;
+                    if (map.get(key) != null) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Affine or MXFP4 routed keys beside an EXL3 bank: the pack is mixed.
+fn hasAnyAffineOrMxfp4ExpertKey(map: std.json.ObjectMap, layers: u16) bool {
+    if (hasAnyMxfp4SplitKey(map, layers)) return true;
+    var buf: [192]u8 = undefined;
+    for (0..layers) |layer_usize| {
+        for (0..component_count) |ci| {
+            const key = tensorKey(&buf, @intCast(layer_usize), @fromBackingInt(@intCast(ci))) catch return true;
+            if (map.get(key) != null) return true;
+        }
+    }
+    return false;
+}
+
 fn hasAnyMxfp4SplitKey(map: std.json.ObjectMap, layers: u16) bool {
     var buf: [192]u8 = undefined;
     for (0..layers) |layer_usize| {
@@ -423,21 +481,11 @@ fn hasAnyAlternativeExpertKey(map: std.json.ObjectMap, layers: u16, include_mxfp
             const key = tensorKey(&buf, layer, c) catch return true;
             if (map.get(key) != null) return true;
         }
-        for ([_][]const u8{ "gate", "up", "down" }) |projection| {
-            for ([_][]const u8{ "trellis", "suh", "svh" }) |part| {
-                const key = std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.mlp.switch_mlp.{s}_proj.{s}", .{
-                    layer,
-                    projection,
-                    part,
-                }) catch return true;
-                if (map.get(key) != null) return true;
-            }
-        }
     }
-    return false;
+    return hasAnyExl3Key(map, layers);
 }
 
-fn layoutFromWeightMapWithFirstMoe(map: std.json.ObjectMap, layers: u16, first_moe_layer: u16) ?Layout {
+fn layoutFromWeightMapWithFirstMoe(map: std.json.ObjectMap, layers: u16, first_moe_layer: u16, mimo: bool) ?Layout {
     if (layers == 0) return null;
     // Individual source keys are intentionally checked before every packed
     // layout. A complete bank beside any other routed bank is ambiguous.
@@ -468,28 +516,12 @@ fn layoutFromWeightMapWithFirstMoe(map: std.json.ObjectMap, layers: u16, first_m
         }
     }
     if (fused) return .bf16_fused;
-    var exl3 = true;
-    for (0..layers) |layer| {
-        for ([_][]const u8{ "gate", "up", "down" }) |proj| {
-            const trellis = std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.mlp.switch_mlp.{s}_proj.trellis", .{ layer, proj }) catch return null;
-            if (!stringAt(map, trellis)) {
-                exl3 = false;
-                break;
-            }
-            const suh = std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.mlp.switch_mlp.{s}_proj.suh", .{ layer, proj }) catch return null;
-            if (!stringAt(map, suh)) {
-                exl3 = false;
-                break;
-            }
-            const svh = std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.mlp.switch_mlp.{s}_proj.svh", .{ layer, proj }) catch return null;
-            if (!stringAt(map, svh)) {
-                exl3 = false;
-                break;
-            }
-        }
-        if (!exl3) break;
-    }
-    if (exl3) return .exl3_k4;
+    // The nesting is the ARCH's: a pack the loader cannot address is not a pack.
+    const exl3_ok = if (mimo)
+        exl3BankComplete(map, EXL3_PREFIXES[1], first_moe_layer, layers)
+    else
+        exl3BankComplete(map, EXL3_PREFIXES[0], 0, layers);
+    if (exl3_ok) return if (hasAnyAffineOrMxfp4ExpertKey(map, layers)) null else .exl3_k4;
     for (0..layers) |layer| {
         for (0..component_count) |ci| {
             const key = tensorKey(&buf, @intCast(layer), @fromBackingInt(@intCast(ci))) catch return null;
@@ -500,11 +532,11 @@ fn layoutFromWeightMapWithFirstMoe(map: std.json.ObjectMap, layers: u16, first_m
 }
 
 pub fn layoutFromWeightMapForFirstMoe(map: std.json.ObjectMap, layers: u16, first_moe_layer: u16) ?Layout {
-    return layoutFromWeightMapWithFirstMoe(map, layers, first_moe_layer);
+    return layoutFromWeightMapWithFirstMoe(map, layers, first_moe_layer, false);
 }
 
 pub fn layoutFromWeightMap(map: std.json.ObjectMap, layers: u16) ?Layout {
-    return layoutFromWeightMapWithFirstMoe(map, layers, 1);
+    return layoutFromWeightMapWithFirstMoe(map, layers, 1, false);
 }
 
 pub fn layoutFromIndexJsonWithFirstMoe(
@@ -520,11 +552,14 @@ pub fn layoutFromIndexJsonWithFirstMoe(
     if (parsed.value != .object) return null;
     const map = parsed.value.object.get("weight_map") orelse return null;
     if (map != .object) return null;
-    const layout = layoutFromWeightMapWithFirstMoe(map.object, layers, first_moe_layer) orelse return null;
+    const mimo = std.mem.eql(u8, model_type, "mimo_v2");
+    const layout = layoutFromWeightMapWithFirstMoe(map.object, layers, first_moe_layer, mimo) orelse return null;
     if (layout == .mxfp4_split or layout == .mxfp4_individual) {
-        return if (std.mem.eql(u8, model_type, "mimo_v2")) layout else null;
+        return if (mimo) layout else null;
     }
-    return if (std.mem.eql(u8, model_type, "mimo_v2")) null else layout;
+    // EXL3 stacked banks serve on both arches, each under its own nesting.
+    if (layout == .exl3_k4) return layout;
+    return if (mimo) null else layout;
 }
 
 pub fn layoutFromIndexJson(allocator: std.mem.Allocator, model_type: []const u8, raw: []const u8, layers: u16) ?Layout {
@@ -1177,24 +1212,35 @@ test "exl3 top-k above reduce-bank is a named refusal" {
     try t.expectError(error.Exl3TopKExceedsReduceBank, admitExl3TopK(33));
 }
 
-test "exl3 expert_quant admits K2 K3 K4 under every served codebook and refuses other k or codebook" {
+test "exl3 expert_quant admits integer and fractional K under every served codebook and refuses the rest" {
     const t = std.testing;
-    for ([_]u8{ 2, 3, 4 }) |want_k| {
+    const cases = [_]struct { text: []const u8, n: u32 }{
+        .{ .text = "2", .n = 32 },
+        .{ .text = "2.5", .n = 40 },
+        .{ .text = "2.75", .n = 44 },
+        .{ .text = "3", .n = 48 },
+        .{ .text = "3.5", .n = 56 },
+        .{ .text = "4", .n = 64 },
+    };
+    for (cases) |c| {
         for ([_]expert_exl3.Codebook{ .mul1, .tiny, .mcg }) |cb| {
-            var buf: [80]u8 = undefined;
-            const raw = try std.fmt.bufPrint(&buf, "{{\"expert_quant\":{{\"format\":\"exl3\",\"k\":{d},\"codebook\":\"{s}\"}}}}", .{ want_k, @tagName(cb) });
+            var buf: [96]u8 = undefined;
+            const raw = try std.fmt.bufPrint(&buf, "{{\"expert_quant\":{{\"format\":\"exl3\",\"k\":{s},\"codebook\":\"{s}\"}}}}", .{ c.text, @tagName(cb) });
             const ok = try std.json.parseFromSlice(std.json.Value, t.allocator, raw, .{});
             defer ok.deinit();
             const spec = try parseExpertQuant(ok.value.object);
-            try t.expectEqual(want_k, spec.k);
+            try t.expectEqual(c.n, spec.rate.n);
             try t.expectEqual(cb, spec.codebook);
         }
     }
-    const bad_k = try std.json.parseFromSlice(std.json.Value, t.allocator,
-        \\{"expert_quant":{"format":"exl3","k":6,"codebook":"mul1"}}
-    , .{});
-    defer bad_k.deinit();
-    try t.expectError(error.ExpertLayoutUnsupported, parseExpertQuant(bad_k.value.object));
+    // 2.3 is not a multiple of 1/16; 4.5 and 6 are off the served range.
+    for ([_][]const u8{ "2.3", "4.5", "6", "1", "2.0625" }) |bad| {
+        var buf: [96]u8 = undefined;
+        const raw = try std.fmt.bufPrint(&buf, "{{\"expert_quant\":{{\"format\":\"exl3\",\"k\":{s},\"codebook\":\"mul1\"}}}}", .{bad});
+        const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, raw, .{});
+        defer parsed.deinit();
+        try t.expectError(error.ExpertLayoutUnsupported, parseExpertQuant(parsed.value.object));
+    }
     const bad_cb = try std.json.parseFromSlice(std.json.Value, t.allocator,
         \\{"expert_quant":{"format":"exl3","k":4,"codebook":"mul2"}}
     , .{});
@@ -1205,26 +1251,29 @@ test "exl3 expert_quant admits K2 K3 K4 under every served codebook and refuses 
     try t.expectError(error.ExpertLayoutUnsupported, parseExpertQuant(missing.value.object));
 }
 
-test "exl3 kFromPackedDim maps last dim 16*K" {
+test "exl3 kFromPackedDim maps last dim to n" {
     const t = std.testing;
-    try t.expectEqual(@as(?u8, 2), kFromPackedDim(32));
-    try t.expectEqual(@as(?u8, 3), kFromPackedDim(48));
-    try t.expectEqual(@as(?u8, 4), kFromPackedDim(64));
-    try t.expectEqual(@as(?u8, null), kFromPackedDim(80));
-    try t.expectEqual(@as(?u8, null), kFromPackedDim(16));
+    try t.expectEqual(@as(u32, 32), kFromPackedDim(32).?.n);
+    try t.expectEqual(@as(u32, 40), kFromPackedDim(40).?.n);
+    try t.expectEqual(@as(u32, 48), kFromPackedDim(48).?.n);
+    try t.expectEqual(@as(u32, 64), kFromPackedDim(64).?.n);
+    try t.expect(kFromPackedDim(80) == null);
+    try t.expect(kFromPackedDim(16) == null);
+    try t.expect(kFromPackedDim(41) == null);
 }
 
-test "exl3 mixed last dims map to per-tensor K in 2,3,4" {
+test "exl3 mixed last dims map to per-tensor n including a fractional rate" {
     const t = std.testing;
-    const last = [_]u64{ 48, 32, 64, 48, 48, 48 };
-    var counts: [5]u32 = @splat(0);
+    const last = [_]u64{ 48, 32, 64, 48, 40, 48 };
+    var counts: [65]u32 = @splat(0);
     for (last) |d| {
-        const k = kFromPackedDim(d) orelse return error.TestUnexpectedResult;
-        counts[k] += 1;
+        const rate = kFromPackedDim(d) orelse return error.TestUnexpectedResult;
+        counts[rate.n] += 1;
     }
-    try t.expectEqual(@as(u32, 1), counts[2]);
-    try t.expectEqual(@as(u32, 4), counts[3]);
-    try t.expectEqual(@as(u32, 1), counts[4]);
+    try t.expectEqual(@as(u32, 1), counts[32]);
+    try t.expectEqual(@as(u32, 1), counts[40]);
+    try t.expectEqual(@as(u32, 3), counts[48]);
+    try t.expectEqual(@as(u32, 1), counts[64]);
 }
 
 test "layout resolution is qwen4_exp only: the same index declares nothing for another arch" {
@@ -1444,6 +1493,53 @@ test "mxfp4 individual source rejects missing and malformed weights or scales" {
         error.InvalidExpertTensor,
         QuantStore.openForLayout(t.allocator, model_path, geometry, .mxfp4_individual),
     );
+}
+
+/// A synthetic MiMo index: dense layer 0, EXL3 routed banks from layer 1 on.
+fn mimoExl3IndexJson(allocator: std.mem.Allocator, layers: u16, first_moe: u16) ![]u8 {
+    var b: std.ArrayList(u8) = .empty;
+    errdefer b.deinit(allocator);
+    try b.appendSlice(allocator, "{\"weight_map\":{\"model.layers.0.mlp.gate_proj.weight\":\"a\"");
+    var layer: u16 = first_moe;
+    while (layer < layers) : (layer += 1) {
+        for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+            for ([_][]const u8{ "trellis", "suh", "svh" }) |part| {
+                try b.print(allocator, ",\"model.layers.{d}.mlp.switch_mlp.{s}_proj.{s}\":\"a\"", .{ layer, proj, part });
+            }
+        }
+    }
+    try b.appendSlice(allocator, "}}");
+    return b.toOwnedSlice(allocator);
+}
+
+test "mimo_v2 EXL3 stacked experts resolve as a layout and keep the dense prefix" {
+    const t = std.testing;
+    const index = try mimoExl3IndexJson(t.allocator, 3, 1);
+    defer t.allocator.free(index);
+    try t.expectEqual(Layout.exl3_k4, layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", index, 3, 1).?);
+    try t.expect(isRoutedExpertKey(.exl3_k4, "model.layers.1.mlp.switch_mlp.gate_proj.trellis"));
+    try t.expect(!isRoutedExpertKey(.exl3_k4, "model.layers.1.mlp.gate.weight"));
+    // A MoE layer short of its bank is not a pack.
+    const short = try mimoExl3IndexJson(t.allocator, 3, 2);
+    defer t.allocator.free(short);
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", short, 3, 1) == null);
+    // The qwen4 nesting stays its own probe.
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "qwen4_exp", index, 3, 1) == null);
+}
+
+test "mimo_v2 EXL3 beside an MXFP4 bank is a mixed pack and resolves to nothing" {
+    const t = std.testing;
+    const index = try mimoExl3IndexJson(t.allocator, 2, 1);
+    defer t.allocator.free(index);
+    var key_buf: [192]u8 = undefined;
+    const mxfp4 = try mxfp4TensorKey(&key_buf, 1, .gate, .weight);
+    const mixed = try std.fmt.allocPrint(t.allocator, "{s},\"{s}\":\"a\"}}}}", .{ index[0 .. index.len - 2], mxfp4 });
+    defer t.allocator.free(mixed);
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", mixed, 2, 1) == null);
+    const individual = try mxfp4IndividualTensorKey(&key_buf, 1, 0, .gate, .weight);
+    const mixed2 = try std.fmt.allocPrint(t.allocator, "{s},\"{s}\":\"a\"}}}}", .{ index[0 .. index.len - 2], individual });
+    defer t.allocator.free(mixed2);
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", mixed2, 2, 1) == null);
 }
 
 test "mimo_v2 is the only additional expert streaming architecture" {

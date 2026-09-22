@@ -169,7 +169,7 @@ pub const ModelConfig = struct {
     quant_mode: QuantMode = .affine,
     expert_streaming: bool = false,
     expert_layout: expert_quant.Layout = .bf16_fused,
-    expert_quant_k: u8 = 4,
+    expert_quant_rate: expert_exl3.Rate = .{ .n = 64 },
     expert_quant_codebook: expert_exl3.Codebook = .mul1,
     expert_source_dir: ?[]u8 = null,
     /// `MLX_SERVE_NGRAM_BF16_DIR`: serve the PLE n-gram table from the ORIGINAL bf16
@@ -975,9 +975,19 @@ pub const ModelConfig = struct {
     }
 
     /// Dense banks and raw individual experts require the streaming loader.
+    /// An EXL3 bank is a self-describing quantized weight the resident kernels
+    /// read as they are, whatever the trunk's own width says.
     pub fn expertStreamingRequired(self: *const ModelConfig) bool {
+        if (self.expert_layout == .exl3_k4) return false;
         return self.supportsExpertStreaming() and
             (self.quant_bits == 0 or self.expert_layout == .mxfp4_individual);
+    }
+
+    /// A MiMo checkpoint keeps its trunk in the source FP8 layout whichever way
+    /// its routed experts are packed, so both layouts take the source loader.
+    pub fn usesMimoSourceTrunk(self: *const ModelConfig) bool {
+        return std.mem.eql(u8, self.model_type, "mimo_v2") and
+            (self.expert_layout == .mxfp4_individual or self.expert_layout == .exl3_k4);
     }
 
     /// The long-context blast-radius predicate: every long-context mechanism (KV
@@ -1410,9 +1420,10 @@ pub fn parseConfig(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
                 if (parsed.value != .object) return error.ExpertLayoutUnsupported;
                 const spec = try expert_quant.parseExpertQuant(parsed.value.object);
                 try expert_quant.admitExl3TopK(config.num_experts_per_tok);
-                config.expert_quant_k = spec.k;
+                config.expert_quant_rate = spec.rate;
                 config.expert_quant_codebook = spec.codebook;
-                log.info("[expert-exl3] engaged codebook={s}\n", .{@tagName(spec.codebook)});
+                var k_buf: [8]u8 = undefined;
+                log.info("[expert-exl3] engaged K={s} codebook={s}\n", .{ spec.rate.kText(&k_buf), @tagName(spec.codebook) });
             }
         }
     }
@@ -3884,13 +3895,25 @@ pub fn loadWeights(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
     return loadWeightsOpt(io, allocator, model_dir, false);
 }
 
+/// MiMo's trunk is FP8 on disk under either routed-expert layout, so both take
+/// the source loader; an EXL3 pack's routed banks come resident beside it.
+pub fn loadWeightsMimoSource(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !Weights {
+    var config = try parseConfig(io, allocator, model_dir);
+    defer config.deinit(allocator);
+    log.info("[mimo-source] loading original shards: {s} experts, in-memory affine8 trunk and split QKV\n", .{
+        if (config.expert_layout == .exl3_k4) "resident EXL3" else "native MXFP4",
+    });
+    return @import("mimo_source.zig").loadWeights(io, allocator, model_dir, &config);
+}
+
+/// Resident bytes of a MiMo pack the source loader prepares: the affine-8 trunk
+/// plus, under EXL3, the routed banks it holds resident.
+pub fn mimoSourceResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !u64 {
+    return @import("mimo_source.zig").residentBytes(io, allocator, model_dir);
+}
+
 pub fn loadWeightsStreaming(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, layout: expert_quant.Layout) !Weights {
-    if (layout == .mxfp4_individual) {
-        var config = try parseConfig(io, allocator, model_dir);
-        defer config.deinit(allocator);
-        log.info("[mimo-source] loading original shards: native MXFP4 experts, in-memory affine8 trunk and split QKV\n", .{});
-        return @import("mimo_source.zig").loadWeights(io, allocator, model_dir, &config);
-    }
+    if (layout == .mxfp4_individual) return loadWeightsMimoSource(io, allocator, model_dir);
     var dir = try std.Io.Dir.openDirAbsolute(io, model_dir, .{ .iterate = true });
     defer dir.close(io);
     return loadWeightsFromOpenDirMode(io, allocator, dir, model_dir, false, layout);
@@ -8186,6 +8209,40 @@ test "mimo_v2 original config selects split QKV and native expert quantization" 
     try testing.expectEqual(@as(u32, 4), c.quant_bits);
     try testing.expectEqual(@as(u32, 32), c.quant_group_size);
     try testing.expect(c.expertStreamingRequired());
+}
+
+test "mimo_v2 EXL3 routed banks serve resident and take the source trunk loader" {
+    var c = ModelConfig{
+        .model_type = "mimo_v2",
+        .num_hidden_layers = 2,
+        .first_k_dense_replace = 1,
+        .num_experts = 4,
+        .num_experts_per_tok = 2,
+        .hidden_size = 128,
+        .moe_intermediate_size = 128,
+        .quant_bits = 0,
+        .expert_layout = .exl3_k4,
+    };
+    try testing.expect(c.supportsExpertStreaming());
+    try testing.expect(!c.expertStreamingRequired());
+    try testing.expect(c.usesMimoSourceTrunk());
+    c.expert_layout = .mxfp4_individual;
+    try testing.expect(c.expertStreamingRequired());
+    try testing.expect(c.usesMimoSourceTrunk());
+    c.expert_layout = .mxfp4_split;
+    try testing.expect(!c.usesMimoSourceTrunk());
+    var q = ModelConfig{
+        .model_type = "qwen4_exp",
+        .num_hidden_layers = 2,
+        .num_experts = 4,
+        .num_experts_per_tok = 2,
+        .hidden_size = 128,
+        .moe_intermediate_size = 128,
+        .quant_bits = 0,
+        .expert_layout = .exl3_k4,
+    };
+    try testing.expect(!q.usesMimoSourceTrunk());
+    try testing.expect(!q.expertStreamingRequired());
 }
 
 test "mimo_v2 original MXFP4 experts require streaming despite their quantized width" {

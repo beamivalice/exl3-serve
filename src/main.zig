@@ -1490,7 +1490,9 @@ pub fn main(init: std.process.Init) !void {
             return error.ExpertStreamingRequired;
         }
         log.info("Loading weights...\n", .{});
-        var weights = if (load_vision)
+        var weights = if (config.usesMimoSourceTrunk())
+            try model_mod.loadWeightsMimoSource(io, allocator, model_dir)
+        else if (load_vision)
             try model_mod.loadWeightsWithVision(io, allocator, model_dir)
         else
             try model_mod.loadWeights(io, allocator, model_dir);

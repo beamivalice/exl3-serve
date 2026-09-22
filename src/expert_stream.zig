@@ -101,7 +101,8 @@ pub fn exl3ExpertBytes(geometry: Geometry) !u64 {
     const h: u64 = geometry.hidden;
     const i: u64 = geometry.intermediate;
     if (h == 0 or i == 0 or h % 16 != 0 or i % 16 != 0) return error.InvalidExpertGeometry;
-    const tile_words: u64 = 64;
+    if (quant.expert_exl3.kFromPackedDim(geometry.exl3_n) == null) return error.InvalidExpertGeometry;
+    const tile_words: u64 = geometry.exl3_n;
     const gate_up = (h / 16) * (i / 16) * tile_words * 2 + h * 2 + i * 2;
     const down = (i / 16) * (h / 16) * tile_words * 2 + i * 2 + h * 2;
     const both = std.math.mul(u64, gate_up, 2) catch return error.InvalidExpertGeometry;
@@ -480,6 +481,8 @@ pub const Geometry = struct {
     /// Absolute first routed-expert layer. Dense-prefix models keep earlier
     /// indices addressable but do not allocate an expert bank for them.
     first_moe_layer: u16 = 0,
+    /// EXL3 halfwords per packed tile (K = n/16); ignored by every other layout.
+    exl3_n: u32 = 64,
 };
 
 pub const Component = enum(u1) {
@@ -1649,15 +1652,34 @@ test "expert stream MXFP4 byte plan and dense prefix use absolute layers" {
     try t.expectError(error.ExpertCacheTooSmall, cachePlanBytesForGeometry(47 * 13_369_344 - 1, geometry, 13_369_344));
 }
 
-test "exl3 expert bytes at production geometry" {
+test "exl3 expert bytes bill the pack's own halfwords per tile" {
     const t = std.testing;
-    const b = try exl3ExpertBytes(.{ .layers = 48, .experts = 512, .hidden = 2560, .intermediate = 640 });
     const h: u64 = 2560;
     const i: u64 = 640;
-    const tile: u64 = 64;
-    const gate_up = (h / 16) * (i / 16) * tile * 2 + h * 2 + i * 2;
-    const down = (i / 16) * (h / 16) * tile * 2 + i * 2 + h * 2;
-    try t.expectEqual(gate_up * 2 + down, b);
+    for ([_]u32{ 64, 48, 40, 32 }) |n| {
+        const b = try exl3ExpertBytes(.{ .layers = 48, .experts = 512, .hidden = h, .intermediate = i, .exl3_n = n });
+        const tile: u64 = n;
+        const gate_up = (h / 16) * (i / 16) * tile * 2 + h * 2 + i * 2;
+        const down = (i / 16) * (h / 16) * tile * 2 + i * 2 + h * 2;
+        try t.expectEqual(gate_up * 2 + down, b);
+    }
+    try t.expectError(error.InvalidExpertGeometry, exl3ExpertBytes(.{ .layers = 48, .experts = 512, .hidden = h, .intermediate = i, .exl3_n = 41 }));
+}
+
+test "exl3 expert bytes at the MiMo K2.5 geometry size the resident admission" {
+    const t = std.testing;
+    const geometry: Geometry = .{
+        .layers = 48,
+        .experts = 256,
+        .hidden = 4096,
+        .intermediate = 2048,
+        .first_moe_layer = 1,
+        .exl3_n = 40,
+    };
+    const per_expert = try exl3ExpertBytes(geometry);
+    try t.expectEqual(@as(u64, 7_901_184), per_expert);
+    const routed_layers: u64 = geometry.layers - geometry.first_moe_layer;
+    try t.expectEqual(@as(u64, 95_067_045_888), per_expert * geometry.experts * routed_layers);
 }
 
 test "expert stream refuses MTP by name, at load and at request parse" {

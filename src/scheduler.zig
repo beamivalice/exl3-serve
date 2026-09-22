@@ -2674,6 +2674,7 @@ pub fn streamingGeometryOf(config: *const model_mod.ModelConfig) expert_stream_m
         .hidden = config.hidden_size,
         .intermediate = config.moe_intermediate_size,
         .first_moe_layer = @intCast(config.first_k_dense_replace),
+        .exl3_n = config.expert_quant_rate.n,
     };
 }
 
@@ -3801,6 +3802,10 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         params.config.expert_fill_peak_bytes = plan.prefill_peak_bytes;
         streaming_resident_bytes = split.trunk +| split.mtp;
         if (params.expert_cache_fit_resolver) |fit| try fit(params.config, streaming_resident_bytes.?);
+    } else if (params.config.usesMimoSourceTrunk()) {
+        // A resident MiMo load is billed by what the source loader PREPARES:
+        // the disk shards are FP8 plus scale grids, not the affine-8 trunk.
+        streaming_resident_bytes = try model_mod.mimoSourceResidentBytes(sch.io, sch.allocator, params.model_dir);
     }
 
     // GPU-memory pre-flight (MLX path). A Metal OOM during weight load / warmup
@@ -3842,6 +3847,8 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     errdefer sch.allocator.destroy(weights_ptr);
     weights_ptr.* = if (params.config.expert_streaming)
         try model_mod.loadWeightsStreaming(sch.io, sch.allocator, params.model_dir, params.config.expert_layout)
+    else if (params.config.usesMimoSourceTrunk())
+        try model_mod.loadWeightsMimoSource(sch.io, sch.allocator, params.model_dir)
     else if (params.load_vision)
         try model_mod.loadWeightsWithVision(sch.io, sch.allocator, params.model_dir)
     else
@@ -4517,6 +4524,8 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
             params.config.expert_fill_peak_bytes,
             params.config.expert_bounce_bytes,
         )
+    else if (streaming_resident_bytes) |b|
+        b
     else if (entry.bytes_on_disk) |b|
         b
     else
