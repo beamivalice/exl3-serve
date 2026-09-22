@@ -25,6 +25,9 @@ from typing import NamedTuple
 
 import numpy as np
 
+PREFETCH_WORKERS_DEFAULT = 2
+PREFETCH_DEPTH_DEFAULT = 2
+
 # `quantize_tiles_mlx` evaluates before it returns, so the accumulated seconds are
 # GPU-busy wall time: what fraction of the run is the trellis search itself.
 SEARCH_STATS = {"launches": 0, "tiles": 0, "seconds": 0.0,
@@ -788,6 +791,16 @@ def shard_reuse_refusal(path, n_experts: int, in_dim: int, out_dim: int, k,
 
 
 # ---------------------------------------------------------------- prefetching
+
+def prefetch_counts(window: int, workers: int | None, depth: int | None) -> tuple[int, int]:
+    if workers is None:
+        workers = PREFETCH_WORKERS_DEFAULT if window == 8 else 2
+    if depth is None:
+        depth = PREFETCH_DEPTH_DEFAULT if window == 8 else 2
+    if workers < 1 or depth < 1:
+        raise ValueError("prefetch workers and depth must be positive")
+    return workers, depth
+
 
 def prefetch_batches(pool, load, spans, capacity: int = 2):
     if capacity < 1:

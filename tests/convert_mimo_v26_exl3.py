@@ -48,6 +48,7 @@ import exl3_convert_common as _common  # noqa: E402
 from exl3_convert_common import (  # noqa: E402,F401
     G_SCALE_BRACKET, G_SCALE_MAX_EVALS, G_SCALE_TILES, G_SCALE_TOL, G_SCALE_WIDTH,
     HAD_BLOCK, LAUNCH_TILES_CAP, NP_DTYPE, PreparedBank, _ensure_lib, _mx, _search_mlx,
+    PREFETCH_DEPTH_DEFAULT, PREFETCH_WORKERS_DEFAULT, prefetch_counts,
     _tile_helpers, calib_for_expert, codebook_mode, diag_hessian, file_sha256, format_k,
     g_scale_iterations, g_scale_search_mlx, hadamard_matrix, imatrix_expert_vector,
     imatrix_ldl_blocks, inner_hessian_blocks, inner_ldl_blocks, k_from_packed,
@@ -358,10 +359,12 @@ def convert(
     quantizer: str = "ldlq", imatrix: dict | None = None, imatrix_sha: str | None = None,
     layers: str | None = None,
     batch_experts: int = BATCH_EXPERTS_DEFAULT, resume: bool = False,
+    prefetch_workers: int | None = None, prefetch_depth: int | None = None,
     scratch_gb: float = SCRATCH_GB_DEFAULT, g_scale: bool = True, quality: bool = True,
     verbose: bool = True,
 ) -> dict:
     src, dst = Path(src), Path(dst)
+    prefetch_workers, prefetch_depth = prefetch_counts(window, prefetch_workers, prefetch_depth)
     window = validate_window(window, k)
     dst.mkdir(parents=True, exist_ok=True)
     reset_search_stats()
@@ -459,8 +462,8 @@ def convert(
 
             step = max(1, batch_experts)
             spans = [(s, min(experts, s + step)) for s in range(0, experts, step)]
-            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="mimo-exl3-read") as pool:
-                prepared = prefetch_batches(pool, load_batch, spans)
+            with ThreadPoolExecutor(max_workers=prefetch_workers, thread_name_prefix="mimo-exl3-read") as pool:
+                prepared = prefetch_batches(pool, load_batch, spans, capacity=prefetch_depth)
                 for (start, stop), (prep, publics, cals) in zip(spans, prepared):
                     bt, bsuh, bsvh, bf = quantize_prepared_bank(
                         prep, publics, cals, k=k, codebook=codebook, window=window,
@@ -533,6 +536,52 @@ def _mxfp4_bytes(values: np.ndarray, scale_codes: np.ndarray) -> tuple[np.ndarra
 
 
 class PrefetchTests(unittest.TestCase):
+    def test_automatic_prefetch_tuning_is_limited_to_window_eight(self):
+        from unittest.mock import patch
+        with patch.dict(prefetch_counts.__globals__, PREFETCH_WORKERS_DEFAULT=3, PREFETCH_DEPTH_DEFAULT=4):
+            self.assertEqual(prefetch_counts(8, None, None), (3, 4))
+            self.assertEqual(prefetch_counts(12, None, None), (2, 2))
+            self.assertEqual(prefetch_counts(16, None, None), (2, 2))
+            self.assertEqual(prefetch_counts(12, 1, 6), (1, 6))
+
+
+    def test_cli_forwards_prefetch_controls(self):
+        from unittest.mock import Mock, patch
+        class StopProbe(Exception):
+            pass
+        probe = Mock(side_effect=StopProbe)
+        arguments = ["converter", "--src", "unused", "--dst", "unused", "--quantizer", "direct",
+                     "--prefetch-workers", "3", "--prefetch-depth", "4"]
+        with patch.object(sys, "argv", arguments), patch.dict(main.__globals__, convert=probe):
+            with self.assertRaises(StopProbe):
+                main()
+        self.assertEqual(probe.call_args.kwargs["prefetch_workers"], 3)
+        self.assertEqual(probe.call_args.kwargs["prefetch_depth"], 4)
+
+
+    def test_invalid_prefetch_counts_fail_before_staging(self):
+        for kwargs in ({"prefetch_workers": 0}, {"prefetch_depth": 0}):
+            with tempfile.TemporaryDirectory() as td:
+                destination = Path(td) / "out"
+                with self.assertRaises(ValueError):
+                    convert(Path(td) / "missing", destination, **kwargs)
+                self.assertFalse(destination.exists())
+
+
+    def test_worker_counts_preserve_synthetic_shards(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with patch.dict(write_synthetic_source.__globals__, SYN_EXPERTS=4):
+                write_synthetic_source(root / "source")
+            for workers in (1, 3):
+                convert(root / "source", root / str(workers), layers="1", batch_experts=1,
+                        quantizer="direct", window=8, codebook="mul1", verbose=False,
+                        prefetch_workers=workers, prefetch_depth=3)
+            for shard in (root / "1").glob("model-exl3-*.safetensors"):
+                self.assertEqual(shard.read_bytes(), (root / "3" / shard.name).read_bytes())
+
+
     def test_two_loads_can_start_before_either_finishes(self):
         import threading
         barrier = threading.Barrier(2)
@@ -1628,6 +1677,10 @@ def main() -> int:
     ap.add_argument("--imatrix", default=None, help="safetensors imatrix; required for ldlq")
     ap.add_argument("--layers", default=None, help="MoE layer range for pilots, e.g. 1 or 1-4,9")
     ap.add_argument("--batch-experts", type=int, default=BATCH_EXPERTS_DEFAULT)
+    ap.add_argument("--prefetch-workers", type=int, default=None,
+                    help="CPU preparation workers; defaults are tuned by window")
+    ap.add_argument("--prefetch-depth", type=int, default=None,
+                    help="maximum pending CPU preparation batches; defaults are tuned by window")
     ap.add_argument("--resume", action="store_true", help="keep shards that already match")
     ap.add_argument("--scratch-gb", type=float, default=SCRATCH_GB_DEFAULT,
                     help="Metal search scratch budget; sets the tiles per launch")
@@ -1637,6 +1690,11 @@ def main() -> int:
                     help="skip the global codebook-scale search (regularize at g=1)")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
+    try:
+        args.prefetch_workers, args.prefetch_depth = prefetch_counts(
+            args.window, args.prefetch_workers, args.prefetch_depth)
+    except ValueError as error:
+        ap.error(str(error))
     if args.self_test:
         return self_test()
     if not (args.src and args.dst):
@@ -1653,6 +1711,7 @@ def main() -> int:
         k=k, codebook=args.codebook, window=args.window, quantizer=args.quantizer,
         imatrix=imatrix, imatrix_sha=imatrix_sha, layers=args.layers,
         batch_experts=args.batch_experts,
+        prefetch_workers=args.prefetch_workers, prefetch_depth=args.prefetch_depth,
         resume=args.resume, scratch_gb=args.scratch_gb, g_scale=not args.no_g_scale,
         quality=not args.no_quality,
     )
