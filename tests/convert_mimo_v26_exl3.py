@@ -756,8 +756,8 @@ def prepare_expert_bank(publics, seeds, calibrations, *, quantizer: str) -> Prep
     scales with the diagonal). So the LDL need not wait for the scale search."""
     _ensure_lib()
     from ponyexl3.convert.regularize import regularize_public_weight
-    regs = [regularize_public_weight(np.asarray(p, dtype=np.float32), seed=s)
-            for p, s in zip(publics, seeds)]
+    regs = [regularize_public_weight(np.asarray(p, dtype=np.float32), seed=s, hessian_diag=cal)
+            for p, s, cal in zip(publics, seeds, calibrations)]
     inner = np.stack([r.inner for r in regs])
     suh = np.stack([r.suh for r in regs], axis=0)
     svh = np.stack([r.svh for r in regs], axis=0)
@@ -951,7 +951,7 @@ def file_sha256(path) -> str:
 # Bump on any change to the pack format or to what the quantizer produces — never for a
 # comment or a test. A shard's stamp carries this, and `--resume` refuses a shard whose
 # stamp differs, so hashing the file itself would make an editorial change cost a rerun.
-CONVERTER_VERSION = "mimo-exl3-2-ldlq-rotated-gss"
+CONVERTER_VERSION = "mimo-exl3-3-calibrated-regularize"
 
 
 def converter_version() -> str:
@@ -1709,6 +1709,68 @@ def _tile_perm() -> np.ndarray:
     _ensure_lib()
     from ponyexl3.convert.direct import _TENSOR_CORE_PERM
     return _TENSOR_CORE_PERM
+
+
+class CalibratedRegularizationTests(unittest.TestCase):
+    def test_skewed_calibration_controls_the_prepared_output_scales(self):
+        _ensure_lib()
+        from ponyexl3.convert.regularize import regularize_public_weight
+        rng = np.random.default_rng(711)
+        public = rng.standard_normal((128, 128), dtype=np.float32)
+        public *= np.linspace(0.1, 3.0, 128, dtype=np.float32)[None, :]
+        skewed = np.ones(128, dtype=np.float32)
+        skewed[0] = 1e8
+        for quantizer in ("direct", "ldlq"):
+            for cal in (None, np.ones(128, np.float32), skewed):
+                expected = regularize_public_weight(public, seed=713, hessian_diag=cal)
+                actual = prepare_expert_bank([public], [713], [cal], quantizer=quantizer)
+                np.testing.assert_array_equal(actual.svh[0], expected.svh)
+                np.testing.assert_array_equal(actual.suh[0], expected.suh)
+                np.testing.assert_array_equal(actual.inner[0], expected.inner)
+
+    def test_real_layer4_expert121_keeps_suppressed_gates_negative(self):
+        src = Path(MIMO_SOURCE)
+        imatrix_path = Path(os.environ.get("MIMO_V2_IMATRIX", "/Users/beam/llm/models/calib/mimo-v2.6-flash-rl-imatrix.safetensors"))
+        fixture = Path(__file__).resolve().parents[1] / "src/fixtures/mimo_v26_l4_gate_input.safetensors"
+        if not (src / "model.safetensors.index.json").is_file() or not imatrix_path.is_file() or not fixture.is_file():
+            self.skipTest("real MiMo gate regression inputs unavailable")
+        _ensure_lib()
+        import mlx.core as mx
+        from safetensors.numpy import load_file
+        from ponyexl3.mlx.decode import decode_packed_trellis_mlx
+        index = json.loads((src / "model.safetensors.index.json").read_text())["weight_map"]
+        public = SourceReader(src, index).public(4, 121, "gate_proj")
+        imatrix = load_imatrix(imatrix_path)
+        cal = imatrix_expert_vector(imatrix[imatrix_layer_keys(4)[0]], 121, 4096)
+        x = load_file(str(fixture))["x"]
+        expected = x @ public
+        self.assertLess(float(expected.max()), 0)
+        packed, suh, svh, _ = quantize_expert_bank(
+            [public], [expert_seed(4, 121, "gate_proj")], [cal], k=2.5,
+            codebook="tiny", window=12, quantizer="ldlq", scratch_bytes=256 << 20)
+        inner = decode_packed_trellis_mlx(mx.array(packed[0]), 2.5, codebook_mode("tiny"), window=12)
+        reconstructed = public_from_inner_mlx(inner, mx.array(suh[0].astype(np.float32)), mx.array(svh[0].astype(np.float32)))
+        actual = x @ np.array(reconstructed)
+        self.assertTrue(np.isfinite(actual).all())
+        self.assertLess(float(actual.max()), 0)
+        self.assertLess(abs(float(actual[3] - expected[3])), 1.0)
+
+    def test_resume_refuses_the_uncalibrated_regularization_stamp(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "gate.safetensors"
+            base = switch_base(4, "gate_proj")
+            stamp = shard_stamp(k=2.5, codebook="tiny", window=12, quantizer="ldlq", imatrix_sha="test")
+            old_stamp = dict(stamp, converter="mimo-exl3-2-ldlq-rotated-gss")
+            t = np.zeros((1, 8, 8, 40), dtype=np.uint16)
+            s = np.ones((1, 128), dtype=np.float16)
+            write_safetensors_raw(str(path), {
+                base + ".trellis": ("U16", t.shape, t.tobytes()),
+                base + ".suh": ("F16", s.shape, s.tobytes()),
+                base + ".svh": ("F16", s.shape, s.tobytes()),
+            }, metadata=old_stamp)
+            refusal = shard_reuse_refusal(path, 1, 128, 128, 2.5, stamp)
+            self.assertIsNotNone(refusal)
+            self.assertIn("converter=", refusal)
 
 
 class LdlTests(unittest.TestCase):
