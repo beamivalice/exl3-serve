@@ -7,6 +7,8 @@ of `expert_exl3.reconstructPublic` so the Zig test can assert byte identity.
 
   python tests/make_exl3_linear_fixture.py --k 2.5 --codebook tiny \
       --out src/fixtures/exl3_k2p5_tiny_linear.safetensors
+  python tests/make_exl3_linear_fixture.py --k 2.5 --codebook tiny --window 12 \
+      --out src/fixtures/exl3_k2p5_tiny_w12_linear.safetensors
 """
 
 from __future__ import annotations
@@ -49,8 +51,10 @@ def serve_public(inner: np.ndarray, suh: np.ndarray, svh: np.ndarray) -> np.ndar
     return w.astype(np.float16)
 
 
-def write_safetensors(path: str, tensors: dict[str, np.ndarray]) -> None:
-    header: dict[str, object] = {}
+def write_safetensors(
+    path: str, tensors: dict[str, np.ndarray], metadata: dict[str, str]
+) -> None:
+    header: dict[str, object] = {"__metadata__": metadata}
     blob = bytearray()
     for name, arr in tensors.items():
         dtype = {np.dtype(np.uint16): "U16", np.dtype(np.float16): "F16"}[arr.dtype]
@@ -74,6 +78,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--k", type=float, required=True)
     ap.add_argument("--codebook", choices=["mul1", "mcg", "tiny"], required=True)
+    # The codeword width the search hashes. The bitstream is the same width at
+    # every window; only the value each codeword decodes to changes, so a pack
+    # and its reference decode must name the same one.
+    ap.add_argument("--window", type=int, default=16)
     ap.add_argument("--in-features", type=int, default=128)
     ap.add_argument("--out-features", type=int, default=128)
     ap.add_argument("--seed", type=int, default=0)
@@ -107,7 +115,7 @@ def main() -> int:
             for tn in range(out_tiles)
         ]
     )
-    _, states = quantize_tiles_mlx(tiles, k, mode)
+    _, states = quantize_tiles_mlx(tiles, k, mode, window=args.window)
     fresh = np.array(states).astype(np.uint16, copy=False)
     packed = pack_trellis(fresh.reshape(in_tiles, out_tiles, 256), k)
     assert packed.shape == (in_tiles, out_tiles, packed_halfwords(k)), packed.shape
@@ -118,7 +126,7 @@ def main() -> int:
     svh = (signs * (0.7 + 0.35 * rng.random(out_f))).astype(np.float16)
 
     flags = {args.codebook: True}
-    inner = reconstruct_inner(np.asarray(packed), k, **flags)
+    inner = reconstruct_inner(np.asarray(packed), k, window=args.window, **flags)
     public = serve_public(inner, suh, svh)
     write_safetensors(
         args.out,
@@ -129,8 +137,12 @@ def main() -> int:
             "svh": svh,
             "trellis": np.asarray(packed, dtype=np.uint16),
         },
+        {"k": str(k), "codebook": args.codebook, "window": str(args.window)},
     )
-    print(f"{args.out}: K={k} n={packed_halfwords(k)} codebook={args.codebook}")
+    print(
+        f"{args.out}: K={k} n={packed_halfwords(k)} codebook={args.codebook} "
+        f"window={args.window}"
+    )
     return 0
 
 

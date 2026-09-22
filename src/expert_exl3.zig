@@ -425,6 +425,10 @@ pub const fixtures = struct {
     pub const k2 = aligned(@embedFile("fixtures/exl3_k2_linear.safetensors"));
     pub const k2p5_tiny = aligned(@embedFile("fixtures/exl3_k2p5_tiny_linear.safetensors"));
     pub const k3_tiny = aligned(@embedFile("fixtures/exl3_k3_tiny_linear.safetensors"));
+    /// Searched AND decoded at window 12 by PonyExl3: the only fixture that
+    /// certifies a narrowed window against the library rather than against our
+    /// own masking of a w16 bitstream.
+    pub const k2p5_tiny_w12 = aligned(@embedFile("fixtures/exl3_k2p5_tiny_w12_linear.safetensors"));
 
     fn aligned(comptime raw: []const u8) *align(8) const [raw.len]u8 {
         const holder = struct {
@@ -703,4 +707,24 @@ test "exl3 K3 TINY packed fixture decodes to the library inner and public f16" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     try decodePackedFixture(arena.allocator(), fixture_k3_tiny_bytes, .{ .n = 48 }, .tiny);
+}
+
+test "exl3 K2.5 TINY w12 packed fixture decodes to the library inner and public f16" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const dec: Decode = .{ .codebook = .tiny, .window = .w12 };
+    try decodePackedFixture(alloc, fixtures.k2p5_tiny_w12, .{ .n = 40 }, dec);
+
+    // The window is a decode parameter, not a preference: the same bitstream
+    // read at w16 is a different weight matrix, so the fixture certifies w12
+    // rather than the decoder's arithmetic alone.
+    var tensors = try parseSafetensors(alloc, fixtures.k2p5_tiny_w12);
+    defer tensors.deinit();
+    const trellis = tensors.get("trellis") orelse return error.MissingTrellis;
+    const inner = tensors.get("inner") orelse return error.MissingInner;
+    const wide = try alloc.alloc(u16, 128 * 128);
+    reconstructInner(asU16(trellis), 128, 128, .{ .n = 40 }, .tiny, wide);
+    try t.expect(!std.mem.eql(u16, asU16(inner), wide));
 }

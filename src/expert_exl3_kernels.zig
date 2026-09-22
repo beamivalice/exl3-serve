@@ -3469,9 +3469,23 @@ fn measureInnerGemmParity(
     rate: exl3.Rate,
     dec: exl3.Decode,
 ) !Exl3GemmParityStats {
-    const rows = eids.len;
     const w = try dequantStacked(alloc, stacked, in_dim, out_dim, rate, dec);
+    return measureInnerGemmParityOn(alloc, s, got, xh, eids, w, in_dim, out_dim);
+}
 
+/// The same verdict against a weight bank the caller already holds — a
+/// reference decode, where the bar must not be our own decoder's output.
+fn measureInnerGemmParityOn(
+    alloc: std.mem.Allocator,
+    s: mlx.mlx_stream,
+    got: []const f16,
+    xh: []const u16,
+    eids: []const u32,
+    w: []const u16,
+    in_dim: usize,
+    out_dim: usize,
+) !Exl3GemmParityStats {
+    const rows = eids.len;
     const w_arr = mlx.mlx_array_new_data(w.ptr, &[_]c_int{ @intCast(w.len / (in_dim * out_dim)), @intCast(in_dim), @intCast(out_dim) }, 3, .float16);
     defer _ = mlx.mlx_array_free(w_arr);
     const eid_arr = mlx.mlx_array_new_data(eids.ptr, &[_]c_int{@intCast(rows)}, 1, .uint32);
@@ -5484,6 +5498,7 @@ test "exl3 fused decode chain matches the host SwiGLU reference at K2.5 TINY" {
 
 test "exl3 fused decode chain matches the host SwiGLU reference at a narrowed codeword window" {
     try fusedChainMatchesHost(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
+    try fusedChainMatchesHost(exl3.fixtures.k2p5_tiny_w12, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
     try fusedChainMatchesHost(exl3.fixtures.k4, exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w14 });
 }
 
@@ -5502,6 +5517,71 @@ test "exl3 cooperative indexed GEMV matches the host tile decode at a fractional
     }
     try indexedParity(.{ .n = 40 }, 2560, 640, 4, 10, 43, .mul1);
     try indexedParity(.{ .n = 44 }, 2560, 640, 4, 10, 47, .mul1);
+}
+
+/// The w12 fixture through the Metal indexed GEMV, scored against PonyExl3's
+/// own reference decode (the fixture's `inner`) rather than against our host
+/// decoder — the one bar that certifies the narrowed-window convention on the
+/// GPU end to end.
+fn indexedGemvMatchesFixtureInner(fixture: []const u8, rate: exl3.Rate, dec: exl3.Decode) !void {
+    setDecodeParams(dec);
+    defer setDecodeParams(.mul1);
+    const t = std.testing;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const header_len = std.mem.readInt(u64, fixture[0..8], .little);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, fixture[8 .. 8 + header_len], .{});
+    defer parsed.deinit();
+    const data = fixture[8 + header_len ..];
+    const span = struct {
+        fn of(root: std.json.Value, name: []const u8, blob: []const u8) []align(1) const u16 {
+            const off = root.object.get(name).?.object.get("data_offsets").?.array.items;
+            const a: usize = @intCast(off[0].integer);
+            const b: usize = @intCast(off[1].integer);
+            return std.mem.bytesAsSlice(u16, blob[a..b]);
+        }
+    };
+    const trellis_bits = span.of(parsed.value, "trellis", data);
+    const inner_bits = span.of(parsed.value, "inner", data);
+
+    const E: usize = 3;
+    const dim: usize = 128;
+    const rows: usize = 6;
+    const tile_n = 8 * 8 * rate.halfwords();
+    const stacked = try alloc.alloc(u16, E * tile_n);
+    const w = try alloc.alloc(u16, E * dim * dim);
+    for (0..E) |e| {
+        @memcpy(stacked[e * tile_n ..][0..tile_n], trellis_bits);
+        @memcpy(w[e * dim * dim ..][0 .. dim * dim], inner_bits);
+    }
+    var prng = std.Random.DefaultPrng.init(307);
+    const rnd = prng.random();
+    const xh = try alloc.alloc(u16, rows * dim);
+    for (xh) |*v| v.* = exl3.f32ToF16Bits(rnd.float(f32) * 2 - 1);
+    const eids = try alloc.alloc(u32, rows);
+    for (eids, 0..) |*v, i| v.* = @intCast(i % E);
+
+    const x_arr = mlx.mlx_array_new_data(xh.ptr, &[_]c_int{ @intCast(rows), @intCast(dim) }, 2, .float16);
+    defer _ = mlx.mlx_array_free(x_arr);
+    const tr_arr = mlx.mlx_array_new_data(stacked.ptr, &[_]c_int{ @intCast(E), 8, 8, @intCast(rate.halfwords()) }, 4, .uint16);
+    defer _ = mlx.mlx_array_free(tr_arr);
+    const slots = mlx.mlx_array_new_data(eids.ptr, &[_]c_int{@intCast(rows)}, 1, .uint32);
+    defer _ = mlx.mlx_array_free(slots);
+    const got = try indexedGemvCoopF16(s, x_arr, tr_arr, slots);
+    defer _ = mlx.mlx_array_free(got);
+    var contig = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(contig);
+    try mlx.check(mlx.mlx_contiguous(&contig, got, false, s));
+    try mlx.check(mlx.mlx_array_eval(contig));
+    const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
+    try reportGemmParity(try measureInnerGemmParityOn(alloc, s, src[0 .. rows * dim], xh, eids, w, dim, dim));
+}
+
+test "exl3 indexed GEMV decodes the w12 fixture to PonyExl3's own inner weights" {
+    try indexedGemvMatchesFixtureInner(exl3.fixtures.k2p5_tiny_w12, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
 }
 
 test "exl3 cooperative indexed GEMV matches the host tile decode at a narrowed codeword window" {
