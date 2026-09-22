@@ -2,7 +2,8 @@
 //!
 //! The source checkpoint is not an MLX checkpoint: routed experts remain
 //! individual native tensors for the expert-store adapter, while resident
-//! trunk projections use the converter's FP8 -> bf16 -> affine-8 contract.
+//! trunk projections are decoded FP8 -> bf16. This loader is the KLD teacher
+//! path, so the trunk carries no quantization step of its own.
 
 const std = @import("std");
 const mlx = @import("mlx.zig");
@@ -15,7 +16,6 @@ const Allocator = std.mem.Allocator;
 const MAX_HEADER_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 512 * 1024 * 1024;
 const FP8_BLOCK: u64 = 128;
-const AFFINE_GROUP: u64 = 64;
 
 const DType = enum {
     bf16,
@@ -84,18 +84,6 @@ fn freeArray(arr: *mlx.mlx_array) void {
     if (arr.ctx != null) _ = mlx.mlx_array_free(arr.*);
     arr.* = .{};
 }
-
-const QuantTriple = struct {
-    weight: mlx.mlx_array,
-    scales: mlx.mlx_array,
-    biases: mlx.mlx_array,
-
-    fn deinit(self: *QuantTriple) void {
-        freeArray(&self.weight);
-        freeArray(&self.scales);
-        freeArray(&self.biases);
-    }
-};
 
 const DecodedQkv = struct {
     q: []f32,
@@ -591,19 +579,11 @@ fn expectShape(meta: TensorMeta, expected: []const u64) !void {
     }
 }
 
-fn affine8Bytes(rows: u64, cols: u64) !u64 {
-    if (rows == 0 or cols == 0 or cols % 4 != 0 or cols % AFFINE_GROUP != 0)
-        return error.InvalidMimoAffineGeometry;
-    const packed_bytes = std.math.mul(u64, rows, cols) catch
+fn denseBf16Bytes(rows: u64, cols: u64) !u64 {
+    if (rows == 0 or cols == 0) return error.InvalidMimoTrunkGeometry;
+    const elements = std.math.mul(u64, rows, cols) catch
         return error.ResidentBytesOverflow;
-    const groups = std.math.divExact(u64, cols, AFFINE_GROUP) catch
-        return error.InvalidMimoAffineGeometry;
-    const side = std.math.mul(
-        u64,
-        std.math.mul(u64, rows, groups) catch return error.ResidentBytesOverflow,
-        4,
-    ) catch return error.ResidentBytesOverflow;
-    return std.math.add(u64, packed_bytes, side) catch error.ResidentBytesOverflow;
+    return std.math.mul(u64, elements, 2) catch error.ResidentBytesOverflow;
 }
 
 fn inferQkvTp(
@@ -660,7 +640,7 @@ fn validateFp8Pair(
 
     const rows = meta.shape[0];
     const cols = meta.shape[1];
-    if (cols == 0 or cols % FP8_BLOCK != 0 or cols % AFFINE_GROUP != 0)
+    if (cols == 0 or cols % FP8_BLOCK != 0)
         return error.InvalidFp8Shape;
     if (isQkvWeightKey(key)) {
         if (cols != config.hidden_size) return error.InvalidFp8Shape;
@@ -937,10 +917,10 @@ fn countResidentBytes(
                 const bytes = if (isQkvWeightKey(key)) blk: {
                     const geometry = qkvGeometry(config, ref.layer);
                     _ = try inferQkvTp(geometry, scale_meta.shape[0]);
-                    break :blk try affine8Bytes(geometry.q_rows, meta.shape[1]) +
-                        try affine8Bytes(geometry.k_rows, meta.shape[1]) +
-                        try affine8Bytes(geometry.v_rows, meta.shape[1]);
-                } else try affine8Bytes(meta.shape[0], meta.shape[1]);
+                    break :blk try denseBf16Bytes(geometry.q_rows, meta.shape[1]) +
+                        try denseBf16Bytes(geometry.k_rows, meta.shape[1]) +
+                        try denseBf16Bytes(geometry.v_rows, meta.shape[1]);
+                } else try denseBf16Bytes(meta.shape[0], meta.shape[1]);
                 total = std.math.add(u64, total, bytes) catch
                     return error.ResidentBytesOverflow;
             },
@@ -1098,49 +1078,26 @@ fn decodeQkv(
     return .{ .q = q, .k = k, .v = v, .allocator = allocator };
 }
 
-fn quantizeAffine8(
-    allocator: Allocator,
+/// The decoded rows as a dense `[rows, cols]` bf16 weight, the orientation
+/// every other dense checkpoint ships (the transformer pre-transposes at bind).
+fn uploadDecodedBf16(
     values: []const f32,
     rows: usize,
     cols: usize,
     stream: mlx.mlx_stream,
-) !QuantTriple {
-    if (values.len != rows * cols) return error.InvalidMimoAffineGeometry;
+) !mlx.mlx_array {
+    if (values.len != rows * cols) return error.InvalidMimoTrunkGeometry;
     var shape = [_]c_int{
-        std.math.cast(c_int, rows) orelse return error.InvalidMimoAffineGeometry,
-        std.math.cast(c_int, cols) orelse return error.InvalidMimoAffineGeometry,
+        std.math.cast(c_int, rows) orelse return error.InvalidMimoTrunkGeometry,
+        std.math.cast(c_int, cols) orelse return error.InvalidMimoTrunkGeometry,
     };
     const dense = mlx.mlx_array_new_data(@ptrCast(values.ptr), &shape, 2, .float32);
     defer _ = mlx.mlx_array_free(dense);
     var bf16 = mlx.mlx_array_new();
-    defer _ = mlx.mlx_array_free(bf16);
+    errdefer _ = mlx.mlx_array_free(bf16);
     try mlx.check(mlx.mlx_astype(&bf16, dense, .bfloat16, stream));
-
-    var outputs = mlx.mlx_vector_array_new();
-    defer _ = mlx.mlx_vector_array_free(outputs);
-    try mlx.check(mlx.mlx_quantize(
-        &outputs,
-        bf16,
-        mlx.mlx_optional_int.some(64),
-        mlx.mlx_optional_int.some(8),
-        "affine",
-        .{},
-        stream,
-    ));
-    if (mlx.mlx_vector_array_size(outputs) != 3)
-        return error.UnexpectedQuantizeOutput;
-    var triple = QuantTriple{
-        .weight = mlx.mlx_array_new(),
-        .scales = mlx.mlx_array_new(),
-        .biases = mlx.mlx_array_new(),
-    };
-    errdefer triple.deinit();
-    try mlx.check(mlx.mlx_vector_array_get(&triple.weight, outputs, 0));
-    try mlx.check(mlx.mlx_vector_array_get(&triple.scales, outputs, 1));
-    try mlx.check(mlx.mlx_vector_array_get(&triple.biases, outputs, 2));
-    try mlx.check(mlx.mlx_eval(outputs));
-    _ = allocator;
-    return triple;
+    try mlx.check(mlx.mlx_array_eval(bf16));
+    return bf16;
 }
 
 fn putWeight(weights: *model.Weights, allocator: Allocator, key: []const u8, arr: mlx.mlx_array) !void {
@@ -1150,29 +1107,17 @@ fn putWeight(weights: *model.Weights, allocator: Allocator, key: []const u8, arr
     try weights.map.put(owned_key, arr);
 }
 
-fn putTriple(
+fn putDense(
     weights: *model.Weights,
     allocator: Allocator,
     base: []const u8,
-    triple: *QuantTriple,
+    arr: *mlx.mlx_array,
 ) !void {
-    const names = [_][]const u8{ ".weight", ".scales", ".biases" };
-    const arrays = [_]*mlx.mlx_array{ &triple.weight, &triple.scales, &triple.biases };
-    var inserted = [_]bool{ false, false, false };
-    errdefer {
-        for (inserted, arrays) |done, arr| {
-            if (!done) {
-                freeArray(arr);
-            }
-        }
-    }
-    for (names, arrays, 0..) |suffix, arr, i| {
-        const key = try std.fmt.allocPrint(allocator, "{s}{s}", .{ base, suffix });
-        defer allocator.free(key);
-        try putWeight(weights, allocator, key, arr.*);
-        arr.* = .{};
-        inserted[i] = true;
-    }
+    errdefer freeArray(arr);
+    const key = try std.fmt.allocPrint(allocator, "{s}.weight", .{base});
+    defer allocator.free(key);
+    try putWeight(weights, allocator, key, arr.*);
+    arr.* = .{};
 }
 
 fn outputQkvBase(allocator: Allocator, source_key: []const u8, projection: []const u8) ![]u8 {
@@ -1230,9 +1175,8 @@ fn loadFp8Weight(
                 'k' => std.math.cast(usize, geometry.k_rows) orelse return error.InvalidQkvGeometry,
                 else => std.math.cast(usize, geometry.v_rows) orelse return error.InvalidQkvGeometry,
             };
-            var triple = try quantizeAffine8(allocator, values, part_rows, cols, stream);
-            errdefer triple.deinit();
-            try putTriple(weights, allocator, base, &triple);
+            var dense = try uploadDecodedBf16(values, part_rows, cols, stream);
+            try putDense(weights, allocator, base, &dense);
         }
     } else {
         const rows = std.math.cast(usize, meta.shape[0]) orelse return error.InvalidFp8Shape;
@@ -1241,9 +1185,8 @@ fn loadFp8Weight(
         const scale_cols = std.math.cast(usize, scale_meta.shape[1]) orelse return error.InvalidFp8Shape;
         const values = try decodeBlocks(allocator, raw, rows, cols, scale_raw, scale_rows, scale_cols);
         defer allocator.free(values);
-        var triple = try quantizeAffine8(allocator, values, rows, cols, stream);
-        errdefer triple.deinit();
-        try putTriple(weights, allocator, fp8Base(key), &triple);
+        var dense = try uploadDecodedBf16(values, rows, cols, stream);
+        try putDense(weights, allocator, fp8Base(key), &dense);
     }
 }
 
@@ -2055,7 +1998,9 @@ test "mimo source loads a complete split map and preserves dense bytes" {
     var fixture = try makeTinySourceFixture(io, std.testing.allocator, &tmp);
     defer fixture.deinit();
 
-    const expected_bytes: u64 = 139008;
+    // 34560 bytes of already-bf16 trunk plus six 128x128 FP8 projections at
+    // two bytes per element.
+    const expected_bytes: u64 = 34560 + 6 * 128 * 128 * 2;
     try std.testing.expectEqual(
         expected_bytes,
         try residentBytesWithConfig(io, std.testing.allocator, fixture.path, &fixture.config),
@@ -2067,11 +2012,13 @@ test "mimo source loads a complete split map and preserves dense bytes" {
 
     var weights = try loadWeights(io, std.testing.allocator, fixture.path, &fixture.config);
     defer weights.deinit();
-    try std.testing.expectEqual(@as(u32, 24), weights.count());
+    try std.testing.expectEqual(@as(u32, 12), weights.count());
     try std.testing.expect(weights.get("model.layers.0.self_attn.qkv_proj.weight") == null);
     try std.testing.expect(weights.get("model.layers.0.self_attn.q_proj.weight") != null);
-    try std.testing.expect(weights.get("model.layers.0.self_attn.k_proj.scales") != null);
-    try std.testing.expect(weights.get("model.layers.0.mlp.gate_proj.biases") != null);
+    // The prepared trunk is dense bf16, so the dense linear path must find no
+    // quantization side channel at all.
+    try std.testing.expect(weights.get("model.layers.0.self_attn.k_proj.scales") == null);
+    try std.testing.expect(weights.get("model.layers.0.mlp.gate_proj.biases") == null);
     try std.testing.expect(weights.get("model.layers.0.mlp.experts.0.gate_proj.weight") == null);
     try std.testing.expect(weights.get("model.mtp.layers.0.fake.weight") == null);
     try std.testing.expect(weights.get("visual.fake") == null);
@@ -2100,23 +2047,16 @@ test "mimo source loads a complete split map and preserves dense bytes" {
         geometry,
     );
     defer decoded.deinit();
-    const stream = mlx.mlx_default_cpu_stream_new();
-    defer _ = mlx.mlx_stream_free(stream);
-    var expected = try quantizeAffine8(std.testing.allocator, decoded.q, 128, 128, stream);
-    defer expected.deinit();
     const loaded_weight = weights.get("model.layers.0.self_attn.q_proj.weight").?;
-    const loaded_scales = weights.get("model.layers.0.self_attn.q_proj.scales").?;
-    const loaded_biases = weights.get("model.layers.0.self_attn.q_proj.biases").?;
-    try std.testing.expectEqual(mlx.mlx_array_size(expected.weight), mlx.mlx_array_size(loaded_weight));
-    try std.testing.expectEqual(mlx.mlx_array_size(expected.scales), mlx.mlx_array_size(loaded_scales));
-    try std.testing.expectEqual(mlx.mlx_array_size(expected.biases), mlx.mlx_array_size(loaded_biases));
-    const want_weight = mlx.mlx_array_data_uint32(expected.weight) orelse return error.TestUnexpectedNullData;
-    const got_weight = mlx.mlx_array_data_uint32(loaded_weight) orelse return error.TestUnexpectedNullData;
-    for (0..mlx.mlx_array_size(expected.weight)) |i| try std.testing.expectEqual(want_weight[i], got_weight[i]);
-    const want_scales = mlx.mlx_array_data_bfloat16(expected.scales) orelse return error.TestUnexpectedNullData;
-    const got_scales = mlx.mlx_array_data_bfloat16(loaded_scales) orelse return error.TestUnexpectedNullData;
-    for (0..mlx.mlx_array_size(expected.scales)) |i| try std.testing.expectEqual(want_scales[i], got_scales[i]);
-    const want_biases = mlx.mlx_array_data_bfloat16(expected.biases) orelse return error.TestUnexpectedNullData;
-    const got_biases = mlx.mlx_array_data_bfloat16(loaded_biases) orelse return error.TestUnexpectedNullData;
-    for (0..mlx.mlx_array_size(expected.biases)) |i| try std.testing.expectEqual(want_biases[i], got_biases[i]);
+    try std.testing.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(loaded_weight));
+    try std.testing.expectEqualSlices(c_int, &[_]c_int{ 128, 128 }, mlx.getShape(loaded_weight));
+    const got = mlx.mlx_array_data_bfloat16(loaded_weight) orelse return error.TestUnexpectedNullData;
+    for (decoded.q, 0..) |want, i| try std.testing.expectEqual(bf16BitsRne(want), got[i]);
+}
+
+/// Round-to-nearest-even f32 -> bf16, the conversion `mlx_astype` performs.
+fn bf16BitsRne(value: f32) u16 {
+    const bits: u32 = @bitCast(value);
+    const rounded = bits +% 0x7fff +% ((bits >> 16) & 1);
+    return @truncate(rounded >> 16);
 }
