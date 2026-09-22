@@ -218,7 +218,7 @@ def _quantize_public(
     from ponyexl3.convert.regularize import regularize_public_weight
     from ponyexl3.ref.codebook import CodebookMode
 
-    cb = CodebookMode.MCG if codebook == "mcg" else CodebookMode.MUL1
+    cb = codebook_mode(codebook)
     reg = regularize_public_weight(public.astype(np.float32), seed=seed)
     suh = reg.suh.astype(np.float16)
     svh = reg.svh.astype(np.float16)
@@ -273,7 +273,7 @@ def _stack_experts(
     _ensure_lib()
     from ponyexl3.convert.regularize import regularize_public_weight
     from ponyexl3.ref.codebook import CodebookMode
-    cb = CodebookMode.MCG if codebook == "mcg" else CodebookMode.MUL1
+    cb = codebook_mode(codebook)
     e, out_dim, in_dim = bank.shape
     publics = []
     cals = []
@@ -933,8 +933,17 @@ def compose_pack(
             "from_expert": conv["from_expert"], "delta_norms": conv["delta_norms"]}
 
 
+def codebook_mode(codebook: str):
+    """The converter's codebook names, mapped to the search's modes; the server admits the same three."""
+    from ponyexl3.ref.codebook import CodebookMode
+    try:
+        return {"mcg": CodebookMode.MCG, "mul1": CodebookMode.MUL1, "tiny": CodebookMode.TINY}[codebook]
+    except KeyError:
+        raise RuntimeError(f"unknown codebook {codebook!r}; expected mcg, mul1 or tiny") from None
+
+
 def expert_quant_block(source: str, **extra) -> dict:
-    """The `expert_quant` block the server admits: exl3, K, mul1 — nothing else."""
+    """The `expert_quant` block the server admits: exl3, K, and one of mul1|tiny|mcg."""
     block = {"format": "exl3", "k": int(K), "codebook": CODEBOOK, "out_scales": "svh", "source": source}
     block.update(extra)
     return block
@@ -1409,6 +1418,19 @@ class ResumeTests(unittest.TestCase):
             self.assertEqual(plan["skipped"], 3)
             for p in dst.glob("model-exl3-L00-*.safetensors"):
                 self.assertEqual(p.stat().st_mtime_ns, mtimes[p.name])
+
+    def test_tiny_k3_conversion_names_its_codebook(self):
+        rng = np.random.default_rng(13)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            hf, pack, dst = td / "hf", td / "pack", td / "out"
+            _write_resume_fixture(hf, pack, rng)
+            convert_pack(hf, pack, dst, quantizer="direct", k=3, codebook="tiny")
+            cfg = json.loads((dst / "config.json").read_text())
+            self.assertEqual(cfg["expert_quant"]["codebook"], "tiny")
+            self.assertEqual(cfg["expert_quant"]["k"], 3)
+            with self.assertRaises(RuntimeError):
+                codebook_mode("mul2")
 
     def test_resume_at_another_k_rewrites_the_shards(self):
         rng = np.random.default_rng(11)
@@ -2256,7 +2278,7 @@ class ComponentOutputTests(unittest.TestCase):
                 patch.object(sys.modules[__name__], "repack_component_output") as repack:
             self.assertEqual(main(), 0)
         convert.assert_called_once_with(
-            "hf", "pack", "staged", quantizer="direct", calibration=None,
+            "hf", "pack", "staged", quantizer="direct", k=4, codebook="mul1", calibration=None,
             imatrix=None, batch_size=32,
         )
         repack.assert_called_once_with("staged", "components", "existing")
@@ -2414,6 +2436,8 @@ def main():
     ap.add_argument("--share-with", default=None,
                     help="existing canonical component pack whose unchanged files may be shared")
     ap.add_argument("--quantizer", default="direct", choices=("ldlq", "direct"))
+    ap.add_argument("--k", type=int, default=K, choices=(2, 3, 4), help="trellis bits per expert weight")
+    ap.add_argument("--codebook", default=CODEBOOK, choices=("mul1", "tiny", "mcg"))
     ap.add_argument("--calibration", default=None)
     ap.add_argument("--imatrix", default=None)
     ap.add_argument("--batch-size", type=int, default=32)
@@ -2478,8 +2502,8 @@ def main():
     if args.imatrix:
         imat = load_imatrix(os.path.expanduser(args.imatrix))
     convert_pack(
-        args.hf, args.pack, args.dst, quantizer=args.quantizer, calibration=cal, imatrix=imat,
-        batch_size=args.batch_size,
+        args.hf, args.pack, args.dst, quantizer=args.quantizer, k=args.k, codebook=args.codebook,
+        calibration=cal, imatrix=imat, batch_size=args.batch_size,
     )
     if args.component_output:
         repack_component_output(args.dst, args.component_output, args.share_with)
