@@ -96,10 +96,9 @@ pub fn kFromPackedDim(last: u64) ?u8 {
     };
 }
 
-/// How a checkpoint stores its ROUTED experts. All banks use leading expert
-/// index; MXFP4 keeps the nine component ids for interleaved loader contracts,
-/// with its three bias slots intentionally absent.
-pub const Layout = enum { bf16_fused, quantized_split, exl3_k4, mxfp4_split };
+/// Routed experts are leading-index banks or individual source tensors.
+/// Both MXFP4 layouts use nine component ids with three absent bias slots.
+pub const Layout = enum { bf16_fused, quantized_split, exl3_k4, mxfp4_split, mxfp4_individual };
 
 pub const REDUCE_BANK_TOPK: u32 = 32;
 
@@ -180,6 +179,98 @@ pub fn mxfp4TensorKey(buf: []u8, layer: u16, projection: Projection, part: Part)
     });
 }
 
+/// Native MiMo source tensors are one expert per tensor. Their packed U8
+/// weight bytes are relabelled as U32 by the loader; no payload conversion is
+/// needed. The source uses `weight_scale`, not the FP8 trunk's `weight_scale_inv`.
+pub fn mxfp4IndividualTensorKey(
+    buf: []u8,
+    layer: u16,
+    expert: u16,
+    projection: Projection,
+    part: Part,
+) ![]const u8 {
+    const suffix = switch (part) {
+        .weight => "weight",
+        .scales => "weight_scale",
+        .biases => return error.Mxfp4BiasUnsupported,
+    };
+    return std.fmt.bufPrint(buf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.{s}", .{
+        layer,
+        expert,
+        @tagName(projection),
+        suffix,
+    });
+}
+
+fn isMxfp4Layout(layout: Layout) bool {
+    return layout == .mxfp4_split or layout == .mxfp4_individual;
+}
+
+const ParsedMxfp4IndividualKey = struct {
+    layer: u16,
+    expert: u16,
+    projection: Projection,
+    part: Part,
+};
+
+const Mxfp4IndividualKeyParse = union(enum) {
+    not_family,
+    malformed,
+    valid: ParsedMxfp4IndividualKey,
+};
+
+fn decimalU16(text: []const u8) ?u16 {
+    if (text.len == 0) return null;
+    for (text) |byte| {
+        if (!std.ascii.isDigit(byte)) return null;
+    }
+    return std.fmt.parseInt(u16, text, 10) catch null;
+}
+
+fn parseMxfp4IndividualKey(key: []const u8) Mxfp4IndividualKeyParse {
+    const prefix = "model.layers.";
+    if (!std.mem.startsWith(u8, key, prefix)) return .not_family;
+    const after_prefix = key[prefix.len..];
+    const layer_dot = std.mem.indexOfScalar(u8, after_prefix, '.') orelse return .not_family;
+    const layer_text = after_prefix[0..layer_dot];
+    if (layer_text.len != 0 and (layer_text[0] == '-' or layer_text[0] == '+')) return .malformed;
+    if (layer_text.len == 0 or !std.ascii.isDigit(layer_text[0])) return .not_family;
+    const layer = decimalU16(layer_text) orelse return .malformed;
+
+    const experts_prefix = "mlp.experts.";
+    const after_layer = after_prefix[layer_dot + 1 ..];
+    if (!std.mem.startsWith(u8, after_layer, experts_prefix)) return .not_family;
+    const after_experts = after_layer[experts_prefix.len..];
+    // The dense fused expert format has no numeric expert component. It is a
+    // different family, not malformed individual source metadata.
+    if (after_experts.len != 0 and (after_experts[0] == '-' or after_experts[0] == '+')) return .malformed;
+    if (after_experts.len == 0 or !std.ascii.isDigit(after_experts[0])) return .not_family;
+    const expert_dot = std.mem.indexOfScalar(u8, after_experts, '.') orelse return .malformed;
+    const expert = decimalU16(after_experts[0..expert_dot]) orelse return .malformed;
+    const tail = after_experts[expert_dot + 1 ..];
+
+    const projection: Projection = if (std.mem.startsWith(u8, tail, "gate_proj."))
+        .gate
+    else if (std.mem.startsWith(u8, tail, "up_proj."))
+        .up
+    else if (std.mem.startsWith(u8, tail, "down_proj."))
+        .down
+    else
+        return .malformed;
+    const suffix = tail[(switch (projection) {
+        .gate => "gate_proj.".len,
+        .up => "up_proj.".len,
+        .down => "down_proj.".len,
+    })..];
+    const part: Part = if (std.mem.eql(u8, suffix, "weight"))
+        .weight
+    else if (std.mem.eql(u8, suffix, "weight_scale"))
+        .scales
+    else
+        return .malformed;
+    return .{ .valid = .{ .layer = layer, .expert = expert, .projection = projection, .part = part } };
+}
+
 /// True when `key` names a routed-expert bank of `layout` — the tensors the
 /// streamed loader must NOT fault into RAM.
 pub fn isRoutedExpertKey(layout: Layout, key: []const u8) bool {
@@ -194,6 +285,7 @@ pub fn isRoutedExpertKey(layout: Layout, key: []const u8) bool {
             std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null,
         .mxfp4_split => std.mem.startsWith(u8, key, "model.layers.") and
             std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null,
+        .mxfp4_individual => parseMxfp4IndividualKey(key) == .valid,
     };
 }
 
@@ -238,10 +330,130 @@ fn mxfp4BankCompleteFromFirst(map: std.json.ObjectMap, layers: u16, first_moe_la
     return true;
 }
 
+const IndividualMapState = struct {
+    seen: bool = false,
+    malformed: bool = false,
+    out_of_range: bool = false,
+    dense_prefix: bool = false,
+    max_expert: u16 = 0,
+};
+
+fn inspectMxfp4IndividualMap(
+    map: std.json.ObjectMap,
+    layers: u16,
+    experts: ?u16,
+    first_moe_layer: u16,
+) IndividualMapState {
+    var state: IndividualMapState = .{};
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        switch (parseMxfp4IndividualKey(entry.key_ptr.*)) {
+            .not_family => {},
+            .malformed => state.malformed = true,
+            .valid => |parsed| {
+                state.seen = true;
+                state.max_expert = @max(state.max_expert, parsed.expert);
+                if (entry.value_ptr.* != .string) state.malformed = true;
+                if (parsed.layer < first_moe_layer) state.dense_prefix = true;
+                if (parsed.layer >= layers or (experts != null and parsed.expert >= experts.?))
+                    state.out_of_range = true;
+            },
+        }
+    }
+    return state;
+}
+
+fn mxfp4IndividualBankCompleteFromFirst(
+    map: std.json.ObjectMap,
+    layers: u16,
+    experts: ?u16,
+    first_moe_layer: u16,
+) bool {
+    if (layers == 0 or first_moe_layer == 0 or first_moe_layer >= layers) return false;
+    const state = inspectMxfp4IndividualMap(map, layers, experts, first_moe_layer);
+    if (!state.seen or state.malformed or state.out_of_range or state.dense_prefix) return false;
+    const expert_count: u32 = if (experts) |count|
+        count
+    else
+        @as(u32, state.max_expert) + 1;
+    if (expert_count == 0 or expert_count > std.math.maxInt(u16)) return false;
+
+    var buf: [192]u8 = undefined;
+    for (first_moe_layer..layers) |layer_usize| {
+        const layer: u16 = @intCast(layer_usize);
+        for (0..expert_count) |expert_usize| {
+            const expert: u16 = @intCast(expert_usize);
+            for ([_]Projection{ .gate, .up, .down }) |projection| {
+                for ([_]Part{ .weight, .scales }) |part| {
+                    const key = mxfp4IndividualTensorKey(&buf, layer, expert, projection, part) catch return false;
+                    if (!stringAt(map, key)) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+fn hasAnyMxfp4SplitKey(map: std.json.ObjectMap, layers: u16) bool {
+    var buf: [192]u8 = undefined;
+    for (0..layers) |layer_usize| {
+        const layer: u16 = @intCast(layer_usize);
+        for ([_]Projection{ .gate, .up, .down }) |projection| {
+            for ([_]Part{ .weight, .scales }) |part| {
+                const key = mxfp4TensorKey(&buf, layer, projection, part) catch return true;
+                if (map.get(key) != null) return true;
+            }
+            const bias = std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.biases", .{
+                layer,
+                @tagName(projection),
+            }) catch return true;
+            if (map.get(bias) != null) return true;
+        }
+    }
+    return false;
+}
+
+fn hasAnyAlternativeExpertKey(map: std.json.ObjectMap, layers: u16, include_mxfp4_split: bool) bool {
+    if (include_mxfp4_split and hasAnyMxfp4SplitKey(map, layers)) return true;
+    var buf: [192]u8 = undefined;
+    for (0..layers) |layer_usize| {
+        const layer: u16 = @intCast(layer_usize);
+        for (0..component_count) |ci| {
+            const c: Component = @fromBackingInt(@intCast(ci));
+            const key = tensorKey(&buf, layer, c) catch return true;
+            if (map.get(key) != null) return true;
+        }
+        for ([_][]const u8{ "gate", "up", "down" }) |projection| {
+            for ([_][]const u8{ "trellis", "suh", "svh" }) |part| {
+                const key = std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.mlp.switch_mlp.{s}_proj.{s}", .{
+                    layer,
+                    projection,
+                    part,
+                }) catch return true;
+                if (map.get(key) != null) return true;
+            }
+        }
+    }
+    return false;
+}
+
 fn layoutFromWeightMapWithFirstMoe(map: std.json.ObjectMap, layers: u16, first_moe_layer: u16) ?Layout {
     if (layers == 0) return null;
+    // Individual source keys are intentionally checked before every packed
+    // layout. A complete bank beside any other routed bank is ambiguous.
+    const individual_state = inspectMxfp4IndividualMap(map, layers, null, first_moe_layer);
+    if (individual_state.malformed) return null;
+    if (individual_state.seen) {
+        if (individual_state.out_of_range or individual_state.dense_prefix or
+            !mxfp4IndividualBankCompleteFromFirst(map, layers, null, first_moe_layer) or
+            hasAnyAlternativeExpertKey(map, layers, true))
+            return null;
+        return .mxfp4_individual;
+    }
     var buf: [192]u8 = undefined;
-    if (mxfp4BankCompleteFromFirst(map, layers, first_moe_layer)) return .mxfp4_split;
+    if (mxfp4BankCompleteFromFirst(map, layers, first_moe_layer)) {
+        return if (hasAnyAlternativeExpertKey(map, layers, false)) null else .mxfp4_split;
+    }
     var fused = true;
     for (0..layers) |layer| {
         const gate = fusedTensorKey(&buf, @intCast(layer), false) catch return null;
@@ -309,7 +521,7 @@ pub fn layoutFromIndexJsonWithFirstMoe(
     const map = parsed.value.object.get("weight_map") orelse return null;
     if (map != .object) return null;
     const layout = layoutFromWeightMapWithFirstMoe(map.object, layers, first_moe_layer) orelse return null;
-    if (layout == .mxfp4_split) {
+    if (layout == .mxfp4_split or layout == .mxfp4_individual) {
         return if (std.mem.eql(u8, model_type, "mimo_v2")) layout else null;
     }
     return if (std.mem.eql(u8, model_type, "mimo_v2")) null else layout;
@@ -328,6 +540,7 @@ pub fn layoutOfDirWithFirstMoe(
     first_moe_layer: u16,
 ) ?Layout {
     if (!isExpertStreamingArch(model_type)) return null;
+    if (model_dir.len == 0 or !std.fs.path.isAbsolute(model_dir)) return null;
     var dir = std.Io.Dir.openDirAbsolute(io, model_dir, .{}) catch return null;
     defer dir.close(io);
     const raw = dir.readFileAlloc(io, "model.safetensors.index.json", allocator, .limited(64 * 1024 * 1024)) catch return null;
@@ -339,9 +552,16 @@ pub fn layoutOfDir(allocator: std.mem.Allocator, io: std.Io, model_type: []const
     return layoutOfDirWithFirstMoe(allocator, io, model_type, model_dir, layers, 1);
 }
 
+const SourceHeader = struct {
+    parsed: std.json.Parsed(std.json.Value),
+    data_offset: u64,
+    file_size: u64,
+};
+
 const SourceFile = struct {
     name: []u8,
     fd: std.c.fd_t,
+    header: ?SourceHeader = null,
 };
 
 pub fn moeLayerCount(geometry: Geometry) u16 {
@@ -373,7 +593,7 @@ pub const QuantStore = struct {
     }
 
     pub fn componentPresent(self: *const QuantStore, c: Component) bool {
-        return self.layout != .mxfp4_split or partOf(c) != .biases;
+        return !isMxfp4Layout(self.layout) or partOf(c) != .biases;
     }
 
     pub fn span(self: *const QuantStore, layer: u16, expert: u16, c: Component) SourceSpan {
@@ -417,10 +637,11 @@ pub const QuantStore = struct {
         geometry: Geometry,
         chosen: Layout,
     ) !QuantStore {
+        if (model_dir.len == 0 or !std.fs.path.isAbsolute(model_dir)) return error.InvalidExpertModelPath;
         if (geometry.layers == 0 or geometry.experts == 0 or geometry.hidden == 0 or geometry.intermediate == 0 or
             geometry.first_moe_layer > geometry.layers)
             return error.InvalidExpertGeometry;
-        if (chosen == .mxfp4_split and
+        if (isMxfp4Layout(chosen) and
             (geometry.first_moe_layer == 0 or moeLayerCount(geometry) == 0))
             return error.Mxfp4DensePrefixMismatch;
 
@@ -438,10 +659,7 @@ pub const QuantStore = struct {
 
         var files_list: std.ArrayList(SourceFile) = .empty;
         errdefer {
-            for (files_list.items) |file| {
-                _ = std.c.close(file.fd);
-                allocator.free(file.name);
-            }
+            for (files_list.items) |*file| deinitSourceFile(allocator, file);
             files_list.deinit(allocator);
         }
         const per_layer = std.math.mul(usize, geometry.experts, component_count) catch return error.InvalidExpertGeometry;
@@ -464,7 +682,7 @@ pub const QuantStore = struct {
         };
 
         var key_buf: [192]u8 = undefined;
-        const first_layer: u16 = if (chosen == .mxfp4_split) geometry.first_moe_layer else 0;
+        const first_layer: u16 = if (isMxfp4Layout(chosen)) geometry.first_moe_layer else 0;
         if (chosen == .mxfp4_split) {
             // Banks before first_moe_layer must be absent. A dense layer with a
             // stray switch tensor is not safe to reinterpret as a routed bank.
@@ -484,72 +702,81 @@ pub const QuantStore = struct {
             }
         }
 
-        var metadata_ready = false;
-        for (first_layer..geometry.layers) |layer_usize| {
-            const layer: u16 = @intCast(layer_usize);
-            for (0..component_count) |ci| {
-                const c: Component = @fromBackingInt(@intCast(ci));
-                if (chosen == .mxfp4_split and partOf(c) == .biases) {
-                    const bias_key = std.fmt.bufPrint(&key_buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.biases", .{
-                        layer,
-                        @tagName(projectionOf(c)),
-                    }) catch return error.InvalidExpertGeometry;
-                    if (weight_map.get(bias_key) != null) return error.Mxfp4BiasUnsupported;
-                    continue;
-                }
-                const key = if (chosen == .mxfp4_split)
-                    mxfp4TensorKey(&key_buf, layer, projectionOf(c), partOf(c)) catch return error.InvalidExpertGeometry
-                else
-                    tensorKey(&key_buf, layer, c) catch return error.InvalidExpertGeometry;
-                const mapped = weight_map.get(key) orelse return error.MissingExpertTensor;
-                if (mapped != .string) return error.InvalidSafetensorsIndex;
-                const file = try openSource(allocator, &files_list, model_dir, mapped.string);
-                const region = io_mod.tensorRegion(allocator, files_list.items[file].fd, key) catch |err| return switch (err) {
-                    error.MissingSafetensorsTensor => error.MissingExpertTensor,
-                    error.SafetensorsTensorOutOfBounds => error.ExpertTensorOutOfBounds,
-                    else => error.InvalidExpertTensor,
-                };
-                if (region.rank != 3 or region.shape[0] != geometry.experts) return error.InvalidExpertTensor;
-                if (region.shape[1] == 0 or region.shape[1] > std.math.maxInt(u32)) return error.InvalidExpertTensor;
-                if (region.shape[2] == 0 or region.shape[2] > std.math.maxInt(u32)) return error.InvalidExpertTensor;
-                const elem: u64 = switch (region.dtype) {
-                    .bf16 => 2,
-                    .u8 => 1,
-                    .u32 => 4,
-                    .other => return error.InvalidExpertTensor,
-                };
-                const expected_rows = std.math.mul(u64, region.shape[0], region.shape[1]) catch return error.InvalidExpertTensor;
-                const expected_elems = std.math.mul(u64, expected_rows, region.shape[2]) catch return error.InvalidExpertTensor;
-                const expected_bytes = std.math.mul(u64, elem, expected_elems) catch return error.InvalidExpertTensor;
-                if (region.tensor_bytes != expected_bytes) return error.InvalidExpertTensor;
-                const per_expert = region.tensor_bytes / geometry.experts;
-                if (!metadata_ready) {
-                    store.rows[ci] = @intCast(region.shape[1]);
-                    store.cols[ci] = @intCast(region.shape[2]);
-                    store.dtypes[ci] = region.dtype;
-                    store.slot_bytes[ci] = per_expert;
-                } else if (store.rows[ci] != region.shape[1] or store.cols[ci] != region.shape[2] or
-                    store.dtypes[ci] != region.dtype or store.slot_bytes[ci] != per_expert)
-                {
-                    return error.MixedExpertBankGeometry;
-                }
-                const base = std.math.add(u64, region.data_offset, region.tensor_offset) catch return error.InvalidExpertTensor;
-                for (0..geometry.experts) |expert| {
-                    spans[(layer_usize * geometry.experts + expert) * component_count + ci] = .{
-                        .file = file,
-                        .offset = std.math.add(u64, base, @as(u64, expert) * per_expert) catch return error.InvalidExpertTensor,
-                        .len = per_expert,
+        if (chosen == .mxfp4_individual) {
+            try populateMxfp4IndividualStore(
+                allocator,
+                model_dir,
+                weight_map,
+                &files_list,
+                &store,
+            );
+        } else {
+            var metadata_ready = false;
+            for (first_layer..geometry.layers) |layer_usize| {
+                const layer: u16 = @intCast(layer_usize);
+                for (0..component_count) |ci| {
+                    const c: Component = @fromBackingInt(@intCast(ci));
+                    if (chosen == .mxfp4_split and partOf(c) == .biases) {
+                        const bias_key = std.fmt.bufPrint(&key_buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.biases", .{
+                            layer,
+                            @tagName(projectionOf(c)),
+                        }) catch return error.InvalidExpertGeometry;
+                        if (weight_map.get(bias_key) != null) return error.Mxfp4BiasUnsupported;
+                        continue;
+                    }
+                    const key = if (chosen == .mxfp4_split)
+                        mxfp4TensorKey(&key_buf, layer, projectionOf(c), partOf(c)) catch return error.InvalidExpertGeometry
+                    else
+                        tensorKey(&key_buf, layer, c) catch return error.InvalidExpertGeometry;
+                    const mapped = weight_map.get(key) orelse return error.MissingExpertTensor;
+                    if (mapped != .string) return error.InvalidSafetensorsIndex;
+                    const file = try openSource(allocator, &files_list, model_dir, mapped.string);
+                    const region = io_mod.tensorRegion(allocator, files_list.items[file].fd, key) catch |err| return switch (err) {
+                        error.MissingSafetensorsTensor => error.MissingExpertTensor,
+                        error.SafetensorsTensorOutOfBounds => error.ExpertTensorOutOfBounds,
+                        else => error.InvalidExpertTensor,
                     };
+                    if (region.rank != 3 or region.shape[0] != geometry.experts) return error.InvalidExpertTensor;
+                    if (region.shape[1] == 0 or region.shape[1] > std.math.maxInt(u32)) return error.InvalidExpertTensor;
+                    if (region.shape[2] == 0 or region.shape[2] > std.math.maxInt(u32)) return error.InvalidExpertTensor;
+                    const elem: u64 = switch (region.dtype) {
+                        .bf16 => 2,
+                        .u8 => 1,
+                        .u32 => 4,
+                        .other => return error.InvalidExpertTensor,
+                    };
+                    const expected_rows = std.math.mul(u64, region.shape[0], region.shape[1]) catch return error.InvalidExpertTensor;
+                    const expected_elems = std.math.mul(u64, expected_rows, region.shape[2]) catch return error.InvalidExpertTensor;
+                    const expected_bytes = std.math.mul(u64, elem, expected_elems) catch return error.InvalidExpertTensor;
+                    if (region.tensor_bytes != expected_bytes) return error.InvalidExpertTensor;
+                    const per_expert = region.tensor_bytes / geometry.experts;
+                    if (!metadata_ready) {
+                        store.rows[ci] = @intCast(region.shape[1]);
+                        store.cols[ci] = @intCast(region.shape[2]);
+                        store.dtypes[ci] = region.dtype;
+                        store.slot_bytes[ci] = per_expert;
+                    } else if (store.rows[ci] != region.shape[1] or store.cols[ci] != region.shape[2] or
+                        store.dtypes[ci] != region.dtype or store.slot_bytes[ci] != per_expert)
+                    {
+                        return error.MixedExpertBankGeometry;
+                    }
+                    const base = std.math.add(u64, region.data_offset, region.tensor_offset) catch return error.InvalidExpertTensor;
+                    for (0..geometry.experts) |expert| {
+                        spans[(layer_usize * geometry.experts + expert) * component_count + ci] = .{
+                            .file = file,
+                            .offset = std.math.add(u64, base, @as(u64, expert) * per_expert) catch return error.InvalidExpertTensor,
+                            .len = per_expert,
+                        };
+                    }
+                    // The first layer establishes all component metadata; later
+                    // layers are checked against it above.
+                    if (ci + 1 == component_count or
+                        (chosen == .mxfp4_split and ci == @backingInt(Component.down_s)))
+                        metadata_ready = true;
                 }
-                // The first layer establishes all component metadata; later
-                // layers are checked against it above.
-                if (ci + 1 == component_count or
-                    (chosen == .mxfp4_split and ci == @backingInt(Component.down_s)))
-                    metadata_ready = true;
             }
+            if (!metadata_ready) return error.MissingExpertTensor;
         }
-
-        if (!metadata_ready) return error.MissingExpertTensor;
         for ([_]Projection{ .gate, .up, .down }) |p| {
             const in_dim: u64 = if (p == .down) geometry.intermediate else geometry.hidden;
             const out_rows: u64 = if (p == .down) geometry.hidden else geometry.intermediate;
@@ -557,7 +784,7 @@ pub const QuantStore = struct {
             const sc = scalesOf(p);
             if (store.rows[@backingInt(w)] != out_rows or store.rows[@backingInt(sc)] != out_rows)
                 return error.InvalidExpertTensor;
-            if (chosen == .mxfp4_split) {
+            if (isMxfp4Layout(chosen)) {
                 if (store.dtypes[@backingInt(w)] != .u32 or store.dtypes[@backingInt(sc)] != .u8)
                     return error.InvalidExpertTensor;
                 const geom = mxfp4GeomFromShapes(
@@ -570,11 +797,13 @@ pub const QuantStore = struct {
                 ) orelse return error.UnsupportedExpertQuant;
                 store.geoms[@backingInt(w)] = geom;
                 store.geoms[@backingInt(sc)] = geom;
-                const bias_key = std.fmt.bufPrint(&key_buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.biases", .{
-                    first_layer,
-                    @tagName(p),
-                }) catch return error.InvalidExpertGeometry;
-                if (weight_map.get(bias_key) != null) return error.Mxfp4BiasUnsupported;
+                if (chosen == .mxfp4_split) {
+                    const bias_key = std.fmt.bufPrint(&key_buf, "model.layers.{d}.mlp.switch_mlp.{s}_proj.biases", .{
+                        first_layer,
+                        @tagName(p),
+                    }) catch return error.InvalidExpertGeometry;
+                    if (weight_map.get(bias_key) != null) return error.Mxfp4BiasUnsupported;
+                }
             } else {
                 if (store.dtypes[@backingInt(w)] != .u32 or store.dtypes[@backingInt(sc)] != .bf16)
                     return error.InvalidExpertTensor;
@@ -587,15 +816,17 @@ pub const QuantStore = struct {
             }
         }
 
+        // Parsed headers are needed only while constructing the source spans.
+        for (files_list.items) |*file| {
+            if (file.header) |*header| header.parsed.deinit();
+            file.header = null;
+        }
         store.files = try files_list.toOwnedSlice(allocator);
         return store;
     }
 
     pub fn deinit(self: *QuantStore) void {
-        for (self.files) |file| {
-            _ = std.c.close(file.fd);
-            self.allocator.free(file.name);
-        }
+        for (self.files) |*file| deinitSourceFile(self.allocator, file);
         self.allocator.free(self.files);
         self.allocator.free(self.spans);
         self.* = undefined;
@@ -630,6 +861,88 @@ pub fn biasesOf(p: Projection) Component {
     };
 }
 
+fn deinitSourceFile(allocator: std.mem.Allocator, file: *SourceFile) void {
+    if (file.header) |*header| header.parsed.deinit();
+    _ = std.c.close(file.fd);
+    allocator.free(file.name);
+}
+
+fn cacheSourceHeader(allocator: std.mem.Allocator, file: *SourceFile) !void {
+    if (file.header != null) return;
+    var len_bytes: [8]u8 = undefined;
+    try io_mod.readExact(file.fd, &len_bytes, 0);
+    const header_len = std.mem.readInt(u64, &len_bytes, .little);
+    if (header_len == 0 or header_len > 128 * 1024 * 1024) return error.InvalidSafetensorsHeader;
+    const header_bytes = try allocator.alloc(u8, @intCast(header_len));
+    defer allocator.free(header_bytes);
+    try io_mod.readExact(file.fd, header_bytes, 8);
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, header_bytes, .{}) catch
+        return error.InvalidSafetensorsHeader;
+    errdefer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidSafetensorsHeader;
+
+    var st: std.c.Stat = undefined;
+    if (std.c.fstat(file.fd, &st) != 0 or st.size < 0) return error.InvalidSafetensorsHeader;
+    const data_offset = std.math.add(u64, 8, header_len) catch return error.InvalidSafetensorsHeader;
+    file.header = .{
+        .parsed = parsed,
+        .data_offset = data_offset,
+        .file_size = @intCast(st.size),
+    };
+}
+
+fn cachedTensorRegion(file: *const SourceFile, key: []const u8) !io_mod.TensorRegion {
+    const header = file.header orelse return error.InvalidSafetensorsHeader;
+    const value = header.parsed.value.object.get(key) orelse return error.MissingSafetensorsTensor;
+    if (value != .object) return error.InvalidSafetensorsTensor;
+    const object = value.object;
+    const dtype = object.get("dtype") orelse return error.InvalidSafetensorsTensor;
+    if (dtype != .string) return error.InvalidSafetensorsTensor;
+    const dt: io_mod.Dtype = if (std.mem.eql(u8, dtype.string, "BF16"))
+        .bf16
+    else if (std.mem.eql(u8, dtype.string, "U8") or std.mem.eql(u8, dtype.string, "UINT8"))
+        .u8
+    else if (std.mem.eql(u8, dtype.string, "U32") or std.mem.eql(u8, dtype.string, "UINT32"))
+        .u32
+    else
+        .other;
+    const shape = object.get("shape") orelse return error.InvalidSafetensorsTensor;
+    if (shape != .array or shape.array.items.len < 2 or shape.array.items.len > 3)
+        return error.InvalidSafetensorsTensor;
+    var dimensions: [3]u64 = .{ 0, 0, 0 };
+    var elements: u64 = 1;
+    for (shape.array.items, 0..) |dim, i| {
+        if (dim != .integer or dim.integer <= 0) return error.InvalidSafetensorsTensor;
+        dimensions[i] = @intCast(dim.integer);
+        elements = std.math.mul(u64, elements, dimensions[i]) catch return error.InvalidSafetensorsTensor;
+    }
+    if (elements == 0) return error.InvalidSafetensorsTensor;
+    const offsets = object.get("data_offsets") orelse return error.InvalidSafetensorsTensor;
+    if (offsets != .array or offsets.array.items.len != 2) return error.InvalidSafetensorsTensor;
+    const start = offsets.array.items[0];
+    const end = offsets.array.items[1];
+    if (start != .integer or end != .integer or start.integer < 0 or end.integer < start.integer)
+        return error.InvalidSafetensorsTensor;
+    const start_u: u64 = @intCast(start.integer);
+    const end_u: u64 = @intCast(end.integer);
+    const bytes = end_u - start_u;
+    const absolute_end = std.math.add(u64, header.data_offset, end_u) catch return error.InvalidSafetensorsTensor;
+    if (absolute_end > header.file_size) return error.SafetensorsTensorOutOfBounds;
+    return .{
+        .data_offset = header.data_offset,
+        .tensor_offset = start_u,
+        .tensor_bytes = bytes,
+        .shape = dimensions,
+        .rank = @intCast(shape.array.items.len),
+        .dtype = dt,
+    };
+}
+
+fn sourceTensorRegion(allocator: std.mem.Allocator, file: *SourceFile, key: []const u8) !io_mod.TensorRegion {
+    try cacheSourceHeader(allocator, file);
+    return cachedTensorRegion(file, key);
+}
+
 fn openSource(allocator: std.mem.Allocator, list: *std.ArrayList(SourceFile), dir_path: []const u8, name: []const u8) !u16 {
     for (list.items, 0..) |file, i| {
         if (std.mem.eql(u8, file.name, name)) return @intCast(i);
@@ -645,6 +958,178 @@ fn openSource(allocator: std.mem.Allocator, list: *std.ArrayList(SourceFile), di
     errdefer allocator.free(owned_name);
     try list.append(allocator, .{ .name = owned_name, .fd = fd });
     return @intCast(list.items.len - 1);
+}
+
+fn validateMxfp4IndividualMap(
+    map: std.json.ObjectMap,
+    geometry: Geometry,
+) !void {
+    const state = inspectMxfp4IndividualMap(
+        map,
+        geometry.layers,
+        geometry.experts,
+        geometry.first_moe_layer,
+    );
+    if (!state.seen) return error.MissingExpertTensor;
+    if (state.dense_prefix) return error.Mxfp4DensePrefixMismatch;
+    if (state.malformed or state.out_of_range or hasAnyAlternativeExpertKey(map, geometry.layers, true))
+        return error.InvalidSafetensorsIndex;
+    if (!mxfp4IndividualBankCompleteFromFirst(
+        map,
+        geometry.layers,
+        geometry.experts,
+        geometry.first_moe_layer,
+    ))
+        return error.MissingExpertTensor;
+}
+
+fn populateMxfp4IndividualStore(
+    allocator: std.mem.Allocator,
+    model_dir: []const u8,
+    weight_map: std.json.ObjectMap,
+    files_list: *std.ArrayList(SourceFile),
+    store: *QuantStore,
+) !void {
+    const geometry = store.geometry;
+    try validateMxfp4IndividualMap(weight_map, geometry);
+
+    var metadata_ready = false;
+    var key_buf: [192]u8 = undefined;
+    for (geometry.first_moe_layer..geometry.layers) |layer_usize| {
+        const layer: u16 = @intCast(layer_usize);
+        for (0..geometry.experts) |expert_usize| {
+            const expert: u16 = @intCast(expert_usize);
+            for ([_]Projection{ .gate, .up, .down }) |projection| {
+                const in_dim: u64 = if (projection == .down) geometry.intermediate else geometry.hidden;
+                const out_rows: u64 = if (projection == .down) geometry.hidden else geometry.intermediate;
+                if (in_dim % 32 != 0) return error.UnsupportedExpertQuant;
+                for ([_]Part{ .weight, .scales }) |part| {
+                    const c: Component = if (part == .weight) weightOf(projection) else scalesOf(projection);
+                    const key = mxfp4IndividualTensorKey(&key_buf, layer, expert, projection, part) catch
+                        return error.InvalidExpertGeometry;
+                    const mapped = weight_map.get(key) orelse return error.MissingExpertTensor;
+                    if (mapped != .string) return error.InvalidSafetensorsIndex;
+                    const file = try openSource(allocator, files_list, model_dir, mapped.string);
+                    const region = sourceTensorRegion(allocator, &files_list.items[file], key) catch |err| return switch (err) {
+                        error.MissingSafetensorsTensor => error.MissingExpertTensor,
+                        error.SafetensorsTensorOutOfBounds => error.ExpertTensorOutOfBounds,
+                        else => error.InvalidExpertTensor,
+                    };
+                    if (region.rank != 2 or region.dtype != .u8 or
+                        region.shape[0] != out_rows)
+                        return error.InvalidExpertTensor;
+                    const raw_cols: u64 = if (part == .weight) in_dim / 2 else in_dim / 32;
+                    const canonical_cols: u64 = if (part == .weight) in_dim / 8 else in_dim / 32;
+                    if (region.shape[1] != raw_cols or raw_cols > std.math.maxInt(u32) or
+                        canonical_cols > std.math.maxInt(u32))
+                        return error.InvalidExpertTensor;
+                    const expected_bytes = std.math.mul(u64, out_rows, raw_cols) catch return error.InvalidExpertTensor;
+                    if (region.tensor_bytes != expected_bytes) return error.InvalidExpertTensor;
+                    const canonical_dtype: io_mod.Dtype = if (part == .weight) .u32 else .u8;
+                    const slot_bytes = region.tensor_bytes;
+                    const ci = @backingInt(c);
+                    if (!metadata_ready) {
+                        store.rows[ci] = @intCast(out_rows);
+                        store.cols[ci] = @intCast(canonical_cols);
+                        store.dtypes[ci] = canonical_dtype;
+                        store.slot_bytes[ci] = slot_bytes;
+                    } else if (store.rows[ci] != out_rows or store.cols[ci] != canonical_cols or
+                        store.dtypes[ci] != canonical_dtype or store.slot_bytes[ci] != slot_bytes)
+                    {
+                        return error.MixedExpertBankGeometry;
+                    }
+                    const base = std.math.add(u64, region.data_offset, region.tensor_offset) catch return error.InvalidExpertTensor;
+                    store.spans[store.sourceIndex(layer, expert, c)] = .{
+                        .file = file,
+                        .offset = base,
+                        .len = slot_bytes,
+                    };
+                    if (layer == geometry.first_moe_layer and expert == 0 and
+                        projection == .down and part == .scales)
+                        metadata_ready = true;
+                }
+            }
+        }
+    }
+    if (!metadata_ready) return error.MissingExpertTensor;
+}
+
+/// Write a small raw MiMo expert source fixture. The payload intentionally
+/// stores each expert as down, gate, up, unlike Component order, so tests prove
+/// that spans come from each header entry rather than a guessed fixed stride.
+pub fn writeTinyMxfp4IndividualCheckpoint(
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    experts: u16,
+    hidden: u32,
+    inter: u32,
+) ![]u8 {
+    if (experts == 0 or hidden == 0 or inter == 0 or hidden % 32 != 0 or inter % 32 != 0)
+        return error.InvalidExpertGeometry;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const Plan = struct {
+        offset: u64,
+        len: u64,
+        scale: bool,
+    };
+    var plans: std.ArrayList(Plan) = .empty;
+    defer plans.deinit(allocator);
+    var header: std.ArrayList(u8) = .empty;
+    defer header.deinit(allocator);
+    var index: std.ArrayList(u8) = .empty;
+    defer index.deinit(allocator);
+    try header.append(allocator, '{');
+    try index.appendSlice(allocator, "{\"weight_map\":{");
+
+    var payload_len: u64 = 0;
+    var key_buf: [192]u8 = undefined;
+    var entry_count: usize = 0;
+    for (0..experts) |expert_usize| {
+        const expert: u16 = @intCast(expert_usize);
+        for ([_]Projection{ .down, .gate, .up }) |projection| {
+            const in_dim: u64 = if (projection == .down) inter else hidden;
+            const rows: u64 = if (projection == .down) hidden else inter;
+            for ([_]Part{ .weight, .scales }) |part| {
+                const key = try mxfp4IndividualTensorKey(&key_buf, 1, expert, projection, part);
+                const cols = if (part == .weight) in_dim / 2 else in_dim / 32;
+                const len = std.math.mul(u64, rows, cols) catch return error.InvalidExpertGeometry;
+                const sep: []const u8 = if (entry_count == 0) "" else ",";
+                const entry = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}\"{s}\":{{\"dtype\":\"U8\",\"shape\":[{d},{d}],\"data_offsets\":[{d},{d}]}}",
+                    .{ sep, key, rows, cols, payload_len, payload_len + len },
+                );
+                defer allocator.free(entry);
+                try header.appendSlice(allocator, entry);
+                const mapping = try std.fmt.allocPrint(allocator, "{s}\"{s}\":\"mxfp4-individual.safetensors\"", .{ sep, key });
+                defer allocator.free(mapping);
+                try index.appendSlice(allocator, mapping);
+                try plans.append(allocator, .{ .offset = payload_len, .len = len, .scale = part == .scales });
+                payload_len = std.math.add(u64, payload_len, len) catch return error.InvalidExpertGeometry;
+                entry_count += 1;
+            }
+        }
+    }
+    try header.append(allocator, '}');
+    try index.appendSlice(allocator, "}}");
+
+    const payload_size: usize = std.math.cast(usize, payload_len) orelse return error.InvalidExpertGeometry;
+    const total_size = std.math.add(usize, 8 + header.items.len, payload_size) catch return error.InvalidExpertGeometry;
+    const file_bytes = try allocator.alloc(u8, total_size);
+    errdefer allocator.free(file_bytes);
+    std.mem.writeInt(u64, file_bytes[0..8], header.items.len, .little);
+    @memcpy(file_bytes[8..][0..header.items.len], header.items);
+    const payload = file_bytes[8 + header.items.len ..];
+    for (plans.items, 0..) |plan, i| {
+        const out = payload[@intCast(plan.offset)..][0..@intCast(plan.len)];
+        for (out, 0..) |*byte, j| {
+            const salt: usize = if (plan.scale) 0xA7 else 0x31;
+            byte.* = @truncate(j * 17 + i * 29 + salt);
+        }
+    }
+    try dir.writeFile(io, .{ .sub_path = "mxfp4-individual.safetensors", .data = file_bytes });
+    try dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
+    return file_bytes;
 }
 
 test "quantized expert geometry solves bits and group size from packed shapes" {
@@ -803,6 +1288,162 @@ test "mxfp4 layout requires the complete converter bank and never claims the raw
     try t.expect(layoutFromIndexJson(t.allocator, "qwen4_exp", mxfp4_index, 2) == null);
     try t.expect(isRoutedExpertKey(.mxfp4_split, "model.layers.1.mlp.switch_mlp.down_proj.scales"));
     try t.expect(!isRoutedExpertKey(.mxfp4_split, "model.layers.1.mlp.experts.0.down_proj.weight"));
+}
+
+test "mxfp4 individual source detection requires every expert pair and rejects mixed families" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw_file = try writeTinyMxfp4IndividualCheckpoint(t.allocator, tmp.dir, 2, 32, 32);
+    defer t.allocator.free(raw_file);
+    const index = try tmp.dir.readFileAlloc(t.io, "model.safetensors.index.json", t.allocator, .limited(8 * 1024 * 1024));
+    defer t.allocator.free(index);
+
+    try t.expectEqual(
+        Layout.mxfp4_individual,
+        layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", index, 2, 1).?,
+    );
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "qwen4_exp", index, 2, 1) == null);
+    try t.expect(isRoutedExpertKey(.mxfp4_individual, "model.layers.1.mlp.experts.0.gate_proj.weight"));
+    try t.expect(isRoutedExpertKey(.mxfp4_individual, "model.layers.1.mlp.experts.0.gate_proj.weight_scale"));
+    try t.expect(!isRoutedExpertKey(.mxfp4_individual, "model.layers.1.mlp.experts.0.gate_proj.weight_scale_inv"));
+    try t.expect(!isRoutedExpertKey(.mxfp4_individual, "model.layers.1.mlp.experts.gate_up_proj"));
+
+    var key_buf: [192]u8 = undefined;
+    const missing_key = try mxfp4IndividualTensorKey(&key_buf, 1, 0, .gate, .scales);
+    const missing_needle = try std.fmt.allocPrint(
+        t.allocator,
+        "\"{s}\":\"mxfp4-individual.safetensors\",",
+        .{missing_key},
+    );
+    defer t.allocator.free(missing_needle);
+    const missing = try std.mem.replaceOwned(u8, t.allocator, index, missing_needle, "");
+    defer t.allocator.free(missing);
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", missing, 2, 1) == null);
+
+    const bad_scale_key = "model.layers.1.mlp.experts.0.gate_proj.weight_scale_inv";
+    const bad_scale_index = try std.fmt.allocPrint(
+        t.allocator,
+        "{s},\"{s}\":\"mxfp4-individual.safetensors\"{s}",
+        .{ index[0 .. index.len - 2], bad_scale_key, "}}" },
+    );
+    defer t.allocator.free(bad_scale_index);
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", bad_scale_index, 2, 1) == null);
+
+    const dense_prefix_key = "model.layers.0.mlp.experts.0.gate_proj.weight";
+    const dense_prefix_index = try std.fmt.allocPrint(
+        t.allocator,
+        "{s},\"{s}\":\"mxfp4-individual.safetensors\"{s}",
+        .{ index[0 .. index.len - 2], dense_prefix_key, "}}" },
+    );
+    defer t.allocator.free(dense_prefix_index);
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", dense_prefix_index, 2, 1) == null);
+
+    const mixed_key = "model.layers.1.mlp.switch_mlp.gate_proj.weight";
+    const mixed_index = try std.fmt.allocPrint(
+        t.allocator,
+        "{s},\"{s}\":\"mxfp4-individual.safetensors\"{s}",
+        .{ index[0 .. index.len - 2], mixed_key, "}}" },
+    );
+    defer t.allocator.free(mixed_index);
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", mixed_index, 2, 1) == null);
+}
+
+test "mxfp4 individual source preserves permuted raw offsets and canonical slab geometry" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw_file = try writeTinyMxfp4IndividualCheckpoint(t.allocator, tmp.dir, 2, 32, 32);
+    defer t.allocator.free(raw_file);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(t.io, &path_buf);
+    const geometry = Geometry{ .layers = 2, .experts = 2, .hidden = 32, .intermediate = 32, .first_moe_layer = 1 };
+    var store = try QuantStore.openForLayout(t.allocator, path_buf[0..path_len], geometry, .mxfp4_individual);
+    defer store.deinit();
+
+    try t.expectEqual(Layout.mxfp4_individual, store.layout);
+    try t.expect(!store.hasExpertLayer(0));
+    try t.expect(store.hasExpertLayer(1));
+    try t.expectEqual(@as(u64, 512), store.slotBytes(.gate_w));
+    try t.expectEqual(@as(u64, 32), store.slotBytes(.gate_s));
+    try t.expectEqual(@as(u32, 32), store.rowsOf(.gate_w));
+    try t.expectEqual(@as(u32, 4), store.colsOf(.gate_w));
+    try t.expectEqual(io_mod.Dtype.u32, store.dtypeOf(.gate_w));
+    try t.expectEqual(io_mod.Dtype.u8, store.dtypeOf(.gate_s));
+    try t.expectEqual(QuantGeom{ .bits = 4, .group_size = 32 }, store.geomOf(.gate_w));
+    try t.expect(!store.componentPresent(.gate_b));
+    try t.expect(store.span(1, 1, .down_w).offset < store.span(1, 1, .gate_w).offset);
+    try t.expect(store.span(1, 1, .gate_w).offset < store.span(1, 1, .up_w).offset);
+
+    const total: usize = @intCast(store.expertBytes());
+    const got = try t.allocator.alloc(u8, total);
+    defer t.allocator.free(got);
+    try store.readExpert(1, 1, got);
+    var at: usize = 0;
+    for (0..component_count) |ci| {
+        const c: Component = @fromBackingInt(@intCast(ci));
+        if (!store.componentPresent(c)) continue;
+        const span_value = store.span(1, 1, c);
+        const len: usize = @intCast(span_value.len);
+        const source = raw_file[@intCast(span_value.offset)..][0..len];
+        try t.expectEqualSlices(u8, source, got[at..][0..len]);
+        at += len;
+    }
+    try t.expectEqual(total, at);
+}
+
+test "mxfp4 individual source rejects missing and malformed weights or scales" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = t.io;
+    const raw_file = try writeTinyMxfp4IndividualCheckpoint(t.allocator, tmp.dir, 2, 32, 32);
+    defer t.allocator.free(raw_file);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(io, &path_buf);
+    const model_path = path_buf[0..path_len];
+    const geometry = Geometry{ .layers = 2, .experts = 2, .hidden = 32, .intermediate = 32, .first_moe_layer = 1 };
+    const index = try tmp.dir.readFileAlloc(io, "model.safetensors.index.json", t.allocator, .limited(8 * 1024 * 1024));
+    defer t.allocator.free(index);
+
+    var key_buf: [192]u8 = undefined;
+    const scale_key = try mxfp4IndividualTensorKey(&key_buf, 1, 0, .gate, .scales);
+    const missing_needle = try std.fmt.allocPrint(t.allocator, "\"{s}\":\"mxfp4-individual.safetensors\",", .{scale_key});
+    defer t.allocator.free(missing_needle);
+    const missing_index = try std.mem.replaceOwned(u8, t.allocator, index, missing_needle, "");
+    defer t.allocator.free(missing_index);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = missing_index });
+    try t.expectError(
+        error.MissingExpertTensor,
+        QuantStore.openForLayout(t.allocator, model_path, geometry, .mxfp4_individual),
+    );
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index });
+
+    const weight_key = try mxfp4IndividualTensorKey(&key_buf, 1, 0, .gate, .weight);
+    const old_weight = try std.fmt.allocPrint(t.allocator, "\"{s}\":{{\"dtype\":\"U8\",\"shape\":[32,16]", .{weight_key});
+    defer t.allocator.free(old_weight);
+    const new_weight = try std.fmt.allocPrint(t.allocator, "\"{s}\":{{\"dtype\":\"U32\",\"shape\":[32,16]", .{weight_key});
+    defer t.allocator.free(new_weight);
+    const malformed_weight = try std.mem.replaceOwned(u8, t.allocator, raw_file, old_weight, new_weight);
+    defer t.allocator.free(malformed_weight);
+    try tmp.dir.writeFile(io, .{ .sub_path = "mxfp4-individual.safetensors", .data = malformed_weight });
+    try t.expectError(
+        error.InvalidExpertTensor,
+        QuantStore.openForLayout(t.allocator, model_path, geometry, .mxfp4_individual),
+    );
+    try tmp.dir.writeFile(io, .{ .sub_path = "mxfp4-individual.safetensors", .data = raw_file });
+
+    const old_scale = try std.fmt.allocPrint(t.allocator, "\"{s}\":{{\"dtype\":\"U8\",\"shape\":[32,1]", .{scale_key});
+    defer t.allocator.free(old_scale);
+    const new_scale = try std.fmt.allocPrint(t.allocator, "\"{s}\":{{\"dtype\":\"U8\",\"shape\":[32,2]", .{scale_key});
+    defer t.allocator.free(new_scale);
+    const malformed_scale = try std.mem.replaceOwned(u8, t.allocator, raw_file, old_scale, new_scale);
+    defer t.allocator.free(malformed_scale);
+    try tmp.dir.writeFile(io, .{ .sub_path = "mxfp4-individual.safetensors", .data = malformed_scale });
+    try t.expectError(
+        error.InvalidExpertTensor,
+        QuantStore.openForLayout(t.allocator, model_path, geometry, .mxfp4_individual),
+    );
 }
 
 test "mimo_v2 is the only additional expert streaming architecture" {

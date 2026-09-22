@@ -1907,8 +1907,9 @@ pub const Scheduler = struct {
             self.expert_cache_bytes,
             settings_budget,
         )) blk: {
+            if (self.expert_cache_bytes == 0 and settings_budget == 0) return error.ExpertStreamingRequired;
             const geometry = streamingGeometryOf(owned.config);
-            const layout = expert_stream_mod.quant.layoutOfDir(self.allocator, self.io, owned.config.model_type, entry.path, geometry.layers) orelse
+            const layout = expert_stream_mod.quant.layoutOfDirWithFirstMoe(self.allocator, self.io, owned.config.model_type, entry.path, geometry.layers, geometry.first_moe_layer) orelse
                 return error.ExpertStreamingUnsupportedLayout;
             const split = try model_mod.streamingResidentSplit(self.io, self.allocator, entry.path, layout);
             switch (expert_stream_mod.mtpUnderStreaming(self.mtp_enabled, owned.config.mtp_override)) {
@@ -1919,10 +1920,9 @@ pub const Scheduler = struct {
             const mtp_resident = false;
             const per_expert = try expert_stream_mod.expertBytesFor(self.allocator, entry.path, geometry, layout);
             const resolved = try resolveExpertCache(self.expert_cache_bytes, settings_budget, owned.config, split, mtp_resident, per_expert);
-            const plan = try expert_stream_mod.cachePlanBytes(
+            const plan = try expert_stream_mod.cachePlanBytesForGeometry(
                 resolved.cache_bytes,
-                geometry.layers,
-                geometry.experts,
+                geometry,
                 per_expert,
             );
             break :blk expertStreamingGateBytes(split.trunk +| split.mtp, plan.cache_bytes, plan.prefill_peak_bytes, plan.bounce_bytes);

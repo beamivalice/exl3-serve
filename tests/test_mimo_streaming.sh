@@ -6,7 +6,7 @@ MODEL=${MIMO_STREAM_MODEL:-}
 PORT=${1:-}
 BUDGET=${MIMO_SSD_BUDGET_GB:-60}
 if [[ -z "$MODEL" || ! -f "$MODEL/config.json" || ! -f "$MODEL/model.safetensors.index.json" ]]; then
-    echo "SKIP: set MIMO_STREAM_MODEL to a converted MiMo MXFP4 pack"
+    echo "SKIP: set MIMO_STREAM_MODEL to an original or converted MiMo MXFP4 checkpoint"
     exit 0
 fi
 if [[ ! "$PORT" =~ ^[0-9]+$ || "$PORT" -lt 1 || "$PORT" -gt 65535 ]]; then
@@ -46,6 +46,10 @@ done
 curl --connect-timeout 2 --max-time 5 -fsS "$BASE/health" >/dev/null
 curl --max-time 10 -fsS "$BASE/v1/models" >"$OUT/models.json"
 ID=$(jq -er '.data[] | select(.loaded == true and .streaming == true and .input_modalities == ["text"]) | .id' "$OUT/models.json")
+if jq -e '.quantization_config.store_dtype == "mxfp4"' "$MODEL/config.json" >/dev/null; then
+    jq -e --arg id "$ID" '.data[] | select(.id == $id) | .streaming_required == true' "$OUT/models.json" >/dev/null
+    grep -q '\[mimo-source\] loading original shards' "$OUT/server.log"
+fi
 python3 - "$OUT/server.log" "$MODEL/config.json" <<'PY'
 import json
 import re

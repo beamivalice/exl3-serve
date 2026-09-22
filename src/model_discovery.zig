@@ -42,8 +42,8 @@ const supported_model_types = [_][]const u8{
     "qwen3_5_text",     "qwen3_5_moe",
     "qwen3_5_moe_text", "qwen3_moe",
     "qwen3_moe_text",   "qwen3_next",
-    "qwen4_exp",        "qwen4_exp_text", // Qwen3.8-Flash-Next (GDN + QSA + n-gram PLE MoE)
-    "llama",            "mistral",
+    "qwen4_exp", "qwen4_exp_text", // Qwen3.8-Flash-Next (GDN + QSA + n-gram PLE MoE)
+    "llama",     "mistral",
     "lfm2", // also matches any "lfm2*" prefix (lfm2_vl etc. when added)
     "nemotron_h",
     "bert",
@@ -390,7 +390,7 @@ pub fn qwen4StreamingIndexComplete(io: std.Io, allocator: std.mem.Allocator, mod
             var experts = expert_quant.QuantStore.open(allocator, model_dir, geometry) catch return null;
             experts.deinit();
         },
-        .mxfp4_split => {
+        .mxfp4_split, .mxfp4_individual => {
             var experts = expert_quant.QuantStore.openForLayout(allocator, model_dir, geometry, layout) catch return null;
             experts.deinit();
         },
@@ -2171,6 +2171,32 @@ test "mimo_v2 streaming discovery validates MXFP4 headers without a PLE table" {
     try testing.expectEqual(expert_quant.Layout.mxfp4_split, qwen4StreamingIndexComplete(testing.io, a, path).?);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "mxfp4.safetensors", .data = bytes[0..16] });
     try testing.expect(qwen4StreamingIndexComplete(testing.io, a, path) == null);
+}
+
+test "real mimo_v2 original checkpoint discovers complete streamed expert headers" {
+    const source = std.c.getenv("MIMO_V2_SOURCE") orelse return error.SkipZigTest;
+    const layout = qwen4StreamingIndexComplete(testing.io, testing.allocator, std.mem.span(source)) orelse
+        return error.IncompleteMimoSource;
+    try testing.expectEqual(expert_quant.Layout.mxfp4_individual, layout);
+}
+
+test "mimo_v2 original source discovery validates individual MXFP4 tensors" {
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const bytes = try expert_quant.writeTinyMxfp4IndividualCheckpoint(a, tmp.dir, 4, 64, 32);
+    defer a.free(bytes);
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.json",
+        .data =
+        \\{"model_type":"mimo_v2", "num_hidden_layers":2, "hidden_size":64,
+        \\ "n_routed_experts":4, "num_experts_per_tok":2, "moe_intermediate_size":32,
+        \\ "moe_layer_freq":[0,1], "quantization_config":{"quant_method":"fp8","store_dtype":"mxfp4"}}
+        ,
+    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(testing.io, &path_buf);
+    try testing.expectEqual(expert_quant.Layout.mxfp4_individual, qwen4StreamingIndexComplete(testing.io, a, path_buf[0..n]).?);
 }
 
 test "parseStubMeta extracts dims/ctx/quant/MoE + chat/vision capabilities" {

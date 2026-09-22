@@ -1485,6 +1485,10 @@ pub fn main(init: std.process.Init) !void {
     } else {
         // ── Offline single-prompt mode. mlx ops run on this thread, no
         //    scheduler. The same load path as pre-A1.
+        if (config.expertStreamingRequired()) {
+            log.err("This checkpoint requires expert streaming. Use `run <model>` or `--serve` with --ssd-budget-gb or --expert-cache-gb.\n", .{});
+            return error.ExpertStreamingRequired;
+        }
         log.info("Loading weights...\n", .{});
         var weights = if (load_vision)
             try model_mod.loadWeightsWithVision(io, allocator, model_dir)

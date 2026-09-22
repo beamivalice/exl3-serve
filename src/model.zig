@@ -465,7 +465,7 @@ pub const ModelConfig = struct {
     mtp_override: ?bool = null,
     /// null = the process `--mtp-typical`/`--mtp-tokenv3` (exact when neither).
     mtp_acceptance_override: ?mtp_acceptance_mod.Mode = null,
-/// Per-model `ssd_budget_gb` (GiB, the `--ssd-budget-gb` unit) from model-settings.json; 0 = none.
+    /// Per-model `ssd_budget_gb` (GiB, the `--ssd-budget-gb` unit) from model-settings.json; 0 = none.
     ssd_budget_gb_override: u32 = 0,
 
     /// The prefill chunk this model was sized for, FROZEN at load
@@ -974,9 +974,10 @@ pub const ModelConfig = struct {
             self.num_experts_per_tok > 0 and self.hidden_size > 0 and self.moe_intermediate_size > 0;
     }
 
-    /// Only the dense checkpoint cannot be served resident at all.
+    /// Dense banks and raw individual experts require the streaming loader.
     pub fn expertStreamingRequired(self: *const ModelConfig) bool {
-        return self.supportsExpertStreaming() and self.quant_bits == 0;
+        return self.supportsExpertStreaming() and
+            (self.quant_bits == 0 or self.expert_layout == .mxfp4_individual);
     }
 
     /// The long-context blast-radius predicate: every long-context mechanism (KV
@@ -1397,6 +1398,12 @@ pub fn parseConfig(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
         const first_moe: u16 = @intCast(config.first_k_dense_replace);
         if (expert_quant.layoutOfDirWithFirstMoe(allocator, io, config.model_type, model_dir, layers, first_moe)) |layout| {
             config.expert_layout = layout;
+            if (layout == .mxfp4_individual) {
+                config.attn_fused_qkv = false;
+                config.quant_mode = .mxfp4;
+                config.quant_bits = 4;
+                config.quant_group_size = 32;
+            }
             if (layout == .exl3_k4) {
                 const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return error.ExpertLayoutUnsupported;
                 defer parsed.deinit();
@@ -3801,7 +3808,7 @@ pub fn streamingDropsWeightKey(key: []const u8) bool {
 
 pub fn qwen4StreamingWeightKey(layout: expert_quant.Layout, buf: []u8, key: []const u8) ?[]const u8 {
     if (expert_quant.isRoutedExpertKey(layout, key)) return null;
-    if (layout == .mxfp4_split) {
+    if (layout == .mxfp4_split or layout == .mxfp4_individual) {
         if (std.mem.startsWith(u8, key, "mtp.") or std.mem.startsWith(u8, key, "model.mtp.")) return null;
         return key;
     }
@@ -3821,6 +3828,8 @@ pub fn qwen4StreamingWeightKey(layout: expert_quant.Layout, buf: []u8, key: []co
 pub const ResidentSplit = struct { trunk: u64, mtp: u64 };
 
 pub fn streamingResidentSplit(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, layout: expert_quant.Layout) !ResidentSplit {
+    if (layout == .mxfp4_individual)
+        return .{ .trunk = try @import("mimo_source.zig").residentBytes(io, allocator, model_dir), .mtp = 0 };
     var dir = try std.Io.Dir.openDirAbsolute(io, model_dir, .{ .iterate = true });
     defer dir.close(io);
     var referenced = model_discovery.indexShardSet(io, dir) orelse return error.InvalidSafetensorsIndex;
@@ -3876,6 +3885,12 @@ pub fn loadWeights(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
 }
 
 pub fn loadWeightsStreaming(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, layout: expert_quant.Layout) !Weights {
+    if (layout == .mxfp4_individual) {
+        var config = try parseConfig(io, allocator, model_dir);
+        defer config.deinit(allocator);
+        log.info("[mimo-source] loading original shards: native MXFP4 experts, in-memory affine8 trunk and split QKV\n", .{});
+        return @import("mimo_source.zig").loadWeights(io, allocator, model_dir, &config);
+    }
     var dir = try std.Io.Dir.openDirAbsolute(io, model_dir, .{ .iterate = true });
     defer dir.close(io);
     return loadWeightsFromOpenDirMode(io, allocator, dir, model_dir, false, layout);
@@ -8126,6 +8141,79 @@ test "real mimo_v2 Flash config agrees with source geometry" {
     try testing.expectEqual(@as(u32, 9), global);
     try testing.expectEqual(@as(f32, 0.707), c.attention_value_scale);
     try testing.expect(c.isEosToken(151643) and c.isEosToken(151645) and c.isEosToken(151672));
+    try testing.expect(!c.attn_fused_qkv);
+    try testing.expectEqual(QuantMode.mxfp4, c.quant_mode);
+    try testing.expectEqual(@as(u32, 4), c.quant_bits);
+    try testing.expectEqual(@as(u32, 32), c.quant_group_size);
+    try testing.expect(c.expertStreamingRequired());
+}
+
+test "real mimo_v2 original and converted packs bill the same resident trunk" {
+    const source = std.c.getenv("MIMO_V2_SOURCE") orelse return error.SkipZigTest;
+    const reference = std.c.getenv("MIMO_PACK_REFERENCE") orelse return error.SkipZigTest;
+    const original = try streamingResidentSplit(testing.io, testing.allocator, std.mem.span(source), .mxfp4_individual);
+    const converted = try streamingResidentSplit(testing.io, testing.allocator, std.mem.span(reference), .mxfp4_split);
+    try testing.expect(original.trunk > 0);
+    try testing.expectEqual(converted, original);
+}
+
+test "mimo_v2 original config selects split QKV and native expert quantization" {
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw = try expert_quant.writeTinyMxfp4IndividualCheckpoint(a, tmp.dir, 4, 128, 128);
+    defer a.free(raw);
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.json",
+        .data =
+        \\{"model_type":"mimo_v2","num_hidden_layers":2,"hidden_size":128,
+        \\ "num_attention_heads":4,"num_key_value_heads":2,"head_dim":32,
+        \\ "v_head_dim":32,"swa_head_dim":32,"swa_v_head_dim":32,
+        \\ "swa_num_attention_heads":4,"swa_num_key_value_heads":2,
+        \\ "hybrid_layer_pattern":[0,1],"moe_layer_freq":[0,1],
+        \\ "n_routed_experts":4,"num_experts_per_tok":2,"moe_intermediate_size":128,
+        \\ "attention_projection_layout":"fused_qkv",
+        \\ "quantization_config":{"quant_method":"fp8","store_dtype":"mxfp4"}}
+        ,
+    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(testing.io, &path_buf);
+    var c = try parseConfig(testing.io, a, path_buf[0..n]);
+    defer c.deinit(a);
+    try testing.expectEqual(expert_quant.Layout.mxfp4_individual, c.expert_layout);
+    try testing.expect(!c.attn_fused_qkv);
+    try testing.expectEqual(QuantMode.mxfp4, c.quant_mode);
+    try testing.expectEqual(@as(u32, 4), c.quant_bits);
+    try testing.expectEqual(@as(u32, 32), c.quant_group_size);
+    try testing.expect(c.expertStreamingRequired());
+}
+
+test "mimo_v2 original MXFP4 experts require streaming despite their quantized width" {
+    var c = ModelConfig{
+        .model_type = "mimo_v2",
+        .num_hidden_layers = 2,
+        .first_k_dense_replace = 1,
+        .num_experts = 4,
+        .num_experts_per_tok = 2,
+        .hidden_size = 128,
+        .moe_intermediate_size = 128,
+        .quant_bits = 4,
+        .quant_group_size = 32,
+        .quant_mode = .mxfp4,
+        .expert_layout = .mxfp4_individual,
+    };
+    try testing.expect(c.expertStreamingRequired());
+    c.expert_layout = .mxfp4_split;
+    try testing.expect(!c.expertStreamingRequired());
+}
+
+test "mimo_v2 original streaming retains resident names and excludes experts and MTP" {
+    var buf: [256]u8 = undefined;
+    const key = "model.layers.0.self_attn.qkv_proj.weight";
+    try testing.expectEqualStrings(key, qwen4StreamingWeightKey(.mxfp4_individual, &buf, key).?);
+    try testing.expect(qwen4StreamingWeightKey(.mxfp4_individual, &buf, "model.layers.1.mlp.experts.0.gate_proj.weight") == null);
+    try testing.expect(qwen4StreamingWeightKey(.mxfp4_individual, &buf, "model.layers.1.mlp.experts.0.gate_proj.weight_scale") == null);
+    try testing.expect(qwen4StreamingWeightKey(.mxfp4_individual, &buf, "model.mtp.layers.0.self_attn.qkv_proj.weight") == null);
 }
 
 test "mimo_v2 streaming leaves trunk keys intact and excludes only routed banks" {

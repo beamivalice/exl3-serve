@@ -276,8 +276,9 @@ Copyright (c) 2023-2026 The ggml authors
 Prebuilt release staged into `lib/llama` by `scripts/fetch-llama.sh` and linked
 into the mlx-serve binary as the generic GGUF engine. Unmodified.
 
-The TP-aware FP8 QKV reconstruction in `tests/convert_mimo_v2.py` follows
-`conversion/mimo.py`, reimplemented with NumPy before affine quantization.
+The TP-aware FP8 QKV reconstruction in `tests/convert_mimo_v2.py` and
+`src/mimo_source.zig` follows `conversion/mimo.py`, reimplemented with NumPy
+and Zig respectively before affine quantization.
 
 --------------------------------------------------------------------------------
 ds4.c

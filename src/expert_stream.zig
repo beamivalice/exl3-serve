@@ -82,7 +82,7 @@ pub fn mxfp4ExpertBytes(hidden: u32, intermediate: u32) !u64 {
 pub fn expertBytesFor(allocator: std.mem.Allocator, model_dir: []const u8, geometry: Geometry, layout: quant.Layout) !u64 {
     switch (layout) {
         .bf16_fused => return expertBytes(2 * geometry.intermediate, geometry.hidden, geometry.intermediate),
-        .quantized_split, .mxfp4_split => {
+        .quantized_split, .mxfp4_split, .mxfp4_individual => {
             var store = try quant.QuantStore.openForLayout(allocator, model_dir, .{
                 .layers = geometry.layers,
                 .experts = geometry.experts,
@@ -2718,6 +2718,37 @@ test "expert stream MXFP4 header spans and fills preserve native bytes" {
         const len: usize = @intCast(source.len);
         try t.expectEqualSlices(u8, raw[@intCast(source.offset)..][0..len], destination[at..][0..len]);
         at += len;
+    }
+}
+
+test "expert stream original MiMo source warms exact MXFP4 bytes" {
+    const t = std.testing;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw = try quant.writeTinyMxfp4IndividualCheckpoint(t.allocator, tmp.dir, 2, 32, 32);
+    defer t.allocator.free(raw);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(t.io, &path_buf);
+    const geometry = Geometry{ .layers = 2, .experts = 2, .hidden = 32, .intermediate = 32, .first_moe_layer = 1 };
+    const per_expert = try mxfp4ExpertBytes(32, 32);
+    var engine = try Engine.initWithOptions(t.allocator, path_buf[0..n], geometry, 2 * per_expert, tinyStream(), .{
+        .io_workers = 1,
+        .bounce_size = 1 << 20,
+        .layout = .mxfp4_individual,
+    });
+    defer engine.deinit();
+    try engine.warmCache();
+    try t.expectEqual(@as(u64, 1), engine.fill_experts_total);
+    try t.expectEqual(@as(u64, 12), engine.slab_imports);
+    try t.expectEqual(@as(usize, 0), engine.layers[0].slabs.len);
+    var prepared = try engine.prepareHost(1, &.{0});
+    defer prepared.deinit();
+    try t.expectEqual(@as(u64, 1), engine.fill_experts_total);
+    for (0..quant.component_count) |ci| {
+        if (!engine.store.componentPresent(ci)) continue;
+        const source = engine.store.spanAt(1, 0, ci);
+        try t.expectEqualSlices(u8, raw[@intCast(source.offset)..][0..@intCast(source.len)], engine.cacheSlotBytesAt(1, prepared.remapped[0], ci));
     }
 }
 

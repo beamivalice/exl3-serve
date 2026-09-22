@@ -21,6 +21,7 @@ Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds)
 | `launch.zig` | `mlx-serve launch <agent>` (claude/pi/omp/opencode/opencode2/codex/hermes/aider): reads `/v1/models`, writes agent configs into `~/.mlx-serve/<agent>/` |
 | `mlx.zig` | mlx-c FFI |
 | `model.zig` | Config parse + safetensors loading; weight-prefix probing |
+| `mimo_source.zig` | Original MiMo source headers, selective trunk loading, rank-local FP8 QKV reconstruction and in-memory affine8 preparation |
 | `tokenizer.zig` | BPE; single special-token splitter; per-model `digit_group` |
 | `transformer.zig` | Forward pass, arch dispatch, quant resolution, custom kernels. Flash Next trunk = `forwardQwen4With` (hyper-connections, PLE, QSA mask over `gatedFullAttnWith`); EXL3 MoE = `moeExl3` |
 | `qwen4_exp.zig` | Flash Next host side: n-gram hash (splitmix multipliers, per-head primes, eos-segment shifts) + the mmapped `ngram_table.bin` row gather (2/3/4/5/6/8-bit or raw bf16) + `PrefetchPool`/`startWarm` |
@@ -88,7 +89,8 @@ Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter=
 
 ## MiMo-V2.6-Flash (`mimo_v2`, experimental)
 
-- **Pack**: `tests/convert_mimo_v2.py` restacks native MXFP4 expert bytes into `model.layers.N.mlp.switch_mlp` U32 weights + U8 e8m0/32 scales, without biases; FP8 trunk linears become affine-8 and QKV is split. Raw HF per-expert shards are not a streaming pack.
+- **Original checkpoint**: `.mxfp4_individual` streams per-expert U8 payloads directly into U32 slabs without changing bytes. `mimo_source.zig` prepares the resident FP8 trunk as affine-8 and splits rank-local QKV in memory; sources are read-only, MTP/media excluded, residency billed after conversion.
+- **Converted pack**: `tests/convert_mimo_v2.py` optionally restacks the same MXFP4 bytes into `model.layers.N.mlp.switch_mlp` U32 weights + U8 e8m0/32 scales, without biases, and prepares the trunk ahead of time. Both source layouts use the same streaming kernels.
 - **Packed QKV is rank-local**: dequantize each rank's FP8 tiles independently, then regroup `[Q_rank | K_rank | V_rank]` into global Q/K/V. Extra scale rows belong to partial rank-local tiles, not trailing padding on the full tensor.
 - **Geometry**: `hybrid_layer_pattern` 0 = global, 1 = sliding; read heads, KV heads and K/V widths per layer. Rotate only the first `int(head_dim * partial_rotary_factor)` channels; multiply V by `attention_value_scale` BEFORE caching.
 - **Routing/sinks**: sigmoid routing uses f32 inputs/weights, selection-only correction bias and unbiased normalized scores. A sink is an extra softmax denominator column, not a real key; its presence follows the layer type.

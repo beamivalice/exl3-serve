@@ -9,22 +9,23 @@ A fork from ddalcu's MLX-serve, focus only to support selected EXL3 models in Ap
 
 ## MiMo-V2.6-Flash-RL streaming
 
-The raw HF download is not directly loadable. Repack it into a **separate**
-directory; routed expert bytes remain native MXFP4. The converter reconstructs
-rank-local FP8 QKV weights, splits Q/K/V, and converts FP8 trunk linears to
-affine 8-bit. Vision/audio are omitted. Python is needed only for conversion.
+The original HF checkpoint loads directly with expert streaming. Expert bytes
+remain native MXFP4 and are read from the original shards. At load time, the
+engine reconstructs rank-local FP8 QKV weights, splits Q/K/V, and converts FP8
+trunk linears to affine 8-bit **in memory**. Source files are not modified;
+no Python or converted copy is required. Vision/audio and MTP are omitted.
 
 ```sh
-uv run --with mlx==0.32.2 --with numpy python tests/convert_mimo_v2.py \
-  --src /path/to/MiMo-V2.6-Flash-RL \
-  --dst /path/to/MiMo-V2.6-Flash-RL-MXFP4-stream
-
 ./.zig-toolchain/zig build -Doptimize=ReleaseFast
-./zig-out/bin/mlx-serve run /path/to/MiMo-V2.6-Flash-RL-MXFP4-stream \
+./zig-out/bin/mlx-serve run /path/to/MiMo-V2.6-Flash-RL \
   --host 127.0.0.1 --ssd-budget-gb 100 --kv-quant 8 \
   --ctx-size 4096 --prefill-chunk 512 --max-tokens 512 \
   --no-mtp --no-pld --no-vision --prefix-cache-entries 0
 ```
+
+Existing converted MXFP4 packs remain supported. The optional
+`tests/convert_mimo_v2.py` converter performs the same trunk preparation ahead
+of time. Both paths preload 80% of expert-cache slots before readiness.
 
 `--ssd-budget-gb` is a total resident target in GiB, including the trunk,
 expert cache, and streaming workspaces. It must leave room for KV and serving
