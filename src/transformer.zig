@@ -39670,7 +39670,7 @@ const MimoExl3MoeHarness = struct {
         expert_exl3.project(x, self.gate_t[0..gu_tile], self.suh_h[0..hidden], self.svh_i[0..inter], hidden, inter, rate, self.dec, t_hidden, inner, gate_y);
         expert_exl3.project(x, self.gate_t[0..gu_tile], self.suh_h[0..hidden], self.svh_i[0..inter], hidden, inter, rate, self.dec, t_hidden, inner, up_y);
         for (gate_y, up_y) |*g, u| g.* = (g.* / (1.0 + @exp(-g.*))) * u;
-        expert_exl3.project(gate_y, self.down_t[0..d_tile], self.suh_i[0..inter], self.svh_h[0..hidden], inter, hidden, rate, self.dec, t_inter, inner, out);
+        expert_exl3.project(gate_y, self.down_t[0..d_tile], self.suh_i[0..inter], self.svh_h[0..hidden], inter, hidden, rate, self.dec, t_inter, inner[0..hidden], out);
     }
 
     /// One forward through the engine, scored against this harness's own

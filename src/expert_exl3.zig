@@ -437,12 +437,34 @@ pub fn project(
     inner: []f32,
     out: []f32,
 ) void {
+    // Which scratch is which length is the whole contract here, and a wrong
+    // one reaches `@memcpy` as silent UB under ReleaseFast.
+    std.debug.assert(x.len == in_features and suh.len == in_features and transformed.len == in_features);
+    std.debug.assert(svh.len == out_features and inner.len == out_features and out.len == out_features);
     prepareInput(x, suh, transformed);
     innerGemv(trellis, transformed, in_features, out_features, rate, dec, inner);
     finishOutput(inner, svh, out);
 }
 
-const fixture_bytes = @embedFile("fixtures/exl3_k4_linear.safetensors");
+/// `@embedFile` is byte-aligned and the linker lands it wherever it likes, so a
+/// fixture read as u16 through a `[]const u8` is a coin flip on the blob's
+/// address. These copies carry the alignment every reader assumes.
+pub const fixtures = struct {
+    pub const k4 = aligned(@embedFile("fixtures/exl3_k4_linear.safetensors"));
+    pub const k3 = aligned(@embedFile("fixtures/exl3_k3_linear.safetensors"));
+    pub const k2 = aligned(@embedFile("fixtures/exl3_k2_linear.safetensors"));
+    pub const k2p5_tiny = aligned(@embedFile("fixtures/exl3_k2p5_tiny_linear.safetensors"));
+    pub const k3_tiny = aligned(@embedFile("fixtures/exl3_k3_tiny_linear.safetensors"));
+
+    fn aligned(comptime raw: []const u8) *align(8) const [raw.len]u8 {
+        const holder = struct {
+            const value: [raw.len]u8 align(8) = raw[0..raw.len].*;
+        };
+        return &holder.value;
+    }
+};
+
+const fixture_bytes = fixtures.k4;
 
 const TensorView = struct {
     dtype: []const u8,
@@ -651,8 +673,8 @@ test "exl3 K4 packed fixture decodes to the library inner and public f16" {
     try t.expect(rel < 0.02);
 }
 
-const fixture_k3_bytes = @embedFile("fixtures/exl3_k3_linear.safetensors");
-const fixture_k2_bytes = @embedFile("fixtures/exl3_k2_linear.safetensors");
+const fixture_k3_bytes = fixtures.k3;
+const fixture_k2_bytes = fixtures.k2;
 
 fn decodePackedFixture(
     alloc: std.mem.Allocator,
@@ -696,8 +718,8 @@ test "exl3 K2 packed fixture decodes to the library inner and public f16" {
     try decodePackedFixture(arena.allocator(), fixture_k2_bytes, Rate.fromK(2), .mul1);
 }
 
-const fixture_k2p5_tiny_bytes = @embedFile("fixtures/exl3_k2p5_tiny_linear.safetensors");
-const fixture_k3_tiny_bytes = @embedFile("fixtures/exl3_k3_tiny_linear.safetensors");
+const fixture_k2p5_tiny_bytes = fixtures.k2p5_tiny;
+const fixture_k3_tiny_bytes = fixtures.k3_tiny;
 
 test "exl3 K2.5 TINY packed fixture decodes to the library inner and public f16" {
     const t = std.testing;

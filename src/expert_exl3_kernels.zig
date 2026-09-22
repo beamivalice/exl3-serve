@@ -2742,7 +2742,9 @@ test "exl3 packedRate reads n from the last dim and refuses outside K2..K4" {
     try t.expectError(error.BadExl3Shape, packedRate(80));
 }
 
-fn metalInnerGemvFixture(fixture: []const u8, rate: exl3.Rate, dec: exl3.Decode) !void {
+/// The fixture is `align(2)` so the u16 view below is a cast the caller has
+/// already paid for: a byte-aligned blob is a compile error, not a Debug panic.
+fn metalInnerGemvFixture(fixture: []align(2) const u8, rate: exl3.Rate, dec: exl3.Decode) !void {
     setDecodeParams(dec);
     defer setDecodeParams(.mul1);
     const t = std.testing;
@@ -2788,28 +2790,28 @@ fn metalInnerGemvFixture(fixture: []const u8, rate: exl3.Rate, dec: exl3.Decode)
 }
 
 test "exl3 K3 Metal inner GEMV matches the host tile decode" {
-    try metalInnerGemvFixture(@embedFile("fixtures/exl3_k3_linear.safetensors"), exl3.Rate.fromK(3), .mul1);
+    try metalInnerGemvFixture(exl3.fixtures.k3, exl3.Rate.fromK(3), .mul1);
 }
 
 test "exl3 K2 Metal inner GEMV matches the host tile decode" {
-    try metalInnerGemvFixture(@embedFile("fixtures/exl3_k2_linear.safetensors"), exl3.Rate.fromK(2), .mul1);
+    try metalInnerGemvFixture(exl3.fixtures.k2, exl3.Rate.fromK(2), .mul1);
 }
 
 test "exl3 K2.5 TINY Metal inner GEMV matches the host tile decode" {
-    try metalInnerGemvFixture(@embedFile("fixtures/exl3_k2p5_tiny_linear.safetensors"), .{ .n = 40 }, .tiny);
+    try metalInnerGemvFixture(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .tiny);
 }
 
 test "exl3 K3 TINY Metal inner GEMV matches the host tile decode" {
-    try metalInnerGemvFixture(@embedFile("fixtures/exl3_k3_tiny_linear.safetensors"), .{ .n = 48 }, .tiny);
+    try metalInnerGemvFixture(exl3.fixtures.k3_tiny, .{ .n = 48 }, .tiny);
 }
 
 // A w16 bitstream is a valid w12 bitstream — only the value each window decodes
 // to changes — so the existing fixtures are the narrowed packs too, scored
 // against the host reference under the same width.
 test "exl3 Metal inner GEMV matches the host tile decode at a narrowed codeword window" {
-    try metalInnerGemvFixture(@embedFile("fixtures/exl3_k2p5_tiny_linear.safetensors"), .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
-    try metalInnerGemvFixture(@embedFile("fixtures/exl3_k2p5_tiny_linear.safetensors"), .{ .n = 40 }, .{ .codebook = .tiny, .window = .w14 });
-    try metalInnerGemvFixture(@embedFile("fixtures/exl3_k4_linear.safetensors"), exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w12 });
+    try metalInnerGemvFixture(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
+    try metalInnerGemvFixture(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w14 });
+    try metalInnerGemvFixture(exl3.fixtures.k4, exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w12 });
 }
 
 fn indexedParity(rate: exl3.Rate, in_dim: usize, out_dim: usize, e: usize, topk: usize, seed: u64, dec: exl3.Decode) !void {
@@ -2948,7 +2950,7 @@ test "exl3 K4 Metal inner GEMV matches the host tile decode" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -3060,7 +3062,7 @@ test "exl3 512-row prefill: decode-to-f16 gather_mm vs rows kernel" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -3325,7 +3327,7 @@ test "exl3 K4 cooperative indexed GEMV matches host MUL1 tile decode" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -3667,7 +3669,7 @@ test "exl3 fused decode chain matches indexed SwiGLU on one row" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -3761,7 +3763,7 @@ test "exl3 fused decode chain rows match N solo calls" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -3926,7 +3928,7 @@ test "exl3 pair GEMV inner planes are f32" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -3983,7 +3985,7 @@ test "exl3 fused rows at split-2 match N fused solo" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -4085,7 +4087,7 @@ fn sortedGemmSmallShape(dec: exl3.Decode) !void {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -4162,7 +4164,7 @@ test "exl3 K3 sorted GEMM matches host MUL1 on small shape" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k3_linear.safetensors");
+    const fixture = exl3.fixtures.k3;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -4220,7 +4222,7 @@ test "exl3 K4 sorted GEMM matches host MUL1 when a run half-fills the second blo
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -4279,7 +4281,7 @@ test "exl3 K3 sorted GEMM matches host MUL1 on 20-40 row runs" {
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     if (!gemmNaxOn()) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k3_linear.safetensors");
+    const fixture = exl3.fixtures.k3;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -4373,7 +4375,7 @@ test "exl3 sorted GEMM matches host MUL1 with the NAX arm forced off" {
     _ = setenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
     defer _ = unsetenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK");
     try t.expect(!gemmNaxOn());
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -4545,7 +4547,7 @@ test "exl3 sorted GEMM 16-row windows match 4-row per row" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -4605,7 +4607,7 @@ test "exl3 run-aligned windows match stride per row" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -4672,7 +4674,7 @@ test "exl3 aligned GEMM reuses config across nwin" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -4736,7 +4738,7 @@ test "exl3 sorted GEMM 32-row windows match 16-row per row" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -4902,7 +4904,7 @@ test "exl3 moePrefill matches staged sorted chain" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -5171,7 +5173,7 @@ test "exl3 fused decode chain matches the indexed chain across the top-k range" 
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -5260,7 +5262,7 @@ test "exl3 prefill arm matches the fused decode arm across row counts and top-k"
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const fixture = @embedFile("fixtures/exl3_k4_linear.safetensors");
+    const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -5421,20 +5423,20 @@ fn fusedChainMatchesHost(fixture: []const u8, rate: exl3.Rate, dec: exl3.Decode)
 }
 
 test "exl3 fused decode chain matches the host SwiGLU reference" {
-    try fusedChainMatchesHost(@embedFile("fixtures/exl3_k4_linear.safetensors"), exl3.Rate.fromK(4), .mul1);
+    try fusedChainMatchesHost(exl3.fixtures.k4, exl3.Rate.fromK(4), .mul1);
 }
 
 test "exl3 fused decode chain matches the host SwiGLU reference under TINY" {
-    try fusedChainMatchesHost(@embedFile("fixtures/exl3_k4_linear.safetensors"), exl3.Rate.fromK(4), .tiny);
+    try fusedChainMatchesHost(exl3.fixtures.k4, exl3.Rate.fromK(4), .tiny);
 }
 
 test "exl3 fused decode chain matches the host SwiGLU reference at K2.5 TINY" {
-    try fusedChainMatchesHost(@embedFile("fixtures/exl3_k2p5_tiny_linear.safetensors"), .{ .n = 40 }, .tiny);
+    try fusedChainMatchesHost(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .tiny);
 }
 
 test "exl3 fused decode chain matches the host SwiGLU reference at a narrowed codeword window" {
-    try fusedChainMatchesHost(@embedFile("fixtures/exl3_k2p5_tiny_linear.safetensors"), .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
-    try fusedChainMatchesHost(@embedFile("fixtures/exl3_k4_linear.safetensors"), exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w14 });
+    try fusedChainMatchesHost(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
+    try fusedChainMatchesHost(exl3.fixtures.k4, exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w14 });
 }
 
 test "exl3 cooperative indexed GEMV matches host TINY tile decode at K4 K3 K2" {
