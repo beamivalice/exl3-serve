@@ -23,6 +23,7 @@ const build_options = @import("build_options");
 const ollama = @import("ollama.zig");
 const model_discovery = @import("model_discovery.zig");
 const log = @import("log.zig");
+const status = @import("status.zig");
 
 // ── Unparsed-argument reporting ─────────────────────────────────────────
 
@@ -667,6 +668,21 @@ pub fn formatSize(buf: []u8, bytes: u64) []const u8 {
     return std.fmt.bufPrint(buf, "{d} KB", .{bytes / 1024}) catch "?";
 }
 
+/// The post-load line `mlx-serve run` prints, from the status getters:
+/// `real_bytes` is THIS process's physical footprint (Activity Monitor's
+/// "Real Memory" — what the load just grew), `free_bytes` is what the system
+/// would grant a new large allocation, `total_bytes` is physical RAM.
+pub fn formatMemorySummary(buf: []u8, real_bytes: u64, free_bytes: u64, total_bytes: u64) ![]const u8 {
+    var real_sz: [24]u8 = undefined;
+    var free_sz: [24]u8 = undefined;
+    var total_sz: [24]u8 = undefined;
+    return std.fmt.bufPrint(buf, "[mem] real {s}, free {s}, total {s}", .{
+        formatSize(&real_sz, real_bytes),
+        formatSize(&free_sz, free_bytes),
+        formatSize(&total_sz, total_bytes),
+    });
+}
+
 // ── REPL (mlx-serve run) ────────────────────────────────────────────────
 //
 // The REPL is deliberately a real HTTP client against the server's own
@@ -770,6 +786,18 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
     var out_buf: [4096]u8 = undefined;
     var stdout_w = std.Io.File.stdout().writer(io, &out_buf);
     const w = &stdout_w.interface;
+    // The initial load finishes BEFORE the listener binds, so an answering
+    // /health is the post-load moment. `run` quieted the log to warn on a TTY,
+    // so this one line is printed here rather than logged.
+    var mem_buf: [160]u8 = undefined;
+    if (formatMemorySummary(
+        &mem_buf,
+        @as(u64, status.getAppMemFootprintMb()) * 1024 * 1024,
+        status.getAvailableMemBytes(),
+        status.getTotalMemBytes(),
+    )) |line| {
+        try w.print("{s}\n", .{line});
+    } else |_| {}
     try w.writeAll("\n>>> chat is live — /bye to exit\n");
     try w.flush();
 
@@ -1043,6 +1071,18 @@ test "cli: formatSize" {
     try testing.expectEqualStrings("5.2 GB", formatSize(&buf, 5_600_000_000));
     try testing.expectEqualStrings("35 MB", formatSize(&buf, 36_700_160));
     try testing.expectEqualStrings("2 KB", formatSize(&buf, 2048));
+}
+
+test "cli: formatMemorySummary reports real, free and total on one line" {
+    var buf: [160]u8 = undefined;
+    const gb: u64 = 1024 * 1024 * 1024;
+    // Post-load line: process footprint ("real"), headroom for a new large
+    // allocation ("free"), physical RAM ("total"), each through formatSize.
+    const line = try formatMemorySummary(&buf, 20 * gb + gb / 2, 6 * gb + gb / 2, 32 * gb);
+    try testing.expectEqualStrings("[mem] real 20.5 GB, free 6.5 GB, total 32.0 GB", line);
+    // Sub-GB figures ride formatSize's MB arm instead of reading "0.0 GB".
+    const small = try formatMemorySummary(&buf, 512 * 1024 * 1024, gb, 2 * gb);
+    try testing.expectEqualStrings("[mem] real 512 MB, free 1.0 GB, total 2.0 GB", small);
 }
 
 test "cli: dirBytesOneLevel counts weight subdirs (FLUX bundle showed 6 KB)" {
