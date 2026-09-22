@@ -270,6 +270,42 @@ def slice_math(tok, rng, n):
     return docs
 
 
+def build_windows(tok, seed, max_tokens, seq_len, holdout=False):
+    """The calibration corpus as TOKEN WINDOWS, per slice and to a token budget.
+
+    The torch-free form of `qwen38_flash_next_imatrix_collect.build_corpus`, for
+    drivers that only need the text (a served capture re-tokenizes anyway).
+    """
+    rng = random.Random(seed)
+    sweb = swebench_rows()
+    traffic = tool_traffic(600)
+    slices = {name: split_docs(docs, holdout) for name, docs in (
+        ("agent", slice_agent(tok, rng, traffic, sweb, 400)),
+        ("code", slice_code(tok, rng, sweb, 400)),
+        ("prose", slice_prose(tok, rng, sweb, 400)),
+        ("math", slice_math(tok, rng, 200)),
+    )}
+    budget = max_tokens // len(slices)
+    windows, composition = [], {}
+    for name, docs in slices.items():
+        rng.shuffle(docs)
+        used = 0
+        for doc in docs:
+            if used >= budget:
+                break
+            ids = tok.encode(doc)
+            for off in range(0, len(ids), seq_len):
+                w = ids[off:off + seq_len]
+                if len(w) < 16:
+                    continue
+                windows.append(w)
+                used += len(w)
+                if used >= budget:
+                    break
+        composition[name] = used
+    return windows, composition
+
+
 # ============================================================
 # Main
 # ============================================================

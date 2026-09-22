@@ -15345,7 +15345,7 @@ pub const Transformer = struct {
                     .{ .layout = config.expert_layout },
                 );
                 expert_stream = engine;
-                imatrix = try imatrix_capture.Collector.fromEnv(allocator, s, config.num_hidden_layers, @intCast(config.num_experts));
+                imatrix = try imatrix_capture.Collector.forModel(allocator, s, config.model_type, config.num_hidden_layers, @intCast(config.num_experts));
             }
             log.info("[qwen4] n-gram table {d} rows x {d} ({d}-bit, {s}), PLE at layer {d}, QSA budget {d}/{d}\n", .{ st.table.rows, st.table.dim, st.table.bits, if (config.expert_streaming) "sharded pread" else "mmapped", config.ple_layer_idx, config.indexer_budget, config.indexer_compress_ratio });
         } else if (std.mem.eql(u8, config.model_type, "mimo_v2") and config.expert_streaming) {
@@ -15366,6 +15366,7 @@ pub const Transformer = struct {
                 .{ .layout = config.expert_layout },
             );
             expert_stream = engine;
+            imatrix = try imatrix_capture.Collector.forModel(allocator, s, config.model_type, config.num_hidden_layers, @intCast(config.num_experts));
         }
 
         const profile_head_shape = mlx.getShape(lm_head_w);
@@ -28580,6 +28581,7 @@ pub const Transformer = struct {
     const MoeRoutingOverride = struct {
         inds: mlx.mlx_array,
         norm_scores: mlx.mlx_array,
+        imatrix: ?ImatrixTap = null,
     };
 
     fn moeMLPStreamed(self: *Transformer, ctx: *ForwardCtx, x: mlx.mlx_array, mw: *const MoeMlpWeights, layer: u16) !mlx.mlx_array {
@@ -28624,6 +28626,10 @@ pub const Transformer = struct {
         var rows: c_int = 1;
         for (inds_shape[0 .. inds_shape.len - 1]) |d| rows *= d;
         var compute_clock = ProfClock.init();
+        // Both arms index the slab by REMAPPED slot; the capture keys on the
+        // routing's own global ids.
+        const tap = try ImatrixTap.forLayer(self.imatrix, stream_ctx.layer, ids_contiguous, rows, topk, self.s);
+        defer if (tap) |t| t.deinit();
         if (prepared.quantized) {
             const slab_inds = mlx.mlx_array_new_data(remapped_host.ptr, inds_shape.ptr, @intCast(inds_shape.len), .int32);
             defer _ = mlx.mlx_array_free(slab_inds);
@@ -28640,6 +28646,7 @@ pub const Transformer = struct {
             const slab_result = try self.moeMLP2WithRouter(expert_x, expert_x, &mw_slab, null, false, null, .{
                 .inds = slab_inds,
                 .norm_scores = norm_scores,
+                .imatrix = tap,
             });
             engine.noteExpertCompute(stream_ctx.layer, compute_clock.lap());
             return slab_result;
@@ -28653,14 +28660,6 @@ pub const Transformer = struct {
         var w_rows = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(w_rows);
         try mlx.check(mlx.mlx_reshape(&w_rows, norm_scores, &[_]c_int{ rows, topk }, 2, self.s));
-        var global_ids = mlx.mlx_array{ .ctx = null };
-        defer if (global_ids.ctx != null) {
-            _ = mlx.mlx_array_free(global_ids);
-        };
-        if (self.imatrix != null) {
-            global_ids = mlx.mlx_array_new();
-            try mlx.check(mlx.mlx_reshape(&global_ids, ids_contiguous, &[_]c_int{ rows, topk }, 2, self.s));
-        }
         const row_out = try streamedExpertCompute(self.s, .{
             .x_rows = x_rows,
             .gate = prepared.gate,
@@ -28670,9 +28669,7 @@ pub const Transformer = struct {
             .slab_down = prepared.raw_down,
             .slots = remapped_inds,
             .weights = w_rows,
-            .imatrix = self.imatrix,
-            .imatrix_layer = stream_ctx.layer,
-            .global_ids = global_ids,
+            .imatrix = tap,
         }, rows, self.expert_bf16_kernels);
         defer _ = mlx.mlx_array_free(row_out);
         var expert_sum = mlx.mlx_array_new();
@@ -29196,6 +29193,12 @@ pub const Transformer = struct {
         const inds_shape = mlx.getShape(inds);
         const K = inds_shape[inds_shape.len - 1];
         const total_inds: c_int = B * S * K;
+        // A streamed QUANTIZED layer's capture arrives here (the override's ids
+        // are slab slots). The fused arms never materialize the activation rows
+        // the down statistic needs, so an armed capture takes the sorted arm at
+        // every width.
+        const imx: ?ImatrixTap = if (routing_override) |given| given.imatrix else null;
+        if (imx) |tap| try tap.observeInput(self.s, expert_x, B * S, D);
         // Per-expert ADDITIVE biases (gpt_oss) force the sorted path. The three
         // decode fast paths below are all fused kernels that compute
         // `act(gate) * up` straight out of gather_qmm with nowhere to add a
@@ -29206,7 +29209,7 @@ pub const Transformer = struct {
         const has_expert_bias = mw.switch_gate_bias.ctx != null or
             mw.switch_up_bias.ctx != null or
             mw.switch_down_bias.ctx != null;
-        const do_sort = B * S > 1 or total_inds >= 64 or has_expert_bias;
+        const do_sort = imx != null or B * S > 1 or total_inds >= 64 or has_expert_bias;
         const no_idx = mlx.mlx_array{ .ctx = null };
 
         var down_out = mlx.mlx_array_new();
@@ -29218,7 +29221,7 @@ pub const Transformer = struct {
         var cost_arm: u8 = 4;
 
         const grouped_rows = skip_shared and router_override != null and B == 1 and S >= 2 and S <= 128 and !has_expert_bias and moeRowsFusedEnabled() and !qwen4Standin().moe_gateup and !qwen4Standin().moe_down;
-        if ((grouped_rows or moeDecodeDispatchArm(B, S, K, has_expert_bias) == .rows) and
+        if (imx == null and (grouped_rows or moeDecodeDispatchArm(B, S, K, has_expert_bias) == .rows) and
             useGatherQmvDecode(self, gate_qp, up_qp) and mw.switch_gate_s.ctx != null and mw.switch_up_s.ctx != null and mw.switch_down_s.ctx != null and
             try self.moeDecodeGatherQmvRows(&down_out, expert_x, inds, norm_scores, &moe_reduced, mw, gate_qp, up_qp, down_qp, D, K, B, S))
         {
@@ -29326,6 +29329,7 @@ pub const Transformer = struct {
                     try self.computeGeglu(gate_out, up_out);
             };
             defer _ = mlx.mlx_array_free(expert_act);
+            if (imx) |tap| try tap.observeDownSorted(self.s, expert_act, inv_order, total_inds);
 
             // down: expand inner singleton → [N,1,intermediate] → gather_qmm → [N,1,hidden]
             var act_exp = mlx.mlx_array_new();
@@ -37529,31 +37533,67 @@ const StreamedExpertOperands = struct {
     slab_down: mlx.mlx_array,
     slots: mlx.mlx_array,
     weights: mlx.mlx_array,
-    /// imatrix capture only: `slots` are remapped slab slots, so the statistics
-    /// need the routing's own [rows, top_k] GLOBAL expert ids alongside.
-    imatrix: ?*imatrix_capture.Collector = null,
-    imatrix_layer: u16 = 0,
-    global_ids: mlx.mlx_array = .{ .ctx = null },
+    imatrix: ?ImatrixTap = null,
 };
 
-fn imatrixArmed(op: StreamedExpertOperands) bool {
-    return op.imatrix != null and op.global_ids.ctx != null;
-}
+/// imatrix capture through a streamed MoE layer. Every compute arm indexes the
+/// slab by REMAPPED slot, so the tap carries the routing's own [rows, top_k]
+/// GLOBAL expert ids: the statistics are keyed by those.
+const ImatrixTap = struct {
+    collector: *imatrix_capture.Collector,
+    layer: u16,
+    global_ids: mlx.mlx_array,
 
-/// Fold one MoE layer's SwiGLU activation rows into the imatrix. `act` is
-/// [.., inter] in whatever row order the arm produced; `ids_flat` names each of
-/// those `n` rows' global expert in the SAME order.
-fn imatrixObserveDown(op: StreamedExpertOperands, s: mlx.mlx_stream, act: mlx.mlx_array, ids_flat: mlx.mlx_array, n: c_int) !void {
-    const col = op.imatrix orelse return;
-    const ash = mlx.getShape(act);
-    var act_2d = mlx.mlx_array_new();
-    defer _ = mlx.mlx_array_free(act_2d);
-    try mlx.check(mlx.mlx_reshape(&act_2d, act, &[_]c_int{ n, ash[ash.len - 1] }, 2, s));
-    var ids_2d = mlx.mlx_array_new();
-    defer _ = mlx.mlx_array_free(ids_2d);
-    try mlx.check(mlx.mlx_reshape(&ids_2d, ids_flat, &[_]c_int{ n, 1 }, 2, s));
-    try col.observeDown(op.imatrix_layer, act_2d, ids_2d);
-}
+    /// The tap for one streamed layer, owning its [rows, top_k] view of the
+    /// routing's ids; null when no capture is armed. The arms only read it, so
+    /// the layer's own `deinit` frees it once.
+    fn forLayer(col: ?*imatrix_capture.Collector, layer: u16, ids: mlx.mlx_array, rows: c_int, topk: c_int, s: mlx.mlx_stream) !?ImatrixTap {
+        const collector = col orelse return null;
+        var ids_2d = mlx.mlx_array_new();
+        errdefer _ = mlx.mlx_array_free(ids_2d);
+        try mlx.check(mlx.mlx_reshape(&ids_2d, ids, &[_]c_int{ rows, topk }, 2, s));
+        return .{ .collector = collector, .layer = layer, .global_ids = ids_2d };
+    }
+
+    fn deinit(self: ImatrixTap) void {
+        _ = mlx.mlx_array_free(self.global_ids);
+    }
+
+    /// The layer's MLP input rows, [.., hidden] over `rows` tokens.
+    fn observeInput(self: ImatrixTap, s: mlx.mlx_stream, x: mlx.mlx_array, rows: c_int, hidden: c_int) !void {
+        var x_rows = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(x_rows);
+        try mlx.check(mlx.mlx_reshape(&x_rows, x, &[_]c_int{ rows, hidden }, 2, s));
+        try self.collector.observeGateUp(self.layer, x_rows, self.global_ids);
+    }
+
+    /// One MoE layer's SwiGLU activation rows. `act` is [.., inter] in whatever
+    /// row order the arm produced; `ids_flat` names each of those `n` rows'
+    /// global expert in the SAME order.
+    fn observeDown(self: ImatrixTap, s: mlx.mlx_stream, act: mlx.mlx_array, ids_flat: mlx.mlx_array, n: c_int) !void {
+        const ash = mlx.getShape(act);
+        var act_2d = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(act_2d);
+        try mlx.check(mlx.mlx_reshape(&act_2d, act, &[_]c_int{ n, ash[ash.len - 1] }, 2, s));
+        var ids_2d = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(ids_2d);
+        try mlx.check(mlx.mlx_reshape(&ids_2d, ids_flat, &[_]c_int{ n, 1 }, 2, s));
+        try self.collector.observeDown(self.layer, act_2d, ids_2d);
+    }
+
+    /// `act` in the sorted arm's row order; `inv_order` is that arm's own
+    /// permutation back to the routing's order, where the global ids live.
+    fn observeDownSorted(self: ImatrixTap, s: mlx.mlx_stream, act: mlx.mlx_array, inv_order: mlx.mlx_array, n: c_int) !void {
+        const ash = mlx.getShape(act);
+        var act_2d = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(act_2d);
+        try mlx.check(mlx.mlx_reshape(&act_2d, act, &[_]c_int{ n, ash[ash.len - 1] }, 2, s));
+        var routed = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(routed);
+        try mlx.check(mlx.mlx_take_axis(&routed, act_2d, inv_order, 0, s));
+        try self.observeDown(s, routed, self.global_ids, n);
+    }
+};
 
 var streamed_expert_kernels_engaged: bool = false;
 
@@ -37652,14 +37692,14 @@ fn streamedExpertCompositeDown(s: mlx.mlx_stream, op: StreamedExpertOperands, ro
         try mlx.check(mlx.mlx_squeeze(&up, up_3d, s));
         const activation = try streamedExpertSwiglu(s, gate, up);
         defer _ = mlx.mlx_array_free(activation);
-        if (imatrixArmed(op)) {
+        if (op.imatrix) |tap| {
             var flat_global = mlx.mlx_array_new();
             defer _ = mlx.mlx_array_free(flat_global);
-            try mlx.check(mlx.mlx_reshape(&flat_global, op.global_ids, &[_]c_int{total_inds}, 1, s));
+            try mlx.check(mlx.mlx_reshape(&flat_global, tap.global_ids, &[_]c_int{total_inds}, 1, s));
             var sorted_global = mlx.mlx_array_new();
             defer _ = mlx.mlx_array_free(sorted_global);
             try mlx.check(mlx.mlx_take_axis(&sorted_global, flat_global, order, 0, s));
-            try imatrixObserveDown(op, s, activation, sorted_global, total_inds);
+            try tap.observeDown(s, activation, sorted_global, total_inds);
         }
         var act_exp = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(act_exp);
@@ -37698,7 +37738,7 @@ fn streamedExpertCompositeDown(s: mlx.mlx_stream, op: StreamedExpertOperands, ro
     try mlx.check(mlx.mlx_squeeze(&up, up_5d, s));
     const activation = try streamedExpertSwiglu(s, gate, up);
     defer _ = mlx.mlx_array_free(activation);
-    if (imatrixArmed(op)) try imatrixObserveDown(op, s, activation, op.global_ids, rows * topk);
+    if (op.imatrix) |tap| try tap.observeDown(s, activation, tap.global_ids, rows * topk);
     return streamedExpertUnsortedDown(s, op, activation, rows, topk);
 }
 
@@ -37720,13 +37760,13 @@ fn streamedExpertCompute(s: mlx.mlx_stream, op: StreamedExpertOperands, rows: c_
     const slot_shape = mlx.getShape(op.slots);
     if (slot_shape.len != 2 or slot_shape[0] != rows) return error.StreamedExpertShapeMismatch;
     const topk = slot_shape[1];
-    if (imatrixArmed(op)) try op.imatrix.?.observeGateUp(op.imatrix_layer, op.x_rows, op.global_ids);
+    if (op.imatrix) |tap| try tap.observeInput(s, op.x_rows, rows, x_shape[1]);
     if (use_kernels and rows >= 1 and rows <= expert_bf16.MAX_ROWS and topk >= 1 and topk <= expert_bf16.MAX_TOPK) {
         try expertSlabAligned(op.slab_gate_up);
         try expertSlabAligned(op.slab_down);
         const h = try expert_bf16.gateUpSwiglu(s, op.x_rows, op.slab_gate_up, op.slots);
         defer _ = mlx.mlx_array_free(h);
-        if (imatrixArmed(op)) try imatrixObserveDown(op, s, h, op.global_ids, rows * topk);
+        if (op.imatrix) |tap| try tap.observeDown(s, h, tap.global_ids, rows * topk);
         const down_kernel = expert_bf16.downKernelPreferred(@intCast(rows));
         if (!streamed_expert_kernels_engaged) {
             streamed_expert_kernels_engaged = true;
@@ -63807,7 +63847,7 @@ test "imatrix capture keys the streamed MoE statistics on GLOBAL expert ids, on 
     // rows 1 (unsorted composite) and 2 (sorted composite), each on the kernel arm too.
     for ([_]c_int{ 1, 2 }) |rows| {
         for ([_]bool{ false, true }) |kernels| {
-            const col = try imatrix_capture.Collector.init(alloc, s, "/dev/null", 3, experts);
+            const col = try imatrix_capture.Collector.init(alloc, s, "/dev/null", 3, experts, .qwen4_exp);
             defer col.deinit();
             const x_host = try alloc.alloc(u16, @intCast(rows * hidden));
             defer alloc.free(x_host);
@@ -63839,9 +63879,7 @@ test "imatrix capture keys the streamed MoE statistics on GLOBAL expert ids, on 
                 .slab_down = dn,
                 .slots = slots,
                 .weights = w,
-                .imatrix = col,
-                .imatrix_layer = 2,
-                .global_ids = globals,
+                .imatrix = .{ .collector = col, .layer = 2, .global_ids = globals },
             }, rows, kernels);
             defer _ = mlx.mlx_array_free(out);
 
@@ -63869,6 +63907,188 @@ test "imatrix capture keys the streamed MoE statistics on GLOBAL expert ids, on 
             try std.testing.expect(seen > 0);
         }
     }
+}
+
+/// [E, out, in] affine-4/g64 expert bank — the stand-in for a streamed MXFP4
+/// slab, which reaches the same quantized arms through the routing override.
+fn imxQuantBank(s: mlx.mlx_stream, alloc: std.mem.Allocator, rnd: std.Random, e: c_int, out_dim: c_int, in_dim: c_int, owned: *std.ArrayList(mlx.mlx_array)) ![3]mlx.mlx_array {
+    const buf = try alloc.alloc(f32, @intCast(e * out_dim * in_dim));
+    defer alloc.free(buf);
+    for (buf) |*v| v.* = (rnd.float(f32) - 0.5) * 0.4;
+    const a32 = mlx.mlx_array_new_data(buf.ptr, &[_]c_int{ e, out_dim, in_dim }, 3, .float32);
+    defer _ = mlx.mlx_array_free(a32);
+    var bf = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(bf);
+    try mlx.check(mlx.mlx_astype(&bf, a32, .bfloat16, s));
+    var triple = mlx.mlx_vector_array_new();
+    defer _ = mlx.mlx_vector_array_free(triple);
+    try mlx.check(mlx.mlx_quantize(&triple, bf, mlx.mlx_optional_int.some(64), mlx.mlx_optional_int.some(4), "affine", .{}, s));
+    var out: [3]mlx.mlx_array = undefined;
+    for (&out, 0..) |*a, i| {
+        a.* = mlx.mlx_array_new();
+        try mlx.check(mlx.mlx_vector_array_get(a, triple, i));
+        try owned.append(alloc, a.*);
+    }
+    return out;
+}
+
+test "imatrix capture on the streamed QUANTIZED MoE path keys the routing's global ids" {
+    const alloc = std.testing.allocator;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const hidden: c_int = 128;
+    const inter: c_int = 64;
+    const u: c_int = 4; // experts the slab holds; global id = slot + u
+    const experts: c_int = 8;
+    const topk: c_int = 2;
+    var prng = std.Random.DefaultPrng.init(0x515A);
+    const rnd = prng.random();
+
+    var owned: std.ArrayList(mlx.mlx_array) = .empty;
+    defer {
+        for (owned.items) |a| _ = mlx.mlx_array_free(a);
+        owned.deinit(alloc);
+    }
+    const gate = try imxQuantBank(s, alloc, rnd, u, inter, hidden, &owned);
+    const up = try imxQuantBank(s, alloc, rnd, u, inter, hidden, &owned);
+    const down = try imxQuantBank(s, alloc, rnd, u, hidden, inter, &owned);
+    const none = mlx.mlx_array{ .ctx = null };
+    const one = mlx.mlx_array_new_float(1.0);
+    try owned.append(alloc, one);
+    const mw = MoeMlpWeights{
+        .router_w = none,
+        .router_s = none,
+        .router_b = none,
+        .switch_gate_w = gate[0],
+        .switch_gate_s = gate[1],
+        .switch_gate_b = gate[2],
+        .switch_up_w = up[0],
+        .switch_up_s = up[1],
+        .switch_up_b = up[2],
+        .switch_down_w = down[0],
+        .switch_down_s = down[1],
+        .switch_down_b = down[2],
+        .shared_gate_w = none,
+        .shared_gate_s = none,
+        .shared_gate_b = none,
+        .shared_up_w = none,
+        .shared_up_s = none,
+        .shared_up_b = none,
+        .shared_down_w = none,
+        .shared_down_s = none,
+        .shared_down_b = none,
+    };
+
+    const col = try imatrix_capture.Collector.init(alloc, s, "/dev/null", 2, experts, .mimo_v2);
+    defer col.deinit();
+    var xfm: Transformer = undefined;
+    xfm.s = s;
+    xfm.config = .{
+        .model_type = "mimo_v2",
+        .num_experts = @intCast(experts),
+        .num_experts_per_tok = @intCast(topk),
+        .hidden_size = hidden,
+        .moe_intermediate_size = inter,
+        .quant_bits = 4,
+        .quant_group_size = 64,
+        .quant_mode = .affine,
+        .hidden_act = .silu,
+    };
+    xfm.one = one;
+    xfm.bits_cache = .{};
+    xfm.qwen4 = null;
+    xfm.compiled_moe_routing = null;
+    xfm.compiled_gelu = null;
+    xfm.compiled_geglu = null;
+    xfm.cost_trace_active = false;
+    xfm.verify_paired_gu_installed = false;
+    xfm.imatrix = col;
+
+    // Slots DESCEND, so the sorted arm's row order is not the routing's: a
+    // statistic folded in sorted order lands on the wrong expert. Token 0 is
+    // all zeros, so the experts it routes to (and only those) owe zero mass.
+    for ([_]c_int{ 2, 1 }) |rows| {
+        const layer: u16 = if (rows == 2) 1 else 0;
+        const x_host = try alloc.alloc(u16, @intCast(rows * hidden));
+        defer alloc.free(x_host);
+        seFillBf16(rnd, x_host);
+        if (rows == 2) @memset(x_host[0..@intCast(hidden)], 0);
+        const x = mlx.mlx_array_new_data(x_host.ptr, &[_]c_int{ 1, rows, hidden }, 3, .bfloat16);
+        defer _ = mlx.mlx_array_free(x);
+        const slots_host = try alloc.alloc(i32, @intCast(rows * topk));
+        defer alloc.free(slots_host);
+        const globals_host = try alloc.alloc(i32, slots_host.len);
+        defer alloc.free(globals_host);
+        for (slots_host, 0..) |*slot, i| {
+            slot.* = @intCast(u - 1 - @as(i32, @intCast(i)));
+            globals_host[i] = slot.* + u;
+        }
+        const slab_inds = mlx.mlx_array_new_data(slots_host.ptr, &[_]c_int{ 1, rows, topk }, 3, .int32);
+        defer _ = mlx.mlx_array_free(slab_inds);
+        const globals = mlx.mlx_array_new_data(globals_host.ptr, &[_]c_int{ rows, topk }, 2, .int32);
+        defer _ = mlx.mlx_array_free(globals);
+        const w_host = try alloc.alloc(u16, @intCast(rows * topk));
+        defer alloc.free(w_host);
+        seFillBf16(rnd, w_host);
+        const scores = mlx.mlx_array_new_data(w_host.ptr, &[_]c_int{ 1, rows, topk }, 3, .bfloat16);
+        defer _ = mlx.mlx_array_free(scores);
+
+        const out = try xfm.moeMLP2WithRouter(x, x, &mw, null, false, null, .{
+            .inds = slab_inds,
+            .norm_scores = scores,
+            .imatrix = .{ .collector = col, .layer = layer, .global_ids = globals },
+        });
+        defer _ = mlx.mlx_array_free(out);
+        try mlx.check(mlx.mlx_array_eval(out));
+
+        const slot = &col.layers[layer];
+        try std.testing.expectEqual(@as(u64, @intCast(rows)), slot.tokens);
+        try std.testing.expect(slot.gu.ctx != null and slot.down.ctx != null and slot.rows.ctx != null);
+        try std.testing.expectEqualSlices(c_int, &[_]c_int{ experts, hidden }, mlx.getShape(slot.gu));
+        try std.testing.expectEqualSlices(c_int, &[_]c_int{ experts, inter }, mlx.getShape(slot.down));
+        try mlx.check(mlx.mlx_array_eval(slot.rows));
+        try mlx.check(mlx.mlx_array_eval(slot.gu));
+        try mlx.check(mlx.mlx_array_eval(slot.down));
+        const routed = mlx.mlx_array_data_float32(slot.rows).?;
+        const gu_acc = mlx.mlx_array_data_float32(slot.gu).?;
+        const dn_acc = mlx.mlx_array_data_float32(slot.down).?;
+        // Nothing lands on a slab SLOT id, everything on the global id.
+        for (0..@intCast(u)) |e| try std.testing.expectEqual(@as(f32, 0), routed[e]);
+        for (0..@intCast(u * hidden)) |i| try std.testing.expectEqual(@as(f32, 0), gu_acc[i]);
+        for (0..@intCast(u * inter)) |i| try std.testing.expectEqual(@as(f32, 0), dn_acc[i]);
+        var high: f32 = 0;
+        for (@intCast(u)..@intCast(experts)) |e| high += routed[e];
+        try std.testing.expectEqual(@as(f32, @floatFromInt(rows * topk)), high);
+        // Row order: token 0's experts (the two HIGHEST global ids, slots
+        // descend) carry the zero row, every other routed expert real mass.
+        for (@intCast(u)..@intCast(experts)) |e| {
+            if (routed[e] == 0) continue;
+            var mass: f32 = 0;
+            for (0..@intCast(inter)) |c| mass += dn_acc[e * @as(usize, @intCast(inter)) + c];
+            const zero_row = rows == 2 and e >= @as(usize, @intCast(experts - topk));
+            if (zero_row) try std.testing.expectEqual(@as(f32, 0), mass) else try std.testing.expect(mass > 0);
+        }
+    }
+}
+
+test "a streamed layer's imatrix tap views the routing ids and is absent with no capture" {
+    const alloc = std.testing.allocator;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const ids_host = [_]i32{ 7, 3, 1, 5 };
+    const ids = mlx.mlx_array_new_data(&ids_host, &[_]c_int{ 1, 2, 2 }, 3, .int32);
+    defer _ = mlx.mlx_array_free(ids);
+    try std.testing.expect(try ImatrixTap.forLayer(null, 0, ids, 2, 2, s) == null);
+
+    const col = try imatrix_capture.Collector.init(alloc, s, "/dev/null", 2, 8, .mimo_v2);
+    defer col.deinit();
+    const tap = (try ImatrixTap.forLayer(col, 1, ids, 2, 2, s)).?;
+    defer tap.deinit();
+    try std.testing.expectEqual(@as(u16, 1), tap.layer);
+    try std.testing.expectEqualSlices(c_int, &[_]c_int{ 2, 2 }, mlx.getShape(tap.global_ids));
+    try mlx.check(mlx.mlx_array_eval(tap.global_ids));
+    const got = mlx.mlx_array_data_int32(tap.global_ids).?;
+    for (ids_host, 0..) |want, i| try std.testing.expectEqual(want, got[i]);
 }
 
 test "streamed expert compute refuses a misaligned slab by name" {

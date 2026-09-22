@@ -95,6 +95,7 @@ Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter=
 - **Geometry**: `hybrid_layer_pattern` 0 = global, 1 = sliding; read heads, KV heads and K/V widths per layer. Rotate only the first `int(head_dim * partial_rotary_factor)` channels; multiply V by `attention_value_scale` BEFORE caching.
 - **Routing/sinks**: sigmoid routing uses f32 inputs/weights, selection-only correction bias and unbiased normalized scores. A sink is an extra softmax denominator column, not a real key; its presence follows the layer type.
 - **Streaming**: `first_moe_layer` preserves absolute layer indices while excluding dense prefix layers from expert slabs and cache budgets. MXFP4 has six operands in nine stable component slots; absent biases acquire no slab or lease. MTP remains refused while streaming.
+- **Imatrix**: the capture keys by ARCH (`imatrix.Arch.mimo_v2` → `model.layers.{L}.mlp.experts.*`, one flat entry per layer) and reaches the streamed QUANTIZED layer through the routing override's tap; armed, it forces the SORTED expert arm — the fused decode kernels never materialize the activation rows the down statistic needs. Driver: `tests/mimo_imatrix_serve.py`.
 - **Evidence**: `tests/dump_mimo_v2_fixtures.py` supplies the independent HF oracle; `MIMO_V2_SOURCE` tests the downloaded Flash config/template. Native-byte preservation, forward parity, and live serving are separate gates; a header audit proves neither numerical parity nor generation.
 
 ## Qwen3.8-Flash-Next (`qwen4_exp`)
