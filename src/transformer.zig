@@ -29307,8 +29307,17 @@ pub const Transformer = struct {
         }
 
         if (stream_ctx) |info| return self.streamedMoeResult(info, expert_x, inds, norm_scores, mw);
+        if (moeDumpDir() != null) {
+            moeDumpTensor(self.s, "x", moe_dump_layer, expert_x);
+            moeDumpTensor(self.s, "ids", moe_dump_layer, inds);
+            moeDumpTensor(self.s, "w", moe_dump_layer, norm_scores);
+        }
         if (cfg.expert_layout == .exl3_k4) {
             const y = try self.moeExl3(expert_x, mw, inds, norm_scores, skip_shared and router_override != null);
+            if (moeDumpDir() != null) {
+                moeDumpTensor(self.s, "y", moe_dump_layer, y);
+                moeDumpLayerDone();
+            }
             if (skip_shared or mw.shared_expert_gate_w == null or qwen4Standin().moe_shared) return y;
             defer _ = mlx.mlx_array_free(y);
             return self.moeAddGatedShared(y, expert_x, mw);
@@ -29642,6 +29651,10 @@ pub const Transformer = struct {
             try mlx.check(mlx.mlx_astype(&narrowed, expert_sum, mlx.mlx_array_dtype(expert_x), self.s));
             _ = mlx.mlx_array_free(expert_sum);
             expert_sum = narrowed;
+        }
+        if (moeDumpDir() != null) {
+            moeDumpTensor(self.s, "y", moe_dump_layer, expert_sum);
+            moeDumpLayerDone();
         }
 
         if (skip_shared) return expert_sum;
@@ -33290,6 +33303,70 @@ pub fn diagEnvValueOn(raw: ?[*:0]const u8) bool {
 /// Diagnostic env switch: set to a value that is neither empty nor `0`. A
 /// harness exporting `FOO=0` or `FOO=` must never arm a sync profiler (the
 /// qwen4 MTP verify once measured 70 ms).
+
+/// MLX_SERVE_MOE_DUMP=<dir>: one forward's MoE tensors, per layer, as raw f32
+/// with the shape in the file name. Off by default; the dir is read once. Two
+/// packs that share a trunk must agree at the first MoE layer, so this is the
+/// only way to say WHERE two loads of the same model start to differ.
+var moe_dump_dir: ?[]const u8 = null;
+var moe_dump_asked: bool = false;
+var moe_dump_layer: u32 = 0;
+var moe_dump_done: bool = false;
+
+fn moeDumpDir() ?[]const u8 {
+    if (!moe_dump_asked) {
+        moe_dump_asked = true;
+        if (std.c.getenv("MLX_SERVE_MOE_DUMP")) |p| {
+            const v = std.mem.span(p);
+            if (v.len > 0 and v[0] != '0') moe_dump_dir = v;
+        }
+    }
+    return moe_dump_dir;
+}
+
+/// One forward only: the layer counter walks the MoE layers in order and the
+/// dump latches off when it has seen a whole model's worth.
+fn moeDumpLayerDone() void {
+    moe_dump_layer += 1;
+    if (moe_dump_layer >= 64) moe_dump_done = true;
+}
+
+/// One tensor, evaluated and written as f32. Never on a serving path: the dump
+/// is a host read per layer, which is a GPU barrier by construction.
+fn moeDumpTensor(s: mlx.mlx_stream, tag: []const u8, layer: u32, a: mlx.mlx_array) void {
+    const dir = moeDumpDir() orelse return;
+    if (moe_dump_done) return;
+    var f32a = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(f32a);
+    if (mlx.mlx_astype(&f32a, a, .float32, s) != 0) return;
+    var c = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(c);
+    if (mlx.mlx_contiguous(&c, f32a, false, s) != 0) return;
+    if (mlx.mlx_array_eval(c) != 0) return;
+    const p = mlx.mlx_array_data_float32(c) orelse return;
+    const shape = mlx.getShape(c);
+    var name: [512]u8 = undefined;
+    var used: usize = 0;
+    used += (std.fmt.bufPrint(name[used..], "{s}/L{d:0>2}_{s}", .{ dir, layer, tag }) catch return).len;
+    var n: usize = 1;
+    for (shape) |d| {
+        n *= @intCast(d);
+        used += (std.fmt.bufPrint(name[used..], "_{d}", .{d}) catch return).len;
+    }
+    used += (std.fmt.bufPrint(name[used..], ".f32\x00", .{}) catch return).len;
+    const path: [*:0]const u8 = @ptrCast(name[0 .. used - 1].ptr);
+    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+    const bytes = std.mem.sliceAsBytes(p[0..n]);
+    var put: usize = 0;
+    while (put < bytes.len) {
+        const w = std.c.write(fd, bytes.ptr + put, bytes.len - put);
+        if (w <= 0) return;
+        put += @intCast(w);
+    }
+}
+
 fn diagEnvOn(name: [*:0]const u8) bool {
     return diagEnvValueOn(std.c.getenv(name));
 }
