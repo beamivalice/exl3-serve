@@ -834,7 +834,73 @@ pub const ModelConfig = struct {
         return self.longCtxGated();
     }
 
+    /// Dense bf16 bytes ONE token of layer `li`'s K and V occupy. Only correct
+    /// to bill per layer on an arch whose layers really differ (mimo_v2's
+    /// global/sliding split); `kvBytesPerToken` keeps the uniform formula
+    /// everywhere else so no arch's number moves without its bytes moving.
+    fn layerKvBytes(self: *const ModelConfig, li: u32) u64 {
+        return @as(u64, self.layerKVHeads(li)) *
+            (@as(u64, self.layerHeadDim(li)) + @as(u64, self.layerVHeadDim(li))) * 2;
+    }
+
+    /// Rows a ringed sliding layer holds past its window before it compacts.
+    /// The compaction is a real copy of the retained window, so the slack is
+    /// what amortizes it over decode steps.
+    pub const SWA_RING_SLACK: u64 = 512;
+
+    /// Tokens a sliding layer's KV buffer retains, 0 when every layer stores
+    /// the full sequence. Non-zero only where dropping the rows below the
+    /// window is provably invisible: the layer's whole attention is the window,
+    /// every mask builder is handed the TRIMMED length (`slidingViewFor`), and
+    /// no in-kernel band reads absolute positions (the fused hd-256 kernel
+    /// does, so an arch at that width never rings).
+    pub fn swaRingTokens(self: *const ModelConfig) u64 {
+        if (!std.mem.eql(u8, self.model_type, "mimo_v2")) return 0;
+        if (!self.has_sliding_window or self.sliding_window == 0) return 0;
+        if (self.head_dim == 256) return 0;
+        return @as(u64, self.sliding_window) + SWA_RING_SLACK;
+    }
+
+    /// Dense bytes of ringed sliding-layer storage ONE slot holds, whatever the
+    /// context: the twin of `qsaRingBytes`, billed once per slot rather than
+    /// per token. Kv-quantized like any other cache row, so callers scale it
+    /// through `server.kvBytesPerTokenAtBits`.
+    pub fn swaRingBytes(self: *const ModelConfig) u64 {
+        const rows = self.swaRingTokens();
+        if (rows == 0) return 0;
+        return rows * self.slidingLayerKvBytesPerToken();
+    }
+
+    /// Dense bytes one CHUNK token stages in the ringed layers: a prefill chunk
+    /// is written whole before the ring compacts down to its window, so the
+    /// rows exist for the width of the forward and nothing else bills them.
+    pub fn swaStreamBytesPerToken(self: *const ModelConfig) u64 {
+        if (self.swaRingTokens() == 0) return 0;
+        return self.slidingLayerKvBytesPerToken();
+    }
+
+    fn slidingLayerKvBytesPerToken(self: *const ModelConfig) u64 {
+        var total: u64 = 0;
+        var li: u32 = 0;
+        while (li < self.num_hidden_layers) : (li += 1) {
+            if (!self.isGlobalLayer(li)) total += self.layerKvBytes(li);
+        }
+        return total;
+    }
+
     pub fn kvBytesPerToken(self: *const ModelConfig) u64 {
+        // A ringed arch pays per token only on its global layers; the sliding
+        // half is `swaRingBytes`, a constant. Both halves land in the same
+        // commit — billing the ring before the storage rings is an under-bill,
+        // which ends in an uncatchable Metal OOM rather than a 400.
+        if (self.swaRingTokens() > 0) {
+            var total: u64 = 0;
+            var li: u32 = 0;
+            while (li < self.num_hidden_layers) : (li += 1) {
+                if (self.isGlobalLayer(li)) total += self.layerKvBytes(li);
+            }
+            return total;
+        }
         const widths: u64 = if (self.isMla())
             @as(u64, self.mlaQkHeadDim()) + @as(u64, self.mla_v_head_dim)
         else
@@ -8174,6 +8240,11 @@ test "real mimo_v2 Flash config agrees with source geometry" {
         try testing.expectEqual(!c.isGlobalLayer(li), c.layerHasAttnSinks(li));
     }
     try testing.expectEqual(@as(u32, 9), global);
+    // What the session costs: 9 global layers per token, the 39 sliding ones a
+    // ring held once per slot.
+    try testing.expectEqual(@as(u64, 9 * 4 * (192 + 128) * 2), c.kvBytesPerToken());
+    try testing.expectEqual(@as(u64, 128) + ModelConfig.SWA_RING_SLACK, c.swaRingTokens());
+    try testing.expectEqual(c.swaRingTokens() * 39 * 8 * (192 + 128) * 2, c.swaRingBytes());
     try testing.expectEqual(@as(f32, 0.707), c.attention_value_scale);
     try testing.expect(c.isEosToken(151643) and c.isEosToken(151645) and c.isEosToken(151672));
     try testing.expect(!c.attn_fused_qkv);
@@ -8181,6 +8252,69 @@ test "real mimo_v2 Flash config agrees with source geometry" {
     try testing.expectEqual(@as(u32, 4), c.quant_bits);
     try testing.expectEqual(@as(u32, 32), c.quant_group_size);
     try testing.expect(c.expertStreamingRequired());
+}
+
+/// The mimo_v2 geometry of "ModelConfig parses mimo_v2 hybrid geometry", kept
+/// beside the bill assertions so the expected bytes read against one spelling.
+const MIMO_V2_BILL_JSON =
+    \\{
+    \\  "model_type": "mimo_v2", "hidden_size": 384, "vocab_size": 128,
+    \\  "num_hidden_layers": 4, "intermediate_size": 1536,
+    \\  "num_attention_heads": 4, "num_key_value_heads": 2,
+    \\  "head_dim": 192, "v_head_dim": 128,
+    \\  "swa_num_attention_heads": 6, "swa_num_key_value_heads": 3,
+    \\  "swa_head_dim": 192, "swa_v_head_dim": 128,
+    \\  "hybrid_layer_pattern": [0,1,1,0], "sliding_window": 128,
+    \\  "rope_theta": 10000000, "swa_rope_theta": 10000,
+    \\  "partial_rotary_factor": 0.334, "attention_value_scale": 0.707,
+    \\  "add_swa_attention_sink_bias": true, "add_full_attention_sink_bias": false,
+    \\  "attention_projection_layout": "split_qkv", "layernorm_epsilon": 0.00001,
+    \\  "n_routed_experts": 16, "num_experts_per_tok": 4,
+    \\  "moe_intermediate_size": 192, "moe_layer_freq": [0,1,1,1],
+    \\  "scoring_func": "sigmoid", "topk_method": "noaux_tc",
+    \\  "n_group": 1, "topk_group": 1, "norm_topk_prob": true,
+    \\  "routed_scaling_factor": null, "n_shared_experts": null,
+    \\  "eos_token_id": 17, "tie_word_embeddings": false,
+    \\  "quantization": {"bits": 4, "group_size": 32, "mode": "mxfp4"}
+    \\}
+;
+
+test "mimo_v2 bills per-layer KV geometry and the sliding window once per slot" {
+    const c = try parseConfigFromJson(testing.allocator, MIMO_V2_BILL_JSON);
+    // Global layers 0 and 3 at 2 KV heads x (qk 192 + v 128) x 2 bytes. The
+    // sliding pair contributes NOTHING per token — its storage is a ring.
+    try testing.expectEqual(@as(u64, 2 * 2 * (192 + 128) * 2), c.kvBytesPerToken());
+    // The ring: two sliding layers at 3 KV heads x 320 x 2 bytes, held for
+    // `swaRingTokens` rows however long the session runs.
+    try testing.expectEqual(@as(u64, 128) + ModelConfig.SWA_RING_SLACK, c.swaRingTokens());
+    try testing.expectEqual(c.swaRingTokens() * 2 * 3 * (192 + 128) * 2, c.swaRingBytes());
+    // What one chunk token stages in those layers before the ring compacts.
+    try testing.expectEqual(@as(u64, 2 * 3 * (192 + 128) * 2), c.swaStreamBytesPerToken());
+}
+
+test "a non-ringing sliding arch keeps the uniform KV bill" {
+    // gemma4 slides too, but stores every layer full-length, so its bill must
+    // stay the uniform `layers x kv_heads x 2*head_dim x 2`: per-layer geometry
+    // would read `global_head_dim` 512 and move a number whose bytes are still
+    // there.
+    var g = ModelConfig{};
+    g.model_type = "gemma4";
+    g.num_hidden_layers = 48;
+    g.num_key_value_heads = 8;
+    g.head_dim = 256;
+    g.global_head_dim = 512;
+    g.has_sliding_window = true;
+    g.has_explicit_layer_types = true;
+    g.layer_is_global[2] = true;
+    try testing.expectEqual(@as(u64, 0), g.swaRingTokens());
+    try testing.expectEqual(@as(u64, 0), g.swaRingBytes());
+    try testing.expectEqual(@as(u64, 0), g.swaStreamBytesPerToken());
+    try testing.expectEqual(@as(u64, 48 * 8 * 2 * 256 * 2), g.kvBytesPerToken());
+
+    // qwen4_exp: 12 caching layers of 48, uniform geometry, no ring.
+    const q = try parseConfigFromJson(testing.allocator, QWEN4_YARN);
+    try testing.expectEqual(@as(u64, 0), q.swaRingTokens());
+    try testing.expectEqual(@as(u64, 24_576), q.kvBytesPerToken());
 }
 
 test "real mimo_v2 original and converted packs bill the same resident trunk" {

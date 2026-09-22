@@ -3378,7 +3378,9 @@ fn expertStreamingPlannedSeq(config: *const model_mod.ModelConfig) u64 {
 /// The KV a streamed load plans to hold: the second term of the
 /// budget-vs-wired-limit admission.
 fn expertStreamingPlannedKvBytes(config: *const model_mod.ModelConfig) u64 {
-    return kvBytesPerTokenAtBits(config.kvBytesPerToken(), defaultKvBits(config)) *| expertStreamingPlannedSeq(config);
+    const kv_bits = defaultKvBits(config);
+    return kvBytesPerTokenAtBits(config.kvBytesPerToken(), kv_bits) *| expertStreamingPlannedSeq(config) +|
+        slotRingBytes(config, kv_bits);
 }
 
 fn expertStreamingServingBytes(config: *const model_mod.ModelConfig) u64 {
@@ -3552,7 +3554,7 @@ pub fn prefillTransientReserveAtKv(
         config.prefillAttnKeys(seq),
         prefillStreamBytesPerToken(config),
         prefillDequantWeightBytes(config),
-        .{ .qsa_ring_bytes = config.qsaRingBytes() },
+        .{ .qsa_ring_bytes = slotRingBytes(config, kv_bits) },
     ) + qsaMaskBytes(config, @min(chunk, @max(seq, 1)), seq) +
         (if (config.expert_streaming) config.expert_fill_peak_bytes else 0);
 }
@@ -3723,7 +3725,7 @@ pub fn billedPrefillChunk(
 /// explicit `--ctx-size`, 0 while the context is auto (the auto sizer adapts to the rung).
 pub fn sizerCtxKvBytes(config: *const model_mod.ModelConfig, kv_bits: u64) u64 {
     if (manualContext(config) == 0) return 0;
-    return sessionBytesPerToken(config, kv_bits) *| manualContext(config) +| config.qsaRingBytes();
+    return sessionBytesPerToken(config, kv_bits) *| manualContext(config) +| slotRingBytes(config, kv_bits);
 }
 
 /// Freeze this model's prefill chunk at load, from live memory. Idempotent.
@@ -3828,7 +3830,7 @@ pub fn planHotCache(
     const chunk = billedPrefillChunk(config, kv_bits, ceiling, active_weights, sizer_ctx_kv, requested, chunk_override);
     const reserve_chunk = clampReserveWidth(config, chunk);
     const reserve = prefillTransientReserve(config, kv_bits, reserve_chunk);
-    const ctx_kv: u64 = sessionBytesPerToken(config, kv_bits) *| ctx_tokens +| config.qsaRingBytes();
+    const ctx_kv: u64 = sessionBytesPerToken(config, kv_bits) *| ctx_tokens +| slotRingBytes(config, kv_bits);
     return .{
         .chunk = chunk,
         .reserve_chunk = reserve_chunk,
@@ -3901,7 +3903,7 @@ fn ssdFirstSessionTokensNow(config: *const model_mod.ModelConfig, kv_bits: u64, 
 /// The bytes the SSD-first budget floors at: one session at the working context, at the width the cache stores.
 fn ssdFirstSessionKvBytes(config: *const model_mod.ModelConfig, kv_bits: u64, ceiling: u64, active_mem: u64, chunk: u32) u64 {
     return sessionBytesPerToken(config, kv_bits) *|
-        ssdFirstSessionTokensNow(config, kv_bits, ceiling, active_mem, chunk) +| config.qsaRingBytes();
+        ssdFirstSessionTokensNow(config, kv_bits, ceiling, active_mem, chunk) +| slotRingBytes(config, kv_bits);
 }
 
 /// The SSD-first arm of `prefixCacheMemForLoad`, gate and log included. Null when the arch
@@ -3989,7 +3991,7 @@ pub fn prefixCacheMemForLoad(config: *model_mod.ModelConfig, requested: u64, rev
         const chunk: u64 = pinPrefillChunk(config);
         // `statePerTokenBilled` is 0 off qwen4_exp.
         const ctx_kv: u64 = (kvBytesPerTokenAtBits(config.kvBytesPerToken(), kv_bits) +| statePerTokenBilled(config)) *|
-            getEffectiveContextLength(config) +| config.qsaRingBytes();
+            getEffectiveContextLength(config) +| slotRingBytes(config, kv_bits);
         const clamped = clampedPrefixCacheMem(
             requested,
             currentGpuMemoryCeiling(config, active_mem),
@@ -5314,6 +5316,15 @@ pub fn kvBytesPerTokenAtBits(dense: u64, kv_bits: u64) u64 {
     return dense * (2 * kv_bits + 1) / 32;
 }
 
+/// Context-INDEPENDENT bytes one live slot holds beside its per-token KV: the
+/// qwen4 QSA raw-key ring (not kv-quantized) and a ringed sliding layer's
+/// retained window (stored like any other cache row, so it follows `kv_bits`).
+/// Every sizer that used to add `qsaRingBytes` adds this instead — a second
+/// per-slot constant billed at only some of them is the under-bill class.
+pub fn slotRingBytes(config: *const model_mod.ModelConfig, kv_bits: u64) u64 {
+    return config.qsaRingBytes() +| kvBytesPerTokenAtBits(config.swaRingBytes(), kv_bits);
+}
+
 /// The chunk-independent floor every prefill pays: MLX runtime scratch, the
 /// KV cache's proportional capacity growth (old + new buffer coexist across a
 /// grow), and the graph live-set no other term models. MEASURED as the
@@ -5515,6 +5526,10 @@ fn prefillStreamBytesPerToken(config: *const model_mod.ModelConfig) u64 {
         per_tok += MOE_PREFILL_COEXIST * top_k * 2 *
             (@as(u64, config.hidden_size) + config.moe_intermediate_size) * 2;
     }
+    // A ringed sliding layer stages the WHOLE chunk before it compacts back to
+    // its window, so the rows exist for the width of the forward and the
+    // per-token KV term (global layers only) does not carry them.
+    per_tok += config.swaStreamBytesPerToken();
     return per_tok;
 }
 
@@ -5658,7 +5673,7 @@ pub fn prefillRequestTerms(config: *const model_mod.ModelConfig, seq: u64, max_t
         .checkpoint_bytes = retainedSsmCheckpointBytes(config, seq, warm.matched_tokens, chunk),
         .shared_resident_bytes = credited *| kv_per_tok,
         .grow_coexist_bytes = growCoexistBytes(config, warm, seq, kv_per_tok),
-        .qsa_ring_bytes = config.qsaRingBytes() +| head_qsa_ring,
+        .qsa_ring_bytes = slotRingBytes(config, kv_bits) +| head_qsa_ring,
         .mtp_head_kv_bytes = reserved *| head_per_tok,
     };
 }
@@ -24654,6 +24669,46 @@ test "a streaming stop sequence cuts at the match, not at the token boundary" {
     const many = [_][]const u8{ "END", "N" };
     try t.expectEqual(@as(usize, 1), stopSequenceCut("aNbEND", 6, &many).?.index);
     try t.expectEqual(@as(?StopCut, null), stopSequenceCut("all clear", 3, &stops));
+}
+
+fn mimoV2BillConfig() model_mod.ModelConfig {
+    var c = model_mod.ModelConfig{};
+    c.model_type = "mimo_v2";
+    c.num_hidden_layers = 4;
+    c.hidden_size = 384;
+    c.num_attention_heads = 4;
+    c.has_sliding_window = true;
+    c.has_explicit_layer_types = true;
+    c.sliding_window = 128;
+    c.layer_is_global[0] = true;
+    c.layer_is_global[3] = true;
+    c.head_dim = 192;
+    c.v_head_dim = 128;
+    c.num_key_value_heads = 3;
+    c.global_head_dim = 192;
+    c.global_v_head_dim = 128;
+    c.num_global_key_value_heads = 2;
+    return c;
+}
+
+test "the sliding ring is billed once per slot and staged per chunk token" {
+    const t = std.testing;
+    const cfg = mimoV2BillConfig();
+    // Once per slot, at the width the cache stores — the twin of the QSA ring,
+    // which this arch does not have.
+    try t.expectEqual(@as(u64, 0), cfg.qsaRingBytes());
+    try t.expectEqual(cfg.swaRingBytes(), slotRingBytes(&cfg, 16));
+    try t.expectEqual(kvBytesPerTokenAtBits(cfg.swaRingBytes(), 8), slotRingBytes(&cfg, 8));
+    try t.expect(slotRingBytes(&cfg, 8) < slotRingBytes(&cfg, 16));
+    // Per token of context only the two global layers count.
+    try t.expectEqual(@as(u64, 2 * 2 * (192 + 128) * 2), sessionBytesPerToken(&cfg, 16));
+    // The chunk the ring has not compacted yet rides the prefill envelope.
+    try t.expect(prefillStreamBytesPerToken(&cfg) >= cfg.swaStreamBytesPerToken());
+    // An arch that stores every layer full-length keeps a zero ring.
+    var plain = cfg;
+    plain.model_type = "qwen3";
+    try t.expectEqual(@as(u64, 0), slotRingBytes(&plain, 16));
+    try t.expectEqual(@as(u64, 0), prefillStreamBytesPerToken(&plain));
 }
 
 test "generated think tags require an unambiguous literal template opener" {

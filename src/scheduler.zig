@@ -610,6 +610,7 @@ pub const Slot = struct {
         const slot_kv_layers: u32 = if (is_embedded) 0 else config.num_hidden_layers;
         var cache = try KVCache.initWithConfig(allocator, slot_kv_layers, kv_quant_config);
         errdefer cache.deinit();
+        if (config.swaRingTokens() > 0) cache.setSwaRing(config.sliding_window);
 
         // Per-slot SSM cache. Mirror the same predicate `Transformer.init`
         // uses to allocate `xfm.ssm_entries` (transformer.zig: `has_hybrid_layers`

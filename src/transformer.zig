@@ -7039,9 +7039,16 @@ pub const KVCacheEntry = struct {
     value_scales_view: mlx.mlx_array,
     value_biases_view: mlx.mlx_array,
 
-    offset: usize, // logical token count (may be < buffer capacity)
+    offset: usize, // rows STORED (may be < buffer capacity)
     initialized: bool,
     shared_view: bool = false,
+    /// Rows dropped off the FRONT by the sliding ring. The absolute token count
+    /// this entry describes is `base + offset`; every caller that speaks in
+    /// prompt positions (truncate, trimmedCopy) goes through `base`.
+    base: usize = 0,
+    /// This layer's storage is a ring: its attention reads the tail only, so
+    /// rows below the window were dropped and no rewind can reach them.
+    ringed: bool = false,
 };
 
 /// Materialized dense `[B,H,T,D]` K/V pair handed to SDPA. Owns its arrays
@@ -7215,7 +7222,10 @@ pub fn slidingViewFor(cfg: *const ModelConfig, total_kv: c_int, seq_len: c_int) 
     // and then fell through to the explicit-mask path anyway — gemma got
     // nothing from the trim at all.
     const band = fused256Enabled() and cfg.head_dim == 256 and seq_len >= FUSED256_MIN_Q_LEN;
-    const width: usize = if (band or !slidingBlockTrimEnabled()) 1 else SLIDING_TRIM_UNBOUNDED;
+    // A ringed arch does not get to decline the block trim: the rows below the
+    // span are no longer in the cache, so an untrimmed view would be a lie.
+    const rings = cfg.swaRingTokens() > 0;
+    const width: usize = if (band or (!slidingBlockTrimEnabled() and !rings)) 1 else SLIDING_TRIM_UNBOUNDED;
     const span: u32 = if (cfg.has_sliding_window)
         slidingTailSpan(cfg.sliding_window, @intCast(seq_len), width)
     else
@@ -7240,6 +7250,34 @@ pub const KVCache = struct {
     /// `reservedCacheTokens`). A grow is not in place, so a long prefill's peak carried a
     /// second copy of ~6 GB of KV at 458k; reserving on the first grow removes the transient.
     reserve_tokens: usize = 0,
+    /// Window a sliding layer's storage rings at (`ModelConfig.sliding_window`);
+    /// 0 = every layer stores the whole sequence. A layer rings only on a
+    /// forward that hands `update` a non-zero `max_seq` — the one predicate
+    /// that says its attention reads the tail and nothing below it.
+    swa_ring_window: u32 = 0,
+
+    pub fn setSwaRing(self: *KVCache, window: u32) void {
+        self.swa_ring_window = window;
+    }
+
+    /// Rows a ringed entry may hold before it compacts.
+    fn ringCap(window: u32) usize {
+        return @as(usize, window) + ModelConfig.SWA_RING_SLACK;
+    }
+
+    /// Rows a compaction keeps. The gap below `ringCap` is rewind headroom:
+    /// a full-reuse restore clamps back a token and a prefix match lands
+    /// wherever the histories diverged, and neither may fall off the ring.
+    fn ringKeep(window: u32) usize {
+        return @as(usize, window) + ModelConfig.SWA_RING_SLACK / 2;
+    }
+
+    /// Absolute tokens this layer's state describes, rings included.
+    pub fn absSeqLen(self: *const KVCache, layer: u32) usize {
+        const entry = &self.entries[layer];
+        if (!entry.initialized) return 0;
+        return entry.base + entry.offset;
+    }
 
     pub fn init(allocator: std.mem.Allocator, num_layers: u32) !KVCache {
         return initWithConfig(allocator, num_layers, KVQuantConfig.dense);
@@ -7269,7 +7307,8 @@ pub const KVCache = struct {
     /// re-init behind a deinit"; keeping the order inside ONE helper is what
     /// stops it recurring, so the call sites are scan-pinned to use it.
     pub fn reinit(self: *KVCache, num_layers: u32, config: KVQuantConfig) !void {
-        const fresh = try initWithConfig(self.allocator, num_layers, config);
+        var fresh = try initWithConfig(self.allocator, num_layers, config);
+        fresh.swa_ring_window = self.swa_ring_window;
         self.deinit();
         self.* = fresh;
     }
@@ -7291,6 +7330,8 @@ pub const KVCache = struct {
             out[i] = newEmptyKVEntry();
             built = i + 1;
             out[i].offset = src.offset;
+            out[i].base = src.base;
+            out[i].ringed = src.ringed;
             out[i].initialized = src.initialized;
             if (src.initialized) {
                 try mlx.check(mlx.mlx_array_set(&out[i].keys, src.keys));
@@ -7303,7 +7344,7 @@ pub const KVCache = struct {
                 }
             }
         }
-        return .{ .entries = out, .step = self.step, .allocator = self.allocator, .config = self.config };
+        return .{ .entries = out, .step = self.step, .allocator = self.allocator, .config = self.config, .swa_ring_window = self.swa_ring_window };
     }
 
     /// Replace cache state with `snap`. Frees current entries' arrays first;
@@ -7315,6 +7356,8 @@ pub const KVCache = struct {
             freeKVEntry(dst);
             dst.* = newEmptyKVEntry();
             dst.offset = src.offset;
+            dst.base = src.base;
+            dst.ringed = src.ringed;
             dst.initialized = src.initialized;
             if (src.initialized) {
                 try mlx.check(mlx.mlx_array_set(&dst.keys, src.keys));
@@ -7610,6 +7653,9 @@ pub const KVCache = struct {
         max_seq: u32,
     ) !void {
         const entry = &self.entries[layer];
+        // A non-zero `max_seq` IS the ring predicate: it says this forward will
+        // only ever read the tail of this layer.
+        if (self.swa_ring_window > 0 and max_seq > 0) entry.ringed = true;
         _ = mlx.mlx_array_free(entry.key_view);
         _ = mlx.mlx_array_free(entry.value_view);
         _ = mlx.mlx_array_free(entry.key_scales_view);
@@ -7645,7 +7691,7 @@ pub const KVCache = struct {
         if (will_grow) {
             const needed = entry.offset + new_len;
             const cur_cap = if (entry.initialized) bufferCapacity(entry.keys) else 0;
-            const new_cap: c_int = @intCast(self.nextCapacityReserved(cur_cap, needed));
+            const new_cap: c_int = @intCast(self.growCapacityFor(entry, cur_cap, needed));
             kv_cap_buf_grows += 1;
             try growQuantBuf(s, &entry.keys, entry.initialized, entry.offset, new_cap, B, heads, q_last, .uint32);
             try growQuantBuf(s, &entry.values, entry.initialized, entry.offset, new_cap, B, heads, vq_last, .uint32);
@@ -7686,6 +7732,7 @@ pub const KVCache = struct {
         try buildSliceView(s, &entry.key_biases_view, entry.keys_biases, total, view_start);
         try buildSliceView(s, &entry.value_scales_view, entry.values_scales, total, view_start);
         try buildSliceView(s, &entry.value_biases_view, entry.values_biases, total, view_start);
+        try self.ringCompact(entry, s);
     }
 
     fn cowAffineBuffers(s: mlx.mlx_stream, entry: *KVCacheEntry) !void {
@@ -7706,6 +7753,9 @@ pub const KVCache = struct {
 
     fn updateDense(self: *KVCache, layer: u32, new_k: mlx.mlx_array, new_v: mlx.mlx_array, s: mlx.mlx_stream, max_seq: u32) !DenseKVView {
         const entry = &self.entries[layer];
+        // A non-zero `max_seq` IS the ring predicate: it says this forward will
+        // only ever read the tail of this layer.
+        if (self.swa_ring_window > 0 and max_seq > 0) entry.ringed = true;
 
         // 1. Free stale views — drops refcount on buffer → enables buffer donation.
         //    Reset the handles at once: a failing op below must not leave freed
@@ -7746,7 +7796,7 @@ pub const KVCache = struct {
             const dtype = mlx.mlx_array_dtype(new_k);
             const needed = entry.offset + new_len;
             const cur_cap = if (entry.initialized) bufferCapacity(entry.keys) else 0;
-            const new_cap: c_int = @intCast(self.nextCapacityReserved(cur_cap, needed));
+            const new_cap: c_int = @intCast(self.growCapacityFor(entry, cur_cap, needed));
             kv_cap_buf_grows += 1;
             const initialized = entry.initialized;
             try growQuantBuf(s, &entry.keys, initialized, entry.offset, new_cap, B, heads, head_dim, dtype);
@@ -7782,6 +7832,7 @@ pub const KVCache = struct {
         // each buffer's own last dim, so K and V may differ in width.
         try buildSliceView(s, &entry.key_view, entry.keys, total, view_start);
         try buildSliceView(s, &entry.value_view, entry.values, total, view_start);
+        try self.ringCompact(entry, s);
 
         return .{ .k = entry.key_view, .v = entry.value_view, .owned = false };
     }
@@ -7855,7 +7906,7 @@ pub const KVCache = struct {
     /// layers, since the credit must be provable for every buffer the prefill writes.
     pub fn residentCapacityTokens(self: *const KVCache) usize {
         var fold = CapacityFold{};
-        for (self.entries) |*e| fold.add(if (e.initialized) bufferCapacity(e.keys) else null);
+        for (self.entries) |*e| fold.add(if (e.initialized and !e.ringed) bufferCapacity(e.keys) else null);
         return fold.result();
     }
 
@@ -7894,6 +7945,64 @@ pub const KVCache = struct {
             buf.* = new_buf;
             new_buf = .{ .ctx = null };
         }
+    }
+
+    /// Replace `buf` with a fresh `cap`-row buffer holding rows `[drop, offset)`
+    /// at its front. A real copy, not a slice: the point is to release the
+    /// buffer the dropped rows live in.
+    fn ringTailBuf(s: mlx.mlx_stream, buf: *mlx.mlx_array, drop: usize, offset: usize, cap: usize) !void {
+        const sh = mlx.getShape(buf.*);
+        if (sh.len < 4) return;
+        const keep: c_int = @intCast(offset - drop);
+        const buf_shape = [_]c_int{ sh[0], sh[1], @intCast(cap), sh[3] };
+        var fresh = mlx.mlx_array_new();
+        errdefer _ = mlx.mlx_array_free(fresh);
+        try mlx.check(mlx.mlx_zeros(&fresh, &buf_shape, 4, mlx.mlx_array_dtype(buf.*), s));
+        const strides = [_]c_int{ 1, 1, 1, 1 };
+        const tail_start = [_]c_int{ 0, 0, @intCast(drop), 0 };
+        const tail_stop = [_]c_int{ sh[0], sh[1], @intCast(offset), sh[3] };
+        var tail = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(tail);
+        try mlx.check(mlx.mlx_slice(&tail, buf.*, &tail_start, 4, &tail_stop, 4, &strides, 4, s));
+        const head_start = [_]c_int{ 0, 0, 0, 0 };
+        const head_stop = [_]c_int{ sh[0], sh[1], keep, sh[3] };
+        var updated = mlx.mlx_array_new();
+        errdefer _ = mlx.mlx_array_free(updated);
+        try mlx.check(mlx.mlx_slice_update(&updated, fresh, tail, &head_start, 4, &head_stop, 4, &strides, 4, s));
+        _ = mlx.mlx_array_free(fresh);
+        fresh = .{ .ctx = null };
+        _ = mlx.mlx_array_free(buf.*);
+        buf.* = updated;
+    }
+
+    /// Drop the rows below the retained window once a ringed entry passes its
+    /// cap. Runs AFTER this forward's view is built: the view slices the
+    /// pre-compaction buffer and holds it alive, so the rows it reads are never
+    /// the rows this drops.
+    fn ringCompact(self: *KVCache, entry: *KVCacheEntry, s: mlx.mlx_stream) !void {
+        if (self.swa_ring_window == 0 or !entry.ringed) return;
+        if (entry.offset <= ringCap(self.swa_ring_window)) return;
+        const keep = ringKeep(self.swa_ring_window);
+        const drop = entry.offset - keep;
+        const cap = ringCap(self.swa_ring_window);
+        try ringTailBuf(s, &entry.keys, drop, entry.offset, cap);
+        try ringTailBuf(s, &entry.values, drop, entry.offset, cap);
+        if (self.config.scheme != .off) {
+            try ringTailBuf(s, &entry.keys_scales, drop, entry.offset, cap);
+            try ringTailBuf(s, &entry.keys_biases, drop, entry.offset, cap);
+            try ringTailBuf(s, &entry.values_scales, drop, entry.offset, cap);
+            try ringTailBuf(s, &entry.values_biases, drop, entry.offset, cap);
+        }
+        entry.base += drop;
+        entry.offset = keep;
+    }
+
+    /// The capacity a grow takes for THIS entry. A ringed entry never takes the
+    /// session reservation (it holds a window, not a context) and floors at the
+    /// ring cap so a cold decode does not grow twice to reach it.
+    fn growCapacityFor(self: *const KVCache, entry: *const KVCacheEntry, cur_cap: usize, needed: usize) usize {
+        if (!entry.ringed) return self.nextCapacityReserved(cur_cap, needed);
+        return @max(nextCapacity(cur_cap, needed), ringCap(self.swa_ring_window));
     }
 
     fn writeAtOffset(s: mlx.mlx_stream, buf: *mlx.mlx_array, offset: usize, new_chunk: mlx.mlx_array) !void {
@@ -7966,17 +8075,34 @@ pub const KVCache = struct {
     pub fn kvLenForBatching(self: *const KVCache) usize {
         if (self.entries.len > 0 and self.entries[0].initialized) return self.step;
         for (self.entries) |*e| {
-            if (e.initialized) return e.offset;
+            if (e.initialized) return e.base + e.offset;
         }
         return self.step;
     }
 
+    /// Can every ringed entry still show the window a query at `len` reads?
+    /// `base` rows are gone for good, so the answer is a property of what the
+    /// ring kept, not of the request.
+    fn ringServesClamp(self: *const KVCache, len: usize) !void {
+        for (self.entries) |*entry| {
+            if (!entry.initialized or !entry.ringed) continue;
+            if (len < entry.base) return error.SlidingRingRewindPastWindow;
+            const local = len - entry.base;
+            if (local < @min(len, @as(usize, self.swa_ring_window))) return error.SlidingRingRewindPastWindow;
+        }
+    }
+
     /// Truncate the KV cache to keep only the first `len` tokens on the sequence axis.
     pub fn truncate(self: *KVCache, len: usize, s: mlx.mlx_stream) !void {
+        // A ringed layer holds a window, not a prefix: a clamp below the rows it
+        // kept cannot be served. Decide BEFORE mutating anything — a half-clamped
+        // cache is a state no caller can hand back.
+        if (len > 0) try self.ringServesClamp(len);
         self.step = len;
         for (self.entries) |*entry| {
             if (!entry.initialized) continue;
-            if (len >= entry.offset) continue;
+            const local: usize = len -| entry.base;
+            if (local >= entry.offset) continue;
 
             // Free stale views (all 6: dense + 4 quant scale/bias views)
             _ = mlx.mlx_array_free(entry.key_view);
@@ -7994,7 +8120,7 @@ pub const KVCache = struct {
                 entry.value_biases_view = mlx.mlx_array_new();
             }
 
-            if (len == 0) {
+            if (local == 0) {
                 _ = mlx.mlx_array_free(entry.keys);
                 _ = mlx.mlx_array_free(entry.values);
                 entry.keys = mlx.mlx_array_new();
@@ -8011,18 +8137,19 @@ pub const KVCache = struct {
                 }
                 entry.initialized = false;
                 entry.offset = 0;
+                entry.base = 0;
                 continue;
             }
 
             // Just update offset — the buffer still holds data but views will
-            // only expose [0:len]. No need to shrink the pre-allocated buffer.
-            entry.offset = len;
+            // only expose [0:local]. No need to shrink the pre-allocated buffer.
+            entry.offset = local;
 
             // Recreate views for the truncated range. Each buffer is sliced
             // against its OWN shape — an MLA cache's V is narrower than its K.
             const shape = mlx.getShape(entry.keys);
             if (shape.len < 4) continue;
-            const seq_end: c_int = @intCast(len);
+            const seq_end: c_int = @intCast(local);
             const v_start = [_]c_int{ 0, 0, 0, 0 };
             const v_stop = [_]c_int{ shape[0], shape[1], seq_end, shape[3] };
             const v_strides = [_]c_int{ 1, 1, 1, 1 };
@@ -8055,6 +8182,9 @@ pub const KVCacheSnapshot = struct {
     step: usize,
     allocator: std.mem.Allocator,
     config: KVQuantConfig,
+    /// The ring window the source cache held, so a trim can ask whether the
+    /// rows it would keep still cover a query at the trimmed length.
+    swa_ring_window: u32 = 0,
 
     pub fn deinit(self: *KVCacheSnapshot) void {
         for (self.entries) |*e| {
@@ -8095,7 +8225,15 @@ pub const KVCacheSnapshot = struct {
             out[i] = newEmptyKVEntry();
             built = i + 1;
             out[i].initialized = src.initialized;
-            out[i].offset = @min(src.offset, len);
+            out[i].base = src.base;
+            out[i].ringed = src.ringed;
+            out[i].offset = @min(src.offset, len -| src.base);
+            // A ringed entry keeps a window, so a trim below what it retained
+            // has nothing to hand the restore. Declining is the contract: the
+            // caller retries at a shorter candidate or keeps the resident one.
+            if (src.ringed and src.initialized and
+                out[i].offset < @min(len, @as(usize, self.swa_ring_window)))
+                return error.SlidingRingRewindPastWindow;
             if (src.initialized) {
                 const keep = out[i].offset;
                 out[i].keys = try trimRowsOwned(src.keys, keep, s);
@@ -8125,7 +8263,7 @@ pub const KVCacheSnapshot = struct {
             }
             if (count > 0) _ = mlx.mlx_eval(vec);
         }
-        return .{ .entries = out, .step = @min(self.step, len), .allocator = self.allocator, .config = self.config };
+        return .{ .entries = out, .step = @min(self.step, len), .allocator = self.allocator, .config = self.config, .swa_ring_window = self.swa_ring_window };
     }
 };
 
@@ -14898,6 +15036,7 @@ pub const Transformer = struct {
         // Cache for KV (standard models use all entries, MoE only uses full-attn layers)
         var cache = try KVCache.init(allocator, config.num_hidden_layers);
         errdefer cache.deinit();
+        if (config.swaRingTokens() > 0) cache.setSwaRing(config.sliding_window);
 
         const need_gelu = config.hidden_act == .gelu_approx;
         const need_silu = config.hidden_act == .silu;
@@ -25881,7 +26020,10 @@ pub const Transformer = struct {
                     false,
                     self.s,
                 ));
-            } else if (@as(c_int, @intCast(ctx.cache.seqLen(layer))) <= sw) {
+            } else if (total_kv <= sw) {
+                // The ABSOLUTE position, never the stored row count: a ringed
+                // layer's rows are a window, and the mask the caller built keys
+                // on this same `total_kv > sw`.
                 try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
                     &attn_out,
                     q_rope,
@@ -47487,6 +47629,124 @@ fn loadInklingFixtures(allocator: std.mem.Allocator) !?std.json.Parsed(std.json.
     const data = try reader_state.interface.allocRemaining(allocator, .limited(1 << 26));
     defer allocator.free(data);
     return try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
+}
+
+/// `[1, heads, len, dim]` of distinct, position-dependent values — two caches
+/// fed the same chunk must return byte-identical views, so only distinctness
+/// matters, not the numbers.
+fn swaRingChunk(s: mlx.mlx_stream, start: c_int, len: c_int, heads: c_int, dim: c_int) !mlx.mlx_array {
+    const n: f64 = @floatFromInt(heads * len * dim);
+    const base: f64 = @floatFromInt(start * heads * dim);
+    var flat = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(flat);
+    try mlx.check(mlx.mlx_arange(&flat, base, base + n, 1.0, .float32, s));
+    var scaled = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(scaled);
+    const inv = mlx.mlx_array_new_float(1.0 / 4096.0);
+    defer _ = mlx.mlx_array_free(inv);
+    try mlx.check(mlx.mlx_multiply(&scaled, flat, inv, s));
+    var bf = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(bf);
+    try mlx.check(mlx.mlx_astype(&bf, scaled, .bfloat16, s));
+    var out = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(out);
+    const shape = [_]c_int{ 1, heads, len, dim };
+    try mlx.check(mlx.mlx_reshape(&out, bf, &shape, 4, s));
+    return out;
+}
+
+/// Walk a full-length cache and a ringed one through the same chunk schedule,
+/// asserting the sliding view they hand SDPA is identical at every step.
+fn swaRingWalk(kv_cfg: KVQuantConfig) !void {
+    const alloc = std.testing.allocator;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    const heads: c_int = 2;
+    const dim: c_int = 64;
+
+    var plain = try KVCache.initWithConfig(alloc, 1, kv_cfg);
+    defer plain.deinit();
+    var ringed = try KVCache.initWithConfig(alloc, 1, kv_cfg);
+    defer ringed.deinit();
+    ringed.setSwaRing(window);
+
+    // Three prefill chunks past the compaction cap, then decode steps past it
+    // again: both crossings, and chunk 2 straddles the window boundary.
+    var schedule: [3 + 400]c_int = undefined;
+    for (schedule[0..3]) |*w| w.* = 300;
+    for (schedule[3..]) |*w| w.* = 1;
+
+    var pos: c_int = 0;
+    for (schedule) |q_len| {
+        const k = try swaRingChunk(s, pos, q_len, heads, dim);
+        defer _ = mlx.mlx_array_free(k);
+        const v = try swaRingChunk(s, pos + 7919, q_len, heads, dim);
+        defer _ = mlx.mlx_array_free(v);
+        const span = slidingTailSpan(window, @intCast(q_len), SLIDING_TRIM_UNBOUNDED);
+
+        var pv = try plain.update(0, k, v, s, span);
+        defer pv.deinit();
+        var rv = try ringed.update(0, k, v, s, span);
+        defer rv.deinit();
+
+        try std.testing.expectEqual(@as(f32, 0), try maxAbsDiffF32(pv.k, rv.k, s));
+        try std.testing.expectEqual(@as(f32, 0), try maxAbsDiffF32(pv.v, rv.v, s));
+        pos += q_len;
+    }
+
+    // The point of the ring: the sliding layer's storage stays bounded while the
+    // full-length cache has grown to the whole walk.
+    try std.testing.expectEqual(@as(usize, @intCast(pos)), plain.seqLen(0));
+    try std.testing.expect(ringed.seqLen(0) <= KVCache.ringCap(window));
+    // Absolute position is preserved even though the rows are not.
+    try std.testing.expectEqual(plain.absSeqLen(0), ringed.absSeqLen(0));
+}
+
+test "a ringed sliding layer serves the same view as a full-length cache" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    try swaRingWalk(KVQuantConfig.dense);
+}
+
+test "a ringed sliding layer serves the same view under kv-quant" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    try swaRingWalk(.{ .scheme = .affine, .bits = 8, .group_size = 32 });
+    try swaRingWalk(.{ .scheme = .affine, .bits = 4, .group_size = 32 });
+}
+
+test "a ring rewinds inside its retained window and declines below it" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    var c = try KVCache.init(alloc, 1);
+    defer c.deinit();
+    c.setSwaRing(window);
+
+    var pos: c_int = 0;
+    while (pos < 2000) : (pos += 250) {
+        const k = try swaRingChunk(s, pos, 250, 1, 4);
+        defer _ = mlx.mlx_array_free(k);
+        var view = try c.update(0, k, k, s, slidingTailSpan(window, 250, SLIDING_TRIM_UNBOUNDED));
+        view.deinit();
+    }
+    const abs = c.absSeqLen(0);
+    // A clamp inside the retained rows serves; the full-reuse rewind of one
+    // token is the common case and must never decline.
+    try c.truncate(abs - 1, s);
+    try std.testing.expectEqual(abs - 1, c.absSeqLen(0));
+    // A rewind past the retained window has no rows to serve it and says so.
+    try std.testing.expectError(error.SlidingRingRewindPastWindow, c.truncate(window, s));
+    // A byte-budget trim asks the same question of a snapshot and declines the
+    // same way, so an oversized candidate retries shorter instead of restoring
+    // a window it cannot reproduce.
+    var snap = try c.snapshot();
+    defer snap.deinit();
+    var kept = try snap.trimmedCopy(c.absSeqLen(0), s);
+    kept.deinit();
+    try std.testing.expectError(error.SlidingRingRewindPastWindow, snap.trimmedCopy(window, s));
+    // Zero is a reset, not a rewind.
+    try c.truncate(0, s);
+    try std.testing.expectEqual(@as(usize, 0), c.absSeqLen(0));
 }
 
 /// Max |a-b| between two same-shaped float arrays, with a NaN guard (a NaN

@@ -1363,7 +1363,17 @@ pub const HotPrefixCache = struct {
         // already `final_len`, so unconditional clamping is safe and restores the
         // invariant cache.offset == matched. The stale KV tail has no matching
         // token id, so the match can never reach into it — discarding it is correct.
-        try target_cache.truncate(final_len, s);
+        target_cache.truncate(final_len, s) catch |err| {
+            // A ringed sliding layer holds a window, not a prefix: a clamp below
+            // the rows it kept cannot be served, so this match is not restorable
+            // and the request cold-prefills.
+            log.warn("  [hot-cache] clamp to {d} declined: {s}; cold prefill\n", .{ final_len, @errorName(err) });
+            try target_cache.truncate(0, s);
+            if (target_ssm_entries) |entries| resetSsmEntries(entries);
+            target_moe_seq_offset.* = 0;
+            self.last_restored_used = null;
+            return .{ .matched = 0, .full_match = false };
+        };
 
         const full_reuse = full_match and effective_matched > 1;
         const matched = if (full_reuse) effective_matched - 1 else effective_matched;
