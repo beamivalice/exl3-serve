@@ -5502,6 +5502,10 @@ test "exl3 fused decode chain matches the host SwiGLU reference at a narrowed co
     try fusedChainMatchesHost(exl3.fixtures.k4, exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w14 });
 }
 
+test "exl3 fused decode chain matches the host SwiGLU reference below window 12" {
+    try fusedChainMatchesHost(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w10 });
+}
+
 test "exl3 cooperative indexed GEMV matches host TINY tile decode at K4 K3 K2" {
     for (0..PARITY_SEEDS) |i| {
         try indexedParity(exl3.Rate.fromK(4), 128, 128, 4, 10, 23 + i, .tiny);
@@ -5590,6 +5594,12 @@ test "exl3 cooperative indexed GEMV matches the host tile decode at a narrowed c
         // K4 takes the packed fast branch, which decodes through the same helper.
         try indexedParity(exl3.Rate.fromK(4), 128, 128, 4, 10, 1701 + i, .{ .codebook = .mul1, .window = .w12 });
         try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1801 + i, .{ .codebook = .tiny, .window = .w14 });
+    }
+}
+
+test "exl3 cooperative indexed GEMV matches the host tile decode below window 12" {
+    for (0..PARITY_SEEDS) |i| {
+        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1901 + i, .{ .codebook = .tiny, .window = .w10 });
     }
 }
 

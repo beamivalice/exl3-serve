@@ -130,11 +130,13 @@ test "an EXL3 pack's codeword window is 16 unless its config names one this buil
     try t.expectEqual(expert_exl3.Window.w16, (try specFromConfigJson(t.allocator, base ++ "}}")).window);
     try t.expectEqual(expert_exl3.Window.w16, (try specFromConfigJson(t.allocator, base ++ ",\"window\":16}}")).window);
     try t.expectEqual(expert_exl3.Window.w12, (try specFromConfigJson(t.allocator, base ++ ",\"window\":12}}")).window);
-    try t.expectEqual(expert_exl3.Window.w14, (try specFromConfigJson(t.allocator, base ++ ",\"window\":14}}")).window);
+    try t.expectEqual(expert_exl3.Window.w11, (try specFromConfigJson(t.allocator, base ++ ",\"window\":11}}")).window);
+    try t.expectEqual(expert_exl3.Window.w10, (try specFromConfigJson(t.allocator, base ++ ",\"window\":10}}")).window);
+    try t.expectEqual(expert_exl3.Window.w8, (try specFromConfigJson(t.allocator, base ++ ",\"window\":8}}")).window);
     // The same bitstream decodes to different weights at each width, so an
     // unreadable one is a refusal, never a fallback to 16.
     try t.expectError(error.Exl3WindowUnsupported, specFromConfigJson(t.allocator, base ++ ",\"window\":17}}"));
-    try t.expectError(error.Exl3WindowUnsupported, specFromConfigJson(t.allocator, base ++ ",\"window\":11}}"));
+    try t.expectError(error.Exl3WindowUnsupported, specFromConfigJson(t.allocator, base ++ ",\"window\":7}}"));
     try t.expectError(error.Exl3WindowUnsupported, specFromConfigJson(t.allocator, base ++ ",\"window\":\"12\"}}"));
 }
 

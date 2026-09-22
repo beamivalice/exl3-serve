@@ -36,23 +36,24 @@ pub const Codebook = enum(u8) {
 /// nothing. (Unrelated to the GEMM's row windows.)
 pub const Window = enum(u8) {
     /// w16 is tag 0, so a zeroed config means "mask nothing" — the pack every
-    /// converter wrote before the field existed.
+    /// converter wrote before the field existed. The narrowed widths follow in
+    /// ascending order from tag 1, which is what `bits` and `fromBits` index.
     w16 = 0,
+    w8,
+    w9,
+    w10,
+    w11,
     w12,
     w13,
     w14,
     w15,
 
-    pub const count = 5;
+    pub const min_bits: u8 = 8;
+    pub const count = 16 - min_bits + 1;
 
     pub fn bits(self: Window) u8 {
-        return switch (self) {
-            .w12 => 12,
-            .w13 => 13,
-            .w14 => 14,
-            .w15 => 15,
-            .w16 => 16,
-        };
+        if (self == .w16) return 16;
+        return @intFromEnum(self) + min_bits - 1;
     }
 
     pub fn mask(self: Window) u16 {
@@ -64,14 +65,9 @@ pub const Window = enum(u8) {
     }
 
     pub fn fromBits(w: i64) ?Window {
-        return switch (w) {
-            12 => .w12,
-            13 => .w13,
-            14 => .w14,
-            15 => .w15,
-            16 => .w16,
-            else => null,
-        };
+        if (w == 16) return .w16;
+        if (w < min_bits or w > 15) return null;
+        return @enumFromInt(w - min_bits + 1);
     }
 };
 
@@ -727,4 +723,46 @@ test "exl3 K2.5 TINY w12 packed fixture decodes to the library inner and public 
     const wide = try alloc.alloc(u16, 128 * 128);
     reconstructInner(asU16(trellis), 128, 128, .{ .n = 40 }, .tiny, wide);
     try t.expect(!std.mem.eql(u16, asU16(inner), wide));
+}
+
+test "exl3 every codeword window from 8 to 16 has its own kernel slot" {
+    const t = std.testing;
+    try t.expect(Window.fromBits(7) == null);
+    try t.expect(Window.fromBits(17) == null);
+    try t.expectEqual(@as(usize, 0), Window.w16.index());
+    var seen: [Window.count]bool = @splat(false);
+    var w: i64 = Window.min_bits;
+    while (w <= 16) : (w += 1) {
+        const win = Window.fromBits(w) orelse return error.TestUnexpectedResult;
+        try t.expectEqual(@as(u8, @intCast(w)), win.bits());
+        try t.expect(!seen[win.index()]);
+        seen[win.index()] = true;
+    }
+    for (seen) |s| try t.expect(s);
+}
+
+test "exl3 the reference decode narrows the codeword window at w8 and w10" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var tensors = try parseSafetensors(arena.allocator(), fixtures.k2p5_tiny);
+    defer tensors.deinit();
+    const rate: Rate = .{ .n = 40 };
+    const tile = asU16(tensors.get("trellis") orelse return error.MissingTrellis)[0..rate.halfwords()];
+    var codewords: [TILE_VALUES]u16 = undefined;
+    unpackTile(tile, rate, &codewords);
+    var perm: [TILE_VALUES]usize = undefined;
+    tensorCorePerm(&perm);
+    var wide: [TILE_VALUES]u16 = undefined;
+    decodeTile(tile, rate, .tiny, &wide);
+    for ([_]Window{ .w8, .w10 }) |win| {
+        var got: [TILE_VALUES]u16 = undefined;
+        decodeTile(tile, rate, .{ .codebook = .tiny, .window = win }, &got);
+        var want: [TILE_VALUES]u16 = undefined;
+        for (codewords, 0..) |cw, i| want[perm[i]] = decodeCodeword(cw & win.mask(), .tiny);
+        try t.expectEqualSlices(u16, &want, &got);
+        // The narrowed window is a different weight matrix, not a rounding of
+        // the wide one: a pack read at the wrong width decodes to noise.
+        try t.expect(!std.mem.eql(u16, &wide, &got));
+    }
 }
