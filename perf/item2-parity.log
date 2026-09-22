@@ -1,0 +1,100 @@
+1/3 tests.test_0...OK
+2/3 expert_exl3_kernels.test.exl3 prepared mid production geometry BF16 f32 truth...[exl3-ubench] pair_gemv 235.991 ms
+[exl3-ubench] down_gemv 341.329 ms
+[exl3-ubench] reduce 113.296 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=1 seed=318 rms=1.652197044e-3 composite=1.844521772e-3
+[exl3-ubench] pair_gemv 2.227 ms
+[exl3-ubench] down_gemv 0.755 ms
+[exl3-ubench] reduce 0.212 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=1 seed=319 rms=2.051996031e-3 composite=2.324637829e-3
+[exl3-ubench] pair_gemv 2.437 ms
+[exl3-ubench] down_gemv 0.630 ms
+[exl3-ubench] reduce 0.251 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=1 seed=320 rms=1.998194312e-3 composite=2.249871758e-3
+[exl3-ubench] pair_gemv 2.794 ms
+[exl3-ubench] down_gemv 0.864 ms
+[exl3-ubench] reduce 0.390 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=2 seed=318 rms=2.663549221e-3 composite=2.997764947e-3
+[exl3-ubench] pair_gemv 2.938 ms
+[exl3-ubench] down_gemv 1.001 ms
+[exl3-ubench] reduce 0.303 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=2 seed=319 rms=2.562932609e-3 composite=2.868843716e-3
+[exl3-ubench] pair_gemv 2.776 ms
+[exl3-ubench] down_gemv 0.923 ms
+[exl3-ubench] reduce 0.219 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=2 seed=320 rms=2.382423384e-3 composite=2.692552787e-3
+[exl3-ubench] pair_gemv 3.403 ms
+[exl3-ubench] down_gemv 1.261 ms
+[exl3-ubench] reduce 0.240 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=3 seed=318 rms=2.740881125e-3 composite=3.089557151e-3
+[exl3-ubench] pair_gemv 3.206 ms
+[exl3-ubench] down_gemv 1.226 ms
+[exl3-ubench] reduce 0.258 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=3 seed=319 rms=2.029132473e-3 composite=2.280189624e-3
+[exl3-ubench] pair_gemv 3.474 ms
+[exl3-ubench] down_gemv 1.232 ms
+[exl3-ubench] reduce 0.223 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=3 seed=320 rms=2.527031631e-3 composite=2.831115536e-3
+[exl3-ubench] pair_gemv 3.946 ms
+[exl3-ubench] down_gemv 1.388 ms
+[exl3-ubench] reduce 0.365 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=4 seed=318 rms=2.516226692e-3 composite=2.811019612e-3
+[exl3-ubench] pair_gemv 4.067 ms
+[exl3-ubench] down_gemv 1.509 ms
+[exl3-ubench] reduce 0.283 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=4 seed=319 rms=2.658267699e-3 composite=3.001407877e-3
+[exl3-ubench] pair_gemv 4.063 ms
+[exl3-ubench] down_gemv 1.516 ms
+[exl3-ubench] reduce 0.249 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=4 seed=320 rms=2.331521128e-3 composite=2.613533993e-3
+[exl3-ubench] pair_gemv 4.893 ms
+[exl3-ubench] down_gemv 1.835 ms
+[exl3-ubench] reduce 0.222 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=5 seed=318 rms=2.324170743e-3 composite=2.613576381e-3
+[exl3-ubench] pair_gemv 4.656 ms
+[exl3-ubench] down_gemv 1.729 ms
+[exl3-ubench] reduce 0.235 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=5 seed=319 rms=2.299294978e-3 composite=2.587241279e-3
+[exl3-ubench] pair_gemv 4.662 ms
+[exl3-ubench] down_gemv 1.722 ms
+[exl3-ubench] reduce 0.253 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=5 seed=320 rms=2.488468805e-3 composite=2.803061874e-3
+[exl3-ubench] pair_gemv 5.181 ms
+[exl3-ubench] down_gemv 1.970 ms
+[exl3-ubench] reduce 0.250 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=6 seed=318 rms=2.304388377e-3 composite=2.578235368e-3
+[exl3-ubench] pair_gemv 5.196 ms
+[exl3-ubench] down_gemv 1.988 ms
+[exl3-ubench] reduce 0.243 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=6 seed=319 rms=2.307239034e-3 composite=2.568787606e-3
+[exl3-ubench] pair_gemv 5.104 ms
+[exl3-ubench] down_gemv 1.889 ms
+[exl3-ubench] reduce 0.273 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=6 seed=320 rms=2.344091125e-3 composite=2.632441621e-3
+[exl3-ubench] pair_gemv 5.975 ms
+[exl3-ubench] down_gemv 2.345 ms
+[exl3-ubench] reduce 0.253 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=7 seed=318 rms=2.162407606e-3 composite=2.419053142e-3
+[exl3-ubench] pair_gemv 5.663 ms
+[exl3-ubench] down_gemv 2.270 ms
+[exl3-ubench] reduce 0.438 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=7 seed=319 rms=2.415329065e-3 composite=2.708204932e-3
+[exl3-ubench] pair_gemv 5.815 ms
+[exl3-ubench] down_gemv 2.338 ms
+[exl3-ubench] reduce 0.244 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=7 seed=320 rms=2.437796923e-3 composite=2.742571993e-3
+[exl3-ubench] pair_gemv 6.346 ms
+[exl3-ubench] down_gemv 2.608 ms
+[exl3-ubench] reduce 0.263 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=8 seed=318 rms=2.447173300e-3 composite=2.747841824e-3
+[exl3-ubench] pair_gemv 6.400 ms
+[exl3-ubench] down_gemv 2.560 ms
+[exl3-ubench] reduce 0.240 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=8 seed=319 rms=2.557528951e-3 composite=2.873652539e-3
+[exl3-ubench] pair_gemv 6.443 ms
+[exl3-ubench] down_gemv 2.491 ms
+[exl3-ubench] reduce 0.253 ms
+PREPARED_PARITY hidden=4096 inter=2048 rows=8 seed=320 rms=2.258772296e-3 composite=2.557307516e-3
+OK
+3/3 preview.test_0...OK
+All 3 tests passed.

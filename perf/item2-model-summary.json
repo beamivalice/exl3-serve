@@ -1,0 +1,195 @@
+{
+  "width_ms": {
+    "1": [
+      32.47525,
+      31.320333
+    ],
+    "2": [
+      51.100458,
+      48.485791
+    ],
+    "3": [
+      68.045292,
+      64.269333
+    ],
+    "4": [
+      85.303209,
+      80.207125
+    ],
+    "5": [
+      102.584416,
+      96.412375
+    ],
+    "6": [
+      120.275916,
+      111.80575
+    ],
+    "7": [
+      144.0125,
+      133.091708
+    ],
+    "8": [
+      160.417166,
+      148.057625
+    ]
+  },
+  "width_round_ms": {
+    "1": {
+      "0": [
+        32.690125,
+        31.193542,
+        32.47525
+      ],
+      "1": [
+        31.328042,
+        29.881667,
+        31.320333
+      ]
+    },
+    "2": {
+      "0": [
+        51.100458,
+        51.128459,
+        51.025083
+      ],
+      "1": [
+        48.586375,
+        48.485791,
+        48.406583
+      ]
+    },
+    "3": {
+      "0": [
+        68.045292,
+        68.051708,
+        68.032459
+      ],
+      "1": [
+        64.182458,
+        64.269333,
+        64.347959
+      ]
+    },
+    "4": {
+      "0": [
+        85.28325,
+        85.303209,
+        85.39075
+      ],
+      "1": [
+        80.255833,
+        80.107792,
+        80.207125
+      ]
+    },
+    "5": {
+      "0": [
+        102.584416,
+        102.319833,
+        102.7065
+      ],
+      "1": [
+        95.792042,
+        96.412375,
+        96.419125
+      ]
+    },
+    "6": {
+      "0": [
+        119.926,
+        120.275916,
+        121.35325
+      ],
+      "1": [
+        111.80575,
+        111.148041,
+        111.824792
+      ]
+    },
+    "7": {
+      "0": [
+        143.431,
+        144.0125,
+        144.152209
+      ],
+      "1": [
+        132.096125,
+        133.091708,
+        133.15375
+      ]
+    },
+    "8": {
+      "0": [
+        160.50375,
+        160.417166,
+        160.124333
+      ],
+      "1": [
+        147.582625,
+        148.057625,
+        148.662
+      ]
+    }
+  },
+  "greedy_tok_s": [
+    29.947902991822446,
+    31.047679301702424
+  ],
+  "greedy_samples_tok_s": {
+    "0": [
+      29.895411114976902,
+      29.947902991822446,
+      30.232152098882313
+    ],
+    "1": [
+      30.724191637853785,
+      31.047679301702424,
+      31.458321660886927
+    ]
+  },
+  "greedy_tokens_per_sample": 200,
+  "greedy_identical": true,
+  "verify_argmax_differences": 0,
+  "engagement": [
+    "2/5 transformer.test.perf whole MiMo interleaved decode...[expert-exl3] engaged K=2.5 codebook=tiny window=12",
+    "[expert-exl3] engaged K=2.5 codebook=tiny window=12",
+    "[mlp] fused SwiGLU kernel engaged: n=16777216 tg=256",
+    "[moe] fused router kernel engaged: mode=sigmoid_bias E=256 K=8 tg=256",
+    "[exl3-prefill] GPU window metadata engaged experts=256 win=32",
+    "[exl3-gemm] n40 two-funnel reader engaged dtype=float16",
+    "[exl3-prefill] sorted finish/reduce engaged dtype=bfloat16",
+    "[exl3-decode] n40 eight-weight lane reader engaged dtype=bfloat16",
+    "[exl3-decode] n40 eight-weight lane reader engaged dtype=bfloat16",
+    "[exl3-decode] prepared mid engaged dtype=bfloat16 middle=f16 after down-input Hadamard",
+    "[sliding] block trim engaged: window=128 q_len=2 span=129 kv=129 of 1026 (MLX_SERVE_SLIDING_BLOCK_TRIM=0 restores the untrimmed view)",
+    "[mtp-qmv] row-identical affine8 projections engaged"
+  ],
+  "affine_ms": {},
+  "measurement": {
+    "before": {
+      "utc": "2026-09-22T21:08:49.601529+00:00",
+      "servers": "",
+      "converters": [],
+      "util": [
+        0
+      ]
+    },
+    "after": {
+      "utc": "2026-09-22T21:12:11.179562+00:00",
+      "servers": "",
+      "converters": [],
+      "util": [
+        0
+      ]
+    },
+    "command": [
+      "perf/item2-harness/zig-out/tests/test"
+    ],
+    "exit_code": 0,
+    "env": {
+      "PERF_REPORT": "1",
+      "PERF_MIMO_MODEL": "/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-tiny-k2.5-w12-cal"
+    },
+    "boot": "{ sec = 1789971052, usec = 827667 } Mon Sep 21 13:10:52 2026"
+  }
+}

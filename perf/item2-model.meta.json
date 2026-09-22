@@ -1,0 +1,27 @@
+{
+  "before": {
+    "utc": "2026-09-22T21:08:49.601529+00:00",
+    "servers": "",
+    "converters": [],
+    "util": [
+      0
+    ]
+  },
+  "after": {
+    "utc": "2026-09-22T21:12:11.179562+00:00",
+    "servers": "",
+    "converters": [],
+    "util": [
+      0
+    ]
+  },
+  "command": [
+    "perf/item2-harness/zig-out/tests/test"
+  ],
+  "exit_code": 0,
+  "env": {
+    "PERF_REPORT": "1",
+    "PERF_MIMO_MODEL": "/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-tiny-k2.5-w12-cal"
+  },
+  "boot": "{ sec = 1789971052, usec = 827667 } Mon Sep 21 13:10:52 2026"
+}

@@ -2461,7 +2461,14 @@ pub fn moeSwigluFused(
         try dumpAbsMax(s, inners[0], "ig");
         try dumpAbsMax(s, inners[1], "iu");
     }
-    const down_inner = try downGemvFusedMid(s, inners[0], inners[1], down_t, gate_svh, up_svh, down_suh, slots, inter, hidden, nslots);
+    const down_inner = if (preparedMidOn(hidden, inter, tsh[0], topk, tsh[3], rows, out_dtype) and mlx.mlx_array_dtype(x) == .bfloat16) blk: {
+        const y = try downGemvPreparedMid(s, inners[0], inners[1], down_t, gate_svh, up_svh, down_suh, slots, inter, hidden, nslots);
+        if (!prepared_mid_engaged) {
+            prepared_mid_engaged = true;
+            log.info("[exl3-decode] prepared mid engaged dtype=bfloat16 middle=f16 after down-input Hadamard\n", .{});
+        }
+        break :blk y;
+    } else try downGemvFusedMid(s, inners[0], inners[1], down_t, gate_svh, up_svh, down_suh, slots, inter, hidden, nslots);
     defer _ = mlx.mlx_array_free(down_inner);
     try ubenchEval(down_inner, "down_gemv");
     // The SwiGLU product and the down inner plane are the f16 stores that can
@@ -6956,9 +6963,13 @@ fn n40PrefillBf16Truth(seed: u64, win: c_int) !void {
 }
 
 fn n40Bf16Truth(seed: u64, win: c_int, rows: usize, decode: bool) !void {
+    return n40Bf16TruthGeometry(seed, win, rows, decode, 256, 128);
+}
+
+fn n40Bf16TruthGeometry(seed: u64, win: c_int, rows: usize, decode: bool, hidden: usize, inter: usize) !void {
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s) or !gemmNaxOn()) return error.SkipZigTest;
-    const c = MimoMoeCase{ .e = 8, .hidden = 256, .inter = 128, .topk = 8, .rows = rows, .rate = .{ .n = 40 }, .dec = .{ .codebook = .tiny, .window = .w12 }, .seed = seed, .banks = MIMO_BANKS, .x_scale = 3 };
+    const c = MimoMoeCase{ .e = 8, .hidden = hidden, .inter = inter, .topk = 8, .rows = rows, .rate = .{ .n = 40 }, .dec = .{ .codebook = .tiny, .window = .w12 }, .seed = seed, .banks = MIMO_BANKS, .x_scale = 3 };
     setDecodeParams(c.dec);
     defer setDecodeParams(.mul1);
     const saved_win = gemm_win_cached;
@@ -6975,13 +6986,15 @@ fn n40Bf16Truth(seed: u64, win: c_int, rows: usize, decode: bool) !void {
         v.* = @bitCast(@as(u32, b.*) << 16);
     }
     _ = mlx.mlx_array_free(f.arrays[8]);
-    f.arrays[8] = mlx.mlx_array_new_data(xb.ptr, &.{ @intCast(rows), 256 }, 2, .bfloat16);
+    f.arrays[8] = mlx.mlx_array_new_data(xb.ptr, &.{ @intCast(rows), @intCast(hidden) }, 2, .bfloat16);
+    resetFusedDispatchCount();
     const ar = f.arrays;
     const y = if (decode)
         try moeSwigluFused(s, ar[8], ar[0], ar[3], ar[4], ar[1], ar[3], ar[4], ar[2], ar[5], ar[6], ar[7], ar[9], .bfloat16)
     else
         try mimoPrefillArm(s, &f, c.topk);
     defer _ = mlx.mlx_array_free(y);
+    if (decode and (prepared_mid_force orelse false)) try std.testing.expectEqual(@as(u32, 4), fusedDispatchCount());
     try std.testing.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(y));
     var yf = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(yf);
@@ -6996,7 +7009,7 @@ fn n40Bf16Truth(seed: u64, win: c_int, rows: usize, decode: bool) !void {
         const slots = f.slots[r * c.topk ..][0..c.topk];
         const scores = f.scores[r * c.topk ..][0..c.topk];
         try exl3SwigluF32(alloc, f.xf[r * c.hidden ..][0..c.hidden], &f, c, slots, scores, &peaks, truth);
-        const xr = mlx.mlx_array_new_data(xb[r * c.hidden ..].ptr, &.{256}, 1, .bfloat16);
+        const xr = mlx.mlx_array_new_data(xb[r * c.hidden ..].ptr, &.{@intCast(hidden)}, 1, .bfloat16);
         defer _ = mlx.mlx_array_free(xr);
         const sr = mlx.mlx_array_new_data(slots.ptr, &.{8}, 1, .uint32);
         defer _ = mlx.mlx_array_free(sr);
@@ -7021,6 +7034,7 @@ fn n40Bf16Truth(seed: u64, win: c_int, rows: usize, decode: bool) !void {
             err_comp += (b - v) * (b - v);
         }
     }
+    if (diagEnvValueOn(std.c.getenv("PERF_REPORT"))) std.debug.print("PREPARED_PARITY hidden={d} inter={d} rows={d} seed={d} rms={e:.9} composite={e:.9}\n", .{ hidden, inter, rows, seed, @sqrt(err_new / @as(f64, @floatFromInt(c.rows * c.hidden))), @sqrt(err_comp / @as(f64, @floatFromInt(c.rows * c.hidden))) });
     if (err_new > err_comp) {
         std.debug.print("n40 bf16 truth seed={d} win={d}: squared error {d:.9} > composite {d:.9}\n", .{ seed, win, err_new, err_comp });
         return error.PrefillWorseThanComposite;
@@ -7280,5 +7294,124 @@ test "exl3 n40 decode lane codewords and decoded weights are exact" {
 test "exl3 n40 decode BF16 rows no worse than composite against f32 truth" {
     for (1..9) |rows| {
         for (0..3) |seed| try n40Bf16Truth(318 + seed, 32, rows, true);
+    }
+}
+
+var prepared_mid_force: ?bool = null;
+
+test "exl3 n40 prepared mid adds one dispatch and preserves BF16 f32 truth" {
+    prepared_mid_force = true;
+    defer prepared_mid_force = null;
+    for (1..9) |rows| {
+        for (0..3) |seed| try n40Bf16Truth(318 + seed, 32, rows, true);
+    }
+}
+
+fn metalReplaceAll(comptime source: []const u8, comptime old: []const u8, comptime replacement: []const u8) [:0]const u8 {
+    @setEvalBranchQuota(200000);
+    const at = comptime std.mem.indexOf(u8, source, old) orelse return source ++ "";
+    return comptime source[0..at] ++ replacement ++ metalReplaceAll(source[at + old.len ..], old, replacement);
+}
+
+const DECODE_MID_SOURCE: [:0]const u8 = blk: {
+    @setEvalBranchQuota(200000);
+    const start = std.mem.indexOf(u8, DOWN_FUSED_SOURCE, "const float sc =").?;
+    const end = start + std.mem.indexOf(u8, DOWN_FUSED_SOURCE[start..], "threadgroup_barrier(mem_flags::mem_threadgroup);").?;
+    const head =
+        \\const uint slot = uint(threadgroup_position_in_grid.y);
+        \\const uint sg = uint(threadgroup_position_in_grid.x);
+        \\const uint lane = uint(thread_index_in_simdgroup);
+        \\const uint eid = uint(slots[slot]);
+        \\constexpr uint SGS = uint(IDIM) / 128u;
+    ;
+    break :blk head ++ "\n" ++ metalReplaceAll(DOWN_FUSED_SOURCE[start..end], "prepared[base", "prepared[(size_t)slot * uint(IDIM) + base");
+};
+
+const DOWN_PREPARED_SOURCE: [:0]const u8 = blk: {
+    @setEvalBranchQuota(200000);
+    const start = std.mem.indexOf(u8, DOWN_FUSED_SOURCE, "const float sc =").?;
+    const barrier = "threadgroup_barrier(mem_flags::mem_threadgroup);";
+    const end = start + std.mem.indexOf(u8, DOWN_FUSED_SOURCE[start..], barrier).? + barrier.len;
+    const head = metalReplaceAll(DOWN_FUSED_SOURCE[0..start], "threadgroup half prepared[uint(IDIM)];", "");
+    break :blk head ++ "const device half *prepared = middle + (size_t)slot * uint(IDIM);\n" ++ DOWN_FUSED_SOURCE[end..];
+};
+
+const DecodeMidKey = struct { dim: c_int, nslots: c_int, nsplit: c_int };
+var decode_mid_cfgs: CfgCache(DecodeMidKey, 8) = .{};
+var decode_mid_kernel: ?mlx.mlx_fast_metal_kernel = null;
+var down_prepared_cfgs: CfgCache(DownFusedKey, 8) = .{};
+var down_prepared_kernel: KernelSlots = no_kernels;
+var prepared_mid_engaged: bool = false;
+
+fn prepareDecodeMid(s: mlx.mlx_stream, ig: mlx.mlx_array, iu: mlx.mlx_array, svhg: mlx.mlx_array, svhu: mlx.mlx_array, suhd: mlx.mlx_array, slots: mlx.mlx_array, dim: c_int, nslots: c_int, nsplit: c_int) !mlx.mlx_array {
+    const key = DecodeMidKey{ .dim = dim, .nslots = nslots, .nsplit = nsplit };
+    const cfg = decode_mid_cfgs.get(key) orelse blk: {
+        const c = mlx.mlx_fast_metal_kernel_config_new();
+        errdefer _ = mlx.mlx_fast_metal_kernel_config_free(c);
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &.{ nslots, dim }, 2, .float16));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(c, @divExact(dim, 128) * 32, nslots, 1));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(c, 32, 1, 1));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "IDIM", dim));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "NSPLIT", nsplit));
+        decode_mid_cfgs.put(key, c);
+        break :blk c;
+    };
+    const kernel = try getNamedKernel(&decode_mid_kernel, "mlxserve_exl3_decode_mid", &.{ "ig", "iu", "svhg", "svhu", "suhd", "slots" }, &.{"prepared"}, DECODE_MID_SOURCE, "");
+    const outputs = try applyOuts(s, kernel, &.{ ig, iu, svhg, svhu, suhd, slots }, cfg, 1);
+    defer _ = mlx.mlx_vector_array_free(outputs);
+    var middle = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(middle);
+    try mlx.check(mlx.mlx_vector_array_get(&middle, outputs, 0));
+    return middle;
+}
+
+fn downGemvPreparedMid(s: mlx.mlx_stream, ig: mlx.mlx_array, iu: mlx.mlx_array, trellis: mlx.mlx_array, svhg: mlx.mlx_array, svhu: mlx.mlx_array, suhd: mlx.mlx_array, slots: mlx.mlx_array, in_dim: c_int, out_dim: c_int, nslots: c_int) !mlx.mlx_array {
+    const nsplit: c_int = @intCast(pairSplitCountFor(out_dim));
+    const middle = try prepareDecodeMid(s, ig, iu, svhg, svhu, suhd, slots, in_dim, nslots, nsplit);
+    defer _ = mlx.mlx_array_free(middle);
+    const tsh = mlx.getShape(trellis);
+    const rate = try packedRate(tsh[tsh.len - 1]);
+    const key = DownFusedKey{ .in_dim = in_dim, .out_dim = out_dim, .nslots = nslots, .nsplit = nsplit, .n = rate.n };
+    const cfg = down_prepared_cfgs.get(key) orelse blk: {
+        const c = mlx.mlx_fast_metal_kernel_config_new();
+        errdefer _ = mlx.mlx_fast_metal_kernel_config_free(c);
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &.{ nslots, out_dim }, 2, .float16));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(c, @divExact(out_dim, 16) * 128, nslots, 1));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(c, 128, 1, 1));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "IDIM", in_dim));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "ODIM", out_dim));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "NHW", @intCast(rate.n)));
+        down_prepared_cfgs.put(key, c);
+        break :blk c;
+    };
+    const kernel = try codebookKernel(&down_prepared_kernel, "mlxserve_exl3_down_prepared", &.{ "middle", "trellis", "slots" }, &.{"y"}, DOWN_PREPARED_SOURCE);
+    const outputs = try applyOuts(s, kernel, &.{ middle, trellis, slots }, cfg, 1);
+    defer _ = mlx.mlx_vector_array_free(outputs);
+    var y = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(y);
+    try mlx.check(mlx.mlx_vector_array_get(&y, outputs, 0));
+    return y;
+}
+
+fn preparedMidOn(hidden: c_int, inter: c_int, experts: c_int, topk: c_int, nhw: c_int, rows: c_int, dtype: mlx.mlx_dtype) bool {
+    if (prepared_mid_force) |v| return v;
+    return hidden == 4096 and inter == 2048 and experts == 256 and topk == 8 and nhw == 40 and rows >= 1 and rows <= 8 and dtype == .bfloat16;
+}
+
+test "exl3 prepared mid default excludes qwen and unmeasured widths" {
+    try std.testing.expect(preparedMidOn(4096, 2048, 256, 8, 40, 1, .bfloat16));
+    try std.testing.expect(preparedMidOn(4096, 2048, 256, 8, 40, 8, .bfloat16));
+    try std.testing.expect(!preparedMidOn(4096, 2048, 256, 8, 40, 9, .bfloat16));
+    try std.testing.expect(!preparedMidOn(4096, 2048, 256, 8, 40, 1, .float16));
+    try std.testing.expect(!preparedMidOn(2560, 640, 512, 10, 64, 1, .bfloat16));
+    try std.testing.expect(!preparedMidOn(2560, 640, 512, 10, 48, 1, .bfloat16));
+}
+
+test "exl3 prepared mid production geometry BF16 f32 truth" {
+    if (!diagEnvValueOn(std.c.getenv("PERF_REPORT"))) return error.SkipZigTest;
+    prepared_mid_force = true;
+    defer prepared_mid_force = null;
+    for (1..9) |rows| {
+        for (0..3) |seed| try n40Bf16TruthGeometry(318 + seed, 32, rows, true, 4096, 2048);
     }
 }

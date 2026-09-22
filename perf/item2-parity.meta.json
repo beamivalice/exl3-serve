@@ -1,0 +1,28 @@
+{
+  "before": {
+    "utc": "2026-09-22T21:06:27.167405+00:00",
+    "servers": "",
+    "converters": [],
+    "util": [
+      0
+    ]
+  },
+  "after": {
+    "utc": "2026-09-22T21:08:27.975823+00:00",
+    "servers": "",
+    "converters": [],
+    "util": [
+      0
+    ]
+  },
+  "command": [
+    "perf/prepared-parity/tests/test"
+  ],
+  "exit_code": 0,
+  "env": {
+    "PERF_REPORT": "1",
+    "MLX_ENABLE_TF32": "0",
+    "MLX_SERVE_EXL3_LAYER_UBENCH": "1"
+  },
+  "boot": "{ sec = 1789971052, usec = 827667 } Mon Sep 21 13:10:52 2026"
+}
