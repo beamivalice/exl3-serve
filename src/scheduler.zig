@@ -4923,6 +4923,19 @@ fn inferenceLoop(ctx: ThreadCtx) void {
             }
         }
     }
+    flushImatrixCaptures(sch);
+}
+
+/// Shutdown exit: an armed activation capture is written HERE, the last point
+/// this thread is alive. `Scheduler.deinit` unloads on the caller's thread,
+/// where the capture's mlx stream does not exist.
+fn flushImatrixCaptures(sch: *Scheduler) void {
+    sch.registry.mutex.lockUncancelable(sch.io);
+    defer sch.registry.mutex.unlock(sch.io);
+    var it = sch.registry.entries.valueIterator();
+    while (it.next()) |entry_ptr| {
+        if (entry_ptr.*.transformer) |x| x.flushImatrix();
+    }
 }
 
 /// Phase A4: encode one or more images on the inference thread. Mirrors the

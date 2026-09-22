@@ -3,6 +3,7 @@ const dsv4_mod = @import("deepseek_v4.zig");
 const qwen4_mod = @import("qwen4_exp.zig");
 const expert_stream_mod = @import("expert_stream.zig");
 const expert_bf16 = @import("expert_bf16_kernels.zig");
+const imatrix_capture = @import("imatrix.zig");
 const expert_exl3_kernels = @import("expert_exl3_kernels.zig");
 const expert_quant_mod = @import("expert_quant.zig");
 // The qwen4_exp MTP head shares the sidecar head's draft-rerank scheme
@@ -14633,6 +14634,7 @@ pub const Transformer = struct {
     qwen4_mtp_owner: ?*Qwen4MtpState = null,
     expert_stream: ?*expert_stream_mod.Engine = null,
     expert_bf16_kernels: bool = true,
+    imatrix: ?*imatrix_capture.Collector = null,
 
     // BERT encoder-only (null for decoder models)
     bert_layers: ?[]BertLayerWeights,
@@ -15284,6 +15286,8 @@ pub const Transformer = struct {
         var qwen4_mixer: ?HcWeights = null;
         var qwen4_mtp: ?Qwen4Mtp = null;
         var expert_stream: ?*expert_stream_mod.Engine = null;
+        var imatrix: ?*imatrix_capture.Collector = null;
+        errdefer if (imatrix) |c| c.deinit();
         if (config.isQwen4()) {
             var extra: std.ArrayList(mlx.mlx_array) = .empty;
             defer extra.deinit(allocator);
@@ -15341,6 +15345,7 @@ pub const Transformer = struct {
                     .{ .layout = config.expert_layout },
                 );
                 expert_stream = engine;
+                imatrix = try imatrix_capture.Collector.fromEnv(allocator, s, config.num_hidden_layers, @intCast(config.num_experts));
             }
             log.info("[qwen4] n-gram table {d} rows x {d} ({d}-bit, {s}), PLE at layer {d}, QSA budget {d}/{d}\n", .{ st.table.rows, st.table.dim, st.table.bits, if (config.expert_streaming) "sharded pread" else "mmapped", config.ple_layer_idx, config.indexer_budget, config.indexer_compress_ratio });
         } else if (std.mem.eql(u8, config.model_type, "mimo_v2") and config.expert_streaming) {
@@ -15407,6 +15412,7 @@ pub const Transformer = struct {
             .qwen4_mtp = qwen4_mtp,
             .expert_stream = expert_stream,
             .expert_bf16_kernels = expertBf16KernelsEnabled(),
+            .imatrix = imatrix,
             .lm_head_w = lm_head_w,
             .lm_head_s = lm_head_s,
             .lm_head_b = lm_head_b,
@@ -16180,7 +16186,18 @@ pub const Transformer = struct {
         return self.forward(token_ids);
     }
 
+    /// Write the activation capture out and drop it. Idempotent, and MUST run on
+    /// the inference thread: the accumulators' stream is bound to it, while
+    /// `Scheduler.deinit` tears models down on the caller's thread.
+    pub fn flushImatrix(self: *Transformer) void {
+        const c = self.imatrix orelse return;
+        self.imatrix = null;
+        _ = c.flush() catch |e| log.warn("[imatrix] flush failed: {s}\n", .{@errorName(e)});
+        c.deinit();
+    }
+
     pub fn deinit(self: *Transformer) void {
+        self.flushImatrix(); // `/v1/unload-model` reaches here on the inference thread
         self.releaseJoinedVerifyLogits();
         if (self.ane_prefill) |eng| {
             eng.deinit();
@@ -28636,6 +28653,14 @@ pub const Transformer = struct {
         var w_rows = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(w_rows);
         try mlx.check(mlx.mlx_reshape(&w_rows, norm_scores, &[_]c_int{ rows, topk }, 2, self.s));
+        var global_ids = mlx.mlx_array{ .ctx = null };
+        defer if (global_ids.ctx != null) {
+            _ = mlx.mlx_array_free(global_ids);
+        };
+        if (self.imatrix != null) {
+            global_ids = mlx.mlx_array_new();
+            try mlx.check(mlx.mlx_reshape(&global_ids, ids_contiguous, &[_]c_int{ rows, topk }, 2, self.s));
+        }
         const row_out = try streamedExpertCompute(self.s, .{
             .x_rows = x_rows,
             .gate = prepared.gate,
@@ -28645,6 +28670,9 @@ pub const Transformer = struct {
             .slab_down = prepared.raw_down,
             .slots = remapped_inds,
             .weights = w_rows,
+            .imatrix = self.imatrix,
+            .imatrix_layer = stream_ctx.layer,
+            .global_ids = global_ids,
         }, rows, self.expert_bf16_kernels);
         defer _ = mlx.mlx_array_free(row_out);
         var expert_sum = mlx.mlx_array_new();
@@ -37501,7 +37529,31 @@ const StreamedExpertOperands = struct {
     slab_down: mlx.mlx_array,
     slots: mlx.mlx_array,
     weights: mlx.mlx_array,
+    /// imatrix capture only: `slots` are remapped slab slots, so the statistics
+    /// need the routing's own [rows, top_k] GLOBAL expert ids alongside.
+    imatrix: ?*imatrix_capture.Collector = null,
+    imatrix_layer: u16 = 0,
+    global_ids: mlx.mlx_array = .{ .ctx = null },
 };
+
+fn imatrixArmed(op: StreamedExpertOperands) bool {
+    return op.imatrix != null and op.global_ids.ctx != null;
+}
+
+/// Fold one MoE layer's SwiGLU activation rows into the imatrix. `act` is
+/// [.., inter] in whatever row order the arm produced; `ids_flat` names each of
+/// those `n` rows' global expert in the SAME order.
+fn imatrixObserveDown(op: StreamedExpertOperands, s: mlx.mlx_stream, act: mlx.mlx_array, ids_flat: mlx.mlx_array, n: c_int) !void {
+    const col = op.imatrix orelse return;
+    const ash = mlx.getShape(act);
+    var act_2d = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(act_2d);
+    try mlx.check(mlx.mlx_reshape(&act_2d, act, &[_]c_int{ n, ash[ash.len - 1] }, 2, s));
+    var ids_2d = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(ids_2d);
+    try mlx.check(mlx.mlx_reshape(&ids_2d, ids_flat, &[_]c_int{ n, 1 }, 2, s));
+    try col.observeDown(op.imatrix_layer, act_2d, ids_2d);
+}
 
 var streamed_expert_kernels_engaged: bool = false;
 
@@ -37600,6 +37652,15 @@ fn streamedExpertCompositeDown(s: mlx.mlx_stream, op: StreamedExpertOperands, ro
         try mlx.check(mlx.mlx_squeeze(&up, up_3d, s));
         const activation = try streamedExpertSwiglu(s, gate, up);
         defer _ = mlx.mlx_array_free(activation);
+        if (imatrixArmed(op)) {
+            var flat_global = mlx.mlx_array_new();
+            defer _ = mlx.mlx_array_free(flat_global);
+            try mlx.check(mlx.mlx_reshape(&flat_global, op.global_ids, &[_]c_int{total_inds}, 1, s));
+            var sorted_global = mlx.mlx_array_new();
+            defer _ = mlx.mlx_array_free(sorted_global);
+            try mlx.check(mlx.mlx_take_axis(&sorted_global, flat_global, order, 0, s));
+            try imatrixObserveDown(op, s, activation, sorted_global, total_inds);
+        }
         var act_exp = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(act_exp);
         try mlx.check(mlx.mlx_expand_dims(&act_exp, activation, -2, s));
@@ -37637,6 +37698,7 @@ fn streamedExpertCompositeDown(s: mlx.mlx_stream, op: StreamedExpertOperands, ro
     try mlx.check(mlx.mlx_squeeze(&up, up_5d, s));
     const activation = try streamedExpertSwiglu(s, gate, up);
     defer _ = mlx.mlx_array_free(activation);
+    if (imatrixArmed(op)) try imatrixObserveDown(op, s, activation, op.global_ids, rows * topk);
     return streamedExpertUnsortedDown(s, op, activation, rows, topk);
 }
 
@@ -37658,11 +37720,13 @@ fn streamedExpertCompute(s: mlx.mlx_stream, op: StreamedExpertOperands, rows: c_
     const slot_shape = mlx.getShape(op.slots);
     if (slot_shape.len != 2 or slot_shape[0] != rows) return error.StreamedExpertShapeMismatch;
     const topk = slot_shape[1];
+    if (imatrixArmed(op)) try op.imatrix.?.observeGateUp(op.imatrix_layer, op.x_rows, op.global_ids);
     if (use_kernels and rows >= 1 and rows <= expert_bf16.MAX_ROWS and topk >= 1 and topk <= expert_bf16.MAX_TOPK) {
         try expertSlabAligned(op.slab_gate_up);
         try expertSlabAligned(op.slab_down);
         const h = try expert_bf16.gateUpSwiglu(s, op.x_rows, op.slab_gate_up, op.slots);
         defer _ = mlx.mlx_array_free(h);
+        if (imatrixArmed(op)) try imatrixObserveDown(op, s, h, op.global_ids, rows * topk);
         const down_kernel = expert_bf16.downKernelPreferred(@intCast(rows));
         if (!streamed_expert_kernels_engaged) {
             streamed_expert_kernels_engaged = true;
@@ -63710,6 +63774,100 @@ test "the streamed expert kernel arm is switched off by MLX_SERVE_EXPERT_BF16_KE
         try mlx.check(mlx.mlx_array_eval(out));
         const p = mlx.mlx_array_data_bfloat16(out).?;
         for (p[0..@intCast(rows * hidden)]) |bits| try std.testing.expect(std.math.isFinite(seBf16(bits)));
+    }
+}
+
+test "imatrix capture keys the streamed MoE statistics on GLOBAL expert ids, on every arm" {
+    const alloc = std.testing.allocator;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const hidden: c_int = 64;
+    const inter: c_int = 32;
+    const u: c_int = 8;
+    const experts: c_int = 16; // the slab holds 8 of them; ids 8..15 are the resident half
+    const topk: c_int = 10;
+    var prng = std.Random.DefaultPrng.init(0x1A7A1);
+    const rnd = prng.random();
+
+    const gu_host = try alloc.alloc(u16, @intCast(u * 2 * inter * hidden));
+    defer alloc.free(gu_host);
+    seFillBf16(rnd, gu_host);
+    const dn_host = try alloc.alloc(u16, @intCast(u * hidden * inter));
+    defer alloc.free(dn_host);
+    seFillBf16(rnd, dn_host);
+    const gu = mlx.mlx_array_new_data(gu_host.ptr, &[_]c_int{ u, 2 * inter, hidden }, 3, .bfloat16);
+    defer _ = mlx.mlx_array_free(gu);
+    const dn = mlx.mlx_array_new_data(dn_host.ptr, &[_]c_int{ u, hidden, inter }, 3, .bfloat16);
+    defer _ = mlx.mlx_array_free(dn);
+    const views = try seSplitViews(s, gu, dn, u, inter, hidden);
+    defer _ = mlx.mlx_array_free(views.gate);
+    defer _ = mlx.mlx_array_free(views.up);
+    defer _ = mlx.mlx_array_free(views.down);
+
+    // rows 1 (unsorted composite) and 2 (sorted composite), each on the kernel arm too.
+    for ([_]c_int{ 1, 2 }) |rows| {
+        for ([_]bool{ false, true }) |kernels| {
+            const col = try imatrix_capture.Collector.init(alloc, s, "/dev/null", 3, experts);
+            defer col.deinit();
+            const x_host = try alloc.alloc(u16, @intCast(rows * hidden));
+            defer alloc.free(x_host);
+            seFillBf16(rnd, x_host);
+            const w_host = try alloc.alloc(u16, @intCast(rows * topk));
+            defer alloc.free(w_host);
+            seFillBf16(rnd, w_host);
+            const slots_host = try seSlots(alloc, @intCast(rows), @intCast(topk), @intCast(u));
+            defer alloc.free(slots_host);
+            const global_host = try alloc.alloc(i32, slots_host.len);
+            defer alloc.free(global_host);
+            for (slots_host, 0..) |slot, i| global_host[i] = slot + u;
+
+            const x = mlx.mlx_array_new_data(x_host.ptr, &[_]c_int{ rows, hidden }, 2, .bfloat16);
+            defer _ = mlx.mlx_array_free(x);
+            const w = mlx.mlx_array_new_data(w_host.ptr, &[_]c_int{ rows, topk }, 2, .bfloat16);
+            defer _ = mlx.mlx_array_free(w);
+            const slots = mlx.mlx_array_new_data(slots_host.ptr, &[_]c_int{ rows, topk }, 2, .int32);
+            defer _ = mlx.mlx_array_free(slots);
+            const globals = mlx.mlx_array_new_data(global_host.ptr, &[_]c_int{ rows, topk }, 2, .int32);
+            defer _ = mlx.mlx_array_free(globals);
+
+            const out = try streamedExpertCompute(s, .{
+                .x_rows = x,
+                .gate = views.gate,
+                .up = views.up,
+                .down = views.down,
+                .slab_gate_up = gu,
+                .slab_down = dn,
+                .slots = slots,
+                .weights = w,
+                .imatrix = col,
+                .imatrix_layer = 2,
+                .global_ids = globals,
+            }, rows, kernels);
+            defer _ = mlx.mlx_array_free(out);
+
+            const slot = &col.layers[2];
+            try std.testing.expectEqual(@as(u64, @intCast(rows)), slot.tokens);
+            try std.testing.expectEqualSlices(c_int, &[_]c_int{ experts, hidden }, mlx.getShape(slot.gu));
+            try std.testing.expectEqualSlices(c_int, &[_]c_int{ experts, inter }, mlx.getShape(slot.down));
+            try mlx.check(mlx.mlx_array_eval(slot.rows));
+            const routed = mlx.mlx_array_data_float32(slot.rows).?;
+            var low: f32 = 0;
+            var high: f32 = 0;
+            for (0..@intCast(u)) |e| low += routed[e];
+            for (@intCast(u)..@intCast(experts)) |e| high += routed[e];
+            try std.testing.expectEqual(@as(f32, 0), low);
+            try std.testing.expectEqual(@as(f32, @floatFromInt(rows * topk)), high);
+            // Every expert the slab served owns some mass on both statistics.
+            try mlx.check(mlx.mlx_array_eval(slot.gu));
+            try mlx.check(mlx.mlx_array_eval(slot.down));
+            const gu_acc = mlx.mlx_array_data_float32(slot.gu).?;
+            const dn_acc = mlx.mlx_array_data_float32(slot.down).?;
+            for (0..@intCast(u * hidden)) |i| try std.testing.expectEqual(@as(f32, 0), gu_acc[i]);
+            for (0..@intCast(u * inter)) |i| try std.testing.expectEqual(@as(f32, 0), dn_acc[i]);
+            var seen: f32 = 0;
+            for (@intCast(u * inter)..@intCast(experts * inter)) |i| seen += dn_acc[i];
+            try std.testing.expect(seen > 0);
+        }
     }
 }
 
