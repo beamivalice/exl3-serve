@@ -172,20 +172,39 @@ pub const USAGE =
     \\
 ;
 
-pub const RowScore = struct { kld: f64, nll: f64, top1: bool };
+pub const RowScore = struct {
+    kld: f64,
+    nll: f64,
+    top1: bool,
+    cosine_similarity: f64,
+    cosine_loss: f64,
+};
 
 pub fn scoreRow(teacher: []const f32, model: []const f32, token: u32) !RowScore {
     if (model.len != teacher.len or token >= teacher.len) return error.KldShapeMismatch;
     var teacher_max = -std.math.inf(f64);
     var candidate_max = -std.math.inf(f64);
     var candidate_top: usize = 0;
+    var dot: f64 = 0;
+    var teacher_norm_sq: f64 = 0;
+    var candidate_norm_sq: f64 = 0;
     for (teacher, 0..) |value, i| {
+        const teacher_value = @as(f64, value);
+        const candidate_value = @as(f64, model[i]);
+        if (!std.math.isFinite(teacher_value) or !std.math.isFinite(candidate_value)) return error.NonFinite;
         if (value > teacher_max) teacher_max = value;
         if (model[i] > candidate_max) {
             candidate_max = model[i];
             candidate_top = i;
         }
+        dot += teacher_value * candidate_value;
+        teacher_norm_sq += teacher_value * teacher_value;
+        candidate_norm_sq += candidate_value * candidate_value;
     }
+    if (!std.math.isFinite(dot) or !std.math.isFinite(teacher_norm_sq) or !std.math.isFinite(candidate_norm_sq)) return error.NonFinite;
+    if (teacher_norm_sq == 0 or candidate_norm_sq == 0) return error.ZeroNorm;
+    const cosine_similarity = dot / (@sqrt(teacher_norm_sq) * @sqrt(candidate_norm_sq));
+    if (!std.math.isFinite(cosine_similarity)) return error.NonFinite;
     var teacher_sum: f64 = 0;
     var candidate_sum: f64 = 0;
     for (teacher, 0..) |value, i| {
@@ -204,6 +223,8 @@ pub fn scoreRow(teacher: []const f32, model: []const f32, token: u32) !RowScore 
         .kld = kld,
         .nll = candidate_log_z - model[token],
         .top1 = candidate_top == token,
+        .cosine_similarity = cosine_similarity,
+        .cosine_loss = 1.0 - cosine_similarity,
     };
 }
 
@@ -1029,13 +1050,36 @@ pub const PromptScore = struct {
     top1: usize,
     positions: usize,
     nll: f64,
+    cosine_similarity: f64,
+    cosine_loss: f64,
     eos_pos: ?usize = null,
     kld_to_eos: f64 = 0,
     top1_to_eos: usize = 0,
     positions_to_eos: usize = 0,
     nll_to_eos: f64 = 0,
+    cosine_similarity_to_eos: f64 = 0,
+    cosine_loss_to_eos: f64 = 0,
+    worst_cosine_loss: f64 = 0,
+    worst_cosine_loss_to_eos: f64 = 0,
     per_position_kld: []const f64 = &.{},
 };
+
+// MLX allocator counters intentionally exclude mmap/page-cache-backed n-gram storage.
+const MemoryReport = struct {
+    model_active_bytes: usize,
+    peak_active_bytes: usize,
+    final_active_bytes: usize,
+    final_cache_bytes: usize,
+};
+
+fn writeMemoryReportFields(w: *std.Io.Writer, report: MemoryReport) !void {
+    try w.print("\"model_active_bytes\":{d},\"peak_active_bytes\":{d},\"final_active_bytes\":{d},\"final_cache_bytes\":{d}", .{
+        report.model_active_bytes,
+        report.peak_active_bytes,
+        report.final_active_bytes,
+        report.final_cache_bytes,
+    });
+}
 
 pub fn firstEosPosition(generated: []const u32, eos: []const u32) ?usize {
     for (generated, 0..) |t, i| {
@@ -1045,6 +1089,10 @@ pub fn firstEosPosition(generated: []const u32, eos: []const u32) ?usize {
 }
 
 pub fn runCompare(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Options, out: *Out) !void {
+    var memory: MemoryReport = undefined;
+    try mlx.check(mlx.mlx_get_active_memory(&memory.model_active_bytes));
+    try mlx.check(mlx.mlx_reset_peak_memory());
+
     var base = try readBaseline(allocator, io, opts.fixture);
     defer base.deinit();
     const count = if (opts.limit > 0 and opts.limit < base.prompts.len) opts.limit else base.prompts.len;
@@ -1056,6 +1104,12 @@ pub fn runCompare(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
     var total_kld: f64 = 0;
     var total_kld_eos: f64 = 0;
     var total_nll_eos: f64 = 0;
+    var total_cosine_similarity: f64 = 0;
+    var total_cosine_loss: f64 = 0;
+    var total_cosine_similarity_eos: f64 = 0;
+    var total_cosine_loss_eos: f64 = 0;
+    var worst_cosine_loss: f64 = 0;
+    var worst_cosine_loss_eos: f64 = 0;
     var total_top1_eos: usize = 0;
     var total_positions_eos: usize = 0;
     var eos_set: std.ArrayList(u32) = .empty;
@@ -1105,11 +1159,17 @@ pub fn runCompare(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
 
         var prompt_kld: f64 = 0;
         var prompt_nll: f64 = 0;
+        var prompt_cosine_similarity: f64 = 0;
+        var prompt_cosine_loss: f64 = 0;
+        var prompt_worst_cosine_loss: f64 = 0;
         var prompt_top1: usize = 0;
         const eos_pos = firstEosPosition(generated, eos_set.items);
         const n_eos: usize = if (eos_pos) |e| e + 1 else generated.len;
         var kld_eos: f64 = 0;
         var nll_eos: f64 = 0;
+        var cosine_similarity_eos: f64 = 0;
+        var cosine_loss_eos: f64 = 0;
+        var worst_cosine_loss_eos_prompt: f64 = 0;
         var top1_eos: usize = 0;
         const per_pos = try allocator.alloc(f64, generated.len);
         for (generated, 0..) |token, position| {
@@ -1123,11 +1183,17 @@ pub fn runCompare(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
             const score = try scoreRow(teacher_row, model_row, token);
             prompt_kld += score.kld;
             prompt_nll += score.nll;
+            prompt_cosine_similarity += score.cosine_similarity;
+            prompt_cosine_loss += score.cosine_loss;
+            if (score.cosine_loss > prompt_worst_cosine_loss) prompt_worst_cosine_loss = score.cosine_loss;
             if (score.top1) prompt_top1 += 1;
             per_pos[position] = score.kld;
             if (position < n_eos) {
                 kld_eos += score.kld;
                 nll_eos += score.nll;
+                cosine_similarity_eos += score.cosine_similarity;
+                cosine_loss_eos += score.cosine_loss;
+                if (score.cosine_loss > worst_cosine_loss_eos_prompt) worst_cosine_loss_eos_prompt = score.cosine_loss;
                 if (score.top1) top1_eos += 1;
             }
         }
@@ -1139,19 +1205,31 @@ pub fn runCompare(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
             .top1 = prompt_top1,
             .positions = generated.len,
             .nll = prompt_nll / positions,
+            .cosine_similarity = prompt_cosine_similarity / positions,
+            .cosine_loss = prompt_cosine_loss / positions,
             .eos_pos = eos_pos,
             .kld_to_eos = kld_eos / positions_eos,
             .top1_to_eos = top1_eos,
             .positions_to_eos = n_eos,
             .nll_to_eos = nll_eos / positions_eos,
+            .cosine_similarity_to_eos = cosine_similarity_eos / positions_eos,
+            .cosine_loss_to_eos = cosine_loss_eos / positions_eos,
+            .worst_cosine_loss = prompt_worst_cosine_loss,
+            .worst_cosine_loss_to_eos = worst_cosine_loss_eos_prompt,
             .per_position_kld = per_pos,
         });
         total_kld += prompt_kld;
         total_nll += prompt_nll;
+        total_cosine_similarity += prompt_cosine_similarity;
+        total_cosine_loss += prompt_cosine_loss;
+        if (prompt_worst_cosine_loss > worst_cosine_loss) worst_cosine_loss = prompt_worst_cosine_loss;
         total_top1 += prompt_top1;
         total_positions += generated.len;
         total_kld_eos += kld_eos;
         total_nll_eos += nll_eos;
+        total_cosine_similarity_eos += cosine_similarity_eos;
+        total_cosine_loss_eos += cosine_loss_eos;
+        if (worst_cosine_loss_eos_prompt > worst_cosine_loss_eos) worst_cosine_loss_eos = worst_cosine_loss_eos_prompt;
         total_top1_eos += top1_eos;
         total_positions_eos += n_eos;
         out.print("{s:<48} {d:>14.9} {d:>6}/{d:<3} {d:>14.9}   to-eos {d:>12.9} {d:>3}/{d:<3} {d:>12.9}\n", .{
@@ -1174,14 +1252,34 @@ pub fn runCompare(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
     const positions_eos_f: f64 = @floatFromInt(@max(total_positions_eos, 1));
     const mean_kld_eos = total_kld_eos / positions_eos_f;
     const mean_nll_eos = total_nll_eos / positions_eos_f;
+    const mean_cosine_similarity = total_cosine_similarity / positions_f;
+    const mean_cosine_loss = total_cosine_loss / positions_f;
+    const mean_cosine_similarity_eos = total_cosine_similarity_eos / positions_eos_f;
+    const mean_cosine_loss_eos = total_cosine_loss_eos / positions_eos_f;
     const mean_top1_eos = @as(f64, @floatFromInt(total_top1_eos)) / positions_eos_f;
+    try mlx.check(mlx.mlx_get_peak_memory(&memory.peak_active_bytes));
+    try mlx.check(mlx.mlx_get_active_memory(&memory.final_active_bytes));
+    try mlx.check(mlx.mlx_get_cache_memory(&memory.final_cache_bytes));
+
     out.print("{s:<48} {d:>14.9} {d:>6}/{d:<3} {d:>14.9}   to-eos {d:>12.9} {d:>3}/{d:<3} {d:>12.9}\n", .{ "mean", mean_kld, total_top1, total_positions, mean_nll, mean_kld_eos, total_top1_eos, total_positions_eos, mean_nll_eos });
-    out.print("[kld] {s}: to-first-EOS mean KLD={d:.9} top1={d:.6} NLL={d:.9} over {d} positions\n", .{ opts.label, mean_kld_eos, mean_top1_eos, mean_nll_eos, total_positions_eos });
-    out.print("[kld] {s}: mean KLD={d:.9} top1={d:.6} NLL={d:.9} over {d} prompts / {d} positions\n", .{
+    out.print("[kld] {s}: to-first-EOS mean KLD={d:.9} top1={d:.6} NLL={d:.9} cosine={d:.9} loss={d:.9} worst_loss={d:.9} over {d} positions\n", .{
+        opts.label,
+        mean_kld_eos,
+        mean_top1_eos,
+        mean_nll_eos,
+        mean_cosine_similarity_eos,
+        mean_cosine_loss_eos,
+        worst_cosine_loss_eos,
+        total_positions_eos,
+    });
+    out.print("[kld] {s}: mean KLD={d:.9} top1={d:.6} NLL={d:.9} cosine={d:.9} loss={d:.9} worst_loss={d:.9} over {d} prompts / {d} positions\n", .{
         opts.label,
         mean_kld,
         mean_top1,
         mean_nll,
+        mean_cosine_similarity,
+        mean_cosine_loss,
+        worst_cosine_loss,
         scores.items.len,
         total_positions,
     });
@@ -1204,25 +1302,49 @@ pub fn runCompare(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
         try writeJsonString(w, opts.fixture);
         try w.writeAll(",\n  \"kv_cache_format\": ");
         try writeJsonString(w, kvCacheFormat(opts.kv_quant_config));
-        try w.print(",\n  \"mean_kld\": {d},\n  \"mean_top1\": {d},\n  \"mean_nll\": {d},\n  \"positions\": {d}", .{
+        try w.writeAll(",\n  ");
+        try writeMemoryReportFields(w, memory);
+        try w.print(",\n  \"mean_kld\": {d},\n  \"mean_top1\": {d},\n  \"mean_nll\": {d},\n  \"mean_cosine_similarity\": {d},\n  \"mean_cosine_loss\": {d},\n  \"worst_cosine_loss\": {d},\n  \"positions\": {d}", .{
             mean_kld,
             mean_top1,
             mean_nll,
+            mean_cosine_similarity,
+            mean_cosine_loss,
+            worst_cosine_loss,
             total_positions,
         });
-        try w.print(",\n  \"mean_kld_to_eos\": {d},\n  \"mean_top1_to_eos\": {d},\n  \"mean_nll_to_eos\": {d},\n  \"positions_to_eos\": {d}", .{
+        try w.print(",\n  \"mean_kld_to_eos\": {d},\n  \"mean_top1_to_eos\": {d},\n  \"mean_nll_to_eos\": {d},\n  \"mean_cosine_similarity_to_eos\": {d},\n  \"mean_cosine_loss_to_eos\": {d},\n  \"worst_cosine_loss_to_eos\": {d},\n  \"positions_to_eos\": {d}", .{
             mean_kld_eos,
             mean_top1_eos,
             mean_nll_eos,
+            mean_cosine_similarity_eos,
+            mean_cosine_loss_eos,
+            worst_cosine_loss_eos,
             total_positions_eos,
         });
         try w.writeAll(",\n  \"prompts\": [\n");
         for (scores.items, 0..) |s, i| {
             try w.writeAll("    {\"id\": ");
             try writeJsonString(w, s.id);
-            try w.print(", \"kld\": {d}, \"top1\": {d}, \"positions\": {d}, \"nll\": {d}", .{ s.kld, s.top1, s.positions, s.nll });
+            try w.print(", \"kld\": {d}, \"top1\": {d}, \"positions\": {d}, \"nll\": {d}, \"cosine_similarity\": {d}, \"cosine_loss\": {d}, \"worst_cosine_loss\": {d}", .{
+                s.kld,
+                s.top1,
+                s.positions,
+                s.nll,
+                s.cosine_similarity,
+                s.cosine_loss,
+                s.worst_cosine_loss,
+            });
             if (s.eos_pos) |e| try w.print(", \"eos_pos\": {d}", .{e}) else try w.writeAll(", \"eos_pos\": null");
-            try w.print(", \"kld_to_eos\": {d}, \"top1_to_eos\": {d}, \"positions_to_eos\": {d}, \"nll_to_eos\": {d}, \"per_position_kld\": [", .{ s.kld_to_eos, s.top1_to_eos, s.positions_to_eos, s.nll_to_eos });
+            try w.print(", \"kld_to_eos\": {d}, \"top1_to_eos\": {d}, \"positions_to_eos\": {d}, \"nll_to_eos\": {d}, \"cosine_similarity_to_eos\": {d}, \"cosine_loss_to_eos\": {d}, \"worst_cosine_loss_to_eos\": {d}, \"per_position_kld\": [", .{
+                s.kld_to_eos,
+                s.top1_to_eos,
+                s.positions_to_eos,
+                s.nll_to_eos,
+                s.cosine_similarity_to_eos,
+                s.cosine_loss_to_eos,
+                s.worst_cosine_loss_to_eos,
+            });
             for (s.per_position_kld, 0..) |k, j| {
                 if (j > 0) try w.writeAll(",");
                 try w.print("{d}", .{k});
@@ -1236,7 +1358,13 @@ pub fn runCompare(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
     }
 
     for (scores.items) |s| {
-        if (!std.math.isFinite(s.kld) or !std.math.isFinite(s.nll)) return error.NonFiniteKld;
+        if (!std.math.isFinite(s.kld) or !std.math.isFinite(s.nll) or
+            !std.math.isFinite(s.cosine_similarity) or !std.math.isFinite(s.cosine_loss) or
+            !std.math.isFinite(s.cosine_similarity_to_eos) or !std.math.isFinite(s.cosine_loss_to_eos) or
+            !std.math.isFinite(s.worst_cosine_loss) or !std.math.isFinite(s.worst_cosine_loss_to_eos))
+        {
+            return error.NonFiniteKld;
+        }
     }
 }
 
@@ -1260,26 +1388,88 @@ pub fn cmdKld(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8
 
 const TEACHER_FIXTURE = "/Users/beam/llm/models/kld-teacher/Qwen3.8-Flash-Next-wikitext2-60x64";
 
+test "kld: compare memory report serializes aggregate MLX byte counters" {
+    const report = MemoryReport{
+        .model_active_bytes = 11_000,
+        .peak_active_bytes = 22_000,
+        .final_active_bytes = 13_000,
+        .final_cache_bytes = 4_000,
+    };
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeMemoryReportFields(&w, report);
+    try testing.expectEqualStrings(
+        "\"model_active_bytes\":11000,\"peak_active_bytes\":22000,\"final_active_bytes\":13000,\"final_cache_bytes\":4000",
+        w.buffered(),
+    );
+}
+
 test "kld: scoreRow on identical logits is zero divergence and the plain NLL" {
     const logits = [_]f32{ 0.5, -1.0, 2.0, 0.0, 3.5, -2.5, 1.0, 0.25 };
     const s = try scoreRow(&logits, &logits, 4);
     try testing.expectApproxEqAbs(@as(f64, 0), s.kld, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 1), s.cosine_similarity, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0), s.cosine_loss, 1e-12);
     try testing.expect(s.top1);
     var sum: f64 = 0;
     for (logits) |v| sum += @exp(@as(f64, v) - 3.5);
     try testing.expectApproxEqAbs(@log(sum), s.nll, 1e-12);
 }
 
+test "kld: scoreRow reports raw-logit cosine for identical, orthogonal, opposite, and scaling rows" {
+    const teacher = [_]f32{ 3.0, 4.0 };
+    const identical = [_]f32{ 3.0, 4.0 };
+    const scaled = [_]f32{ 30.0, 40.0 };
+    const orthogonal = [_]f32{ 4.0, -3.0 };
+    const opposite = [_]f32{ -3.0, -4.0 };
+
+    const same = try scoreRow(&teacher, &identical, 0);
+    try testing.expectApproxEqAbs(@as(f64, 1), same.cosine_similarity, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0), same.cosine_loss, 1e-12);
+
+    const scale = try scoreRow(&teacher, &scaled, 0);
+    try testing.expectApproxEqAbs(@as(f64, 1), scale.cosine_similarity, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0), scale.cosine_loss, 1e-12);
+
+    const right_angle = try scoreRow(&teacher, &orthogonal, 0);
+    try testing.expectApproxEqAbs(@as(f64, 0), right_angle.cosine_similarity, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 1), right_angle.cosine_loss, 1e-12);
+
+    const reverse = try scoreRow(&teacher, &opposite, 0);
+    try testing.expectApproxEqAbs(@as(f64, -1), reverse.cosine_similarity, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 2), reverse.cosine_loss, 1e-12);
+}
+
+test "kld: scoreRow rejects nonfinite and zero-norm cosine rows" {
+    const valid = [_]f32{ 1.0, 2.0 };
+    const zero = [_]f32{ 0.0, 0.0 };
+    const nan_row = [_]f32{ std.math.nan(f32), 2.0 };
+    const inf_row = [_]f32{ 1.0, std.math.inf(f32) };
+
+    try testing.expectError(error.NonFinite, scoreRow(&nan_row, &valid, 0));
+    try testing.expectError(error.NonFinite, scoreRow(&valid, &inf_row, 0));
+    try testing.expectError(error.ZeroNorm, scoreRow(&zero, &valid, 0));
+    try testing.expectError(error.ZeroNorm, scoreRow(&valid, &zero, 0));
+}
+
 fn refScore(teacher: []const f32, model: []const f32, token: usize) RowScore {
     var tmax: f64 = -std.math.inf(f64);
     var mmax: f64 = -std.math.inf(f64);
     var mtop: usize = 0;
+    var dot: f64 = 0;
+    var teacher_norm_sq: f64 = 0;
+    var model_norm_sq: f64 = 0;
     for (teacher, 0..) |v, i| {
         if (v > tmax) tmax = v;
         if (model[i] > mmax) {
             mmax = model[i];
             mtop = i;
         }
+        const tv = @as(f64, v);
+        const mv = @as(f64, model[i]);
+        dot += tv * mv;
+        teacher_norm_sq += tv * tv;
+        model_norm_sq += mv * mv;
     }
     var tsum: f64 = 0;
     var msum: f64 = 0;
@@ -1295,11 +1485,18 @@ fn refScore(teacher: []const f32, model: []const f32, token: usize) RowScore {
         const lq = @as(f64, model[i]) - mlz;
         kld += @exp(lp) * (lp - lq);
     }
-    return .{ .kld = kld, .nll = mlz - model[token], .top1 = mtop == token };
+    const cosine_similarity = dot / (@sqrt(teacher_norm_sq) * @sqrt(model_norm_sq));
+    return .{
+        .kld = kld,
+        .nll = mlz - model[token],
+        .top1 = mtop == token,
+        .cosine_similarity = cosine_similarity,
+        .cosine_loss = 1.0 - cosine_similarity,
+    };
 }
 
 test "kld: scoreRow matches the closed form on two 8-vocab rows" {
-    const teacher = [_]f32{ 0, 0, 0, 0, 0, 0, 0, 0 };
+    const teacher = [_]f32{ 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5 };
     const model = [_]f32{ 1.0, 0.5, -0.5, 2.0, 0.0, -1.0, 0.25, 3.0 };
 
     var msum: f64 = 0;
@@ -1320,7 +1517,7 @@ test "kld: scoreRow matches the closed form on two 8-vocab rows" {
 }
 
 test "kld: scoreRow is log-sum-exp stable on large logits" {
-    var teacher: [8]f32 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
+    var teacher: [8]f32 = .{ 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5 };
     var model: [8]f32 = .{ 1.0, 0.5, -0.5, 2.0, 0.0, -1.0, 0.25, 3.0 };
     const base = try scoreRow(&teacher, &model, 3);
     for (&teacher) |*v| v.* += 90000.0;

@@ -1,0 +1,9406 @@
+{
+  "by_matrix": {
+    "down": {
+      "global_cosine": 0.9905385698242063,
+      "global_loss": 0.009461430175793706,
+      "matrix_count": 192,
+      "mean_cosine": 0.9905418846624613,
+      "mean_loss": 0.009458115337538613,
+      "moments_float64": {
+        "dot": 49765.73451099537,
+        "source_norm_sq": 50631.135538739065,
+        "target_norm_sq": 49854.043384808036
+      },
+      "p95_loss": 0.010058799795251839,
+      "weight_count": 314572800,
+      "worst": {
+        "cosine": 0.9882776547715512,
+        "expert_id": 447,
+        "layer": 0,
+        "loss": 0.011722345228448838,
+        "matrix": "down"
+      },
+      "worst_loss": 0.011722345228448838
+    },
+    "gate": {
+      "global_cosine": 0.989981307587917,
+      "global_loss": 0.010018692412082975,
+      "matrix_count": 192,
+      "mean_cosine": 0.9899827926930159,
+      "mean_loss": 0.010017207306984074,
+      "moments_float64": {
+        "dot": 51435.09335770665,
+        "source_norm_sq": 52305.15284670444,
+        "target_norm_sq": 51608.424403096134
+      },
+      "p95_loss": 0.010364840325689633,
+      "weight_count": 314572800,
+      "worst": {
+        "cosine": 0.9890595132725188,
+        "expert_id": 63,
+        "layer": 0,
+        "loss": 0.010940486727481158,
+        "matrix": "gate"
+      },
+      "worst_loss": 0.010940486727481158
+    },
+    "up": {
+      "global_cosine": 0.9899790805484545,
+      "global_loss": 0.010020919451545485,
+      "matrix_count": 192,
+      "mean_cosine": 0.989978703423748,
+      "mean_loss": 0.01002129657625188,
+      "moments_float64": {
+        "dot": 51793.56507394323,
+        "source_norm_sq": 52672.64256994226,
+        "target_norm_sq": 51965.423233025096
+      },
+      "p95_loss": 0.010378642783592528,
+      "weight_count": 314572800,
+      "worst": {
+        "cosine": 0.9890334802258726,
+        "expert_id": 319,
+        "layer": 0,
+        "loss": 0.010966519774127437,
+        "matrix": "up"
+      },
+      "worst_loss": 0.010966519774127437
+    }
+  },
+  "geometry": {
+    "expert_intermediate_size": 640,
+    "experts": 512,
+    "hidden_size": 2560,
+    "layers": 48,
+    "matrices_per_expert": [
+      "gate",
+      "up",
+      "down"
+    ],
+    "sampled_matrices": 576,
+    "sampled_weights": 943718400
+  },
+  "matrices": [
+    {
+      "cosine": 0.9890595132725188,
+      "expert_id": 63,
+      "layer": 0,
+      "loss": 0.010940486727481158,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9890394701954716,
+      "expert_id": 63,
+      "layer": 0,
+      "loss": 0.01096052980452844,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897675118206718,
+      "expert_id": 63,
+      "layer": 0,
+      "loss": 0.010232488179328203,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9892208314265779,
+      "expert_id": 191,
+      "layer": 0,
+      "loss": 0.010779168573422093,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9891986541471025,
+      "expert_id": 191,
+      "layer": 0,
+      "loss": 0.010801345852897493,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902182561829659,
+      "expert_id": 191,
+      "layer": 0,
+      "loss": 0.009781743817034116,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9891157323630728,
+      "expert_id": 319,
+      "layer": 0,
+      "loss": 0.01088426763692718,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9890334802258726,
+      "expert_id": 319,
+      "layer": 0,
+      "loss": 0.010966519774127437,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9890798177756339,
+      "expert_id": 319,
+      "layer": 0,
+      "loss": 0.010920182224366082,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9891477269433694,
+      "expert_id": 447,
+      "layer": 0,
+      "loss": 0.010852273056630612,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9891027698257898,
+      "expert_id": 447,
+      "layer": 0,
+      "loss": 0.010897230174210182,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9882776547715512,
+      "expert_id": 447,
+      "layer": 0,
+      "loss": 0.011722345228448838,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9895806845083839,
+      "expert_id": 63,
+      "layer": 1,
+      "loss": 0.010419315491616121,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9895676599068624,
+      "expert_id": 63,
+      "layer": 1,
+      "loss": 0.010432340093137649,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900913132913999,
+      "expert_id": 63,
+      "layer": 1,
+      "loss": 0.009908686708600123,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9895798751075254,
+      "expert_id": 191,
+      "layer": 1,
+      "loss": 0.01042012489247457,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9895946403549525,
+      "expert_id": 191,
+      "layer": 1,
+      "loss": 0.010405359645047518,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902617804528159,
+      "expert_id": 191,
+      "layer": 1,
+      "loss": 0.009738219547184124,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989538373617578,
+      "expert_id": 319,
+      "layer": 1,
+      "loss": 0.010461626382421985,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9895478791304195,
+      "expert_id": 319,
+      "layer": 1,
+      "loss": 0.010452120869580472,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903359851209542,
+      "expert_id": 319,
+      "layer": 1,
+      "loss": 0.00966401487904578,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896495986080234,
+      "expert_id": 447,
+      "layer": 1,
+      "loss": 0.010350401391976627,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896292411482317,
+      "expert_id": 447,
+      "layer": 1,
+      "loss": 0.010370758851768302,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899357147061041,
+      "expert_id": 447,
+      "layer": 1,
+      "loss": 0.010064285293895914,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898698597135549,
+      "expert_id": 63,
+      "layer": 2,
+      "loss": 0.0101301402864451,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898545096539438,
+      "expert_id": 63,
+      "layer": 2,
+      "loss": 0.010145490346056163,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902870332831236,
+      "expert_id": 63,
+      "layer": 2,
+      "loss": 0.009712966716876381,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899206919090374,
+      "expert_id": 191,
+      "layer": 2,
+      "loss": 0.01007930809096258,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898949343046722,
+      "expert_id": 191,
+      "layer": 2,
+      "loss": 0.010105065695327764,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902849982078522,
+      "expert_id": 191,
+      "layer": 2,
+      "loss": 0.009715001792147793,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899763793804891,
+      "expert_id": 319,
+      "layer": 2,
+      "loss": 0.010023620619510898,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899467948042502,
+      "expert_id": 319,
+      "layer": 2,
+      "loss": 0.010053205195749815,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906046583951367,
+      "expert_id": 319,
+      "layer": 2,
+      "loss": 0.009395341604863328,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989867118104768,
+      "expert_id": 447,
+      "layer": 2,
+      "loss": 0.010132881895231982,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898696754937265,
+      "expert_id": 447,
+      "layer": 2,
+      "loss": 0.010130324506273491,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906075579892689,
+      "expert_id": 447,
+      "layer": 2,
+      "loss": 0.009392442010731084,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899624868740066,
+      "expert_id": 63,
+      "layer": 3,
+      "loss": 0.010037513125993436,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899563095700578,
+      "expert_id": 63,
+      "layer": 3,
+      "loss": 0.010043690429942242,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905641432766473,
+      "expert_id": 63,
+      "layer": 3,
+      "loss": 0.009435856723352676,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899791897949942,
+      "expert_id": 191,
+      "layer": 3,
+      "loss": 0.010020810205005781,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899633468115836,
+      "expert_id": 191,
+      "layer": 3,
+      "loss": 0.0100366531884164,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906709153063935,
+      "expert_id": 191,
+      "layer": 3,
+      "loss": 0.009329084693606493,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896830308708527,
+      "expert_id": 319,
+      "layer": 3,
+      "loss": 0.010316969129147258,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896786925908859,
+      "expert_id": 319,
+      "layer": 3,
+      "loss": 0.010321307409114078,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908179837243837,
+      "expert_id": 319,
+      "layer": 3,
+      "loss": 0.009182016275616323,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989834480908923,
+      "expert_id": 447,
+      "layer": 3,
+      "loss": 0.010165519091076991,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898035095185544,
+      "expert_id": 447,
+      "layer": 3,
+      "loss": 0.010196490481445553,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902242084755571,
+      "expert_id": 447,
+      "layer": 3,
+      "loss": 0.009775791524442856,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898878682297524,
+      "expert_id": 63,
+      "layer": 4,
+      "loss": 0.010112131770247612,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989850910833178,
+      "expert_id": 63,
+      "layer": 4,
+      "loss": 0.010149089166822,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904030586877774,
+      "expert_id": 63,
+      "layer": 4,
+      "loss": 0.009596941312222551,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898341160702031,
+      "expert_id": 191,
+      "layer": 4,
+      "loss": 0.010165883929796893,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898221263200051,
+      "expert_id": 191,
+      "layer": 4,
+      "loss": 0.010177873679994898,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906088105471392,
+      "expert_id": 191,
+      "layer": 4,
+      "loss": 0.009391189452860771,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989838986296878,
+      "expert_id": 319,
+      "layer": 4,
+      "loss": 0.010161013703121946,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898399152400299,
+      "expert_id": 319,
+      "layer": 4,
+      "loss": 0.0101600847599701,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907579360407677,
+      "expert_id": 319,
+      "layer": 4,
+      "loss": 0.009242063959232327,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898448502982103,
+      "expert_id": 447,
+      "layer": 4,
+      "loss": 0.010155149701789656,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898192402030731,
+      "expert_id": 447,
+      "layer": 4,
+      "loss": 0.010180759796926897,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904081533659083,
+      "expert_id": 447,
+      "layer": 4,
+      "loss": 0.009591846634091739,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898346808660448,
+      "expert_id": 63,
+      "layer": 5,
+      "loss": 0.010165319133955242,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898270983948786,
+      "expert_id": 63,
+      "layer": 5,
+      "loss": 0.01017290160512141,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902550950695852,
+      "expert_id": 63,
+      "layer": 5,
+      "loss": 0.0097449049304148,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900065721570278,
+      "expert_id": 191,
+      "layer": 5,
+      "loss": 0.009993427842972191,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899961674512381,
+      "expert_id": 191,
+      "layer": 5,
+      "loss": 0.010003832548761915,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908317398485377,
+      "expert_id": 191,
+      "layer": 5,
+      "loss": 0.009168260151462326,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900289994552782,
+      "expert_id": 319,
+      "layer": 5,
+      "loss": 0.009971000544721775,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990023207903471,
+      "expert_id": 319,
+      "layer": 5,
+      "loss": 0.009976792096529019,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908068269326653,
+      "expert_id": 319,
+      "layer": 5,
+      "loss": 0.009193173067334692,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900116428841734,
+      "expert_id": 447,
+      "layer": 5,
+      "loss": 0.009988357115826574,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989983062707804,
+      "expert_id": 447,
+      "layer": 5,
+      "loss": 0.010016937292195993,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906224326256392,
+      "expert_id": 447,
+      "layer": 5,
+      "loss": 0.009377567374360796,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899035634263229,
+      "expert_id": 63,
+      "layer": 6,
+      "loss": 0.010096436573677092,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898753946989708,
+      "expert_id": 63,
+      "layer": 6,
+      "loss": 0.01012460530102921,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907208702633636,
+      "expert_id": 63,
+      "layer": 6,
+      "loss": 0.00927912973663636,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898842332162121,
+      "expert_id": 191,
+      "layer": 6,
+      "loss": 0.010115766783787894,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898640303178711,
+      "expert_id": 191,
+      "layer": 6,
+      "loss": 0.010135969682128931,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906433709453956,
+      "expert_id": 191,
+      "layer": 6,
+      "loss": 0.009356629054604437,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899583686926119,
+      "expert_id": 319,
+      "layer": 6,
+      "loss": 0.01004163130738811,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899573191013655,
+      "expert_id": 319,
+      "layer": 6,
+      "loss": 0.01004268089863447,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904068178574071,
+      "expert_id": 319,
+      "layer": 6,
+      "loss": 0.00959318214259286,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897866247132169,
+      "expert_id": 447,
+      "layer": 6,
+      "loss": 0.010213375286783122,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897634921720135,
+      "expert_id": 447,
+      "layer": 6,
+      "loss": 0.010236507827986463,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903980795617294,
+      "expert_id": 447,
+      "layer": 6,
+      "loss": 0.009601920438270573,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896681942587161,
+      "expert_id": 63,
+      "layer": 7,
+      "loss": 0.010331805741283895,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989685161684624,
+      "expert_id": 63,
+      "layer": 7,
+      "loss": 0.010314838315376051,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901524669865057,
+      "expert_id": 63,
+      "layer": 7,
+      "loss": 0.00984753301349428,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898344107118483,
+      "expert_id": 191,
+      "layer": 7,
+      "loss": 0.0101655892881517,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898156305002945,
+      "expert_id": 191,
+      "layer": 7,
+      "loss": 0.01018436949970547,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905891488450229,
+      "expert_id": 191,
+      "layer": 7,
+      "loss": 0.009410851154977085,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898100553088969,
+      "expert_id": 319,
+      "layer": 7,
+      "loss": 0.010189944691103126,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897941331622562,
+      "expert_id": 319,
+      "layer": 7,
+      "loss": 0.010205866837743827,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905407536116639,
+      "expert_id": 319,
+      "layer": 7,
+      "loss": 0.009459246388336062,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899216134880493,
+      "expert_id": 447,
+      "layer": 7,
+      "loss": 0.010078386511950699,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899061291750696,
+      "expert_id": 447,
+      "layer": 7,
+      "loss": 0.010093870824930407,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906981541303395,
+      "expert_id": 447,
+      "layer": 7,
+      "loss": 0.009301845869660541,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898024650680209,
+      "expert_id": 63,
+      "layer": 8,
+      "loss": 0.010197534931979058,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897958991846065,
+      "expert_id": 63,
+      "layer": 8,
+      "loss": 0.010204100815393469,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905883775514556,
+      "expert_id": 63,
+      "layer": 8,
+      "loss": 0.009411622448544432,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896518743686479,
+      "expert_id": 191,
+      "layer": 8,
+      "loss": 0.010348125631352123,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896623237625486,
+      "expert_id": 191,
+      "layer": 8,
+      "loss": 0.01033767623745141,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901917670387566,
+      "expert_id": 191,
+      "layer": 8,
+      "loss": 0.009808232961243446,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989637156113238,
+      "expert_id": 319,
+      "layer": 8,
+      "loss": 0.010362843886762008,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896207678461819,
+      "expert_id": 319,
+      "layer": 8,
+      "loss": 0.010379232153818085,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904015578309096,
+      "expert_id": 319,
+      "layer": 8,
+      "loss": 0.009598442169090449,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989722721544688,
+      "expert_id": 447,
+      "layer": 8,
+      "loss": 0.010277278455312011,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897254136805971,
+      "expert_id": 447,
+      "layer": 8,
+      "loss": 0.010274586319402923,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902921603113103,
+      "expert_id": 447,
+      "layer": 8,
+      "loss": 0.009707839688689712,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898791755880326,
+      "expert_id": 63,
+      "layer": 9,
+      "loss": 0.010120824411967377,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898763819103856,
+      "expert_id": 63,
+      "layer": 9,
+      "loss": 0.010123618089614372,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901135228277148,
+      "expert_id": 63,
+      "layer": 9,
+      "loss": 0.00988647717228519,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900935089578383,
+      "expert_id": 191,
+      "layer": 9,
+      "loss": 0.00990649104216168,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900991056916025,
+      "expert_id": 191,
+      "layer": 9,
+      "loss": 0.009900894308397468,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905911034530921,
+      "expert_id": 191,
+      "layer": 9,
+      "loss": 0.009408896546907908,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899867693924865,
+      "expert_id": 319,
+      "layer": 9,
+      "loss": 0.010013230607513468,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900094335339065,
+      "expert_id": 319,
+      "layer": 9,
+      "loss": 0.009990566466093531,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906063546959267,
+      "expert_id": 319,
+      "layer": 9,
+      "loss": 0.009393645304073273,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989838625286425,
+      "expert_id": 447,
+      "layer": 9,
+      "loss": 0.010161374713575033,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898057940598441,
+      "expert_id": 447,
+      "layer": 9,
+      "loss": 0.010194205940155854,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896699011148393,
+      "expert_id": 447,
+      "layer": 9,
+      "loss": 0.010330098885160677,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897298363591458,
+      "expert_id": 63,
+      "layer": 10,
+      "loss": 0.010270163640854202,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897513383529756,
+      "expert_id": 63,
+      "layer": 10,
+      "loss": 0.010248661647024426,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902894058765653,
+      "expert_id": 63,
+      "layer": 10,
+      "loss": 0.009710594123434668,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897867501735338,
+      "expert_id": 191,
+      "layer": 10,
+      "loss": 0.010213249826466209,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897743711878784,
+      "expert_id": 191,
+      "layer": 10,
+      "loss": 0.010225628812121634,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905725776750622,
+      "expert_id": 191,
+      "layer": 10,
+      "loss": 0.009427422324937762,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897630126881204,
+      "expert_id": 319,
+      "layer": 10,
+      "loss": 0.010236987311879608,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897610746599421,
+      "expert_id": 319,
+      "layer": 10,
+      "loss": 0.01023892534005788,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904689617413832,
+      "expert_id": 319,
+      "layer": 10,
+      "loss": 0.009531038258616786,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897978993973885,
+      "expert_id": 447,
+      "layer": 10,
+      "loss": 0.010202100602611508,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897758900787805,
+      "expert_id": 447,
+      "layer": 10,
+      "loss": 0.01022410992121947,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907370481793909,
+      "expert_id": 447,
+      "layer": 10,
+      "loss": 0.0092629518206091,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899543932116809,
+      "expert_id": 63,
+      "layer": 11,
+      "loss": 0.010045606788319117,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899351753622976,
+      "expert_id": 63,
+      "layer": 11,
+      "loss": 0.010064824637702419,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905868115785116,
+      "expert_id": 63,
+      "layer": 11,
+      "loss": 0.009413188421488417,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898966585922985,
+      "expert_id": 191,
+      "layer": 11,
+      "loss": 0.010103341407701527,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898855628023095,
+      "expert_id": 191,
+      "layer": 11,
+      "loss": 0.010114437197690451,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904565695859114,
+      "expert_id": 191,
+      "layer": 11,
+      "loss": 0.00954343041408856,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898814461185048,
+      "expert_id": 319,
+      "layer": 11,
+      "loss": 0.010118553881495185,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898731881469383,
+      "expert_id": 319,
+      "layer": 11,
+      "loss": 0.010126811853061746,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990385906066152,
+      "expert_id": 319,
+      "layer": 11,
+      "loss": 0.009614093933848045,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899964833794446,
+      "expert_id": 447,
+      "layer": 11,
+      "loss": 0.01000351662055543,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.99000275228245,
+      "expert_id": 447,
+      "layer": 11,
+      "loss": 0.00999724771754995,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906788709342063,
+      "expert_id": 447,
+      "layer": 11,
+      "loss": 0.009321129065793743,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899512184093816,
+      "expert_id": 63,
+      "layer": 12,
+      "loss": 0.010048781590618394,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899592063849354,
+      "expert_id": 63,
+      "layer": 12,
+      "loss": 0.010040793615064603,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897529285408143,
+      "expert_id": 63,
+      "layer": 12,
+      "loss": 0.010247071459185686,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989931160006783,
+      "expert_id": 191,
+      "layer": 12,
+      "loss": 0.01006883999321695,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899401556583529,
+      "expert_id": 191,
+      "layer": 12,
+      "loss": 0.010059844341647084,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904751792398634,
+      "expert_id": 191,
+      "layer": 12,
+      "loss": 0.00952482076013661,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899784873886631,
+      "expert_id": 319,
+      "layer": 12,
+      "loss": 0.01002151261133688,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989962395418697,
+      "expert_id": 319,
+      "layer": 12,
+      "loss": 0.010037604581302983,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907363417154369,
+      "expert_id": 319,
+      "layer": 12,
+      "loss": 0.009263658284563103,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899757271535223,
+      "expert_id": 447,
+      "layer": 12,
+      "loss": 0.010024272846477666,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899790421096145,
+      "expert_id": 447,
+      "layer": 12,
+      "loss": 0.010020957890385485,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904309510707022,
+      "expert_id": 447,
+      "layer": 12,
+      "loss": 0.009569048929297774,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898246040826272,
+      "expert_id": 63,
+      "layer": 13,
+      "loss": 0.01017539591737282,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898618056536449,
+      "expert_id": 63,
+      "layer": 13,
+      "loss": 0.0101381943463551,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901907654203845,
+      "expert_id": 63,
+      "layer": 13,
+      "loss": 0.009809234579615467,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898407014169279,
+      "expert_id": 191,
+      "layer": 13,
+      "loss": 0.010159298583072074,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989818627540172,
+      "expert_id": 191,
+      "layer": 13,
+      "loss": 0.010181372459827975,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990519057758284,
+      "expert_id": 191,
+      "layer": 13,
+      "loss": 0.009480942241716028,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898044873484253,
+      "expert_id": 319,
+      "layer": 13,
+      "loss": 0.0101955126515747,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898071647249016,
+      "expert_id": 319,
+      "layer": 13,
+      "loss": 0.0101928352750984,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906019342491242,
+      "expert_id": 319,
+      "layer": 13,
+      "loss": 0.009398065750875761,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898605719124212,
+      "expert_id": 447,
+      "layer": 13,
+      "loss": 0.010139428087578839,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898731338035779,
+      "expert_id": 447,
+      "layer": 13,
+      "loss": 0.010126866196422113,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899574167137477,
+      "expert_id": 447,
+      "layer": 13,
+      "loss": 0.010042583286252293,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900761907361724,
+      "expert_id": 63,
+      "layer": 14,
+      "loss": 0.009923809263827632,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900786493701313,
+      "expert_id": 63,
+      "layer": 14,
+      "loss": 0.009921350629868653,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908696995839804,
+      "expert_id": 63,
+      "layer": 14,
+      "loss": 0.009130300416019588,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990099441509234,
+      "expert_id": 191,
+      "layer": 14,
+      "loss": 0.009900558490765987,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901107536524129,
+      "expert_id": 191,
+      "layer": 14,
+      "loss": 0.009889246347587144,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908057640099598,
+      "expert_id": 191,
+      "layer": 14,
+      "loss": 0.009194235990040212,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898684798005366,
+      "expert_id": 319,
+      "layer": 14,
+      "loss": 0.010131520199463395,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898444034852919,
+      "expert_id": 319,
+      "layer": 14,
+      "loss": 0.010155596514708098,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904529639793949,
+      "expert_id": 319,
+      "layer": 14,
+      "loss": 0.009547036020605137,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897908570795674,
+      "expert_id": 447,
+      "layer": 14,
+      "loss": 0.010209142920432623,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896731869275772,
+      "expert_id": 447,
+      "layer": 14,
+      "loss": 0.01032681307242278,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9895863769187706,
+      "expert_id": 447,
+      "layer": 14,
+      "loss": 0.010413623081229395,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897903692393757,
+      "expert_id": 63,
+      "layer": 15,
+      "loss": 0.01020963076062431,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898021966868699,
+      "expert_id": 63,
+      "layer": 15,
+      "loss": 0.010197803313130138,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908605234622763,
+      "expert_id": 63,
+      "layer": 15,
+      "loss": 0.009139476537723734,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898613745263046,
+      "expert_id": 191,
+      "layer": 15,
+      "loss": 0.010138625473695373,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898643343623164,
+      "expert_id": 191,
+      "layer": 15,
+      "loss": 0.010135665637683644,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908058728324737,
+      "expert_id": 191,
+      "layer": 15,
+      "loss": 0.009194127167526323,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899192823317342,
+      "expert_id": 319,
+      "layer": 15,
+      "loss": 0.010080717668265793,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899535192925375,
+      "expert_id": 319,
+      "layer": 15,
+      "loss": 0.010046480707462502,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904191418047115,
+      "expert_id": 319,
+      "layer": 15,
+      "loss": 0.009580858195288533,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899668827979655,
+      "expert_id": 447,
+      "layer": 15,
+      "loss": 0.01003311720203448,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990023930356176,
+      "expert_id": 447,
+      "layer": 15,
+      "loss": 0.009976069643824026,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906015797045767,
+      "expert_id": 447,
+      "layer": 15,
+      "loss": 0.00939842029542326,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901592723719437,
+      "expert_id": 63,
+      "layer": 16,
+      "loss": 0.009840727628056323,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901693343796389,
+      "expert_id": 63,
+      "layer": 16,
+      "loss": 0.009830665620361057,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908093491153013,
+      "expert_id": 63,
+      "layer": 16,
+      "loss": 0.009190650884698726,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901775434004617,
+      "expert_id": 191,
+      "layer": 16,
+      "loss": 0.009822456599538287,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902204646816184,
+      "expert_id": 191,
+      "layer": 16,
+      "loss": 0.009779535318381605,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907465176152064,
+      "expert_id": 191,
+      "layer": 16,
+      "loss": 0.009253482384793621,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902087794278386,
+      "expert_id": 319,
+      "layer": 16,
+      "loss": 0.009791220572161419,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902390932562715,
+      "expert_id": 319,
+      "layer": 16,
+      "loss": 0.009760906743728537,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908242158863674,
+      "expert_id": 319,
+      "layer": 16,
+      "loss": 0.009175784113632623,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901253772307813,
+      "expert_id": 447,
+      "layer": 16,
+      "loss": 0.009874622769218688,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901453536535954,
+      "expert_id": 447,
+      "layer": 16,
+      "loss": 0.00985464634640465,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906620157861523,
+      "expert_id": 447,
+      "layer": 16,
+      "loss": 0.009337984213847683,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900716726066474,
+      "expert_id": 63,
+      "layer": 17,
+      "loss": 0.009928327393352587,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900668281038749,
+      "expert_id": 63,
+      "layer": 17,
+      "loss": 0.009933171896125081,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908409915271954,
+      "expert_id": 63,
+      "layer": 17,
+      "loss": 0.009159008472804597,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899483522143135,
+      "expert_id": 191,
+      "layer": 17,
+      "loss": 0.010051647785686457,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899315671745981,
+      "expert_id": 191,
+      "layer": 17,
+      "loss": 0.01006843282540193,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903963601958848,
+      "expert_id": 191,
+      "layer": 17,
+      "loss": 0.00960363980411516,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900947496825422,
+      "expert_id": 319,
+      "layer": 17,
+      "loss": 0.009905250317457814,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900894736442979,
+      "expert_id": 319,
+      "layer": 17,
+      "loss": 0.00991052635570211,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907877480779701,
+      "expert_id": 319,
+      "layer": 17,
+      "loss": 0.009212251922029902,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990136144714424,
+      "expert_id": 447,
+      "layer": 17,
+      "loss": 0.009863855285575984,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901300100584189,
+      "expert_id": 447,
+      "layer": 17,
+      "loss": 0.009869989941581059,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9910074996835826,
+      "expert_id": 447,
+      "layer": 17,
+      "loss": 0.008992500316417407,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899542129048995,
+      "expert_id": 63,
+      "layer": 18,
+      "loss": 0.010045787095100511,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899567807426823,
+      "expert_id": 63,
+      "layer": 18,
+      "loss": 0.01004321925731766,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990412401711127,
+      "expert_id": 63,
+      "layer": 18,
+      "loss": 0.009587598288873012,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899009393089087,
+      "expert_id": 191,
+      "layer": 18,
+      "loss": 0.010099060691091344,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989908152610767,
+      "expert_id": 191,
+      "layer": 18,
+      "loss": 0.010091847389232966,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908725437413917,
+      "expert_id": 191,
+      "layer": 18,
+      "loss": 0.009127456258608335,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899415169031557,
+      "expert_id": 319,
+      "layer": 18,
+      "loss": 0.010058483096844317,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899390209982638,
+      "expert_id": 319,
+      "layer": 18,
+      "loss": 0.010060979001736192,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905362038268363,
+      "expert_id": 319,
+      "layer": 18,
+      "loss": 0.00946379617316373,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899654507876866,
+      "expert_id": 447,
+      "layer": 18,
+      "loss": 0.010034549212313393,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989975760261655,
+      "expert_id": 447,
+      "layer": 18,
+      "loss": 0.010024239738344987,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990277089140763,
+      "expert_id": 447,
+      "layer": 18,
+      "loss": 0.009722910859237044,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901035431172829,
+      "expert_id": 63,
+      "layer": 19,
+      "loss": 0.00989645688271712,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901046402217828,
+      "expert_id": 63,
+      "layer": 19,
+      "loss": 0.009895359778217205,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906187447217008,
+      "expert_id": 63,
+      "layer": 19,
+      "loss": 0.00938125527829925,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900786565710497,
+      "expert_id": 191,
+      "layer": 19,
+      "loss": 0.009921343428950347,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900767037904098,
+      "expert_id": 191,
+      "layer": 19,
+      "loss": 0.009923296209590204,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907913759535844,
+      "expert_id": 191,
+      "layer": 19,
+      "loss": 0.009208624046415648,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901058280691103,
+      "expert_id": 319,
+      "layer": 19,
+      "loss": 0.009894171930889706,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901027455089885,
+      "expert_id": 319,
+      "layer": 19,
+      "loss": 0.009897254491011531,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990712131646498,
+      "expert_id": 319,
+      "layer": 19,
+      "loss": 0.009287868353502038,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901290037775915,
+      "expert_id": 447,
+      "layer": 19,
+      "loss": 0.009870996222408501,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901194052395015,
+      "expert_id": 447,
+      "layer": 19,
+      "loss": 0.009880594760498518,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909383540675333,
+      "expert_id": 447,
+      "layer": 19,
+      "loss": 0.009061645932466722,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899677585901413,
+      "expert_id": 63,
+      "layer": 20,
+      "loss": 0.0100322414098587,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899753982697765,
+      "expert_id": 63,
+      "layer": 20,
+      "loss": 0.010024601730223459,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906188537522728,
+      "expert_id": 63,
+      "layer": 20,
+      "loss": 0.009381146247727234,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899612121654778,
+      "expert_id": 191,
+      "layer": 20,
+      "loss": 0.010038787834522167,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899476044631469,
+      "expert_id": 191,
+      "layer": 20,
+      "loss": 0.01005239553685311,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909066362308099,
+      "expert_id": 191,
+      "layer": 20,
+      "loss": 0.009093363769190121,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900158632530726,
+      "expert_id": 319,
+      "layer": 20,
+      "loss": 0.009984136746927441,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900025406318854,
+      "expert_id": 319,
+      "layer": 20,
+      "loss": 0.00999745936811458,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908777289892589,
+      "expert_id": 319,
+      "layer": 20,
+      "loss": 0.009122271010741145,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899981611827379,
+      "expert_id": 447,
+      "layer": 20,
+      "loss": 0.010001838817262132,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899723655093617,
+      "expert_id": 447,
+      "layer": 20,
+      "loss": 0.01002763449063826,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990715903057944,
+      "expert_id": 447,
+      "layer": 20,
+      "loss": 0.009284096942056008,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901351053758637,
+      "expert_id": 63,
+      "layer": 21,
+      "loss": 0.009864894624136311,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901116392289692,
+      "expert_id": 63,
+      "layer": 21,
+      "loss": 0.009888360771030835,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905042395350898,
+      "expert_id": 63,
+      "layer": 21,
+      "loss": 0.009495760464910186,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990149337462062,
+      "expert_id": 191,
+      "layer": 21,
+      "loss": 0.009850662537937982,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901434303304576,
+      "expert_id": 191,
+      "layer": 21,
+      "loss": 0.009856569669542403,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904100636744331,
+      "expert_id": 191,
+      "layer": 21,
+      "loss": 0.009589936325566928,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901634626821357,
+      "expert_id": 319,
+      "layer": 21,
+      "loss": 0.009836537317864269,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901489443736167,
+      "expert_id": 319,
+      "layer": 21,
+      "loss": 0.009851055626383332,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908361643126083,
+      "expert_id": 319,
+      "layer": 21,
+      "loss": 0.009163835687391653,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901461759049812,
+      "expert_id": 447,
+      "layer": 21,
+      "loss": 0.009853824095018782,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990141615759171,
+      "expert_id": 447,
+      "layer": 21,
+      "loss": 0.009858384240828966,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990874162619,
+      "expert_id": 447,
+      "layer": 21,
+      "loss": 0.009125837381000035,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901473140392804,
+      "expert_id": 63,
+      "layer": 22,
+      "loss": 0.009852685960719643,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901526843687808,
+      "expert_id": 63,
+      "layer": 22,
+      "loss": 0.009847315631219211,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990571401558233,
+      "expert_id": 63,
+      "layer": 22,
+      "loss": 0.009428598441767022,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901824632343901,
+      "expert_id": 191,
+      "layer": 22,
+      "loss": 0.009817536765609924,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901821089390087,
+      "expert_id": 191,
+      "layer": 22,
+      "loss": 0.00981789106099129,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906372604597256,
+      "expert_id": 191,
+      "layer": 22,
+      "loss": 0.009362739540274445,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901276771217534,
+      "expert_id": 319,
+      "layer": 22,
+      "loss": 0.009872322878246576,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901237465630132,
+      "expert_id": 319,
+      "layer": 22,
+      "loss": 0.009876253436986837,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906678211526767,
+      "expert_id": 319,
+      "layer": 22,
+      "loss": 0.009332178847323291,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990153717281139,
+      "expert_id": 447,
+      "layer": 22,
+      "loss": 0.00984628271886101,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901719112050369,
+      "expert_id": 447,
+      "layer": 22,
+      "loss": 0.009828088794963108,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905737282588122,
+      "expert_id": 447,
+      "layer": 22,
+      "loss": 0.00942627174118782,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901375066480178,
+      "expert_id": 63,
+      "layer": 23,
+      "loss": 0.009862493351982193,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901280337892613,
+      "expert_id": 63,
+      "layer": 23,
+      "loss": 0.009871966210738714,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907191920315083,
+      "expert_id": 63,
+      "layer": 23,
+      "loss": 0.009280807968491733,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990151079479965,
+      "expert_id": 191,
+      "layer": 23,
+      "loss": 0.009848920520035054,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901251775530449,
+      "expert_id": 191,
+      "layer": 23,
+      "loss": 0.009874822446955145,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909282484045493,
+      "expert_id": 191,
+      "layer": 23,
+      "loss": 0.009071751595450706,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902316840785017,
+      "expert_id": 319,
+      "layer": 23,
+      "loss": 0.009768315921498294,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902068808851721,
+      "expert_id": 319,
+      "layer": 23,
+      "loss": 0.009793119114827942,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908782906795796,
+      "expert_id": 319,
+      "layer": 23,
+      "loss": 0.009121709320420446,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902059734945411,
+      "expert_id": 447,
+      "layer": 23,
+      "loss": 0.009794026505458908,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901875631331621,
+      "expert_id": 447,
+      "layer": 23,
+      "loss": 0.00981243686683786,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908873431970874,
+      "expert_id": 447,
+      "layer": 23,
+      "loss": 0.009112656802912622,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900350088222405,
+      "expert_id": 63,
+      "layer": 24,
+      "loss": 0.009964991177759508,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900256168821049,
+      "expert_id": 63,
+      "layer": 24,
+      "loss": 0.009974383117895114,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907785304167605,
+      "expert_id": 63,
+      "layer": 24,
+      "loss": 0.00922146958323955,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898716537268728,
+      "expert_id": 191,
+      "layer": 24,
+      "loss": 0.010128346273127198,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898795773051662,
+      "expert_id": 191,
+      "layer": 24,
+      "loss": 0.01012042269483382,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903870916769953,
+      "expert_id": 191,
+      "layer": 24,
+      "loss": 0.009612908323004654,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898871865096542,
+      "expert_id": 319,
+      "layer": 24,
+      "loss": 0.010112813490345762,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898732457372736,
+      "expert_id": 319,
+      "layer": 24,
+      "loss": 0.010126754262726356,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906372236943249,
+      "expert_id": 319,
+      "layer": 24,
+      "loss": 0.009362776305675058,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899317806012464,
+      "expert_id": 447,
+      "layer": 24,
+      "loss": 0.010068219398753575,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899498923734884,
+      "expert_id": 447,
+      "layer": 24,
+      "loss": 0.010050107626511595,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904859816478129,
+      "expert_id": 447,
+      "layer": 24,
+      "loss": 0.009514018352187126,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899417191146679,
+      "expert_id": 63,
+      "layer": 25,
+      "loss": 0.010058280885332116,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899448529162379,
+      "expert_id": 63,
+      "layer": 25,
+      "loss": 0.010055147083762095,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903047811495287,
+      "expert_id": 63,
+      "layer": 25,
+      "loss": 0.00969521885047131,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902175286662835,
+      "expert_id": 191,
+      "layer": 25,
+      "loss": 0.009782471333716458,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902412495677188,
+      "expert_id": 191,
+      "layer": 25,
+      "loss": 0.009758750432281249,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907811508047858,
+      "expert_id": 191,
+      "layer": 25,
+      "loss": 0.009218849195214207,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901062005496238,
+      "expert_id": 319,
+      "layer": 25,
+      "loss": 0.009893799450376162,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901197592191474,
+      "expert_id": 319,
+      "layer": 25,
+      "loss": 0.00988024078085259,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907599687574848,
+      "expert_id": 319,
+      "layer": 25,
+      "loss": 0.009240031242515157,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899716053808328,
+      "expert_id": 447,
+      "layer": 25,
+      "loss": 0.010028394619167158,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898645752220825,
+      "expert_id": 447,
+      "layer": 25,
+      "loss": 0.010135424777917512,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900472081723432,
+      "expert_id": 447,
+      "layer": 25,
+      "loss": 0.009952791827656848,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899030076885791,
+      "expert_id": 63,
+      "layer": 26,
+      "loss": 0.010096992311420916,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898954137785443,
+      "expert_id": 63,
+      "layer": 26,
+      "loss": 0.010104586221455714,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906527877061696,
+      "expert_id": 63,
+      "layer": 26,
+      "loss": 0.009347212293830398,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900767938992009,
+      "expert_id": 191,
+      "layer": 26,
+      "loss": 0.009923206100799109,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990071483540141,
+      "expert_id": 191,
+      "layer": 26,
+      "loss": 0.009928516459859038,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909179923905923,
+      "expert_id": 191,
+      "layer": 26,
+      "loss": 0.009082007609407694,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899269516521242,
+      "expert_id": 319,
+      "layer": 26,
+      "loss": 0.010073048347875813,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899347042472983,
+      "expert_id": 319,
+      "layer": 26,
+      "loss": 0.010065295752701653,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907275157728128,
+      "expert_id": 319,
+      "layer": 26,
+      "loss": 0.009272484227187183,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900525046028236,
+      "expert_id": 447,
+      "layer": 26,
+      "loss": 0.009947495397176431,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900355874280805,
+      "expert_id": 447,
+      "layer": 26,
+      "loss": 0.00996441257191949,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908688776090859,
+      "expert_id": 447,
+      "layer": 26,
+      "loss": 0.00913112239091407,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990106338041625,
+      "expert_id": 63,
+      "layer": 27,
+      "loss": 0.009893661958375044,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901010460762951,
+      "expert_id": 63,
+      "layer": 27,
+      "loss": 0.009898953923704878,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906582883315439,
+      "expert_id": 63,
+      "layer": 27,
+      "loss": 0.009341711668456099,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901098970499793,
+      "expert_id": 191,
+      "layer": 27,
+      "loss": 0.009890102950020685,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901132321116347,
+      "expert_id": 191,
+      "layer": 27,
+      "loss": 0.009886767888365289,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909699109805424,
+      "expert_id": 191,
+      "layer": 27,
+      "loss": 0.009030089019457566,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900105247963924,
+      "expert_id": 319,
+      "layer": 27,
+      "loss": 0.0099894752036076,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900239987261291,
+      "expert_id": 319,
+      "layer": 27,
+      "loss": 0.009976001273870883,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902625809312422,
+      "expert_id": 319,
+      "layer": 27,
+      "loss": 0.009737419068757802,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901925245128803,
+      "expert_id": 447,
+      "layer": 27,
+      "loss": 0.009807475487119688,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901836249523943,
+      "expert_id": 447,
+      "layer": 27,
+      "loss": 0.009816375047605685,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908613781729171,
+      "expert_id": 447,
+      "layer": 27,
+      "loss": 0.009138621827082916,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.99018818329893,
+      "expert_id": 63,
+      "layer": 28,
+      "loss": 0.009811816701070009,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901922644550932,
+      "expert_id": 63,
+      "layer": 28,
+      "loss": 0.00980773554490677,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898017023960147,
+      "expert_id": 63,
+      "layer": 28,
+      "loss": 0.010198297603985274,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990195723384886,
+      "expert_id": 191,
+      "layer": 28,
+      "loss": 0.00980427661511396,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902330556031658,
+      "expert_id": 191,
+      "layer": 28,
+      "loss": 0.009766944396834232,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906637167780795,
+      "expert_id": 191,
+      "layer": 28,
+      "loss": 0.009336283221920483,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901607851203129,
+      "expert_id": 319,
+      "layer": 28,
+      "loss": 0.009839214879687086,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901760406914067,
+      "expert_id": 319,
+      "layer": 28,
+      "loss": 0.009823959308593255,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909311097105333,
+      "expert_id": 319,
+      "layer": 28,
+      "loss": 0.009068890289466669,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901440644618847,
+      "expert_id": 447,
+      "layer": 28,
+      "loss": 0.009855935538115257,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901515564425367,
+      "expert_id": 447,
+      "layer": 28,
+      "loss": 0.009848443557463282,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904495344947059,
+      "expert_id": 447,
+      "layer": 28,
+      "loss": 0.009550465505294148,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901223638843781,
+      "expert_id": 63,
+      "layer": 29,
+      "loss": 0.009877636115621868,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901305367486286,
+      "expert_id": 63,
+      "layer": 29,
+      "loss": 0.009869463251371391,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905549056494766,
+      "expert_id": 63,
+      "layer": 29,
+      "loss": 0.00944509435052343,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900735503896023,
+      "expert_id": 191,
+      "layer": 29,
+      "loss": 0.00992644961039768,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900657626392674,
+      "expert_id": 191,
+      "layer": 29,
+      "loss": 0.009934237360732623,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908103145432248,
+      "expert_id": 191,
+      "layer": 29,
+      "loss": 0.009189685456775232,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900739149491619,
+      "expert_id": 319,
+      "layer": 29,
+      "loss": 0.00992608505083814,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990066354423008,
+      "expert_id": 319,
+      "layer": 29,
+      "loss": 0.009933645576991945,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908603259091889,
+      "expert_id": 319,
+      "layer": 29,
+      "loss": 0.009139674090811067,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900943162070032,
+      "expert_id": 447,
+      "layer": 29,
+      "loss": 0.009905683792996833,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900791379865284,
+      "expert_id": 447,
+      "layer": 29,
+      "loss": 0.009920862013471643,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901862141280294,
+      "expert_id": 447,
+      "layer": 29,
+      "loss": 0.00981378587197057,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990224355597669,
+      "expert_id": 63,
+      "layer": 30,
+      "loss": 0.00977564440233103,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902126755166875,
+      "expert_id": 63,
+      "layer": 30,
+      "loss": 0.009787324483312543,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909196535699469,
+      "expert_id": 63,
+      "layer": 30,
+      "loss": 0.009080346430053066,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902156442938286,
+      "expert_id": 191,
+      "layer": 30,
+      "loss": 0.009784355706171421,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902460803151205,
+      "expert_id": 191,
+      "layer": 30,
+      "loss": 0.009753919684879486,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909320140734516,
+      "expert_id": 191,
+      "layer": 30,
+      "loss": 0.00906798592654845,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900041525650194,
+      "expert_id": 319,
+      "layer": 30,
+      "loss": 0.00999584743498061,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900165577850327,
+      "expert_id": 319,
+      "layer": 30,
+      "loss": 0.009983442214967275,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905817888706433,
+      "expert_id": 319,
+      "layer": 30,
+      "loss": 0.009418211129356702,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898614596421192,
+      "expert_id": 447,
+      "layer": 30,
+      "loss": 0.010138540357880754,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897775129176799,
+      "expert_id": 447,
+      "layer": 30,
+      "loss": 0.010222487082320098,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899456883400024,
+      "expert_id": 447,
+      "layer": 30,
+      "loss": 0.010054311659997595,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900202722472308,
+      "expert_id": 63,
+      "layer": 31,
+      "loss": 0.00997972775276923,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990039145328761,
+      "expert_id": 63,
+      "layer": 31,
+      "loss": 0.009960854671238972,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909560652164988,
+      "expert_id": 63,
+      "layer": 31,
+      "loss": 0.009043934783501184,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990049481127905,
+      "expert_id": 191,
+      "layer": 31,
+      "loss": 0.009950518872094971,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900556044806355,
+      "expert_id": 191,
+      "layer": 31,
+      "loss": 0.009944395519364546,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909216558813495,
+      "expert_id": 191,
+      "layer": 31,
+      "loss": 0.009078344118650494,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900248170103312,
+      "expert_id": 319,
+      "layer": 31,
+      "loss": 0.009975182989668818,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900601946296621,
+      "expert_id": 319,
+      "layer": 31,
+      "loss": 0.009939805370337895,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906249987641376,
+      "expert_id": 319,
+      "layer": 31,
+      "loss": 0.009375001235862435,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990122127193704,
+      "expert_id": 447,
+      "layer": 31,
+      "loss": 0.00987787280629604,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990159815531592,
+      "expert_id": 447,
+      "layer": 31,
+      "loss": 0.009840184468407953,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907731724297008,
+      "expert_id": 447,
+      "layer": 31,
+      "loss": 0.009226827570299245,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903032009123022,
+      "expert_id": 63,
+      "layer": 32,
+      "loss": 0.009696799087697827,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903117526417831,
+      "expert_id": 63,
+      "layer": 32,
+      "loss": 0.00968824735821694,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908899423180814,
+      "expert_id": 63,
+      "layer": 32,
+      "loss": 0.009110057681918637,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902442228434135,
+      "expert_id": 191,
+      "layer": 32,
+      "loss": 0.009755777156586487,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902726960940549,
+      "expert_id": 191,
+      "layer": 32,
+      "loss": 0.009727303905945117,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908589694298581,
+      "expert_id": 191,
+      "layer": 32,
+      "loss": 0.009141030570141928,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903279505920665,
+      "expert_id": 319,
+      "layer": 32,
+      "loss": 0.009672049407933536,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903470376594883,
+      "expert_id": 319,
+      "layer": 32,
+      "loss": 0.009652962340511717,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908706332703494,
+      "expert_id": 319,
+      "layer": 32,
+      "loss": 0.00912936672965059,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902636101173524,
+      "expert_id": 447,
+      "layer": 32,
+      "loss": 0.009736389882647578,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902656841170225,
+      "expert_id": 447,
+      "layer": 32,
+      "loss": 0.009734315882977462,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907609468956688,
+      "expert_id": 447,
+      "layer": 32,
+      "loss": 0.009239053104331152,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901888672593819,
+      "expert_id": 63,
+      "layer": 33,
+      "loss": 0.009811132740618067,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990180210918798,
+      "expert_id": 63,
+      "layer": 33,
+      "loss": 0.009819789081201957,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909805582862137,
+      "expert_id": 63,
+      "layer": 33,
+      "loss": 0.009019441713786325,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900949197090727,
+      "expert_id": 191,
+      "layer": 33,
+      "loss": 0.009905080290927293,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901149360286835,
+      "expert_id": 191,
+      "layer": 33,
+      "loss": 0.009885063971316499,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902119415575922,
+      "expert_id": 191,
+      "layer": 33,
+      "loss": 0.009788058442407821,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901981592627564,
+      "expert_id": 319,
+      "layer": 33,
+      "loss": 0.00980184073724355,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901945799677414,
+      "expert_id": 319,
+      "layer": 33,
+      "loss": 0.009805420032258594,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990701473973216,
+      "expert_id": 319,
+      "layer": 33,
+      "loss": 0.009298526026784049,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902502318249844,
+      "expert_id": 447,
+      "layer": 33,
+      "loss": 0.009749768175015605,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902385446174399,
+      "expert_id": 447,
+      "layer": 33,
+      "loss": 0.009761455382560125,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9910426192808786,
+      "expert_id": 447,
+      "layer": 33,
+      "loss": 0.008957380719121444,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900601229322689,
+      "expert_id": 63,
+      "layer": 34,
+      "loss": 0.00993987706773114,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990071899538673,
+      "expert_id": 63,
+      "layer": 34,
+      "loss": 0.009928100461326972,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904677630798538,
+      "expert_id": 63,
+      "layer": 34,
+      "loss": 0.009532236920146153,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.99002073818238,
+      "expert_id": 191,
+      "layer": 34,
+      "loss": 0.009979261817619989,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900324029036551,
+      "expert_id": 191,
+      "layer": 34,
+      "loss": 0.009967597096344871,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990935840646091,
+      "expert_id": 191,
+      "layer": 34,
+      "loss": 0.00906415935390903,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900389517935535,
+      "expert_id": 319,
+      "layer": 34,
+      "loss": 0.009961048206446499,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900318370919733,
+      "expert_id": 319,
+      "layer": 34,
+      "loss": 0.009968162908026712,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905556183560902,
+      "expert_id": 319,
+      "layer": 34,
+      "loss": 0.009444381643909816,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900662516109819,
+      "expert_id": 447,
+      "layer": 34,
+      "loss": 0.00993374838901806,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900678113864911,
+      "expert_id": 447,
+      "layer": 34,
+      "loss": 0.009932188613508863,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901911290432559,
+      "expert_id": 447,
+      "layer": 34,
+      "loss": 0.009808870956744098,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901239837377577,
+      "expert_id": 63,
+      "layer": 35,
+      "loss": 0.009876016262242326,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901242350212388,
+      "expert_id": 63,
+      "layer": 35,
+      "loss": 0.009875764978761192,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905405452628043,
+      "expert_id": 63,
+      "layer": 35,
+      "loss": 0.009459454737195672,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901208112081309,
+      "expert_id": 191,
+      "layer": 35,
+      "loss": 0.009879188791869109,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901084802590915,
+      "expert_id": 191,
+      "layer": 35,
+      "loss": 0.009891519740908516,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905864474877808,
+      "expert_id": 191,
+      "layer": 35,
+      "loss": 0.009413552512219203,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901054466179643,
+      "expert_id": 319,
+      "layer": 35,
+      "loss": 0.009894553382035709,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901139518089926,
+      "expert_id": 319,
+      "layer": 35,
+      "loss": 0.009886048191007357,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906562247018227,
+      "expert_id": 319,
+      "layer": 35,
+      "loss": 0.009343775298177315,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901410330095882,
+      "expert_id": 447,
+      "layer": 35,
+      "loss": 0.009858966990411777,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901471964957093,
+      "expert_id": 447,
+      "layer": 35,
+      "loss": 0.009852803504290741,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909128698825053,
+      "expert_id": 447,
+      "layer": 35,
+      "loss": 0.009087130117494735,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896327195822877,
+      "expert_id": 63,
+      "layer": 36,
+      "loss": 0.010367280417712288,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896218394284102,
+      "expert_id": 63,
+      "layer": 36,
+      "loss": 0.0103781605715898,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905405367097517,
+      "expert_id": 63,
+      "layer": 36,
+      "loss": 0.009459463290248271,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896221722298996,
+      "expert_id": 191,
+      "layer": 36,
+      "loss": 0.010377827770100434,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9895958863855744,
+      "expert_id": 191,
+      "layer": 36,
+      "loss": 0.010404113614425614,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907366725927549,
+      "expert_id": 191,
+      "layer": 36,
+      "loss": 0.009263327407245114,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896557328385367,
+      "expert_id": 319,
+      "layer": 36,
+      "loss": 0.010344267161463305,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896577170359693,
+      "expert_id": 319,
+      "layer": 36,
+      "loss": 0.010342282964030725,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907240511725871,
+      "expert_id": 319,
+      "layer": 36,
+      "loss": 0.009275948827412894,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896130560163001,
+      "expert_id": 447,
+      "layer": 36,
+      "loss": 0.010386943983699881,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9896204977069271,
+      "expert_id": 447,
+      "layer": 36,
+      "loss": 0.01037950229307294,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904331577981828,
+      "expert_id": 447,
+      "layer": 36,
+      "loss": 0.00956684220181725,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9897868900443438,
+      "expert_id": 63,
+      "layer": 37,
+      "loss": 0.010213109955656163,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989792555413241,
+      "expert_id": 63,
+      "layer": 37,
+      "loss": 0.01020744458675904,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903906973937063,
+      "expert_id": 63,
+      "layer": 37,
+      "loss": 0.009609302606293668,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898710330465503,
+      "expert_id": 191,
+      "layer": 37,
+      "loss": 0.01012896695344967,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898510509913742,
+      "expert_id": 191,
+      "layer": 37,
+      "loss": 0.01014894900862584,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902860164979521,
+      "expert_id": 191,
+      "layer": 37,
+      "loss": 0.009713983502047885,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899071313897151,
+      "expert_id": 319,
+      "layer": 37,
+      "loss": 0.01009286861028491,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898893789891303,
+      "expert_id": 319,
+      "layer": 37,
+      "loss": 0.01011062101086968,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990700657127087,
+      "expert_id": 319,
+      "layer": 37,
+      "loss": 0.009299342872913008,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899319087701339,
+      "expert_id": 447,
+      "layer": 37,
+      "loss": 0.010068091229866072,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899243264764344,
+      "expert_id": 447,
+      "layer": 37,
+      "loss": 0.010075673523565642,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907425131034086,
+      "expert_id": 447,
+      "layer": 37,
+      "loss": 0.00925748689659145,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900871607705166,
+      "expert_id": 63,
+      "layer": 38,
+      "loss": 0.009912839229483383,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900741095390415,
+      "expert_id": 63,
+      "layer": 38,
+      "loss": 0.009925890460958486,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902605956656166,
+      "expert_id": 63,
+      "layer": 38,
+      "loss": 0.009739404334383361,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900671575041516,
+      "expert_id": 191,
+      "layer": 38,
+      "loss": 0.00993284249584836,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990073940112834,
+      "expert_id": 191,
+      "layer": 38,
+      "loss": 0.009926059887165994,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902245298311649,
+      "expert_id": 191,
+      "layer": 38,
+      "loss": 0.009775470168835065,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900568207785789,
+      "expert_id": 319,
+      "layer": 38,
+      "loss": 0.009943179221421072,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900410095167974,
+      "expert_id": 319,
+      "layer": 38,
+      "loss": 0.00995899048320259,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904558809373831,
+      "expert_id": 319,
+      "layer": 38,
+      "loss": 0.009544119062616874,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900669604756402,
+      "expert_id": 447,
+      "layer": 38,
+      "loss": 0.009933039524359755,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900701590405638,
+      "expert_id": 447,
+      "layer": 38,
+      "loss": 0.009929840959436165,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900225865648479,
+      "expert_id": 447,
+      "layer": 38,
+      "loss": 0.009977413435152127,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900527599611401,
+      "expert_id": 63,
+      "layer": 39,
+      "loss": 0.009947240038859939,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900485744641317,
+      "expert_id": 63,
+      "layer": 39,
+      "loss": 0.009951425535868252,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990643349350942,
+      "expert_id": 63,
+      "layer": 39,
+      "loss": 0.009356650649057996,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900540222400638,
+      "expert_id": 191,
+      "layer": 39,
+      "loss": 0.00994597775993622,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900699728223682,
+      "expert_id": 191,
+      "layer": 39,
+      "loss": 0.009930027177631806,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907361851480108,
+      "expert_id": 191,
+      "layer": 39,
+      "loss": 0.009263814851989238,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990118336459113,
+      "expert_id": 319,
+      "layer": 39,
+      "loss": 0.009881663540887042,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900742586103113,
+      "expert_id": 319,
+      "layer": 39,
+      "loss": 0.009925741389688714,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906058156542861,
+      "expert_id": 319,
+      "layer": 39,
+      "loss": 0.00939418434571393,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900587377127618,
+      "expert_id": 447,
+      "layer": 39,
+      "loss": 0.00994126228723824,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900647117966714,
+      "expert_id": 447,
+      "layer": 39,
+      "loss": 0.009935288203328563,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901986217661572,
+      "expert_id": 447,
+      "layer": 39,
+      "loss": 0.00980137823384275,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901760820892535,
+      "expert_id": 63,
+      "layer": 40,
+      "loss": 0.009823917910746549,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901630144730632,
+      "expert_id": 63,
+      "layer": 40,
+      "loss": 0.009836985526936792,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990754531029763,
+      "expert_id": 63,
+      "layer": 40,
+      "loss": 0.009245468970237036,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902219439206923,
+      "expert_id": 191,
+      "layer": 40,
+      "loss": 0.009778056079307706,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902140863920613,
+      "expert_id": 191,
+      "layer": 40,
+      "loss": 0.009785913607938679,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909359925429991,
+      "expert_id": 191,
+      "layer": 40,
+      "loss": 0.009064007457000867,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990139658449705,
+      "expert_id": 319,
+      "layer": 40,
+      "loss": 0.009860341550295026,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901295124210676,
+      "expert_id": 319,
+      "layer": 40,
+      "loss": 0.009870487578932385,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907903015895585,
+      "expert_id": 319,
+      "layer": 40,
+      "loss": 0.009209698410441503,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902127216936171,
+      "expert_id": 447,
+      "layer": 40,
+      "loss": 0.00978727830638293,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990195304834879,
+      "expert_id": 447,
+      "layer": 40,
+      "loss": 0.009804695165120947,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906493751931108,
+      "expert_id": 447,
+      "layer": 40,
+      "loss": 0.009350624806889196,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902447724688273,
+      "expert_id": 63,
+      "layer": 41,
+      "loss": 0.00975522753117275,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902554353933707,
+      "expert_id": 63,
+      "layer": 41,
+      "loss": 0.009744564606629313,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990978976614139,
+      "expert_id": 63,
+      "layer": 41,
+      "loss": 0.009021023385860971,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902460719803403,
+      "expert_id": 191,
+      "layer": 41,
+      "loss": 0.009753928019659686,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902447022286858,
+      "expert_id": 191,
+      "layer": 41,
+      "loss": 0.00975529777131423,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990993570687192,
+      "expert_id": 191,
+      "layer": 41,
+      "loss": 0.00900642931280804,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902408270571875,
+      "expert_id": 319,
+      "layer": 41,
+      "loss": 0.009759172942812477,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902423672557712,
+      "expert_id": 319,
+      "layer": 41,
+      "loss": 0.009757632744228806,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909738732016125,
+      "expert_id": 319,
+      "layer": 41,
+      "loss": 0.009026126798387546,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902548091401301,
+      "expert_id": 447,
+      "layer": 41,
+      "loss": 0.009745190859869912,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902378098731246,
+      "expert_id": 447,
+      "layer": 41,
+      "loss": 0.009762190126875403,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9909249389393552,
+      "expert_id": 447,
+      "layer": 41,
+      "loss": 0.009075061060644818,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899835461760441,
+      "expert_id": 63,
+      "layer": 42,
+      "loss": 0.010016453823955884,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900024155473064,
+      "expert_id": 63,
+      "layer": 42,
+      "loss": 0.009997584452693609,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906529905534419,
+      "expert_id": 63,
+      "layer": 42,
+      "loss": 0.009347009446558086,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899802099527816,
+      "expert_id": 191,
+      "layer": 42,
+      "loss": 0.010019790047218424,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899761464462504,
+      "expert_id": 191,
+      "layer": 42,
+      "loss": 0.010023853553749573,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906545993679019,
+      "expert_id": 191,
+      "layer": 42,
+      "loss": 0.0093454006320981,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900039317080327,
+      "expert_id": 319,
+      "layer": 42,
+      "loss": 0.009996068291967308,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900097693694855,
+      "expert_id": 319,
+      "layer": 42,
+      "loss": 0.009990230630514518,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990647715015891,
+      "expert_id": 319,
+      "layer": 42,
+      "loss": 0.009352284984109005,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900031456527651,
+      "expert_id": 447,
+      "layer": 42,
+      "loss": 0.009996854347234851,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899966232979727,
+      "expert_id": 447,
+      "layer": 42,
+      "loss": 0.010003376702027333,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904085686885947,
+      "expert_id": 447,
+      "layer": 42,
+      "loss": 0.009591431311405274,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902395315018923,
+      "expert_id": 63,
+      "layer": 43,
+      "loss": 0.009760468498107744,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902404466877514,
+      "expert_id": 63,
+      "layer": 43,
+      "loss": 0.009759553312248648,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9907857506994733,
+      "expert_id": 63,
+      "layer": 43,
+      "loss": 0.009214249300526722,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902431427105607,
+      "expert_id": 191,
+      "layer": 43,
+      "loss": 0.009756857289439314,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902628404380551,
+      "expert_id": 191,
+      "layer": 43,
+      "loss": 0.009737159561944875,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906971699937435,
+      "expert_id": 191,
+      "layer": 43,
+      "loss": 0.009302830006256535,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902242026891216,
+      "expert_id": 319,
+      "layer": 43,
+      "loss": 0.009775797310878409,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902417102663323,
+      "expert_id": 319,
+      "layer": 43,
+      "loss": 0.009758289733667658,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908587519367827,
+      "expert_id": 319,
+      "layer": 43,
+      "loss": 0.009141248063217255,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902392508374148,
+      "expert_id": 447,
+      "layer": 43,
+      "loss": 0.00976074916258518,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902206482383646,
+      "expert_id": 447,
+      "layer": 43,
+      "loss": 0.009779351761635358,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908102846586541,
+      "expert_id": 447,
+      "layer": 43,
+      "loss": 0.009189715341345939,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900913150314465,
+      "expert_id": 63,
+      "layer": 44,
+      "loss": 0.00990868496855346,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901086046510895,
+      "expert_id": 63,
+      "layer": 44,
+      "loss": 0.009891395348910481,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905541011021033,
+      "expert_id": 63,
+      "layer": 44,
+      "loss": 0.00944589889789671,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901257679881844,
+      "expert_id": 191,
+      "layer": 44,
+      "loss": 0.009874232011815587,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901097717418624,
+      "expert_id": 191,
+      "layer": 44,
+      "loss": 0.009890228258137568,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902407819800297,
+      "expert_id": 191,
+      "layer": 44,
+      "loss": 0.009759218019970262,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901137438240265,
+      "expert_id": 319,
+      "layer": 44,
+      "loss": 0.009886256175973496,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900948391851406,
+      "expert_id": 319,
+      "layer": 44,
+      "loss": 0.00990516081485937,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9906453540243425,
+      "expert_id": 319,
+      "layer": 44,
+      "loss": 0.009354645975657494,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901015622931442,
+      "expert_id": 447,
+      "layer": 44,
+      "loss": 0.009898437706855834,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9901043850473175,
+      "expert_id": 447,
+      "layer": 44,
+      "loss": 0.009895614952682541,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990483713275041,
+      "expert_id": 447,
+      "layer": 44,
+      "loss": 0.009516286724958967,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899951359332451,
+      "expert_id": 63,
+      "layer": 45,
+      "loss": 0.010004864066754937,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899800299401883,
+      "expert_id": 63,
+      "layer": 45,
+      "loss": 0.0100199700598117,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898761013961744,
+      "expert_id": 63,
+      "layer": 45,
+      "loss": 0.010123898603825565,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899730554998639,
+      "expert_id": 191,
+      "layer": 45,
+      "loss": 0.010026944500136081,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899732805910245,
+      "expert_id": 191,
+      "layer": 45,
+      "loss": 0.010026719408975482,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902493870481816,
+      "expert_id": 191,
+      "layer": 45,
+      "loss": 0.00975061295181845,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899893448630653,
+      "expert_id": 319,
+      "layer": 45,
+      "loss": 0.010010655136934665,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900107712452433,
+      "expert_id": 319,
+      "layer": 45,
+      "loss": 0.009989228754756718,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9905215207762895,
+      "expert_id": 319,
+      "layer": 45,
+      "loss": 0.009478479223710479,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900032308251893,
+      "expert_id": 447,
+      "layer": 45,
+      "loss": 0.009996769174810738,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900052925022457,
+      "expert_id": 447,
+      "layer": 45,
+      "loss": 0.00999470749775433,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904350213757935,
+      "expert_id": 447,
+      "layer": 45,
+      "loss": 0.009564978624206466,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.989969234443061,
+      "expert_id": 63,
+      "layer": 46,
+      "loss": 0.010030765556939047,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899762451481193,
+      "expert_id": 63,
+      "layer": 46,
+      "loss": 0.010023754851880673,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990497318306487,
+      "expert_id": 63,
+      "layer": 46,
+      "loss": 0.009502681693512982,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.990064997488948,
+      "expert_id": 191,
+      "layer": 46,
+      "loss": 0.009935002511051949,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900209974627129,
+      "expert_id": 191,
+      "layer": 46,
+      "loss": 0.009979002537287118,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9902214458356735,
+      "expert_id": 191,
+      "layer": 46,
+      "loss": 0.009778554164326492,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899388419685706,
+      "expert_id": 319,
+      "layer": 46,
+      "loss": 0.010061158031429374,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899311593701349,
+      "expert_id": 319,
+      "layer": 46,
+      "loss": 0.010068840629865128,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899724959554671,
+      "expert_id": 319,
+      "layer": 46,
+      "loss": 0.010027504044532898,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899635489087192,
+      "expert_id": 447,
+      "layer": 46,
+      "loss": 0.010036451091280818,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899480988566802,
+      "expert_id": 447,
+      "layer": 46,
+      "loss": 0.010051901143319775,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9904785745715076,
+      "expert_id": 447,
+      "layer": 46,
+      "loss": 0.009521425428492436,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.98991291933076,
+      "expert_id": 63,
+      "layer": 47,
+      "loss": 0.010087080669240023,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899051334096692,
+      "expert_id": 63,
+      "layer": 47,
+      "loss": 0.010094866590330764,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9908744314827487,
+      "expert_id": 63,
+      "layer": 47,
+      "loss": 0.009125568517251326,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899225561062064,
+      "expert_id": 191,
+      "layer": 47,
+      "loss": 0.010077443893793614,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899259956945978,
+      "expert_id": 191,
+      "layer": 47,
+      "loss": 0.010074004305402173,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9898023489862976,
+      "expert_id": 191,
+      "layer": 47,
+      "loss": 0.010197651013702402,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899204240800538,
+      "expert_id": 319,
+      "layer": 47,
+      "loss": 0.010079575919946238,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899355197000264,
+      "expert_id": 319,
+      "layer": 47,
+      "loss": 0.010064480299973644,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9900397955887,
+      "expert_id": 319,
+      "layer": 47,
+      "loss": 0.009960204411299967,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899346314845736,
+      "expert_id": 447,
+      "layer": 47,
+      "loss": 0.010065368515426387,
+      "matrix": "gate",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9899261543426813,
+      "expert_id": 447,
+      "layer": 47,
+      "loss": 0.010073845657318725,
+      "matrix": "up",
+      "source_shape": [
+        2560,
+        640
+      ],
+      "target_shape": [
+        2560,
+        640
+      ],
+      "weight_count": 1638400
+    },
+    {
+      "cosine": 0.9903413308434287,
+      "expert_id": 447,
+      "layer": 47,
+      "loss": 0.00965866915657132,
+      "matrix": "down",
+      "source_shape": [
+        640,
+        2560
+      ],
+      "target_shape": [
+        640,
+        2560
+      ],
+      "weight_count": 1638400
+    }
+  ],
+  "measurement": "cpu_reconstructed_weight_cosine",
+  "method": {
+    "accumulation": "float64 dot and squared-norm moments",
+    "bf16_conversion": "little-endian uint16 word shifted left 16 bits into float32",
+    "codebook": "mul1",
+    "cpu_only": true,
+    "exl3_k": 3,
+    "ponyexl3_root": "/Users/beam/llm/ponyexl3",
+    "raw_safetensors_reads": "header parsed and one first-axis expert row seek-read at a time",
+    "reconstructor": "ponyexl3.ref.reconstruct.reconstruct_public_weights",
+    "sample": {
+      "exhaustive": false,
+      "expert_count_per_layer": 4,
+      "expert_ids": [
+        63,
+        191,
+        319,
+        447
+      ],
+      "layers": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47
+      ]
+    },
+    "source_dtype": "BF16",
+    "source_orientation": "gate_up source[expert, 0:640, :] and [640:1280, :] transpose to public [2560,640]; down source[expert, :, :] transpose to public [640,2560]",
+    "target_layout_validation": "trellis tile dimensions times 16 equal public dimensions and packed size is 48; suh/svh first-axis rows match input/output dimensions",
+    "target_orientation": "reconstruct_public_weights returns [in_features,out_features]; suh is the left/input sign vector and svh is the right/output sign vector",
+    "workers": 4
+  },
+  "schema_version": 1,
+  "source_config_sha256": "889658f2508e8c61d409b02e70e0d78d8d4452ec65aaafbe129805d213d2e74b",
+  "source_index_sha256": "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+  "source_path": "/Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next",
+  "summary": {
+    "global_cosine": 0.9901616405853412,
+    "global_loss": 0.009838359414658826,
+    "matrix_count": 576,
+    "mean_cosine": 0.990167793593075,
+    "mean_loss": 0.009832206406924856,
+    "moments_float64": {
+      "dot": 152994.3929426453,
+      "source_norm_sq": 155608.93095538567,
+      "target_norm_sq": 153427.89102092918
+    },
+    "p95_loss": 0.01034277901338887,
+    "weight_count": 943718400,
+    "worst": {
+      "cosine": 0.9882776547715512,
+      "expert_id": 447,
+      "layer": 0,
+      "loss": 0.011722345228448838,
+      "matrix": "down"
+    },
+    "worst_loss": 0.011722345228448838
+  },
+  "target_config_sha256": "3845514255e0c3aff7af1c6d236164a9c762242ab615c1f43416bf280362d2a7",
+  "target_index_sha256": "5dfee0d150a2ee85504641e1911de509eb39e4826bf09db238fa5d2bf55a8a0e",
+  "target_path": "/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3"
+}

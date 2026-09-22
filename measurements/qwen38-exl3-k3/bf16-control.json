@@ -1,0 +1,19 @@
+{
+  "schema": "mlx-serve-kld-compare-v1",
+  "tool": "mlx-serve",
+  "label": "bf16-reference-control",
+  "model": "/Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next",
+  "fixture": "/Users/beam/llm/models/kld-teacher/mlx-serve-bf16-60x64",
+  "kv_cache_format": "bf16",
+  "mean_kld": 0,
+  "mean_top1": 1,
+  "mean_nll": 0.15370585129079617,
+  "positions": 64,
+  "mean_kld_to_eos": 0,
+  "mean_top1_to_eos": 1,
+  "mean_nll_to_eos": 0.15370585129079617,
+  "positions_to_eos": 64,
+  "prompts": [
+    {"id": "wikitext2-test-00-robert-boulter", "kld": 0, "top1": 64, "positions": 64, "nll": 0.15370585129079617, "eos_pos": null, "kld_to_eos": 0, "top1_to_eos": 64, "positions_to_eos": 64, "nll_to_eos": 0.15370585129079617, "per_position_kld": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}
+  ]
+}
