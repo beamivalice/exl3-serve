@@ -39120,10 +39120,10 @@ test "exl3 a trellis the kernels cannot decode refuses at load" {
 test "exl3 a trellis the config's rate or expert geometry does not name refuses at load" {
     const t = std.testing;
     const s = mlx.gpuStream();
-    // The streaming bill prices n from the config, so a config that names a
-    // narrower (or wider) rate than the shards carry must never load.
+    // The streaming bill prices n from the config, so a shard WIDER than the
+    // config names must never load; a narrower one is over-billed, not wrong.
     try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 48 }, .{ .n = 40 }));
-    try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 40 }, .{ .n = 48 }));
+    _ = try bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 8, 40 }, .{ .n = 48 });
     try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 8, 8, 8, 64 }, .{ .n = 64 }));
     try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 4, 8, 64 }, .{ .n = 64 }));
     try t.expectError(error.Exl3TrellisGeometry, bindExl3SwitchBank(s, &[_]c_int{ 4, 8, 16, 64 }, .{ .n = 64 }));
@@ -39835,9 +39835,9 @@ const SwitchMlpBank = struct {
 };
 
 /// A trellis the EXL3 kernels can decode AND the memory plan can price:
-/// `[E, in/16, out/16, n]` at the rate the CONFIG names. Decode reads n off the
-/// tensor while the streaming bill reads it off the config, so a pack whose two
-/// disagree under-bills — and an under-bill here is an uncatchable Metal OOM.
+/// `[E, in/16, out/16, n]` at a rate the CONFIG's bill covers. Decode reads n
+/// off the tensor and a layer may carry fewer bits than the pack's widest — a
+/// wider one under-bills, and an under-bill here is an uncatchable Metal OOM.
 fn exl3TrellisAdmitted(shape: []const c_int, experts: u32, in_dim: u32, out_dim: u32, rate: expert_exl3.Rate) bool {
     if (shape.len != 4) return false;
     for (shape) |d| if (d <= 0) return false;
@@ -39845,7 +39845,7 @@ fn exl3TrellisAdmitted(shape: []const c_int, experts: u32, in_dim: u32, out_dim:
     const want = [3]u32{ experts, in_dim / 16, out_dim / 16 };
     for (want, 0..) |w, i| if (w != @as(u32, @intCast(shape[i]))) return false;
     const packed_rate = expert_exl3.kFromPackedDim(@intCast(shape[3])) orelse return false;
-    return packed_rate.n == rate.n;
+    return packed_rate.n <= rate.n;
 }
 
 fn loadSwitchMlpBank(weights: *const Weights, buf: *[256]u8, prefix: []const u8, layer: u32, exl3: bool, config: *const ModelConfig) error{ MissingWeight, Exl3TrellisGeometry }!SwitchMlpBank {
@@ -39889,6 +39889,26 @@ fn loadSwitchMlpBank(weights: *const Weights, buf: *[256]u8, prefix: []const u8,
         .down_s = getLayerWeightOpt(weights, buf, prefix, layer, "mlp.switch_mlp.down_proj.scales") orelse mlx.mlx_array_new(),
         .down_b = getLayerWeightOpt(weights, buf, prefix, layer, "mlp.switch_mlp.down_proj.biases") orelse mlx.mlx_array_new(),
     };
+}
+
+test "exl3 a layer may pack below the rate the config bills, never above it" {
+    const t = std.testing;
+    const E: u32 = 256;
+    const h: u32 = 4096;
+    const i: u32 = 2048;
+    const k4: expert_exl3.Rate = .{ .n = 64 };
+    const shape = struct {
+        fn at(n: c_int) [4]c_int {
+            return .{ @intCast(E), @intCast(h / 16), @intCast(i / 16), n };
+        }
+    }.at;
+    // A pack whose tail layers carry more bits than its body: the config bills
+    // the widest, so a narrower layer admits and a wider one cannot.
+    try t.expect(exl3TrellisAdmitted(&shape(64), E, h, i, k4));
+    try t.expect(exl3TrellisAdmitted(&shape(40), E, h, i, k4));
+    try t.expect(!exl3TrellisAdmitted(&shape(64), E, h, i, .{ .n = 40 }));
+    try t.expect(!exl3TrellisAdmitted(&shape(41), E, h, i, k4));
+    try t.expect(!exl3TrellisAdmitted(&shape(64), E, h, h, k4));
 }
 
 /// Build a "<container>.<leaf>" layer-weight suffix into `buf`. Used where the
