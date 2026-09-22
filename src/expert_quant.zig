@@ -25,21 +25,31 @@ pub const QuantGeom = struct {
 
 /// Affine (bits, group_size) from PACKED shapes alone: a row holds `w_cols * 32`
 /// packed bits over `in_dim` values and `s_cols` scale groups cover them.
-pub fn affineGeomFromShapes(w_cols: u64, s_cols: u64, in_dim: u64) ?QuantGeom {
-    if (w_cols == 0 or s_cols == 0 or in_dim == 0) return null;
+/// The bit width `w_cols` U32 columns pack `in_dim` weights at, when it is one
+/// this build reads.
+pub fn affineBitsFromPacked(w_cols: u64, in_dim: u64) ?u32 {
+    if (w_cols == 0 or in_dim == 0) return null;
     const packed_bits = std.math.mul(u64, w_cols, 32) catch return null;
-    if (packed_bits % in_dim != 0 or in_dim % s_cols != 0) return null;
-    const bits = packed_bits / in_dim;
-    const gs = in_dim / s_cols;
-    switch (bits) {
-        2, 3, 4, 5, 6, 8 => {},
-        else => return null,
-    }
-    switch (gs) {
-        32, 64, 128 => {},
-        else => return null,
-    }
-    return .{ .bits = @intCast(bits), .group_size = @intCast(gs) };
+    if (packed_bits % in_dim != 0) return null;
+    return switch (packed_bits / in_dim) {
+        2, 3, 4, 5, 6, 8 => |bits| @intCast(bits),
+        else => null,
+    };
+}
+
+/// The group size `s_cols` scale columns cover `in_dim` weights at.
+pub fn affineGroupFromScales(s_cols: u64, in_dim: u64) ?u32 {
+    if (s_cols == 0 or in_dim == 0 or in_dim % s_cols != 0) return null;
+    return switch (in_dim / s_cols) {
+        32, 64, 128 => |gs| @intCast(gs),
+        else => null,
+    };
+}
+
+pub fn affineGeomFromShapes(w_cols: u64, s_cols: u64, in_dim: u64) ?QuantGeom {
+    const bits = affineBitsFromPacked(w_cols, in_dim) orelse return null;
+    const gs = affineGroupFromScales(s_cols, in_dim) orelse return null;
+    return .{ .bits = bits, .group_size = gs };
 }
 
 /// Native MiMo MXFP4 is a biasless packed pair, not affine quantization:
@@ -161,12 +171,21 @@ pub fn scalesOf(p: Projection) Component {
     };
 }
 
-pub fn tensorKey(buf: []u8, layer: u16, c: Component) ![]const u8 {
-    return std.fmt.bufPrint(buf, "language_model.model.layers.{d}.mlp.switch_mlp.{s}_proj.{s}", .{
+/// The affine routed-bank nesting, per arch: qwen4 packs sit under
+/// `language_model.`, MiMo packs do not.
+const AFFINE_PREFIXES = [_][]const u8{ "language_model.model.layers.", "model.layers." };
+
+fn affineTensorKeyAt(buf: []u8, prefix: []const u8, layer: u16, c: Component) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}{d}.mlp.switch_mlp.{s}_proj.{s}", .{
+        prefix,
         layer,
         @tagName(projectionOf(c)),
         @tagName(partOf(c)),
     });
+}
+
+pub fn tensorKey(buf: []u8, layer: u16, c: Component) ![]const u8 {
+    return affineTensorKeyAt(buf, AFFINE_PREFIXES[0], layer, c);
 }
 
 pub fn fusedTensorKey(buf: []u8, layer: u16, down: bool) ![]const u8 {
@@ -284,7 +303,8 @@ pub fn isRoutedExpertKey(layout: Layout, key: []const u8) bool {
         .bf16_fused => std.mem.startsWith(u8, key, "model.language_model.layers.") and
             (std.mem.endsWith(u8, key, ".mlp.experts.gate_up_proj") or
                 std.mem.endsWith(u8, key, ".mlp.experts.down_proj")),
-        .quantized_split => std.mem.startsWith(u8, key, "language_model.model.layers.") and
+        .quantized_split => (std.mem.startsWith(u8, key, AFFINE_PREFIXES[0]) or
+            std.mem.startsWith(u8, key, AFFINE_PREFIXES[1])) and
             std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null,
         .exl3_k4 => (std.mem.startsWith(u8, key, "language_model.model.layers.") or
             std.mem.startsWith(u8, key, "language_model.mtp.") or
@@ -422,6 +442,30 @@ fn exl3BankComplete(map: std.json.ObjectMap, prefix: []const u8, first_moe_layer
     return true;
 }
 
+fn affineBankComplete(map: std.json.ObjectMap, prefix: []const u8, first_moe_layer: u16, layers: u16) bool {
+    if (first_moe_layer >= layers) return false;
+    var buf: [192]u8 = undefined;
+    var layer: u16 = first_moe_layer;
+    while (layer < layers) : (layer += 1) {
+        for (0..component_count) |ci| {
+            const key = affineTensorKeyAt(&buf, prefix, layer, @fromBackingInt(@intCast(ci))) catch return false;
+            if (!stringAt(map, key)) return false;
+        }
+    }
+    return true;
+}
+
+fn hasAnyAffineKey(map: std.json.ObjectMap, prefix: []const u8, layers: u16) bool {
+    var buf: [192]u8 = undefined;
+    for (0..layers) |layer| {
+        for (0..component_count) |ci| {
+            const key = affineTensorKeyAt(&buf, prefix, @intCast(layer), @fromBackingInt(@intCast(ci))) catch return true;
+            if (map.get(key) != null) return true;
+        }
+    }
+    return false;
+}
+
 fn hasAnyExl3Key(map: std.json.ObjectMap, layers: u16) bool {
     var buf: [192]u8 = undefined;
     for (EXL3_PREFIXES) |prefix| {
@@ -442,14 +486,7 @@ fn hasAnyExl3Key(map: std.json.ObjectMap, layers: u16) bool {
 /// Affine or MXFP4 routed keys beside an EXL3 bank: the pack is mixed.
 fn hasAnyAffineOrMxfp4ExpertKey(map: std.json.ObjectMap, layers: u16) bool {
     if (hasAnyMxfp4SplitKey(map, layers)) return true;
-    var buf: [192]u8 = undefined;
-    for (0..layers) |layer_usize| {
-        for (0..component_count) |ci| {
-            const key = tensorKey(&buf, @intCast(layer_usize), @fromBackingInt(@intCast(ci))) catch return true;
-            if (map.get(key) != null) return true;
-        }
-    }
-    return false;
+    return hasAnyAffineKey(map, AFFINE_PREFIXES[0], layers);
 }
 
 fn hasAnyMxfp4SplitKey(map: std.json.ObjectMap, layers: u16) bool {
@@ -522,12 +559,9 @@ fn layoutFromWeightMapWithFirstMoe(map: std.json.ObjectMap, layers: u16, first_m
     else
         exl3BankComplete(map, EXL3_PREFIXES[0], 0, layers);
     if (exl3_ok) return if (hasAnyAffineOrMxfp4ExpertKey(map, layers)) null else .exl3_k4;
-    for (0..layers) |layer| {
-        for (0..component_count) |ci| {
-            const key = tensorKey(&buf, @intCast(layer), @fromBackingInt(@intCast(ci))) catch return null;
-            if (!stringAt(map, key)) return null;
-        }
-    }
+    const affine_prefix = if (mimo) AFFINE_PREFIXES[1] else AFFINE_PREFIXES[0];
+    const affine_first: u16 = if (mimo) first_moe_layer else 0;
+    if (!affineBankComplete(map, affine_prefix, affine_first, layers)) return null;
     return .quantized_split;
 }
 
@@ -557,8 +591,9 @@ pub fn layoutFromIndexJsonWithFirstMoe(
     if (layout == .mxfp4_split or layout == .mxfp4_individual) {
         return if (mimo) layout else null;
     }
-    // EXL3 stacked banks serve on both arches, each under its own nesting.
-    if (layout == .exl3_k4) return layout;
+    // EXL3 and affine stacked banks serve on both arches, each under its own
+    // nesting; only the dense bf16 pack is qwen4's alone.
+    if (layout == .exl3_k4 or layout == .quantized_split) return layout;
     return if (mimo) null else layout;
 }
 
@@ -1493,6 +1528,61 @@ test "mxfp4 individual source rejects missing and malformed weights or scales" {
         error.InvalidExpertTensor,
         QuantStore.openForLayout(t.allocator, model_path, geometry, .mxfp4_individual),
     );
+}
+
+/// A synthetic MiMo index: dense layer 0, affine routed banks from layer 1 on.
+fn mimoAffineIndexJson(allocator: std.mem.Allocator, layers: u16, first_moe: u16) ![]u8 {
+    var b: std.ArrayList(u8) = .empty;
+    errdefer b.deinit(allocator);
+    try b.appendSlice(allocator, "{\"weight_map\":{\"model.layers.0.mlp.gate_proj.weight\":\"a\"");
+    var layer: u16 = first_moe;
+    while (layer < layers) : (layer += 1) {
+        for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+            for ([_][]const u8{ "weight", "scales", "biases" }) |part| {
+                try b.print(allocator, ",\"model.layers.{d}.mlp.switch_mlp.{s}_proj.{s}\":\"a\"", .{ layer, proj, part });
+            }
+        }
+    }
+    try b.appendSlice(allocator, "}}");
+    return b.toOwnedSlice(allocator);
+}
+
+test "a mixed-width MiMo affine pack solves (bits, group_size) per layer and projection" {
+    const t = std.testing;
+    // hidden 4096, inter 2048: the four widths the imatrix allocator emits,
+    // read off the PACKED shapes the shards carry — the config states none.
+    const gate = struct {
+        fn at(w_cols: u64, s_cols: u64) ?QuantGeom {
+            return affineGeomFromShapes(w_cols, s_cols, 4096);
+        }
+    }.at;
+    const down = struct {
+        fn at(w_cols: u64, s_cols: u64) ?QuantGeom {
+            return affineGeomFromShapes(w_cols, s_cols, 2048);
+        }
+    }.at;
+    try t.expectEqual(QuantGeom{ .bits = 2, .group_size = 128 }, gate(256, 32).?);
+    try t.expectEqual(QuantGeom{ .bits = 2, .group_size = 128 }, down(128, 16).?);
+    try t.expectEqual(QuantGeom{ .bits = 3, .group_size = 128 }, gate(384, 32).?);
+    try t.expectEqual(QuantGeom{ .bits = 2, .group_size = 64 }, gate(256, 64).?);
+    try t.expectEqual(QuantGeom{ .bits = 4, .group_size = 64 }, gate(512, 64).?);
+    try t.expectEqual(QuantGeom{ .bits = 4, .group_size = 64 }, down(256, 32).?);
+}
+
+test "mimo_v2 affine routed banks resolve as a layout under the arch's own nesting" {
+    const t = std.testing;
+    const index = try mimoAffineIndexJson(t.allocator, 3, 1);
+    defer t.allocator.free(index);
+    try t.expectEqual(Layout.quantized_split, layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", index, 3, 1).?);
+    try t.expect(isRoutedExpertKey(.quantized_split, "model.layers.1.mlp.switch_mlp.gate_proj.weight"));
+    try t.expect(isRoutedExpertKey(.quantized_split, "language_model.model.layers.1.mlp.switch_mlp.gate_proj.weight"));
+    try t.expect(!isRoutedExpertKey(.quantized_split, "model.layers.1.mlp.gate.weight"));
+    // A MoE layer short of its bank is not a pack, and the dense prefix stays dense.
+    const short = try mimoAffineIndexJson(t.allocator, 3, 2);
+    defer t.allocator.free(short);
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "mimo_v2", short, 3, 1) == null);
+    // qwen4 nests under `language_model.`, so the same map is not its pack.
+    try t.expect(layoutFromIndexJsonWithFirstMoe(t.allocator, "qwen4_exp", index, 3, 1) == null);
 }
 
 /// A synthetic MiMo index: dense layer 0, EXL3 routed banks from layer 1 on.

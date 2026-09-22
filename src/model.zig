@@ -978,16 +978,24 @@ pub const ModelConfig = struct {
     /// An EXL3 bank is a self-describing quantized weight the resident kernels
     /// read as they are, whatever the trunk's own width says.
     pub fn expertStreamingRequired(self: *const ModelConfig) bool {
-        if (self.expert_layout == .exl3_k4) return false;
+        if (self.expert_layout == .exl3_k4 or self.isMimoResidentAffine()) return false;
         return self.supportsExpertStreaming() and
             (self.quant_bits == 0 or self.expert_layout == .mxfp4_individual);
     }
 
+    /// A MiMo affine pack carries its widths PER LAYER, so the config-wide
+    /// `quant_bits` stays 0 — which is the dense-checkpoint tell everywhere
+    /// else. The layout, not the width, says these experts are already packed.
+    pub fn isMimoResidentAffine(self: *const ModelConfig) bool {
+        return self.expert_layout == .quantized_split and std.mem.eql(u8, self.model_type, "mimo_v2");
+    }
+
     /// A MiMo checkpoint keeps its trunk in the source FP8 layout whichever way
-    /// its routed experts are packed, so both layouts take the source loader.
+    /// its routed experts are packed, so every layout takes the source loader.
     pub fn usesMimoSourceTrunk(self: *const ModelConfig) bool {
         return std.mem.eql(u8, self.model_type, "mimo_v2") and
-            (self.expert_layout == .mxfp4_individual or self.expert_layout == .exl3_k4);
+            (self.expert_layout == .mxfp4_individual or self.expert_layout == .exl3_k4 or
+                self.expert_layout == .quantized_split);
     }
 
     /// The long-context blast-radius predicate: every long-context mechanism (KV
@@ -1408,8 +1416,10 @@ pub fn parseConfig(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
         const first_moe: u16 = @intCast(config.first_k_dense_replace);
         if (expert_quant.layoutOfDirWithFirstMoe(allocator, io, config.model_type, model_dir, layers, first_moe)) |layout| {
             config.expert_layout = layout;
+            // The MiMo source trunk loader hands back SPLIT q/k/v whatever
+            // the checkpoint's own projection layout names.
+            if (config.usesMimoSourceTrunk()) config.attn_fused_qkv = false;
             if (layout == .mxfp4_individual) {
-                config.attn_fused_qkv = false;
                 config.quant_mode = .mxfp4;
                 config.quant_bits = 4;
                 config.quant_group_size = 32;
@@ -8209,6 +8219,37 @@ test "mimo_v2 original config selects split QKV and native expert quantization" 
     try testing.expectEqual(@as(u32, 4), c.quant_bits);
     try testing.expectEqual(@as(u32, 32), c.quant_group_size);
     try testing.expect(c.expertStreamingRequired());
+}
+
+test "mimo_v2 affine routed banks serve resident and take the source trunk loader" {
+    var c = ModelConfig{
+        .model_type = "mimo_v2",
+        .num_hidden_layers = 2,
+        .first_k_dense_replace = 1,
+        .num_experts = 4,
+        .num_experts_per_tok = 2,
+        .hidden_size = 128,
+        .moe_intermediate_size = 128,
+        // No `quantization` block: the pack's widths are per layer, so the
+        // config-wide width stays 0 and must not read as "dense bf16".
+        .quant_bits = 0,
+        .expert_layout = .quantized_split,
+    };
+    try testing.expect(c.supportsExpertStreaming());
+    try testing.expect(!c.expertStreamingRequired());
+    try testing.expect(c.usesMimoSourceTrunk());
+    var q = ModelConfig{
+        .model_type = "qwen4_exp",
+        .num_hidden_layers = 2,
+        .num_experts = 4,
+        .num_experts_per_tok = 2,
+        .hidden_size = 128,
+        .moe_intermediate_size = 128,
+        .quant_bits = 0,
+        .expert_layout = .quantized_split,
+    };
+    try testing.expect(!q.usesMimoSourceTrunk());
+    try testing.expect(q.expertStreamingRequired());
 }
 
 test "mimo_v2 EXL3 routed banks serve resident and take the source trunk loader" {

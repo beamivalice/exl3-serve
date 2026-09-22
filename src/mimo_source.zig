@@ -22,6 +22,7 @@ const DType = enum {
     f16,
     f32,
     u16,
+    u32,
     fp8_e4m3,
     unknown,
 };
@@ -43,8 +44,9 @@ const SourceIndex = struct {
 
 const TensorKind = enum {
     resident,
-    /// A stacked EXL3 routed bank: resident bytes the kernels read as they are.
-    exl3_expert,
+    /// A stacked routed-expert bank (EXL3 trellis or affine): resident bytes
+    /// the kernels read as they are.
+    routed_expert,
     fp8_weight,
     fp8_scale,
     skipped,
@@ -123,7 +125,7 @@ pub fn loadWeights(
         const meta = entry.value_ptr.*;
         switch (try classifyKey(key, config)) {
             .skipped, .fp8_scale => {},
-            .resident, .exl3_expert => {
+            .resident, .routed_expert => {
                 const raw = try readTensor(allocator, model_dir, meta);
                 defer allocator.free(raw);
                 var arr = try uploadDense(raw, meta, stream);
@@ -290,6 +292,7 @@ fn parseDType(name: []const u8) DType {
     if (std.mem.eql(u8, name, "F16")) return .f16;
     if (std.mem.eql(u8, name, "F32")) return .f32;
     if (std.mem.eql(u8, name, "U16")) return .u16;
+    if (std.mem.eql(u8, name, "U32")) return .u32;
     if (std.mem.eql(u8, name, "F8_E4M3") or std.mem.eql(u8, name, "F8_E4M3FN"))
         return .fp8_e4m3;
     return .unknown;
@@ -455,7 +458,10 @@ fn classifyKey(key: []const u8, config: *const model.ModelConfig) !TensorKind {
         return .skipped;
     if (std.mem.startsWith(u8, key, "model.layers.") and
         std.mem.indexOf(u8, key, ".mlp.switch_mlp.") != null)
-        return if (config.expert_layout == .exl3_k4) .exl3_expert else error.UnclassifiedMimoTensor;
+        return if (config.expert_layout == .exl3_k4 or config.expert_layout == .quantized_split)
+            .routed_expert
+        else
+            error.UnclassifiedMimoTensor;
 
     if (std.mem.eql(u8, key, "model.embed_tokens.weight") or
         std.mem.eql(u8, key, "lm_head.weight") or
@@ -513,7 +519,7 @@ fn payloadBytes(meta: TensorMeta, expected_dtype: ?DType) !u64 {
     if (expected_dtype) |want| if (meta.dtype != want) return error.MimoTensorDtypeMismatch;
     const elem_size: u64 = switch (meta.dtype) {
         .bf16, .f16, .u16 => 2,
-        .f32 => 4,
+        .f32, .u32 => 4,
         .fp8_e4m3 => 1,
         .unknown => return error.UnsupportedMimoTensorDtype,
     };
@@ -670,6 +676,55 @@ fn denseExpectedShape(
 
 /// Stacked bank geometry: `[E, in/16, out/16, n]` trellis with `suh`/`svh` the
 /// two axis scales. gate and up project hidden->inter, down the other way.
+/// The routed bank of whichever layout this pack packs its experts in.
+fn validateRoutedExpert(key: []const u8, meta: TensorMeta, config: *const model.ModelConfig) !void {
+    return if (config.expert_layout == .quantized_split)
+        validateAffineExpert(key, meta, config)
+    else
+        validateExl3Expert(key, meta, config);
+}
+
+/// `[E, out, packed]` U32 beside bf16 `[E, out, groups]` scales and biases, at
+/// a (bits, group_size) the shapes themselves solve — this pack's widths are
+/// per layer and per projection, so there is no config-wide width to check.
+fn validateAffineExpert(key: []const u8, meta: TensorMeta, config: *const model.ModelConfig) !void {
+    const parts = try routedBankKey(key, config);
+    const experts: u64 = config.num_experts;
+    if (meta.shape.len != 3) return error.MimoTensorShapeMismatch;
+    if (std.mem.eql(u8, parts.part, "weight")) {
+        if (meta.dtype != .u32) return error.MimoTensorDtypeMismatch;
+        if (expert_quant.affineBitsFromPacked(meta.shape[2], parts.in_dim) == null)
+            return error.MimoTensorShapeMismatch;
+    } else if (std.mem.eql(u8, parts.part, "scales") or std.mem.eql(u8, parts.part, "biases")) {
+        if (meta.dtype != .bf16) return error.MimoTensorDtypeMismatch;
+        if (expert_quant.affineGroupFromScales(meta.shape[2], parts.in_dim) == null)
+            return error.MimoTensorShapeMismatch;
+    } else return error.UnclassifiedMimoTensor;
+    try expectShape(meta, &[_]u64{ experts, parts.out_dim, meta.shape[2] });
+    _ = try payloadBytes(meta, meta.dtype);
+}
+
+const RoutedBankKey = struct { part: []const u8, in_dim: u64, out_dim: u64 };
+
+fn routedBankKey(key: []const u8, config: *const model.ModelConfig) !RoutedBankKey {
+    const ref = layerKey(key) orelse return error.UnclassifiedMimoTensor;
+    if (ref.layer >= config.num_hidden_layers or ref.layer < config.first_k_dense_replace)
+        return error.MimoLayerOutOfRange;
+    const bank_prefix = "mlp.switch_mlp.";
+    if (!std.mem.startsWith(u8, ref.rest, bank_prefix)) return error.UnclassifiedMimoTensor;
+    const rest = ref.rest[bank_prefix.len..];
+    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return error.UnclassifiedMimoTensor;
+    const proj = rest[0..dot];
+    const down = std.mem.eql(u8, proj, "down_proj");
+    if (!down and !std.mem.eql(u8, proj, "gate_proj") and !std.mem.eql(u8, proj, "up_proj"))
+        return error.UnclassifiedMimoTensor;
+    return .{
+        .part = rest[dot + 1 ..],
+        .in_dim = if (down) config.moe_intermediate_size else config.hidden_size,
+        .out_dim = if (down) config.hidden_size else config.moe_intermediate_size,
+    };
+}
+
 fn validateExl3Expert(key: []const u8, meta: TensorMeta, config: *const model.ModelConfig) !void {
     const ref = layerKey(key) orelse return error.UnclassifiedMimoTensor;
     if (ref.layer >= config.num_hidden_layers or ref.layer < config.first_k_dense_replace)
@@ -724,7 +779,7 @@ fn requireKind(
         return error.MimoRequiredTensorKindMismatch;
     switch (expected) {
         .resident => try validateDense(key, meta, config),
-        .exl3_expert => try validateExl3Expert(key, meta, config),
+        .routed_expert => try validateRoutedExpert(key, meta, config),
         .fp8_weight => try validateFp8Pair(source, allocator, config, key, meta),
         .fp8_scale, .skipped => {},
     }
@@ -761,11 +816,16 @@ fn validateRequired(
         } else {
             try requireKind(source, allocator, config, try std.fmt.allocPrint(allocator, "{s}.mlp.gate.weight", .{layer_prefix}), .resident);
             try requireKind(source, allocator, config, try std.fmt.allocPrint(allocator, "{s}.mlp.gate.e_score_correction_bias", .{layer_prefix}), .resident);
-            if (config.expert_layout == .exl3_k4) {
+            const bank: ?[3][]const u8 = switch (config.expert_layout) {
+                .exl3_k4 => .{ "trellis", "suh", "svh" },
+                .quantized_split => .{ "weight", "scales", "biases" },
+                else => null,
+            };
+            if (bank) |parts| {
                 for ([_][]const u8{ "gate", "up", "down" }) |projection| {
-                    for ([_][]const u8{ "trellis", "suh", "svh" }) |part| {
+                    for (parts) |part| {
                         const k = try std.fmt.allocPrint(allocator, "{s}.mlp.switch_mlp.{s}_proj.{s}", .{ layer_prefix, projection, part });
-                        try requireKind(source, allocator, config, k, .exl3_expert);
+                        try requireKind(source, allocator, config, k, .routed_expert);
                     }
                 }
             }
@@ -782,7 +842,7 @@ fn validatePlan(source: *const SourceIndex, allocator: Allocator, config: *const
         switch (try classifyKey(key, config)) {
             .skipped => {},
             .resident => try validateDense(key, meta, config),
-            .exl3_expert => try validateExl3Expert(key, meta, config),
+            .routed_expert => try validateRoutedExpert(key, meta, config),
             .fp8_weight => try validateFp8Pair(source, allocator, config, key, meta),
             .fp8_scale => {
                 const suffix = ".weight_scale_inv";
@@ -809,7 +869,7 @@ fn countResidentBytes(
         const meta = entry.value_ptr.*;
         switch (try classifyKey(key, config)) {
             .skipped, .fp8_scale => {},
-            .resident, .exl3_expert => {
+            .resident, .routed_expert => {
                 total = std.math.add(u64, total, try payloadBytes(meta, null)) catch
                     return error.ResidentBytesOverflow;
             },
@@ -866,6 +926,7 @@ fn uploadDense(raw: []const u8, meta: TensorMeta, stream: mlx.mlx_stream) !mlx.m
         .f16 => .float16,
         .f32 => .float32,
         .u16 => .uint16,
+        .u32 => .uint32,
         else => return error.MimoTensorDtypeMismatch,
     };
     _ = stream;
@@ -1387,9 +1448,27 @@ fn makeTinySourceFixture(
 
 /// A two-layer MiMo checkpoint whose layer 1 carries stacked EXL3 banks at the
 /// given packed halfword count. `n = 0` writes no banks at all.
+/// The routed bank a synthetic MiMo source carries: none, an EXL3 trellis at
+/// `n` packed halfwords, or an affine bank at (bits, group_size).
+const TinyAffine = struct { bits: u64, group_size: u64 };
+
+const TinyBank = union(enum) {
+    none,
+    exl3: u64,
+    affine: TinyAffine,
+};
+
 fn writeTinyExl3Source(io: std.Io, allocator: Allocator, dir: std.Io.Dir, n: u64) !void {
+    return writeTinySource(io, allocator, dir, if (n == 0) .none else .{ .exl3 = n });
+}
+
+fn writeTinySource(io: std.Io, allocator: Allocator, dir: std.Io.Dir, bank: TinyBank) !void {
     const dim: u64 = 128;
     const tiles = dim / 16;
+    const n: u64 = switch (bank) {
+        .exl3 => |v| v,
+        else => 0,
+    };
     try dir.writeFile(io, .{ .sub_path = "config.json", .data =
         \\{"model_type":"mimo_v2","vocab_size":2,"hidden_size":128,
         \\ "num_hidden_layers":2,"intermediate_size":128,
@@ -1404,6 +1483,17 @@ fn writeTinyExl3Source(io: std.Io, allocator: Allocator, dir: std.Io.Dir, n: u64
         \\ "add_full_attention_sink_bias":false,
         \\ "expert_quant":{"format":"exl3","k":2.5,"codebook":"tiny"}}
     });
+    const affine: TinyAffine = switch (bank) {
+        .affine => |a| a,
+        else => .{ .bits = 0, .group_size = 0 },
+    };
+    const packed_cols: u64 = if (affine.bits == 0) 0 else dim * affine.bits / 32;
+    const group_cols: u64 = if (affine.group_size == 0) 0 else dim / affine.group_size;
+    const affine_w = try allocator.alloc(u8, @intCast(2 * dim * @max(packed_cols, 1) * 4));
+    defer allocator.free(affine_w);
+    @memset(affine_w, 0x11);
+    const affine_s = try testBf16Bytes(allocator, @intCast(2 * dim * @max(group_cols, 1)), 0x3c00);
+    defer allocator.free(affine_s);
     const embed = try testBf16Bytes(allocator, 2 * 128, 0x3f80);
     defer allocator.free(embed);
     const norm = try testBf16Bytes(allocator, 128, 0x3f80);
@@ -1489,6 +1579,26 @@ fn writeTinyExl3Source(io: std.Io, allocator: Allocator, dir: std.Io.Dir, n: u64
         } else {
             try tensors.append(allocator, .{ .key = "model.layers.1.mlp.gate.weight", .dtype = "BF16", .shape = &embed_shape, .bytes = router });
             try tensors.append(allocator, .{ .key = "model.layers.1.mlp.gate.e_score_correction_bias", .dtype = "F32", .shape = &corr_shape, .bytes = corr });
+            if (affine.bits > 0) {
+                const w_shape = [_]u64{ 2, dim, packed_cols };
+                const s_shape = [_]u64{ 2, dim, group_cols };
+                inline for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+                    try tensors.append(allocator, .{
+                        .key = try std.fmt.allocPrint(allocator, "model.layers.1.mlp.switch_mlp.{s}_proj.weight", .{proj}),
+                        .dtype = "U32",
+                        .shape = &w_shape,
+                        .bytes = affine_w[0..@intCast(2 * dim * packed_cols * 4)],
+                    });
+                    inline for ([_][]const u8{ "scales", "biases" }) |part| {
+                        try tensors.append(allocator, .{
+                            .key = try std.fmt.allocPrint(allocator, "model.layers.1.mlp.switch_mlp.{s}_proj.{s}", .{ proj, part }),
+                            .dtype = "BF16",
+                            .shape = &s_shape,
+                            .bytes = affine_s[0..@intCast(2 * dim * group_cols * 2)],
+                        });
+                    }
+                }
+            }
             if (n > 0) {
                 inline for ([_][]const u8{ "gate", "up", "down" }) |proj| {
                     try tensors.append(allocator, .{
@@ -1564,6 +1674,78 @@ test "mimo source loads and bills EXL3 routed banks beside the prepared trunk" {
     const suh = weights.get("model.layers.1.mlp.switch_mlp.down_proj.suh") orelse
         return error.MissingWeight;
     try t.expectEqual(mlx.mlx_dtype.float16, mlx.mlx_array_dtype(suh));
+}
+
+test "mimo source loads and bills affine routed banks beside the prepared trunk" {
+    const t = std.testing;
+    const io = t.io;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "mimo-affine");
+    var dir = try tmp.dir.openDir(io, "mimo-affine", .{});
+    defer dir.close(io);
+    try writeTinySource(io, alloc, dir, .{ .affine = .{ .bits = 2, .group_size = 64 } });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try dir.realPath(io, &path_buf);
+    const path = path_buf[0..path_len];
+
+    var config = try model.parseConfig(io, t.allocator, path);
+    defer config.deinit(t.allocator);
+    try t.expectEqual(expert_quant.Layout.quantized_split, config.expert_layout);
+    try t.expect(!config.expertStreamingRequired());
+    try t.expect(config.usesMimoSourceTrunk());
+    // The source trunk hands back split q/k/v, so the fused layout the config
+    // names must not survive the layout resolve.
+    try t.expect(!config.attn_fused_qkv);
+
+    // Nine banks: three projections of [2,128,8] u32 plus two [2,128,2] bf16.
+    const bank_bytes: u64 = 3 * (2 * 128 * 8 * 4 + 2 * (2 * 128 * 2 * 2));
+    const with_banks = try residentBytesWithConfig(io, t.allocator, path, &config);
+    try tmp.dir.createDirPath(io, "mimo-affine-trunk-only");
+    var bare = try tmp.dir.openDir(io, "mimo-affine-trunk-only", .{});
+    defer bare.close(io);
+    try writeTinySource(io, alloc, bare, .none);
+    var bare_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const bare_len = try bare.realPath(io, &bare_buf);
+    var bare_config = try model.parseConfig(io, t.allocator, bare_buf[0..bare_len]);
+    defer bare_config.deinit(t.allocator);
+    const without = try residentBytesWithConfig(io, t.allocator, bare_buf[0..bare_len], &bare_config);
+    try t.expectEqual(bank_bytes, with_banks - without);
+
+    var weights = try loadWeights(io, t.allocator, path, &config);
+    defer weights.deinit();
+    const w = weights.get("model.layers.1.mlp.switch_mlp.gate_proj.weight") orelse return error.MissingWeight;
+    try t.expectEqualSlices(c_int, &[_]c_int{ 2, 128, 8 }, mlx.getShape(w));
+    try t.expectEqual(mlx.mlx_dtype.uint32, mlx.mlx_array_dtype(w));
+    const sc = weights.get("model.layers.1.mlp.switch_mlp.down_proj.scales") orelse return error.MissingWeight;
+    try t.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(sc));
+    const bi = weights.get("model.layers.1.mlp.switch_mlp.down_proj.biases") orelse return error.MissingWeight;
+    try t.expectEqualSlices(c_int, &[_]c_int{ 2, 128, 2 }, mlx.getShape(bi));
+}
+
+test "mimo source refuses an affine bank whose packed width does not solve" {
+    const t = std.testing;
+    const io = t.io;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "mimo-affine-bad");
+    var dir = try tmp.dir.openDir(io, "mimo-affine-bad", .{});
+    defer dir.close(io);
+    // 7 bits per weight is not a width this build reads.
+    try writeTinySource(io, alloc, dir, .{ .affine = .{ .bits = 7, .group_size = 64 } });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try dir.realPath(io, &path_buf);
+    const path = path_buf[0..path_len];
+    var config = try model.parseConfig(io, t.allocator, path);
+    defer config.deinit(t.allocator);
+    config.expert_layout = .quantized_split;
+    try t.expectError(error.MimoTensorShapeMismatch, residentBytesWithConfig(io, t.allocator, path, &config));
 }
 
 test "mimo source refuses an EXL3 trellis the kernels cannot decode" {

@@ -6,6 +6,7 @@
 - **A load the server refuses by name no longer restarts it from the tray**; the selection reverts to the model still being served and the refusal shows as an error card.
 - **Two EXL3 packs on different codebooks can be loaded at once**; each model's forward now decodes with its own codebook instead of the one the most recent load installed.
 - **An EXL3 pack whose routed-expert trellis disagrees with its `config.json` is refused by name at load**, rather than serving under a memory plan that under-counts the expert bytes.
+- **A MiMo affine expert pack serves resident.** Routed experts packed as `switch_mlp` weight/scales/biases under the arch's own nesting are recognized, load beside the source FP8 trunk, and resolve their (bits, group size) per layer and projection; such a pack is no longer reported as streaming-required.
 
 ## Exl3-serve - v26.9.5
 

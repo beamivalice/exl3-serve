@@ -3422,9 +3422,11 @@ pub fn streamingStubMarker(architecture: []const u8, geometry_ok: bool, index_co
 }
 
 /// A dense qwen4_exp checkpoint has no resident arm at all; a quantized pack
-/// streams only when a budget asks it to.
-pub fn streamingRequiredMarker(architecture: []const u8, quant_bits: u32, geometry_ok: bool, index_complete: bool) bool {
-    return streamingStubMarker(architecture, geometry_ok, index_complete) and quant_bits == 0;
+/// streams only when a budget asks it to. A pack that quantizes its routed
+/// experts PER LAYER names no config-wide width, so the width alone would read
+/// it as dense — `quantized_experts` is the pack's own `expert_quant` block.
+pub fn streamingRequiredMarker(architecture: []const u8, quant_bits: u32, quantized_experts: bool, geometry_ok: bool, index_complete: bool) bool {
+    return streamingStubMarker(architecture, geometry_ok, index_complete) and quant_bits == 0 and !quantized_experts;
 }
 
 pub fn rowSsdBudgetGb(effective_bytes: u64, setting_gb: u32) u32 {
@@ -4100,10 +4102,14 @@ test "bf16 streaming marker is a property of the checkpoint, not of the launch f
 
 test "a quantized pack is streaming capable and only the dense one is streaming required" {
     try std.testing.expect(streamingStubMarker("qwen4_exp", true, true));
-    try std.testing.expect(streamingRequiredMarker("qwen4_exp", 0, true, true));
-    try std.testing.expect(!streamingRequiredMarker("qwen4_exp", 4, true, true));
-    try std.testing.expect(!streamingRequiredMarker("qwen4_exp", 8, true, true));
-    try std.testing.expect(!streamingRequiredMarker("qwen3_5_moe", 0, true, true));
+    try std.testing.expect(streamingRequiredMarker("qwen4_exp", 0, false, true, true));
+    try std.testing.expect(!streamingRequiredMarker("qwen4_exp", 4, false, true, true));
+    try std.testing.expect(!streamingRequiredMarker("qwen4_exp", 8, false, true, true));
+    try std.testing.expect(!streamingRequiredMarker("qwen3_5_moe", 0, false, true, true));
+    // A pack whose routed experts are quantized PER LAYER names no config-wide
+    // width, so the width alone cannot tell it from a dense checkpoint.
+    try std.testing.expect(!streamingRequiredMarker("mimo_v2", 0, true, true, true));
+    try std.testing.expect(streamingStubMarker("mimo_v2", true, true));
 }
 
 test "the streaming markers read the ONE arch gate: no other arch carries them" {
@@ -4111,7 +4117,7 @@ test "the streaming markers read the ONE arch gate: no other arch carries them" 
     var buf: [96]u8 = undefined;
     for ([_][]const u8{ "qwen4_exp_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next", "hy_v3", "llama", "gguf", "bert", "" }) |arch| {
         try t.expect(!streamingStubMarker(arch, true, true));
-        try t.expect(!streamingRequiredMarker(arch, 0, true, true));
+        try t.expect(!streamingRequiredMarker(arch, 0, false, true, true));
         try t.expectEqualStrings("", streamingRowPart(&buf, streamingStubMarker(arch, true, true), false, 60));
     }
     try t.expect(streamingStubMarker("qwen4_exp", true, true));
@@ -6777,6 +6783,7 @@ fn renderModelEntry(
     const streaming_required = streamingRequiredMarker(
         entry.arch_hint,
         sm.quant_bits,
+        sm.quantized_experts,
         streaming_geometry,
         streaming_precheck and entry.streaming_index_complete,
     );
