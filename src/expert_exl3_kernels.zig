@@ -2590,7 +2590,13 @@ pub fn moePrefill(
     if (exl3UbenchOn()) try mlx.check(mlx.mlx_array_eval(prep[1]));
     const win = gemmWindowRows();
     const aligned = gemmWindowAligned();
-    const tab = try gemmWindowTable(s, sorted_slots, nslots, win, aligned);
+    const gt = mlx.getShape(gate_t);
+    const optimized = mimoPrefillOn(hidden, gt[2] * 16, gt[0], topk, gt[3]) and aligned;
+    const metadata: ?MimoWindowTable = if (optimized) try buildMimoWindowTable(s, sorted_slots, order_i, nslots, win, gt[0]) else null;
+    defer if (metadata) |m| {
+        _ = mlx.mlx_array_free(m.inverse);
+    };
+    const tab = if (metadata) |m| m.table else try gemmWindowTable(s, sorted_slots, nslots, win, aligned);
     defer _ = mlx.mlx_array_free(tab.starts);
     defer _ = mlx.mlx_array_free(tab.nlives);
     const g_inner = try innerGemmSortedTable(s, prep[0], gate_t, sorted_slots, win, aligned, tab);
@@ -2605,6 +2611,11 @@ pub fn moePrefill(
     const d_inner = try innerGemmSortedTable(s, down_x, down_t, sorted_slots, win, aligned, tab);
     defer _ = mlx.mlx_array_free(d_inner);
     try ubenchEval(d_inner, "gemm_down");
+    if (metadata) |m| {
+        const out = try finishMimoSorted(s, d_inner, m.inverse, down_svh, slots, scores, hidden, rows, topk, mlx.mlx_array_dtype(x));
+        try ubenchEval(out, "token_reduce");
+        return out;
+    }
     const d_unsorted = try scatterSorted(s, d_inner, order_i, hidden, nslots);
     defer _ = mlx.mlx_array_free(d_unsorted);
     const out = try downFinishReduce(s, d_unsorted, down_svh, slots, scores, hidden, rows, topk, mlx.mlx_array_dtype(x));
@@ -6952,4 +6963,242 @@ test "exl3 n40 NAX BF16 prefill no worse than composite against f32 truth" {
     for ([_]c_int{32}) |win| {
         for (0..3) |seed| try n40PrefillBf16Truth(318 + seed, win);
     }
+}
+
+const MimoWindowTable = struct { table: WindowTable, inverse: mlx.mlx_array };
+
+const MIMO_WINDOW_SOURCE: [:0]const u8 =
+    \\const uint tid = uint(thread_index_in_threadgroup);
+    \\const uint n = uint(count[0]);
+    \\const uint capacity = (n + uint(WIN) - 1u) / uint(WIN) + uint(EXPERTS);
+    \\threadgroup uint counts[uint(EXPERTS)];
+    \\for (uint i = tid; i < capacity; i += uint(EXPERTS)) { starts[i] = 0u; nlives[i] = 0u; }
+    \\for (uint i = tid; i < n; i += uint(EXPERTS)) inverse[uint(order[i])] = i;
+    \\uint lo = 0u, hi = n;
+    \\while (lo < hi) { uint m = (lo + hi) >> 1u; if (uint(eids[m]) < tid) lo = m + 1u; else hi = m; }
+    \\const uint first = lo;
+    \\hi = n;
+    \\while (lo < hi) { uint m = (lo + hi) >> 1u; if (uint(eids[m]) <= tid) lo = m + 1u; else hi = m; }
+    \\const uint length = lo - first;
+    \\counts[tid] = (length + uint(WIN) - 1u) / uint(WIN);
+    \\threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    \\uint offset = 0u;
+    \\for (uint e = 0u; e < tid; e++) offset += counts[e];
+    \\for (uint i = 0u; i < counts[tid]; i++) {
+    \\  starts[offset + i] = first + i * uint(WIN);
+    \\  nlives[offset + i] = min(uint(WIN), length - i * uint(WIN));
+    \\}
+;
+
+const MimoWindowKey = struct { rows: c_int, win: c_int, experts: c_int };
+var mimo_window_cfgs: CfgCache(MimoWindowKey, 8) = .{};
+var mimo_window_kernel: ?mlx.mlx_fast_metal_kernel = null;
+var mimo_window_engaged: bool = false;
+
+fn buildMimoWindowTable(s: mlx.mlx_stream, eids: mlx.mlx_array, order: mlx.mlx_array, n: c_int, win: c_int, experts: c_int) !MimoWindowTable {
+    if (experts < 1 or experts > 256 or win < 1 or n < 1) return error.BadExl3Shape;
+    const capacity = @divTrunc(n + win - 1, win) + experts;
+    const key = MimoWindowKey{ .rows = n, .win = win, .experts = experts };
+    const cfg = mimo_window_cfgs.get(key) orelse blk: {
+        const c = mlx.mlx_fast_metal_kernel_config_new();
+        errdefer _ = mlx.mlx_fast_metal_kernel_config_free(c);
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &.{capacity}, 1, .uint32));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &.{capacity}, 1, .uint32));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &.{n}, 1, .uint32));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(c, experts, 1, 1));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(c, experts, 1, 1));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "WIN", win));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "EXPERTS", experts));
+        mimo_window_cfgs.put(key, c);
+        break :blk c;
+    };
+    const nn: u32 = @intCast(n);
+    const count = mlx.mlx_array_new_data(&nn, &.{1}, 1, .uint32);
+    defer _ = mlx.mlx_array_free(count);
+    const kernel = try getNamedKernel(&mimo_window_kernel, "mlxserve_exl3_mimo_windows", &.{ "eids", "order", "count" }, &.{ "starts", "nlives", "inverse" }, MIMO_WINDOW_SOURCE, "");
+    const outputs = try applyOuts(s, kernel, &.{ eids, order, count }, cfg, 3);
+    defer _ = mlx.mlx_vector_array_free(outputs);
+    var starts = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(starts);
+    var nlives = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(nlives);
+    var inverse = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(inverse);
+    try mlx.check(mlx.mlx_vector_array_get(&starts, outputs, 0));
+    try mlx.check(mlx.mlx_vector_array_get(&nlives, outputs, 1));
+    try mlx.check(mlx.mlx_vector_array_get(&inverse, outputs, 2));
+    if (!mimo_window_engaged) {
+        mimo_window_engaged = true;
+        log.info("[exl3-prefill] GPU window metadata engaged experts={d} win={d}\n", .{ experts, win });
+    }
+    return .{ .table = .{ .starts = starts, .nlives = nlives, .nwin = capacity }, .inverse = inverse };
+}
+
+test "exl3 MiMo GPU window metadata has a routing-independent capacity" {
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    for ([_]usize{ 1, 31, 32, 33, 513, 2049 }) |n| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        const ids = try alloc.alloc(u32, n);
+        const ord = try alloc.alloc(u32, n);
+        for (ids, ord, 0..) |*id, *o, i| {
+            id.* = @intCast((i / 97) * 3);
+            o.* = @intCast((i + 7) % n);
+        }
+        const ea = mlx.mlx_array_new_data(ids.ptr, &.{@intCast(n)}, 1, .uint32);
+        defer _ = mlx.mlx_array_free(ea);
+        const oa = mlx.mlx_array_new_data(ord.ptr, &.{@intCast(n)}, 1, .uint32);
+        defer _ = mlx.mlx_array_free(oa);
+        const m = try buildMimoWindowTable(s, ea, oa, @intCast(n), 32, 256);
+        defer _ = mlx.mlx_array_free(m.table.starts);
+        defer _ = mlx.mlx_array_free(m.table.nlives);
+        defer _ = mlx.mlx_array_free(m.inverse);
+        try std.testing.expectEqual(@as(c_int, @intCast((n + 31) / 32 + 256)), m.table.nwin);
+        try mlx.check(mlx.mlx_array_eval(m.table.starts));
+        try mlx.check(mlx.mlx_array_eval(m.table.nlives));
+        try mlx.check(mlx.mlx_array_eval(m.inverse));
+        const starts = mlx.mlx_array_data_uint32(m.table.starts) orelse return error.Unreadable;
+        const lives = mlx.mlx_array_data_uint32(m.table.nlives) orelse return error.Unreadable;
+        const inv = mlx.mlx_array_data_uint32(m.inverse) orelse return error.Unreadable;
+        var row: usize = 0;
+        var wi: usize = 0;
+        while (row < n) : (wi += 1) {
+            var end = row + 1;
+            while (end < n and ids[end] == ids[row] and end - row < 32) : (end += 1) {}
+            try std.testing.expectEqual(row, starts[wi]);
+            try std.testing.expectEqual(end - row, lives[wi]);
+            row = end;
+        }
+        while (wi < @as(usize, @intCast(m.table.nwin))) : (wi += 1) try std.testing.expectEqual(@as(u32, 0), lives[wi]);
+        for (0..n) |i| try std.testing.expectEqual((i + n - 7 % n) % n, inv[i]);
+    }
+}
+
+const MIMO_REDUCE_SOURCE: [:0]const u8 = blk: {
+    const old = "const size_t xb = (size_t)slot * (size_t)(ODIM) + base;";
+    const at = std.mem.indexOf(u8, REDUCE_SOURCE, old).?;
+    break :blk REDUCE_SOURCE[0..at] ++ "const size_t xb = (size_t)inverse[slot] * (size_t)(ODIM) + base;" ++ REDUCE_SOURCE[at + old.len ..];
+};
+var mimo_reduce_kernel: ?mlx.mlx_fast_metal_kernel = null;
+var mimo_reduce_cfgs: CfgCache(DecodeReduceKey, 8) = .{};
+var mimo_reduce_engaged: bool = false;
+
+fn finishMimoSorted(s: mlx.mlx_stream, inner: mlx.mlx_array, inverse: mlx.mlx_array, svh: mlx.mlx_array, slots: mlx.mlx_array, scores: mlx.mlx_array, dim: c_int, rows: c_int, topk: c_int, dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    if (topk < 1 or topk > REDUCE_MAX_TOPK) return error.Exl3TopkUnsupported;
+    const key = DecodeReduceKey{ .out_dim = dim, .rows = rows, .topk = topk, .dtype = dtype };
+    const cfg = mimo_reduce_cfgs.get(key) orelse blk: {
+        const c = mlx.mlx_fast_metal_kernel_config_new();
+        errdefer _ = mlx.mlx_fast_metal_kernel_config_free(c);
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &.{ rows, dim }, 2, dtype));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(c, 32 * topk * @divExact(dim, 128), rows, 1));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(c, 32 * topk, 1, 1));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_dtype(c, "T", dtype));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "ODIM", dim));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "TOPK", topk));
+        mimo_reduce_cfgs.put(key, c);
+        break :blk c;
+    };
+    const kernel = try getNamedKernel(&mimo_reduce_kernel, "mlxserve_exl3_mimo_sorted_reduce", &.{ "inner", "inverse", "svh", "slots", "sc" }, &.{"y"}, MIMO_REDUCE_SOURCE, "");
+    const outputs = try applyOuts(s, kernel, &.{ inner, inverse, svh, slots, scores }, cfg, 1);
+    defer _ = mlx.mlx_vector_array_free(outputs);
+    var y = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(y);
+    try mlx.check(mlx.mlx_vector_array_get(&y, outputs, 0));
+    if (!mimo_reduce_engaged) {
+        mimo_reduce_engaged = true;
+        log.info("[exl3-prefill] sorted finish/reduce engaged dtype={s}\n", .{@tagName(dtype)});
+    }
+    return y;
+}
+
+test "exl3 MiMo sorted BF16 finish uses one dispatch and preserves f32 truth error" {
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var prng = std.Random.DefaultPrng.init(871);
+    var xh: [16 * 128]u16 = undefined;
+    var vh: [8 * 128]u16 = undefined;
+    var sc: [16]f32 = undefined;
+    var slots: [16]u32 = undefined;
+    var inverse: [16]u32 = undefined;
+    for (&xh) |*v| v.* = exl3.f32ToF16Bits(prng.random().float(f32) * 2 - 1);
+    for (&vh) |*v| v.* = exl3.f32ToF16Bits(prng.random().float(f32));
+    for (&sc, &slots, &inverse, 0..) |*v, *e, *iv, i| {
+        v.* = prng.random().float(f32);
+        e.* = @intCast(i % 8);
+        iv.* = @intCast((5 * i + 3) % 16);
+    }
+    const x = mlx.mlx_array_new_data(&xh, &.{ 16, 128 }, 2, .float16);
+    defer _ = mlx.mlx_array_free(x);
+    const va = mlx.mlx_array_new_data(&vh, &.{ 8, 128 }, 2, .float16);
+    defer _ = mlx.mlx_array_free(va);
+    const sa = mlx.mlx_array_new_data(&sc, &.{16}, 1, .float32);
+    defer _ = mlx.mlx_array_free(sa);
+    const ea = mlx.mlx_array_new_data(&slots, &.{16}, 1, .uint32);
+    defer _ = mlx.mlx_array_free(ea);
+    const inv = mlx.mlx_array_new_data(&inverse, &.{16}, 1, .uint32);
+    defer _ = mlx.mlx_array_free(inv);
+    resetFusedDispatchCount();
+    const y = try finishMimoSorted(s, x, inv, va, ea, sa, 128, 2, 8, .bfloat16);
+    defer _ = mlx.mlx_array_free(y);
+    try std.testing.expectEqual(@as(u32, 1), fusedDispatchCount());
+    var order_h: [16]u32 = undefined;
+    for (inverse, 0..) |v, i| order_h[v] = @intCast(i);
+    const order_a = mlx.mlx_array_new_data(&order_h, &.{16}, 1, .uint32);
+    defer _ = mlx.mlx_array_free(order_a);
+    const unsorted = try scatterSorted(s, x, order_a, 128, 16);
+    defer _ = mlx.mlx_array_free(unsorted);
+    const composite = try downFinishReduce(s, unsorted, va, ea, sa, 128, 2, 8, .bfloat16);
+    defer _ = mlx.mlx_array_free(composite);
+    var yf = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(yf);
+    var cf = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(cf);
+    try mlx.check(mlx.mlx_astype(&yf, y, .float32, s));
+    try mlx.check(mlx.mlx_astype(&cf, composite, .float32, s));
+    try mlx.check(mlx.mlx_array_eval(yf));
+    try mlx.check(mlx.mlx_array_eval(cf));
+    const yp = mlx.mlx_array_data_float32(yf) orelse return error.Unreadable;
+    const cp = mlx.mlx_array_data_float32(cf) orelse return error.Unreadable;
+    var en: f64 = 0;
+    var ec: f64 = 0;
+    for (0..2) |r| {
+        var truth: [128]f32 = @splat(0);
+        for (0..8) |k| {
+            const slot = r * 8 + k;
+            var h: [128]f32 = undefined;
+            for (&h, 0..) |*v, j| v.* = exl3.f16BitsToF32(xh[inverse[slot] * 128 + j]);
+            exl3.hadamard128(&h);
+            for (&truth, h, 0..) |*v, a, j| v.* += a * exl3.f16BitsToF32(vh[slots[slot] * 128 + j]) * sc[slot];
+        }
+        for (truth, 0..) |v, j| {
+            const g: f64 = yp[r * 128 + j];
+            const c: f64 = cp[r * 128 + j];
+            try std.testing.expect(std.math.isFinite(g) and std.math.isFinite(c));
+            en += (g - v) * (g - v);
+            ec += (c - v) * (c - v);
+        }
+    }
+    try std.testing.expect(en <= ec);
+}
+
+var mimo_prefill_force: ?bool = null;
+
+fn mimoPrefillOn(hidden: c_int, inter: c_int, experts: c_int, topk: c_int, nhw: c_int) bool {
+    if (mimo_prefill_force) |v| return v;
+    return hidden == 4096 and inter == 2048 and experts == 256 and topk == 8 and nhw == 40;
+}
+
+test "exl3 MiMo prefill metadata and sorted finish preserve BF16 f32-truth bar" {
+    mimo_prefill_force = true;
+    defer mimo_prefill_force = null;
+    for (0..3) |seed| try n40PrefillBf16Truth(318 + seed, 32);
+}
+
+test "exl3 MiMo prefill optimization excludes qwen geometry" {
+    try std.testing.expect(mimoPrefillOn(4096, 2048, 256, 8, 40));
+    try std.testing.expect(!mimoPrefillOn(2560, 640, 512, 10, 64));
+    try std.testing.expect(!mimoPrefillOn(2560, 640, 512, 10, 48));
+    try std.testing.expect(!mimoPrefillOn(4096, 2048, 256, 8, 48));
 }
