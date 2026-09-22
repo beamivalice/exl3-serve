@@ -25,8 +25,8 @@ from typing import NamedTuple
 
 import numpy as np
 
-PREFETCH_WORKERS_DEFAULT = 2
-PREFETCH_DEPTH_DEFAULT = 2
+PREFETCH_WORKERS_DEFAULT = 3
+PREFETCH_DEPTH_DEFAULT = 3
 
 # `quantize_tiles_mlx` evaluates before it returns, so the accumulated seconds are
 # GPU-busy wall time: what fraction of the run is the trellis search itself.
@@ -366,6 +366,32 @@ def weighted_rel_err(public: np.ndarray, public_hat: np.ndarray,
     return num / max(den, 1e-30)
 
 
+def weighted_rel_err_mlx(public, public_hat, channel_weights):
+    import mlx.core as mx
+    om = channel_weights.reshape(-1, 1)
+    delta = (public_hat - public).astype(mx.float32)
+    num = mx.sum(om * delta * delta)
+    den = mx.sum(om * public.astype(mx.float32) ** 2)
+    return num / mx.maximum(den, 1e-30)
+
+
+def quality_errors_mlx(recon, publics, calibrations, suh16, svh16):
+    import mlx.core as mx
+    suh_mx = mx.array(suh16, dtype=mx.float32)
+    svh_mx = mx.array(svh16, dtype=mx.float32)
+    result = []
+    for start in range(0, len(publics), 4):
+        errors = []
+        for ei in range(start, min(start + 4, len(publics))):
+            public = publics[ei]
+            hat = public_from_inner_mlx(recon[ei], suh_mx[ei], svh_mx[ei])
+            weights = (mx.ones(public.shape[0], dtype=mx.float32) if calibrations[ei] is None
+                       else mx.array(calibrations[ei], dtype=mx.float32))
+            errors.append(weighted_rel_err_mlx(mx.array(public, dtype=mx.float32), hat, weights))
+        result.extend(np.array(mx.stack(errors)).tolist())
+    return result
+
+
 def imatrix_ldl_blocks(diag_public: np.ndarray, suh: np.ndarray) -> np.ndarray:
     return inner_ldl_blocks(inner_hessian_blocks(diag_public, suh))
 
@@ -683,13 +709,8 @@ def quantize_prepared_bank(
     svh16 = prep.svh.astype(np.float16)
     if want_err:
         trellis, recon = result
-        suh_mx = mx.array(suh16.astype(np.float32))
-        svh_mx = mx.array(svh16.astype(np.float32))
-        for ei in range(n):
-            hat = np.array(public_from_inner_mlx(recon[ei], suh_mx[ei], svh_mx[ei]))
-            w = calibrations[ei] if calibrations[ei] is not None else np.ones(rows, np.float32)
-            err_out.append(weighted_rel_err(publics[ei], hat, w))
-        del recon, suh_mx, svh_mx
+        err_out.extend(quality_errors_mlx(recon, publics, calibrations, suh16, svh16))
+        del recon
     else:
         trellis = result
     # ONE clear per expert bank. Clearing per launch measured 1.27x slower on the real

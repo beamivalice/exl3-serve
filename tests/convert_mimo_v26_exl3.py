@@ -57,7 +57,7 @@ from exl3_convert_common import (  # noqa: E402,F401
     prior_ldl_blocks, public_from_inner_mlx, quantize_expert_bank, quantize_inner_direct,
     quantize_prepared_bank, read_header, read_raw, read_stamp, reset_search_stats,
     sample_tile_index, sample_tiles_mlx, search_stats_snapshot, search_tiles,
-    shard_reuse_refusal, validate_window, weighted_rel_err)
+    shard_reuse_refusal, validate_window, weighted_rel_err, weighted_rel_err_mlx, quality_errors_mlx)
 
 K_DEFAULT = 2.5
 CODEBOOK_DEFAULT = "tiny"
@@ -809,6 +809,54 @@ class RoundTripTests(unittest.TestCase):
 
 
 class QualityMetricTests(unittest.TestCase):
+    def test_quality_readbacks_are_bounded_to_four_experts(self):
+        from unittest.mock import patch
+        import mlx.core as mx
+        rng = np.random.default_rng(85)
+        publics = [rng.standard_normal((128, 128), dtype=np.float32) for _ in range(9)]
+        recon = mx.array(np.stack(publics))
+        scales = np.ones((9, 128), np.float16)
+        original = np.array
+        def bounded(value, *args, **kwargs):
+            if isinstance(value, mx.array) and value.size > 4:
+                raise AssertionError("quality group exceeds four experts")
+            return original(value, *args, **kwargs)
+        with patch.object(np, "array", bounded):
+            errors = quality_errors_mlx(recon, publics, [None] * 9, scales, scales)
+        self.assertEqual(len(errors), 9)
+        self.assertTrue(all(np.isfinite(error) for error in errors))
+
+
+    def test_device_metric_matches_the_host_metric(self):
+        import mlx.core as mx
+        rng = np.random.default_rng(83)
+        public = rng.standard_normal((128, 64), dtype=np.float32)
+        hat = public + rng.standard_normal(public.shape, dtype=np.float32) * np.float32(0.1)
+        weights = np.abs(rng.standard_normal(128, dtype=np.float32)) + np.float32(0.1)
+        expected = weighted_rel_err(public, hat, weights)
+        actual = weighted_rel_err_mlx(mx.array(public), mx.array(hat), mx.array(weights))
+        self.assertAlmostEqual(float(actual.item()), expected, places=6)
+
+
+    def test_quality_reads_back_only_float_scalars(self):
+        from unittest.mock import patch
+        import mlx.core as mx
+        rng = np.random.default_rng(84)
+        publics = [rng.standard_normal((128, 128), dtype=np.float32) for _ in range(2)]
+        errors = []
+        original = np.array
+        def scalar_readback(value, *args, **kwargs):
+            if isinstance(value, mx.array) and value.dtype == mx.float32 and value.ndim > 1:
+                raise AssertionError("quality readback contains a full float matrix")
+            return original(value, *args, **kwargs)
+        with patch.object(np, "array", scalar_readback):
+            quantize_expert_bank(publics, [1, 2], [np.ones(128, np.float32)] * 2,
+                                 k=2.5, codebook="mul1", window=8, quantizer="ldlq",
+                                 scratch_bytes=1 << 26, err_out=errors)
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all(np.isfinite(error) and error > 0 for error in errors))
+
+
     def test_the_metric_is_dsv4s_definition_with_the_axis_this_layout_uses(self):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from dsv4_imatrix import weighted_rel_err as reference
