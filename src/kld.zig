@@ -863,10 +863,7 @@ pub fn loadModel(io: std.Io, allocator: std.mem.Allocator, opts: Options) !*Load
     self.chat_config = try chat_mod.loadChatConfig(io, allocator, opts.model_dir);
     errdefer self.chat_config.deinit();
 
-    self.weights = if (self.config.expert_streaming)
-        try model_mod.loadWeightsStreaming(io, allocator, opts.model_dir, self.config.expert_layout)
-    else
-        try model_mod.loadWeights(io, allocator, opts.model_dir);
+    self.weights = try model_mod.loadWeightsForConfig(io, allocator, opts.model_dir, &self.config, false);
     errdefer self.weights.deinit();
     model_mod.resolveWeightPrefix(&self.config, &self.weights);
 
@@ -1866,4 +1863,194 @@ test "kld records the budget that shaped the load, never the raw flag" {
     try testing.expectEqual(@as(u64, 60), capturedSsdBudgetGb(&q4, 0));
     q4.expert_ssd_budget_bytes = 0;
     try testing.expectEqual(@as(u64, 48), capturedSsdBudgetGb(&q4, 48 * GiB));
+}
+
+const TinyMimo = struct {
+    const hidden: usize = 128;
+    const vocab: usize = 8;
+    const experts: usize = 4;
+    const layers: usize = 2;
+    const qkv_rows: usize = 384; // (8 heads + 8 kv + 8 v) * 16
+    const packed_cols: usize = hidden / 8; // 4-bit affine over `hidden` inputs
+    const groups: usize = hidden / 64;
+};
+
+const TinyTensor = struct {
+    key: []const u8,
+    dtype: []const u8,
+    shape: []const u64,
+    bytes: []const u8,
+};
+
+fn tinyBf16(a: std.mem.Allocator, count: usize, seed: u64) ![]u8 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const out = try a.alloc(u8, count * 2);
+    for (0..count) |i| {
+        const v: f32 = r.float(f32) - 0.5;
+        const bits: u32 = @bitCast(v);
+        std.mem.writeInt(u16, out[i * 2 ..][0..2], @truncate(bits >> 16), .little);
+    }
+    return out;
+}
+
+/// e4m3 codes in [0.5, 0.94] with alternating signs — every byte a finite value,
+/// so a pack that reads them raw still forwards instead of dying on a NaN.
+fn tinyFp8(a: std.mem.Allocator, count: usize, seed: u64) ![]u8 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const out = try a.alloc(u8, count);
+    for (out) |*b| b.* = (if (r.boolean()) @as(u8, 0xB0) else @as(u8, 0x30)) | r.uintLessThan(u8, 8);
+    return out;
+}
+
+fn tinyU32(a: std.mem.Allocator, count: usize, seed: u64) ![]u8 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const out = try a.alloc(u8, count * 4);
+    for (0..count) |i| std.mem.writeInt(u32, out[i * 4 ..][0..4], r.int(u32), .little);
+    return out;
+}
+
+fn tinyF32(a: std.mem.Allocator, values: []const f32) ![]u8 {
+    const out = try a.alloc(u8, values.len * 4);
+    for (values, 0..) |v, i| std.mem.writeInt(u32, out[i * 4 ..][0..4], @bitCast(v), .little);
+    return out;
+}
+
+fn writeTinyShard(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, tensors: []const TinyTensor) !void {
+    var header: std.ArrayList(u8) = .empty;
+    defer header.deinit(a);
+    try header.append(a, '{');
+    var payload: usize = 0;
+    for (tensors, 0..) |t, i| {
+        if (i != 0) try header.append(a, ',');
+        try header.print(a, "\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[", .{ t.key, t.dtype });
+        for (t.shape, 0..) |dim, j| {
+            if (j != 0) try header.append(a, ',');
+            try header.print(a, "{d}", .{dim});
+        }
+        try header.print(a, "],\"data_offsets\":[{d},{d}]}}", .{ payload, payload + t.bytes.len });
+        payload += t.bytes.len;
+    }
+    try header.append(a, '}');
+
+    const file_bytes = try a.alloc(u8, 8 + header.items.len + payload);
+    defer a.free(file_bytes);
+    std.mem.writeInt(u64, file_bytes[0..8], header.items.len, .little);
+    @memcpy(file_bytes[8..][0..header.items.len], header.items);
+    var at: usize = 8 + header.items.len;
+    for (tensors) |t| {
+        @memcpy(file_bytes[at..][0..t.bytes.len], t.bytes);
+        at += t.bytes.len;
+    }
+    try dir.writeFile(io, .{ .sub_path = "model-00001.safetensors", .data = file_bytes });
+
+    var index: std.ArrayList(u8) = .empty;
+    defer index.deinit(a);
+    try index.appendSlice(a, "{\"weight_map\":{");
+    for (tensors, 0..) |t, i| {
+        if (i != 0) try index.append(a, ',');
+        try index.print(a, "\"{s}\":\"model-00001.safetensors\"", .{t.key});
+    }
+    try index.appendSlice(a, "}}");
+    try dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
+}
+
+/// A two-layer mimo_v2 pack shaped like a converted MiMo: the FP8 source trunk
+/// (layer 0 dense) beside RESIDENT affine routed banks (layer 1). `expert_seed`
+/// is the only thing that differs between two arms.
+fn writeTinyMimoResidentPack(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expert_seed: u64) !void {
+    const H = TinyMimo.hidden;
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data =
+        \\{"model_type":"mimo_v2","vocab_size":8,"hidden_size":128,
+        \\ "num_hidden_layers":2,"intermediate_size":128,
+        \\ "moe_intermediate_size":128,"n_routed_experts":4,
+        \\ "num_experts_per_tok":2,"n_group":1,"topk_group":1,
+        \\ "num_attention_heads":8,"num_key_value_heads":8,"head_dim":16,
+        \\ "v_head_dim":16,"swa_num_attention_heads":8,
+        \\ "swa_num_key_value_heads":8,"swa_head_dim":16,"swa_v_head_dim":16,
+        \\ "hybrid_layer_pattern":[0,0],"moe_layer_freq":[0,1],
+        \\ "attention_projection_layout":"fused_qkv",
+        \\ "add_swa_attention_sink_bias":false,
+        \\ "add_full_attention_sink_bias":false}
+    });
+    try dir.writeFile(io, .{ .sub_path = "tokenizer_config.json", .data = "{}" });
+    try dir.writeFile(io, .{ .sub_path = "tokenizer.json", .data =
+        \\{"pre_tokenizer":{"type":"ByteLevel"},"model":{"type":"BPE",
+        \\ "vocab":{"a":0,"b":1,"c":2,"d":3,"e":4,"f":5,"g":6,"h":7},"merges":[]}}
+    });
+
+    var tensors: std.ArrayList(TinyTensor) = .empty;
+    defer tensors.deinit(a);
+    const vec_shape = try a.dupe(u64, &[_]u64{H});
+    try tensors.append(a, .{ .key = "model.embed_tokens.weight", .dtype = "BF16", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.vocab, H }), .bytes = try tinyBf16(a, TinyMimo.vocab * H, 11) });
+    try tensors.append(a, .{ .key = "lm_head.weight", .dtype = "BF16", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.vocab, H }), .bytes = try tinyBf16(a, TinyMimo.vocab * H, 12) });
+    try tensors.append(a, .{ .key = "model.norm.weight", .dtype = "BF16", .shape = vec_shape, .bytes = try tinyBf16(a, H, 13) });
+
+    for (0..TinyMimo.layers) |li| {
+        const p = try std.fmt.allocPrint(a, "model.layers.{d}", .{li});
+        const seed: u64 = 100 + li;
+        try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.input_layernorm.weight", .{p}), .dtype = "BF16", .shape = vec_shape, .bytes = try tinyBf16(a, H, seed) });
+        try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.post_attention_layernorm.weight", .{p}), .dtype = "BF16", .shape = vec_shape, .bytes = try tinyBf16(a, H, seed + 1) });
+        try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.self_attn.qkv_proj.weight", .{p}), .dtype = "F8_E4M3", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.qkv_rows, H }), .bytes = try tinyFp8(a, TinyMimo.qkv_rows * H, seed + 2) });
+        try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.self_attn.qkv_proj.weight_scale_inv", .{p}), .dtype = "F32", .shape = try a.dupe(u64, &[_]u64{ 4, 1 }), .bytes = try tinyF32(a, &[_]f32{ 1.0, 0.75, 1.25, 0.5 }) });
+        try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.self_attn.o_proj.weight", .{p}), .dtype = "BF16", .shape = try a.dupe(u64, &[_]u64{ H, H }), .bytes = try tinyBf16(a, H * H, seed + 3) });
+
+        if (li == 0) {
+            for ([_][]const u8{ "gate", "up", "down" }, 0..) |proj, j| {
+                try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.{s}_proj.weight", .{ p, proj }), .dtype = "F8_E4M3", .shape = try a.dupe(u64, &[_]u64{ H, H }), .bytes = try tinyFp8(a, H * H, seed + 10 + j) });
+                try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.{s}_proj.weight_scale_inv", .{ p, proj }), .dtype = "F32", .shape = try a.dupe(u64, &[_]u64{ 1, 1 }), .bytes = try tinyF32(a, &[_]f32{1.0}) });
+            }
+            continue;
+        }
+        try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.gate.weight", .{p}), .dtype = "BF16", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.experts, H }), .bytes = try tinyBf16(a, TinyMimo.experts * H, seed + 20) });
+        try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.gate.e_score_correction_bias", .{p}), .dtype = "F32", .shape = try a.dupe(u64, &[_]u64{TinyMimo.experts}), .bytes = try tinyF32(a, &[_]f32{ 0.0, 0.1, -0.1, 0.05 }) });
+        for ([_][]const u8{ "gate", "up", "down" }, 0..) |proj, j| {
+            const rows = TinyMimo.experts * H;
+            try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.switch_mlp.{s}_proj.weight", .{ p, proj }), .dtype = "U32", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.experts, H, TinyMimo.packed_cols }), .bytes = try tinyU32(a, rows * TinyMimo.packed_cols, expert_seed * 1000 + j) });
+            try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.switch_mlp.{s}_proj.scales", .{ p, proj }), .dtype = "BF16", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.experts, H, TinyMimo.groups }), .bytes = try tinyBf16(a, rows * TinyMimo.groups, expert_seed * 1000 + 10 + j) });
+            try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.switch_mlp.{s}_proj.biases", .{ p, proj }), .dtype = "BF16", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.experts, H, TinyMimo.groups }), .bytes = try tinyBf16(a, rows * TinyMimo.groups, expert_seed * 1000 + 20 + j) });
+        }
+    }
+    try writeTinyShard(io, a, dir, tensors.items);
+}
+
+test "kld: a resident mimo_v2 load takes the source trunk and its logits follow the routed experts" {
+    const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var metal: bool = false;
+    mlx.check(mlx.mlx_metal_is_available(&metal)) catch return error.SkipZigTest;
+    if (!metal) return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const ids = [_]u32{ 1, 3, 5, 2, 7, 0 };
+    var rows: [2][TinyMimo.vocab]f32 = undefined;
+    for ([_][]const u8{ "pack_a", "pack_b" }, 0..) |sub, arm| {
+        try tmp.dir.createDirPath(io, sub);
+        var dir = try tmp.dir.openDir(io, sub, .{});
+        defer dir.close(io);
+        try writeTinyMimoResidentPack(io, arena, dir, @as(u64, arm) + 1);
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_len = try dir.realPath(io, &path_buf);
+
+        const loaded = try loadModel(io, allocator, .{ .model_dir = path_buf[0..path_len] });
+        defer loaded.deinit();
+        // The served trunk is the source loader's rank-local split; the raw
+        // fused FP8 tensor never reaches a kernel.
+        try testing.expect(loaded.weights.get("model.layers.0.self_attn.q_proj.weight") != null);
+        try testing.expect(loaded.weights.get("model.layers.0.self_attn.qkv_proj.weight") == null);
+
+        var ctx = loaded.xfm.defaultCtx();
+        const logits = try forwardPrompt(allocator, loaded, &ctx, &ids);
+        defer _ = mlx.mlx_array_free(logits);
+        try readLastRow(&loaded.xfm, logits, &rows[arm]);
+        for (rows[arm]) |v| try testing.expect(std.math.isFinite(v));
+    }
+    try testing.expect(!std.mem.eql(f32, &rows[0], &rows[1]));
 }

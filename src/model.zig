@@ -3990,6 +3990,22 @@ pub fn mimoSourceResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_d
     return @import("mimo_source.zig").residentBytes(io, allocator, model_dir);
 }
 
+/// The ONE weight-loader decision. A second construction site is how a
+/// subcommand ends up forwarding through a model the server never serves —
+/// a MiMo pack read without its source trunk binds the raw FP8 fused QKV.
+pub fn loadWeightsForConfig(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    model_dir: []const u8,
+    config: *const ModelConfig,
+    load_vision: bool,
+) !Weights {
+    if (config.expert_streaming) return loadWeightsStreaming(io, allocator, model_dir, config.expert_layout);
+    if (config.usesMimoSourceTrunk()) return loadWeightsMimoSource(io, allocator, model_dir);
+    if (load_vision) return loadWeightsWithVision(io, allocator, model_dir);
+    return loadWeights(io, allocator, model_dir);
+}
+
 pub fn loadWeightsStreaming(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, layout: expert_quant.Layout) !Weights {
     if (layout == .mxfp4_individual) return loadWeightsMimoSource(io, allocator, model_dir);
     var dir = try std.Io.Dir.openDirAbsolute(io, model_dir, .{ .iterate = true });

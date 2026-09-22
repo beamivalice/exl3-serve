@@ -3846,14 +3846,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // Weights — first mlx call. Binds the stream on this thread.
     const weights_ptr = try sch.allocator.create(Weights);
     errdefer sch.allocator.destroy(weights_ptr);
-    weights_ptr.* = if (params.config.expert_streaming)
-        try model_mod.loadWeightsStreaming(sch.io, sch.allocator, params.model_dir, params.config.expert_layout)
-    else if (params.config.usesMimoSourceTrunk())
-        try model_mod.loadWeightsMimoSource(sch.io, sch.allocator, params.model_dir)
-    else if (params.load_vision)
-        try model_mod.loadWeightsWithVision(sch.io, sch.allocator, params.model_dir)
-    else
-        try model_mod.loadWeights(sch.io, sch.allocator, params.model_dir);
+    weights_ptr.* = try model_mod.loadWeightsForConfig(sch.io, sch.allocator, params.model_dir, params.config, params.load_vision);
     errdefer weights_ptr.deinit();
     model_mod.resolveWeightPrefix(params.config, weights_ptr);
 

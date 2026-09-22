@@ -9,6 +9,7 @@
 - **An EXL3 pack can name the codeword window its search hashed** (`expert_quant.window`, 12 to 16, absent means 16): every decode arm masks the sliding window to the model's own width, and a width this build cannot decode is refused by name at load.
 - **MiMo-V2.6-Flash serves long context at a fraction of the KV.** Its 39 sliding-window layers now keep a short ring instead of a full-length cache, so a token costs only the 9 global layers' keys and values; a prefix whose match falls below the retained window cold-prefills instead of restoring.
 - **A MiMo affine expert pack serves resident.** Routed experts packed as `switch_mlp` weight/scales/biases under the arch's own nesting are recognized, load beside the source FP8 trunk, and resolve their (bits, group size) per layer and projection; such a pack is no longer reported as streaming-required.
+- **`mlx-serve kld` scores a resident MiMo pack through the model the server serves.** It loads the source FP8 trunk like every other path, so two packs that differ only in their routed experts no longer compare identical.
 
 ## Exl3-serve - v26.9.5
 
