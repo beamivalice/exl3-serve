@@ -178,7 +178,26 @@ def dequant_mxfp4(weight: np.ndarray, scale: np.ndarray, *, block: int = 32) -> 
 
 def public_from_mxfp4(weight: np.ndarray, scale: np.ndarray) -> np.ndarray:
     """EXL3 public weight (in_features, out_features) from the MXFP4 pair."""
-    return np.ascontiguousarray(dequant_mxfp4(weight, scale).T)
+    w = np.asarray(weight, dtype=np.uint8)
+    s = np.asarray(scale, dtype=np.uint8)
+    if w.ndim != 2 or s.ndim != 2:
+        return np.ascontiguousarray(dequant_mxfp4(w, s).T)
+    rows, half = w.shape
+    if half * 2 % 32 or s.shape != (rows, half * 2 // 32):
+        return np.ascontiguousarray(dequant_mxfp4(w, s).T)
+    values = e2m1_value(np.arange(16, dtype=np.uint8))
+    public = np.empty((half * 2, rows), dtype=np.float32)
+    for start in range(0, rows, 64):
+        stop = min(start + 64, rows)
+        nibbles = np.empty((stop - start, half * 2), dtype=np.uint8)
+        nibbles[:, 0::2] = w[start:stop] & 15
+        nibbles[:, 1::2] = w[start:stop] >> 4
+        decoded = values[nibbles]
+        decoded.reshape(stop - start, half * 2 // 32, 32)[:] *= e8m0_value(s[start:stop])[:, :, None]
+        if not np.isfinite(decoded).all():
+            return np.ascontiguousarray(dequant_mxfp4(w, s).T)
+        public[:, start:stop] = decoded.T
+    return public
 
 
 # ------------------------------------------------------------------ K / rate
@@ -1245,6 +1264,34 @@ def _mxfp4_bytes(values: np.ndarray, scale_codes: np.ndarray) -> tuple[np.ndarra
 
 
 class Mxfp4LayoutTests(unittest.TestCase):
+    def test_public_decode_bounds_the_nibble_lookup_scratch(self):
+        from unittest.mock import patch
+        rng = np.random.default_rng(81)
+        weight = rng.integers(0, 256, (129, 256), dtype=np.uint8)
+        scale = rng.integers(100, 140, (129, 16), dtype=np.uint8)
+        expected = public_from_mxfp4(weight, scale)
+        original = e2m1_value
+        def bounded(codes):
+            if np.size(codes) > 64 * 512:
+                raise MemoryError("nibble lookup exceeds one 64-row tile")
+            return original(codes)
+        with patch.dict(public_from_mxfp4.__globals__, e2m1_value=bounded):
+            actual = public_from_mxfp4(weight, scale)
+        self.assertTrue(actual.flags.c_contiguous)
+        np.testing.assert_array_equal(actual.view(np.uint32), expected.view(np.uint32))
+
+    def test_public_decode_preserves_all_nibble_and_finite_scale_bits(self):
+        weight = np.broadcast_to(np.arange(256, dtype=np.uint8), (253, 256))
+        scale = np.broadcast_to(np.arange(253, dtype=np.uint8)[:, None], (253, 16))
+        expected = np.ascontiguousarray(dequant_mxfp4(weight, scale).T)
+        actual = public_from_mxfp4(weight, scale)
+        np.testing.assert_array_equal(actual.view(np.uint32), expected.view(np.uint32))
+        for code in (253, 254):
+            weight = np.full((3, 16), 0x11, np.uint8)
+            scale = np.full((3, 1), code, np.uint8)
+            np.testing.assert_array_equal(public_from_mxfp4(weight, scale).view(np.uint32),
+                                          dequant_mxfp4(weight, scale).T.view(np.uint32))
+
     def test_even_column_is_the_low_nibble_and_odd_the_high(self):
         codes = np.zeros((1, 64), dtype=np.uint8)
         codes[0, 0] = 0x2   # 1.0
