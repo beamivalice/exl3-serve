@@ -477,12 +477,15 @@ fn validateShardStamps(source: *const SourceIndex, config: *const model.ModelCon
         }
         if (stamp.k) |text| {
             // The stamp spells a rate ("2.5", "4"); the engine keys on the
-            // halfwords per tile it implies.
+            // halfwords per tile it implies. The relation is the trellis
+            // shape's (`exl3TrellisAdmitted`): the config names the widest rate
+            // a layer packs and bills it, so a shard at or below it is
+            // over-billed rather than wrong, and only a wider one refuses.
             const k = std.fmt.parseFloat(f64, text) catch return error.Exl3ShardStampMismatch;
             const scaled = @round(k * 16.0);
             if (@abs(k * 16.0 - scaled) > 1e-6) return error.Exl3ShardStampMismatch;
             if (scaled < 0 or scaled > 1024) return error.Exl3ShardStampMismatch;
-            if (@as(u32, @intFromFloat(scaled)) != config.expert_quant_rate.n)
+            if (@as(u32, @intFromFloat(scaled)) > config.expert_quant_rate.n)
                 return error.Exl3ShardStampMismatch;
         }
     }
@@ -1851,12 +1854,16 @@ test "mimo source refuses an EXL3 shard whose stamp disagrees with the config" {
     defer tmp.cleanup();
 
     // The config every arm parses names k 2.5 / tiny / w16.
-    const Case = struct { dir: []const u8, stamp: ?[]const u8, window: expert_exl3.Window, want: ?anyerror };
+    const Case = struct { dir: []const u8, stamp: ?[]const u8, window: expert_exl3.Window, rate: ?expert_exl3.Rate = null, want: ?anyerror };
     const cases = [_]Case{
         .{ .dir = "stamp-matches", .stamp = "\"k\":\"2.5\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w16, .want = null },
         .{ .dir = "stamp-window", .stamp = "\"k\":\"2.5\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w12, .want = error.Exl3ShardStampMismatch },
         .{ .dir = "stamp-codebook", .stamp = "\"k\":\"2.5\",\"codebook\":\"mul1\",\"window\":\"16\"", .window = .w16, .want = error.Exl3ShardStampMismatch },
+        // The bill prices the config's rate, so a shard WIDER than it refuses.
         .{ .dir = "stamp-k", .stamp = "\"k\":\"3\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w16, .want = error.Exl3ShardStampMismatch },
+        // A tail-bumped pack: the config names the widest rate and the body
+        // layers stamp below it. Over-billed, not wrong — it loads.
+        .{ .dir = "stamp-k-below", .stamp = "\"k\":\"2.5\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w16, .rate = .{ .n = 64 }, .want = null },
         // A pack written before the stamp existed is admitted as legacy.
         .{ .dir = "stamp-absent", .stamp = null, .window = .w12, .want = null },
     };
@@ -1871,6 +1878,7 @@ test "mimo source refuses an EXL3 shard whose stamp disagrees with the config" {
         var config = try model.parseConfig(io, t.allocator, path);
         defer config.deinit(t.allocator);
         config.expert_quant_window = case.window;
+        if (case.rate) |r| config.expert_quant_rate = r;
         const got = residentBytesWithConfig(io, t.allocator, path, &config);
         if (case.want) |want| try t.expectError(want, got) else _ = try got;
     }
