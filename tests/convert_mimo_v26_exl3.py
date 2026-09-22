@@ -15,9 +15,10 @@ Per MoE layer L and projection P one shard `model-exl3-L{LL}-{P}.safetensors`:
 
 Default quantization is LDLQ under the imatrix Hessian ROTATED into the inner
 basis the search works in, preceded by a per-expert global codebook-scale search;
-`--quantizer direct` is the calibration-free path. `--window` is 16 only: the
-trellis decoders hash the full 16-bit sliding window, so a narrower search packs
-bits nothing can read back.
+`--quantizer direct` is the calibration-free path. `--window` (default 16) is the
+codeword width the search hashes; the pack records it in `expert_quant.window`
+and every decoder masks to it (the engine admits 8..16), so a narrower window
+trades weight error for search time at the same bits per weight.
 
   python3 tests/convert_mimo_v26_exl3.py --self-test
   python3 tests/convert_mimo_v26_exl3.py \\
@@ -2207,7 +2208,7 @@ def main() -> int:
     ap.add_argument("--k", default=str(K_DEFAULT), help="trellis rate, any multiple of 1/16")
     ap.add_argument("--codebook", default=CODEBOOK_DEFAULT, choices=("tiny", "mul1", "mcg"))
     ap.add_argument("--window", type=int, default=WINDOW_DEFAULT,
-                    help="trellis search window; only 16 is readable by the decoders")
+                    help="codeword window the search hashes, 8..16 served; stamped into the pack")
     ap.add_argument("--quantizer", default="ldlq", choices=("ldlq", "direct"))
     ap.add_argument("--imatrix", default=None, help="safetensors imatrix; required for ldlq")
     ap.add_argument("--layers", default=None, help="MoE layer range for pilots, e.g. 1 or 1-4,9")
