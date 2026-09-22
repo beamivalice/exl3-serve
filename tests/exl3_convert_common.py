@@ -165,12 +165,16 @@ def _tile_helpers():
 LAUNCH_TILES_CAP = 1024
 
 
+def launch_tile_cap(window: int) -> int:
+    return 8192 if window == 8 else LAUNCH_TILES_CAP
+
+
 def launch_tiles_for(k, window: int, scratch_gb: float) -> int:
     """Tiles per Metal launch: the smaller of the scratch budget and the saturation cap."""
     _ensure_lib()
     from ponyexl3.convert.metal_search import _scratch_bytes_per_tile
     per = _scratch_bytes_per_tile(k, window)
-    return max(1, min(LAUNCH_TILES_CAP, int(scratch_gb * (1 << 30)) // per))
+    return max(1, min(launch_tile_cap(window), int(scratch_gb * (1 << 30)) // per))
 
 
 def search_tiles(tiles: np.ndarray, *, k, cb, window: int, chunk: int,
@@ -410,7 +414,7 @@ def _search_mlx(tiles_mx, *, k, cb, window: int, scratch_bytes: int):
     _ensure_lib()
     from ponyexl3.convert.metal_search import quantize_tiles_mlx, _scratch_bytes_per_tile
     n = int(tiles_mx.shape[0])
-    per_launch = max(1, min(LAUNCH_TILES_CAP,
+    per_launch = max(1, min(launch_tile_cap(window),
                             scratch_bytes // _scratch_bytes_per_tile(k, window)))
     t0 = time.perf_counter()
     decoded, states = quantize_tiles_mlx(

@@ -708,6 +708,32 @@ class Mxfp4LayoutTests(unittest.TestCase):
 
 
 class RateTests(unittest.TestCase):
+    def test_narrow_launches_are_larger_and_still_scratch_bounded(self):
+        _ensure_lib()
+        from ponyexl3.convert.metal_search import _scratch_bytes_per_tile
+        self.assertEqual(launch_tiles_for(2.5, 8, 4.0), 8192)
+        self.assertEqual(launch_tiles_for(2.5, 16, 4.0), 1024)
+        per_tile = _scratch_bytes_per_tile(2.5, 8)
+        self.assertEqual(launch_tiles_for(2.5, 8, per_tile * 73 / (1 << 30)), 73)
+
+
+    def test_search_uses_the_narrow_launch_budget(self):
+        from unittest.mock import patch
+        _ensure_lib()
+        from ponyexl3.convert import metal_search
+        class Tiles:
+            shape = (16384, 256)
+        seen = []
+        def search(tiles, k, cb, **kwargs):
+            seen.append(kwargs["max_scratch_bytes"])
+            return None, None
+        reset_search_stats()
+        with patch.object(metal_search, "quantize_tiles_mlx", search):
+            _search_mlx(Tiles(), k=2.5, cb=None, window=8, scratch_bytes=1 << 32)
+        self.assertEqual(seen, [8192 * metal_search._scratch_bytes_per_tile(2.5, 8)])
+        self.assertEqual(search_stats_snapshot()["launches"], 2)
+
+
     def test_a_k_that_is_not_a_sixteenth_is_refused(self):
         for bad in (2.3, 2.51, 3.999):
             with self.assertRaises(ValueError):
