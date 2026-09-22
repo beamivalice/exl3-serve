@@ -2151,7 +2151,7 @@ test "expert stream warm cache leaves an active layer reusable after a fill erro
     var fixture = try TinyLayersEngine.open(5, 3, 1, 8);
     defer fixture.close();
     const engine = &fixture.engine;
-    const bad_index = (1 * @as(usize, 8) + 0) * 2 + @intFromEnum(Component.down);
+    const bad_index = (1 * @as(usize, 8) + 0) * 2 + @backingInt(Component.down);
     const good = engine.store.spans[bad_index];
     engine.store.spans[bad_index] = .{ .file = good.file, .offset = 1 << 40, .len = good.len };
     try t.expectError(error.FillSpanPastEof, engine.warmCache());
@@ -2750,6 +2750,19 @@ test "expert stream MXFP4 keeps nine component ids but imports and leases only s
     try t.expectEqual(@as(usize, 0), engine.layers[0].slabs.len);
     try t.expectEqual(@as(usize, quant.component_count), engine.layers[1].slabs.len);
     try t.expectError(error.ExpertLayerAbsent, engine.prepareHost(0, &.{1}));
+
+    try engine.warmCache();
+    try t.expectEqual(@as(u64, 1), engine.fill_experts_total);
+    try t.expect(engine.slotReady(1, 0));
+    try t.expect(!engine.slotReady(1, 1));
+    var warm_hit = try engine.prepareHost(1, &.{0});
+    warm_hit.deinit();
+    try t.expectEqual(@as(u64, 1), engine.fill_experts_total);
+    for (0..quant.component_count) |ci| {
+        if (!engine.store.componentPresent(ci)) continue;
+        const source = engine.store.spanAt(1, 0, ci);
+        try t.expectEqualSlices(u8, raw[@intCast(source.offset)..][0..@intCast(source.len)], engine.cacheSlotBytesAt(1, 0, ci));
+    }
 
     var prepared = try engine.prepareHost(1, &.{1});
     const slot = prepared.remapped[0];

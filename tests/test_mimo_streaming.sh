@@ -46,6 +46,24 @@ done
 curl --connect-timeout 2 --max-time 5 -fsS "$BASE/health" >/dev/null
 curl --max-time 10 -fsS "$BASE/v1/models" >"$OUT/models.json"
 ID=$(jq -er '.data[] | select(.loaded == true and .streaming == true and .input_modalities == ["text"]) | .id' "$OUT/models.json")
+python3 - "$OUT/server.log" "$MODEL/config.json" <<'PY'
+import json
+import re
+import sys
+
+log = open(sys.argv[1]).read()
+config = json.load(open(sys.argv[2]))
+warm = re.search(
+    r"\[expert-stream\] cache warm complete: slots=(\d+)/(\d+) per layer, layers=(\d+), bytes=(\d+)",
+    log,
+)
+assert warm, "model became ready without preloading its expert cache"
+slots, capacity, layers, size = map(int, warm.groups())
+assert slots == capacity * 4 // 5, (slots, capacity)
+pattern = config["moe_layer_freq"]
+assert layers == sum(bool(x) for x in pattern), (layers, pattern)
+assert size > 0, "cache preload read no expert bytes"
+PY
 jq -nc --arg model "$ID" '{model:$model,messages:[{role:"user",content:"Write one short sentence about rain."}],temperature:0,seed:1234,max_tokens:16,enable_thinking:false,stream:false}' >"$OUT/request.json"
 for n in 1 2; do
     curl --connect-timeout 5 --max-time 1800 -fsS -H 'Content-Type: application/json' \

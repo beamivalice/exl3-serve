@@ -4322,6 +4322,19 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         }
     }
 
+    if (xfm_ptr.expert_stream) |engine| {
+        const slots = engine.warmSlotsPerLayer();
+        const layers = expert_stream_mod.moeLayerCount(engine.geometry);
+        const bytes = @as(u64, slots) * layers * engine.plan.expert_bytes;
+        log.info("[expert-stream] cache warm: preloading {d:.3} GB (80% of cache slots, lowest expert IDs)\n", .{@as(f64, @floatFromInt(bytes)) / 1e9});
+        const start = std.Io.Timestamp.now(sch.io, .awake);
+        try engine.warmCache();
+        const elapsed_ns: u64 = @intCast(start.untilNow(sch.io, .awake).nanoseconds);
+        log.info("[expert-stream] cache warm complete: slots={d}/{d} per layer, layers={d}, bytes={d}, elapsed_ms={d}\n", .{
+            slots, engine.plan.slots_per_layer, layers, bytes, elapsed_ns / std.time.ns_per_ms,
+        });
+    }
+
     // Eager warmup: faults weight pages + compiles the decode-path kernels
     // on this thread's stream. ~600-900 ms at boot but the first user request
     // skips a cold path — observed savings on Gemma 4 E4B 4-bit.
