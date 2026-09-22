@@ -1080,6 +1080,29 @@ class SourceReader:
 
 # --------------------------------------------------------------------- convert
 
+def prefetch_batches(pool, load, spans, capacity: int = 2):
+    if capacity < 1:
+        raise ValueError("prefetch capacity must be positive")
+    spans = iter(spans)
+    pending = []
+    try:
+        for _ in range(capacity):
+            span = next(spans, None)
+            if span is None:
+                break
+            pending.append(pool.submit(load, *span))
+        while pending:
+            batch = pending.pop(0).result()
+            span = next(spans, None)
+            if span is not None:
+                pending.append(pool.submit(load, *span))
+            yield batch
+            del batch
+    finally:
+        for future in pending:
+            future.cancel()
+
+
 def convert(
     src, dst, *,
     k=K_DEFAULT, codebook: str = CODEBOOK_DEFAULT, window: int = WINDOW_DEFAULT,
@@ -1187,12 +1210,9 @@ def convert(
 
             step = max(1, batch_experts)
             spans = [(s, min(experts, s + step)) for s in range(0, experts, step)]
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mimo-exl3-read") as pool:
-                pending = pool.submit(load_batch, *spans[0])
-                for idx, (start, stop) in enumerate(spans):
-                    prep, publics, cals = pending.result()
-                    pending = (pool.submit(load_batch, *spans[idx + 1])
-                               if idx + 1 < len(spans) else None)
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="mimo-exl3-read") as pool:
+                prepared = prefetch_batches(pool, load_batch, spans)
+                for (start, stop), (prep, publics, cals) in zip(spans, prepared):
                     bt, bsuh, bsvh, bf = quantize_prepared_bank(
                         prep, publics, cals, k=k, codebook=codebook, window=window,
                         scratch_bytes=scratch_bytes, g_scale=g_scale, scale_out=scales,
@@ -1261,6 +1281,43 @@ def _mxfp4_bytes(values: np.ndarray, scale_codes: np.ndarray) -> tuple[np.ndarra
     v = np.asarray(values, dtype=np.uint8)
     packed = (v[:, 0::2] & 0x0F) | ((v[:, 1::2] & 0x0F) << 4)
     return packed.astype(np.uint8), np.asarray(scale_codes, dtype=np.uint8)
+
+
+class PrefetchTests(unittest.TestCase):
+    def test_two_loads_can_start_before_either_finishes(self):
+        import threading
+        barrier = threading.Barrier(2)
+        def load(value):
+            if value < 2:
+                barrier.wait(timeout=2)
+            return value * 3
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            result = list(prefetch_batches(pool, load, [(i,) for i in range(7)]))
+        self.assertEqual(result, [i * 3 for i in range(7)])
+
+    def test_prefetch_has_at_most_two_pending_batches(self):
+        from concurrent.futures import Future
+        submitted = []
+        class Pool:
+            def submit(self, function, *args):
+                future = Future()
+                submitted.append(future)
+                try:
+                    future.set_result(function(*args))
+                except Exception as error:
+                    future.set_exception(error)
+                return future
+        batches = prefetch_batches(Pool(), lambda value: value, [(i,) for i in range(10)])
+        self.assertEqual(next(batches), 0)
+        self.assertEqual(len(submitted), 3)
+        self.assertEqual(next(batches), 1)
+        self.assertEqual(len(submitted), 4)
+        batches.close()
+        self.assertEqual(list(prefetch_batches(Pool(), lambda: None, [])), [])
+        def fail(value):
+            raise ValueError("load failed")
+        with self.assertRaisesRegex(ValueError, "load failed"):
+            list(prefetch_batches(Pool(), fail, [(0,)]))
 
 
 class Mxfp4LayoutTests(unittest.TestCase):
