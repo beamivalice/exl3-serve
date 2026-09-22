@@ -753,6 +753,12 @@ fn codebookHelpers(comptime cb: exl3.Codebook, comptime win: exl3.Window) [:0]co
     return comptime pair ++
         \\static inline float2 exl3_decode2(uint2 cw) { return float2(exl3_pairh(cw)); }
         \\static inline float exl3_decode1(uint cw) { return exl3_decode2(uint2(cw, 0u)).x; }
+        \\static inline ulong exl3_n40_lane(const device uint *words, uint lane) {
+        \\  const uint end = 20u * lane + 20u;
+        \\  const uint last = (end - 1u) >> 5u;
+        \\  const uint prev = last == 0u ? 19u : last - 1u;
+        \\  return (((ulong)words[prev] << 32u) | (ulong)words[last]) >> ((0u - end) & 31u);
+        \\}
         \\// Weight t's 16-bit codeword is the window ending at floor((t+1)*K), with
         \\// K = N/16; the pair (t0, t0+1) shares one 32-bit funnel read.
         \\struct exl3_win { uint i0; uint i1; uint sh; uint fresh; };
@@ -1757,6 +1763,24 @@ const DOWN_FUSED_SOURCE: [:0]const u8 =
     \\    acc[p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[p * 2u + 1u]);
     \\  }
     \\}
+    \\}
+    \\else if (N == 40u) {
+    \\for (uint tk = tk0 + sg; tk < tk1; tk += SGS) {
+    \\  const device uint* words = trellis_e + ((size_t)tk * (size_t)OT + ot) * PACKED_W;
+    \\  const ulong merged = exl3_n40_lane(words, lane);
+    \\  const float in0 = float(prepared[tk * TILE + row0]);
+    \\  const float in1 = float(prepared[tk * TILE + row1]);
+    \\  const float in2 = float(prepared[tk * TILE + row2]);
+    \\  const float in3 = float(prepared[tk * TILE + row3]);
+    \\  const uint sh[8] = {18u, 15u, 13u, 10u, 8u, 5u, 3u, 0u};
+    \\  const float ins[8] = {in0, in1, in2, in3, in0, in1, in2, in3};
+    \\  for (uint p = 0u; p < 4u; p++) {
+    \\    const uint2 cw = uint2(uint(merged >> sh[p * 2u]), uint(merged >> sh[p * 2u + 1u])) & uint2(0xffffu);
+    \\    const float2 w = exl3_decode2(cw);
+    \\    acc[p * 2u] = fma(ins[p * 2u], w.x, acc[p * 2u]);
+    \\    acc[p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[p * 2u + 1u]);
+    \\  }
+    \\}
     \\} else {
     \\  uint w0[4];
     \\  uint w1[4];
@@ -1945,6 +1969,24 @@ const PAIR_GEMV_SOURCE: [:0]const u8 =
     \\    const float in2 = float(prepared[xb + (tk - tk0) * TILE + row2]);
     \\    const float in3 = float(prepared[xb + (tk - tk0) * TILE + row3]);
     \\    const uint sh[8] = {28u, 24u, 20u, 16u, 12u, 8u, 4u, 0u};
+    \\    const float ins[8] = {in0, in1, in2, in3, in0, in1, in2, in3};
+    \\    for (uint p = 0u; p < 4u; p++) {
+    \\      const uint2 cw = uint2(uint(merged >> sh[p * 2u]), uint(merged >> sh[p * 2u + 1u])) & uint2(0xffffu);
+    \\      const float2 w = exl3_decode2(cw);
+    \\      acc[p * 2u] = fma(ins[p * 2u], w.x, acc[p * 2u]);
+    \\      acc[p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[p * 2u + 1u]);
+    \\    }
+    \\  }
+    \\  }
+    \\  else if (N == 40u) {
+    \\  for (uint tk = tk0 + sg; tk < tk1; tk += SGS) {
+    \\    const device uint *words = trellis_e + ((size_t)tk * (size_t)OT + ot) * PACKED_W;
+    \\    const ulong merged = exl3_n40_lane(words, lane);
+    \\    const float in0 = float(prepared[xb + (tk - tk0) * TILE + row0]);
+    \\    const float in1 = float(prepared[xb + (tk - tk0) * TILE + row1]);
+    \\    const float in2 = float(prepared[xb + (tk - tk0) * TILE + row2]);
+    \\    const float in3 = float(prepared[xb + (tk - tk0) * TILE + row3]);
+    \\    const uint sh[8] = {18u, 15u, 13u, 10u, 8u, 5u, 3u, 0u};
     \\    const float ins[8] = {in0, in1, in2, in3, in0, in1, in2, in3};
     \\    for (uint p = 0u; p < 4u; p++) {
     \\      const uint2 cw = uint2(uint(merged >> sh[p * 2u]), uint(merged >> sh[p * 2u + 1u])) & uint2(0xffffu);
@@ -2144,6 +2186,7 @@ const REDUCE_SOURCE: [:0]const u8 =
     \\}
 ;
 
+var n40_decode_engaged: bool = false;
 var pair_gemv_kernel: KernelSlots = no_kernels;
 var mid_kernel: ?mlx.mlx_fast_metal_kernel = null;
 var reduce_kernel: ?mlx.mlx_fast_metal_kernel = null;
@@ -2207,6 +2250,10 @@ fn pairGemv(s: mlx.mlx_stream, x: mlx.mlx_array, suhg: mlx.mlx_array, suhu: mlx.
     const outs = [_][*:0]const u8{ "yg", "yu" };
     const kernel = try codebookKernel(&pair_gemv_kernel, "mlxserve_exl3_pair_gemv", &ins, &outs, PAIR_GEMV_SOURCE);
     const ov = try applyOuts(s, kernel, &.{ x, suhg, suhu, tg, tu, slots }, cfg, 2);
+    if (rate.n == 40 and !n40_decode_engaged) {
+        n40_decode_engaged = true;
+        log.info("[exl3-decode] n40 eight-weight lane reader engaged dtype={s}\n", .{@tagName(mlx.mlx_array_dtype(x))});
+    }
     defer _ = mlx.mlx_vector_array_free(ov);
     var a = mlx.mlx_array_new();
     errdefer _ = mlx.mlx_array_free(a);
@@ -6826,10 +6873,23 @@ test "exl3 codebook A/B at production shape" {
 }
 
 fn n40NaxReaderExact(comptime cb: exl3.Codebook, comptime win: exl3.Window, comptime raw: bool) !void {
+    return n40WeightReaderExact(cb, win, raw, false);
+}
+
+fn n40WeightReaderExact(comptime cb: exl3.Codebook, comptime win: exl3.Window, comptime raw: bool, comptime lane_reader: bool) !void {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const source =
+    const source = if (lane_reader)
+        \\const uint lane = thread_position_in_grid.x % 32u;
+        \\const uint tile = thread_position_in_grid.x / 32u;
+        \\const ulong bits = exl3_n40_lane((const device uint *)trellis + tile * 20u, lane);
+        \\const uint shifts[8] = {18u, 15u, 13u, 10u, 8u, 5u, 3u, 0u};
+        \\for (uint j = 0u; j < 8u; j++) {
+        \\  const uint cw = uint(bits >> shifts[j]) & 0xffffu;
+        \\  result[tile * 256u + lane * 8u + j] = as_type<ushort>(exl3_pairh(uint2(cw)).x);
+        \\}
+    else
         \\const uint lane = thread_position_in_grid.x % 32u;
         \\const uint tile = thread_position_in_grid.x / 32u;
         \\const nfrag f = nax_wfrag_k<40u>((const device uint *)trellis + tile * 20u, lane);
@@ -6842,7 +6902,7 @@ fn n40NaxReaderExact(comptime cb: exl3.Codebook, comptime win: exl3.Window, comp
     ;
     const header = comptime GEMM_NAX_INCLUDES ++ codebookHelpers(cb, win) ++ (if (raw) identity else "") ++ GEMM_NAX_FRAGS;
     var kernel: ?mlx.mlx_fast_metal_kernel = null;
-    const k = try getNamedKernel(&kernel, comptime "exl3_n40_reader_exact" ++ cbSuffix(cb) ++ winSuffix(win) ++ (if (raw) "_raw" else "_weights"), &.{"trellis"}, &.{"result"}, source, header);
+    const k = try getNamedKernel(&kernel, comptime "exl3_n40_reader_exact" ++ cbSuffix(cb) ++ winSuffix(win) ++ (if (raw) "_raw" else "_weights") ++ (if (lane_reader) "_lane" else "_nax"), &.{"trellis"}, &.{"result"}, source, header);
     defer _ = mlx.mlx_fast_metal_kernel_free(k);
     var trellis_data: [128 * 40]u16 = undefined;
     var prng = std.Random.DefaultPrng.init(430);
@@ -6876,7 +6936,7 @@ fn n40NaxReaderExact(comptime cb: exl3.Codebook, comptime win: exl3.Window, comp
         for (0..32) |lane| {
             const tau = 64 * (lane >> 4) + ((lane & 7) << 3) + ((lane >> 3) & 1);
             for ([_]usize{ 0, 1, 8, 9, 4, 5, 12, 13 }, 0..) |offset, j| {
-                const code = codes[2 * tau + offset];
+                const code = codes[if (lane_reader) lane * 8 + j else 2 * tau + offset];
                 const want = if (raw) code else exl3.decodeCodeword(code & win.mask(), cb);
                 try t.expectEqual(want, got[tile * 256 + lane * 8 + j]);
             }
@@ -6892,9 +6952,13 @@ test "exl3 n40 NAX codewords and decoded weights are exact" {
 }
 
 fn n40PrefillBf16Truth(seed: u64, win: c_int) !void {
+    return n40Bf16Truth(seed, win, 65, false);
+}
+
+fn n40Bf16Truth(seed: u64, win: c_int, rows: usize, decode: bool) !void {
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s) or !gemmNaxOn()) return error.SkipZigTest;
-    const c = MimoMoeCase{ .e = 8, .hidden = 256, .inter = 128, .topk = 8, .rows = 65, .rate = .{ .n = 40 }, .dec = .{ .codebook = .tiny, .window = .w12 }, .seed = seed, .banks = MIMO_BANKS, .x_scale = 3 };
+    const c = MimoMoeCase{ .e = 8, .hidden = 256, .inter = 128, .topk = 8, .rows = rows, .rate = .{ .n = 40 }, .dec = .{ .codebook = .tiny, .window = .w12 }, .seed = seed, .banks = MIMO_BANKS, .x_scale = 3 };
     setDecodeParams(c.dec);
     defer setDecodeParams(.mul1);
     const saved_win = gemm_win_cached;
@@ -6911,8 +6975,12 @@ fn n40PrefillBf16Truth(seed: u64, win: c_int) !void {
         v.* = @bitCast(@as(u32, b.*) << 16);
     }
     _ = mlx.mlx_array_free(f.arrays[8]);
-    f.arrays[8] = mlx.mlx_array_new_data(xb.ptr, &.{ 65, 256 }, 2, .bfloat16);
-    const y = try mimoPrefillArm(s, &f, c.topk);
+    f.arrays[8] = mlx.mlx_array_new_data(xb.ptr, &.{ @intCast(rows), 256 }, 2, .bfloat16);
+    const ar = f.arrays;
+    const y = if (decode)
+        try moeSwigluFused(s, ar[8], ar[0], ar[3], ar[4], ar[1], ar[3], ar[4], ar[2], ar[5], ar[6], ar[7], ar[9], .bfloat16)
+    else
+        try mimoPrefillArm(s, &f, c.topk);
     defer _ = mlx.mlx_array_free(y);
     try std.testing.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(y));
     var yf = mlx.mlx_array_new();
@@ -7201,4 +7269,16 @@ test "exl3 MiMo prefill optimization excludes qwen geometry" {
     try std.testing.expect(!mimoPrefillOn(2560, 640, 512, 10, 64));
     try std.testing.expect(!mimoPrefillOn(2560, 640, 512, 10, 48));
     try std.testing.expect(!mimoPrefillOn(4096, 2048, 256, 8, 48));
+}
+
+test "exl3 n40 decode lane codewords and decoded weights are exact" {
+    try n40WeightReaderExact(.tiny, .w12, true, true);
+    try n40WeightReaderExact(.tiny, .w12, false, true);
+    try n40WeightReaderExact(.mul1, .w8, false, true);
+}
+
+test "exl3 n40 decode BF16 rows no worse than composite against f32 truth" {
+    for (1..9) |rows| {
+        for (0..3) |seed| try n40Bf16Truth(318 + seed, 32, rows, true);
+    }
 }
