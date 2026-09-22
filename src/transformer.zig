@@ -31072,6 +31072,7 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
             // `mlx_matmul`; they no-op on already-quantized AND on empty handles.
             const stream_bank = shouldStreamExpertBank(&config, prefix);
             const exl3 = config.expert_layout == .exl3_k4;
+            if (exl3) expert_exl3_kernels.setCodebook(config.expert_quant_codebook);
             const switch_bank: SwitchMlpBank = if (stream_bank) .{
                 .gate_w = mlx.mlx_array_new(),
                 .gate_s = mlx.mlx_array_new(),

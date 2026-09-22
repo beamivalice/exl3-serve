@@ -1,5 +1,6 @@
 const std = @import("std");
 const io_mod = @import("expert_io.zig");
+const expert_exl3 = @import("expert_exl3.zig");
 
 pub const Geometry = struct {
     layers: u16,
@@ -66,7 +67,7 @@ pub fn isExpertStreamingArch(model_type: []const u8) bool {
 
 pub const Exl3Spec = struct {
     k: u8,
-    codebook: []const u8,
+    codebook: expert_exl3.Codebook,
 };
 
 pub fn parseExpertQuant(obj: std.json.ObjectMap) !Exl3Spec {
@@ -82,8 +83,8 @@ pub fn parseExpertQuant(obj: std.json.ObjectMap) !Exl3Spec {
     const cb_v = block.object.get("codebook") orelse return error.ExpertLayoutUnsupported;
     if (cb_v != .string) return error.ExpertLayoutUnsupported;
     if (k < 2 or k > 4) return error.ExpertLayoutUnsupported;
-    if (!std.mem.eql(u8, cb_v.string, "mul1")) return error.ExpertLayoutUnsupported;
-    return .{ .k = k, .codebook = cb_v.string };
+    const codebook = expert_exl3.Codebook.fromName(cb_v.string) orelse return error.ExpertLayoutUnsupported;
+    return .{ .k = k, .codebook = codebook };
 }
 
 pub fn kFromPackedDim(last: u64) ?u8 {
@@ -691,16 +692,18 @@ test "exl3 top-k above reduce-bank is a named refusal" {
     try t.expectError(error.Exl3TopKExceedsReduceBank, admitExl3TopK(33));
 }
 
-test "exl3 expert_quant admits K2 K3 K4 mul1 and refuses other k or codebook" {
+test "exl3 expert_quant admits K2 K3 K4 under every served codebook and refuses other k or codebook" {
     const t = std.testing;
     for ([_]u8{ 2, 3, 4 }) |want_k| {
-        var buf: [80]u8 = undefined;
-        const raw = try std.fmt.bufPrint(&buf, "{{\"expert_quant\":{{\"format\":\"exl3\",\"k\":{d},\"codebook\":\"mul1\"}}}}", .{want_k});
-        const ok = try std.json.parseFromSlice(std.json.Value, t.allocator, raw, .{});
-        defer ok.deinit();
-        const spec = try parseExpertQuant(ok.value.object);
-        try t.expectEqual(want_k, spec.k);
-        try t.expectEqualStrings("mul1", spec.codebook);
+        for ([_]expert_exl3.Codebook{ .mul1, .tiny, .mcg }) |cb| {
+            var buf: [80]u8 = undefined;
+            const raw = try std.fmt.bufPrint(&buf, "{{\"expert_quant\":{{\"format\":\"exl3\",\"k\":{d},\"codebook\":\"{s}\"}}}}", .{ want_k, @tagName(cb) });
+            const ok = try std.json.parseFromSlice(std.json.Value, t.allocator, raw, .{});
+            defer ok.deinit();
+            const spec = try parseExpertQuant(ok.value.object);
+            try t.expectEqual(want_k, spec.k);
+            try t.expectEqual(cb, spec.codebook);
+        }
     }
     const bad_k = try std.json.parseFromSlice(std.json.Value, t.allocator,
         \\{"expert_quant":{"format":"exl3","k":6,"codebook":"mul1"}}
@@ -708,7 +711,7 @@ test "exl3 expert_quant admits K2 K3 K4 mul1 and refuses other k or codebook" {
     defer bad_k.deinit();
     try t.expectError(error.ExpertLayoutUnsupported, parseExpertQuant(bad_k.value.object));
     const bad_cb = try std.json.parseFromSlice(std.json.Value, t.allocator,
-        \\{"expert_quant":{"format":"exl3","k":4,"codebook":"mcg"}}
+        \\{"expert_quant":{"format":"exl3","k":4,"codebook":"mul2"}}
     , .{});
     defer bad_cb.deinit();
     try t.expectError(error.ExpertLayoutUnsupported, parseExpertQuant(bad_cb.value.object));

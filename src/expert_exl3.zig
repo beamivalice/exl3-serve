@@ -8,14 +8,23 @@ pub const K4: u32 = 4;
 pub const K4_PACKED: usize = TILE_VALUES * K4 / 16;
 pub const MCG_MULT: u32 = 0xCBAC1FED;
 pub const MUL1_MULT: u32 = 0x83DCD12D;
+/// TINY keeps MCG's mix and half-pair sum but ADDS the fixed bits: the mantissa
+/// offsets (0x100 low half, 0x200 high half) carry into the exponent with
+/// probability 1/4 and 1/2, which is what closes the gap to MUL1.
+pub const TINY_MASK: u32 = 0x8FFF8FFF;
+pub const TINY_ADD: u32 = 0x32003100;
 
 pub const Codebook = enum(u8) {
-    mcg = 1,
     mul1 = 0,
+    mcg = 1,
+    tiny = 2,
+
+    pub const count = 3;
 
     pub fn fromName(name: []const u8) ?Codebook {
         if (std.mem.eql(u8, name, "mcg")) return .mcg;
         if (std.mem.eql(u8, name, "mul1")) return .mul1;
+        if (std.mem.eql(u8, name, "tiny")) return .tiny;
         return null;
     }
 };
@@ -64,10 +73,19 @@ pub fn decodeMul1(codeword: u16) u16 {
     return f32ToF16Bits(@mulAdd(f32, h, inverse, bias));
 }
 
+pub fn decodeTiny(codeword: u16) u16 {
+    const mixed = @as(u32, codeword) *% MCG_MULT;
+    const pair = (mixed & TINY_MASK) +% TINY_ADD;
+    const lo = f16BitsToF32(@truncate(pair));
+    const hi = f16BitsToF32(@truncate(pair >> 16));
+    return f32ToF16Bits(lo + hi);
+}
+
 pub fn decodeCodeword(codeword: u16, codebook: Codebook) u16 {
     return switch (codebook) {
         .mcg => decodeMcg(codeword),
         .mul1 => decodeMul1(codeword),
+        .tiny => decodeTiny(codeword),
     };
 }
 
@@ -380,6 +398,24 @@ test "exl3 MUL1 codebook pins known codewords" {
     try t.expectEqual(@as(u16, 49896), decodeMul1(0));
     try t.expectEqual(@as(u16, 14625), decodeMul1(1));
     try t.expectEqual(@as(u16, 47511), decodeMul1(7));
+}
+
+test "exl3 TINY codebook pins the converter's codewords" {
+    const t = std.testing;
+    try t.expectEqual(@as(u16, 13696), decodeTiny(0));
+    try t.expectEqual(@as(u16, 15406), decodeTiny(1));
+    try t.expectEqual(@as(u16, 49398), decodeTiny(7));
+    try t.expectEqual(@as(u16, 48865), decodeTiny(255));
+    try t.expectEqual(@as(u16, 46719), decodeTiny(4096));
+    try t.expectEqual(@as(u16, 13165), decodeTiny(65535));
+}
+
+test "exl3 codebook names resolve and an unknown name is null" {
+    const t = std.testing;
+    try t.expectEqual(Codebook.tiny, Codebook.fromName("tiny").?);
+    try t.expectEqual(Codebook.mul1, Codebook.fromName("mul1").?);
+    try t.expectEqual(Codebook.mcg, Codebook.fromName("mcg").?);
+    try t.expectEqual(@as(?Codebook, null), Codebook.fromName("mul2"));
 }
 
 test "exl3 MUL1 codebook maps a zero codeword to the finite half" {
