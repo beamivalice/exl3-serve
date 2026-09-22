@@ -23399,6 +23399,7 @@ pub const Transformer = struct {
                     _ = mlx.mlx_array_free(ff_normed);
                     ff_normed = try self.rmsNorm(h, lw.post_attn_norm);
                 }
+                if (lw.mlp == .moe) moeDumpTensor(self.s, "hin", moe_dump_layer, h);
                 const mlp_out = switch (lw.mlp) {
                     .moe => |*mw| if (is_mimo and self.expert_stream != null)
                         try self.moeMLPStreamed(ctx, ff_normed, mw, @intCast(layer_idx))
@@ -29309,6 +29310,7 @@ pub const Transformer = struct {
         if (stream_ctx) |info| return self.streamedMoeResult(info, expert_x, inds, norm_scores, mw);
         if (moeDumpDir() != null) {
             moeDumpTensor(self.s, "x", moe_dump_layer, expert_x);
+            if (router_logits.ctx != null) moeDumpTensor(self.s, "rlogits", moe_dump_layer, router_logits);
             moeDumpTensor(self.s, "ids", moe_dump_layer, inds);
             moeDumpTensor(self.s, "w", moe_dump_layer, norm_scores);
         }
