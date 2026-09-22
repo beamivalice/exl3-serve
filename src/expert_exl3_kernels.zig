@@ -5821,11 +5821,23 @@ const MimoMoeCase = struct {
     /// parity cases use; the served pack's own magnitudes are `MIMO_BANKS`.
     banks: [4]f32 = @splat(0.9),
     x_scale: f32 = 0.05,
+    /// Raw `[E]`-sliced gate/up/down trellis then suh_h/svh_i/suh_i/svh_h, as
+    /// the shards store them. Set, the fixture carries the PACK's own bytes.
+    real_blob: ?[*:0]const u8 = null,
 };
 
 /// The served w12 pack's own scale magnitudes: |suh| is ~0.01 and |svh| ~1,
 /// so the residual's size reaches the arm's f16 planes through the GEMMs.
 const MIMO_BANKS = [4]f32{ 0.0126, 1.03, 0.0083, 1.009 };
+
+fn readAll(fd: c_int, dst: []u8) !void {
+    var got: usize = 0;
+    while (got < dst.len) {
+        const n = std.c.read(fd, dst.ptr + got, dst.len - got);
+        if (n <= 0) return error.RealBlobShort;
+        got += @intCast(n);
+    }
+}
 
 const MimoMoeFixture = struct {
     arrays: [10]mlx.mlx_array,
@@ -5879,12 +5891,23 @@ fn mimoMoeFixture(alloc: std.mem.Allocator, c: MimoMoeCase) !MimoMoeFixture {
     for ([_][]u16{ gate_t, up_t, down_t }) |bank| {
         for (bank) |*v| v.* = @truncate(rnd.int(u32));
     }
+    var real_fd: ?c_int = null;
+    if (c.real_blob) |path| {
+        const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
+        if (fd < 0) return error.RealBlobOpen;
+        real_fd = fd;
+        for ([_][]u16{ gate_t, up_t, down_t }) |bank| try readAll(fd, std.mem.sliceAsBytes(bank));
+    }
     const suh_h = try alloc.alloc(u16, c.e * c.hidden);
     const svh_i = try alloc.alloc(u16, c.e * c.inter);
     const suh_i = try alloc.alloc(u16, c.e * c.inter);
     const svh_h = try alloc.alloc(u16, c.e * c.hidden);
     for ([_][]u16{ suh_h, svh_i, suh_i, svh_h }, c.banks) |bank, mag| {
         for (bank) |*v| v.* = exl3.f32ToF16Bits(if (rnd.boolean()) mag else -mag);
+    }
+    if (real_fd) |fd| {
+        for ([_][]u16{ suh_h, svh_i, suh_i, svh_h }) |bank| try readAll(fd, std.mem.sliceAsBytes(bank));
+        _ = std.c.close(fd);
     }
     const xh = try alloc.alloc(u16, c.rows * c.hidden);
     const xf = try alloc.alloc(f32, c.rows * c.hidden);
@@ -6128,6 +6151,31 @@ fn mimoArmMatchesF32(c: MimoMoeCase) !void {
 // carries put `silu(gate) * up` past 65504 while every input, weight and
 // output stays ordinary: an f16 plane there turns a whole routed row into inf.
 // Synthetic-magnitude parity cases cannot see it — they never leave f16 range.
+// Every other parity case drives the arms with synthetic trellis and a single
+// scale magnitude; a real shard's suh spans 0.0006..0.17 inside one vector.
+// `REAL_BLOB` names a pack slice (E experts of gate/up/down trellis, then
+// suh_h/svh_i/suh_i/svh_h) so the Metal arms are scored on the bytes a pack
+// actually ships. Absent, there is nothing to read and the case skips.
+test "mimo_v2 EXL3 arms match the f32 SwiGLU on a real pack's own bytes" {
+    const blob = std.c.getenv("REAL_BLOB") orelse return error.SkipZigTest;
+    for ([_]usize{ 1, 33 }) |rows| {
+        for ([_]f32{ 0.3, 1.0, 3.0 }) |xs| {
+            try mimoArmMatchesF32(.{
+                .e = 8,
+                .hidden = 4096,
+                .inter = 2048,
+                .topk = 8,
+                .rows = rows,
+                .rate = .{ .n = 40 },
+                .dec = .{ .codebook = .tiny, .window = .w12 },
+                .seed = 4242,
+                .x_scale = xs,
+                .real_blob = blob,
+            });
+        }
+    }
+}
+
 test "mimo_v2 EXL3 arms stay finite where the SwiGLU product passes the f16 ceiling" {
     for ([_]usize{ 4, 33 }) |rows| {
         try mimoArmMatchesF32(.{
