@@ -18071,6 +18071,8 @@ pub const Transformer = struct {
     /// then resets the cache so the first real request starts from clean state.
     /// Idempotent — calling twice is wasted work but not incorrect.
     pub fn warmup(self: *Transformer) !void {
+        moe_dump_warmup_depth += 1;
+        defer moe_dump_warmup_depth -= 1;
         const dummy_id: i32 = 0; // BOS-ish placeholder; the actual id doesn't matter for warmup
         const decode_shape = [_]c_int{ 1, 1 };
         const decode_input = mlx.mlx_array_new_data(&dummy_id, &decode_shape, 2, .int32);
@@ -18200,6 +18202,8 @@ pub const Transformer = struct {
     // each JIT their Metal pipelines on first dispatch; left to the first live request that compile
     // lands inside a measured round and the table folds it as that width's price.
     pub fn warmupSpecVerify(self: *Transformer, max_width: u32, kv_config: KVQuantConfig) !void {
+        moe_dump_warmup_depth += 1;
+        defer moe_dump_warmup_depth -= 1;
         if (self.qwen4 == null or self.qwen4_mtp == null) return;
         var lap = io_util_mod.Stopwatch.init(std.Io.Threaded.global_single_threaded.io());
         const width_cap: usize = @min(@max(max_width, 1), MAX_WIDTH_WARM);
@@ -22978,6 +22982,8 @@ pub const Transformer = struct {
     /// through per-stream scalar gates; the n-gram PLE adds to the streams
     /// before its layer; the final mixer replaces model.norm.
     fn forwardQwen4With(self: *Transformer, ctx: *ForwardCtx, token_ids: mlx.mlx_array) !mlx.mlx_array {
+        const dumping = moeDumpBeginForward();
+        defer if (dumping) moeDumpForwardDone();
         self.fwd_gen +%= 1; // per-forward QSA scratch key
         if (self.expert_stream != null and ctx.capture_ssm_seq) return error.StreamingSpecCaptureUnsupported;
         if (self.expert_stream) |engine| engine.beginForward();
@@ -23038,6 +23044,7 @@ pub const Transformer = struct {
 
         for (0..layerCap(cfg.num_hidden_layers)) |layer_idx| {
             const li: u32 = @intCast(layer_idx);
+            if (dumping) moe_dump_layer = li;
             const lw = &ml[layer_idx];
             const entry = &entries[layer_idx];
 
@@ -23147,6 +23154,8 @@ pub const Transformer = struct {
     }
 
     fn forwardMoeWith(self: *Transformer, ctx: *ForwardCtx, token_ids: mlx.mlx_array) !mlx.mlx_array {
+        const dumping = moeDumpBeginForward();
+        defer if (dumping) moeDumpForwardDone();
         self.fwd_gen +%= 1; // per-forward QSA scratch key
         const ml = self.moe_layers.?;
         const offset = ctx.moe_seq_offset.*;
@@ -23265,6 +23274,7 @@ pub const Transformer = struct {
             const li: u32 = @intCast(layer_idx);
             const lw = &ml[layer_idx];
 
+            if (dumping) moe_dump_layer = li;
             const normed = try self.rmsNorm(h, lw.input_norm);
             defer _ = mlx.mlx_array_free(normed);
 
@@ -29318,7 +29328,6 @@ pub const Transformer = struct {
             const y = try self.moeExl3(expert_x, mw, inds, norm_scores, skip_shared and router_override != null);
             if (moeDumpDir() != null) {
                 moeDumpTensor(self.s, "y", moe_dump_layer, y);
-                moeDumpLayerDone();
             }
             if (skip_shared or mw.shared_expert_gate_w == null or qwen4Standin().moe_shared) return y;
             defer _ = mlx.mlx_array_free(y);
@@ -29656,7 +29665,6 @@ pub const Transformer = struct {
         }
         if (moeDumpDir() != null) {
             moeDumpTensor(self.s, "y", moe_dump_layer, expert_sum);
-            moeDumpLayerDone();
         }
 
         if (skip_shared) return expert_sum;
@@ -33314,6 +33322,14 @@ var moe_dump_dir: ?[]const u8 = null;
 var moe_dump_asked: bool = false;
 var moe_dump_layer: u32 = 0;
 var moe_dump_done: bool = false;
+var moe_dump_active: bool = false;
+var moe_dump_warmup_depth: u32 = 0;
+
+fn moeDumpBeginForward() bool {
+    if (moe_dump_warmup_depth != 0 or moe_dump_done or moe_dump_active or moeDumpDir() == null) return false;
+    moe_dump_active = true;
+    return true;
+}
 
 fn moeDumpDir() ?[]const u8 {
     if (!moe_dump_asked) {
@@ -33328,16 +33344,16 @@ fn moeDumpDir() ?[]const u8 {
 
 /// One forward only: the layer counter walks the MoE layers in order and the
 /// dump latches off when it has seen a whole model's worth.
-fn moeDumpLayerDone() void {
-    moe_dump_layer += 1;
-    if (moe_dump_layer >= 64) moe_dump_done = true;
+fn moeDumpForwardDone() void {
+    moe_dump_active = false;
+    moe_dump_done = true;
 }
 
 /// One tensor, evaluated and written as f32. Never on a serving path: the dump
 /// is a host read per layer, which is a GPU barrier by construction.
 fn moeDumpTensor(s: mlx.mlx_stream, tag: []const u8, layer: u32, a: mlx.mlx_array) void {
     const dir = moeDumpDir() orelse return;
-    if (moe_dump_done) return;
+    if (!moe_dump_active or moe_dump_done) return;
     var f32a = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(f32a);
     if (mlx.mlx_astype(&f32a, a, .float32, s) != 0) return;
@@ -33367,6 +33383,75 @@ fn moeDumpTensor(s: mlx.mlx_stream, tag: []const u8, layer: u32, a: mlx.mlx_arra
         if (w <= 0) return;
         put += @intCast(w);
     }
+}
+
+test "moe dump waits for a real forward before writing tensors" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(t.io, &path_buf);
+    const saved_dir = moe_dump_dir;
+    const saved_asked = moe_dump_asked;
+    const saved_done = moe_dump_done;
+    const saved_active = moe_dump_active;
+    const saved_warmup = moe_dump_warmup_depth;
+    const saved_layer = moe_dump_layer;
+    defer {
+        moe_dump_dir = saved_dir;
+        moe_dump_asked = saved_asked;
+        moe_dump_done = saved_done;
+        moe_dump_active = saved_active;
+        moe_dump_warmup_depth = saved_warmup;
+        moe_dump_layer = saved_layer;
+    }
+    moe_dump_dir = path_buf[0..path_len];
+    moe_dump_asked = true;
+    moe_dump_done = false;
+    moe_dump_active = false;
+    moe_dump_warmup_depth = 0;
+    const s = mlx.mlx_default_cpu_stream_new();
+    defer _ = mlx.mlx_stream_free(s);
+    const values = [_]f32{ 1, 2, 3, 4 };
+    const a = mlx.mlx_array_new_data(&values, &.{ 1, 2, 2 }, 3, .float32);
+    defer _ = mlx.mlx_array_free(a);
+    moeDumpTensor(s, "x", 1, a);
+    try t.expectError(error.FileNotFound, tmp.dir.openFile(t.io, "L01_x_1_2_2.f32", .{}));
+
+    const config = ModelConfig{ .model_type = "mimo_v2", .num_hidden_layers = 3, .first_k_dense_replace = 1 };
+    const forward = struct {
+        fn run(cfg: ModelConfig, stream: mlx.mlx_stream, x: mlx.mlx_array) void {
+            const dumping = moeDumpBeginForward();
+            defer if (dumping) moeDumpForwardDone();
+            for (cfg.first_k_dense_replace..cfg.num_hidden_layers) |li| {
+                if (dumping) moe_dump_layer = @intCast(li);
+                moeDumpTensor(stream, "x", moe_dump_layer, x);
+            }
+        }
+    }.run;
+    moe_dump_warmup_depth += 1;
+    forward(config, s, a);
+    moe_dump_warmup_depth -= 1;
+    try t.expectError(error.FileNotFound, tmp.dir.openFile(t.io, "L01_x_1_2_2.f32", .{}));
+    try t.expect(!moe_dump_done);
+    forward(config, s, a);
+    for ([_][]const u8{ "L01_x_1_2_2.f32", "L02_x_1_2_2.f32" }) |name| {
+        const bytes = try tmp.dir.readFileAlloc(t.io, name, t.allocator, .limited(128));
+        defer t.allocator.free(bytes);
+        try t.expectEqualSlices(u8, std.mem.sliceAsBytes(&values), bytes);
+    }
+    try t.expect(moe_dump_done and !moe_dump_active);
+    const later_values = [_]f32{ 5, 6, 7, 8 };
+    const later = mlx.mlx_array_new_data(&later_values, &.{ 1, 2, 2 }, 3, .float32);
+    defer _ = mlx.mlx_array_free(later);
+    forward(config, s, later);
+    const unchanged = try tmp.dir.readFileAlloc(t.io, "L01_x_1_2_2.f32", t.allocator, .limited(128));
+    defer t.allocator.free(unchanged);
+    try t.expectEqualSlices(u8, std.mem.sliceAsBytes(&values), unchanged);
+    var files = tmp.dir.iterate();
+    var count: usize = 0;
+    while (try files.next(t.io)) |_| count += 1;
+    try t.expectEqual(@as(usize, 2), count);
 }
 
 fn diagEnvOn(name: [*:0]const u8) bool {
