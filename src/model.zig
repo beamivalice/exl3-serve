@@ -171,6 +171,7 @@ pub const ModelConfig = struct {
     expert_layout: expert_quant.Layout = .bf16_fused,
     expert_quant_rate: expert_exl3.Rate = .{ .n = 64 },
     expert_quant_codebook: expert_exl3.Codebook = .mul1,
+    expert_quant_window: expert_exl3.Window = .w16,
     expert_source_dir: ?[]u8 = null,
     /// `MLX_SERVE_NGRAM_BF16_DIR`: serve the PLE n-gram table from the ORIGINAL bf16
     /// shards in this HF checkpoint dir instead of the pack's quantized `ngram_table.bin`
@@ -1432,8 +1433,9 @@ pub fn parseConfig(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
                 try expert_quant.admitExl3TopK(config.num_experts_per_tok);
                 config.expert_quant_rate = spec.rate;
                 config.expert_quant_codebook = spec.codebook;
+                config.expert_quant_window = spec.window;
                 var k_buf: [8]u8 = undefined;
-                log.info("[expert-exl3] engaged K={s} codebook={s}\n", .{ spec.rate.kText(&k_buf), @tagName(spec.codebook) });
+                log.info("[expert-exl3] engaged K={s} codebook={s} window={d}\n", .{ spec.rate.kText(&k_buf), @tagName(spec.codebook), spec.window.bits() });
             }
         }
     }

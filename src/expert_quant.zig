@@ -78,6 +78,7 @@ pub fn isExpertStreamingArch(model_type: []const u8) bool {
 pub const Exl3Spec = struct {
     rate: expert_exl3.Rate,
     codebook: expert_exl3.Codebook,
+    window: expert_exl3.Window = .w16,
 };
 
 /// `k` is a rate, integer or fractional: admitted only when 16k is an even
@@ -94,6 +95,15 @@ fn rateFromConfigK(k_v: std.json.Value) ?expert_exl3.Rate {
     return expert_exl3.kFromPackedDim(@intFromFloat(rounded));
 }
 
+/// `window` is the codeword width the pack's search hashed. Absent means 16,
+/// the whole sliding window; a width this build cannot decode is refused, not
+/// rounded — the same bitstream decodes to different weights at each width.
+fn windowFromConfig(v: ?std.json.Value) ?expert_exl3.Window {
+    const raw = v orelse return expert_exl3.Window.w16;
+    if (raw != .integer) return null;
+    return expert_exl3.Window.fromBits(raw.integer);
+}
+
 pub fn parseExpertQuant(obj: std.json.ObjectMap) !Exl3Spec {
     const block = obj.get("expert_quant") orelse return error.ExpertLayoutUnsupported;
     if (block != .object) return error.ExpertLayoutUnsupported;
@@ -104,7 +114,28 @@ pub fn parseExpertQuant(obj: std.json.ObjectMap) !Exl3Spec {
     const cb_v = block.object.get("codebook") orelse return error.ExpertLayoutUnsupported;
     if (cb_v != .string) return error.ExpertLayoutUnsupported;
     const codebook = expert_exl3.Codebook.fromName(cb_v.string) orelse return error.ExpertLayoutUnsupported;
-    return .{ .rate = rate, .codebook = codebook };
+    const window = windowFromConfig(block.object.get("window")) orelse return error.Exl3WindowUnsupported;
+    return .{ .rate = rate, .codebook = codebook, .window = window };
+}
+
+fn specFromConfigJson(allocator: std.mem.Allocator, raw: []const u8) !Exl3Spec {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+    return parseExpertQuant(parsed.value.object);
+}
+
+test "an EXL3 pack's codeword window is 16 unless its config names one this build decodes" {
+    const t = std.testing;
+    const base = "{\"expert_quant\":{\"format\":\"exl3\",\"k\":2.5,\"codebook\":\"tiny\"";
+    try t.expectEqual(expert_exl3.Window.w16, (try specFromConfigJson(t.allocator, base ++ "}}")).window);
+    try t.expectEqual(expert_exl3.Window.w16, (try specFromConfigJson(t.allocator, base ++ ",\"window\":16}}")).window);
+    try t.expectEqual(expert_exl3.Window.w12, (try specFromConfigJson(t.allocator, base ++ ",\"window\":12}}")).window);
+    try t.expectEqual(expert_exl3.Window.w14, (try specFromConfigJson(t.allocator, base ++ ",\"window\":14}}")).window);
+    // The same bitstream decodes to different weights at each width, so an
+    // unreadable one is a refusal, never a fallback to 16.
+    try t.expectError(error.Exl3WindowUnsupported, specFromConfigJson(t.allocator, base ++ ",\"window\":17}}"));
+    try t.expectError(error.Exl3WindowUnsupported, specFromConfigJson(t.allocator, base ++ ",\"window\":11}}"));
+    try t.expectError(error.Exl3WindowUnsupported, specFromConfigJson(t.allocator, base ++ ",\"window\":\"12\"}}"));
 }
 
 pub fn kFromPackedDim(last: u64) ?expert_exl3.Rate {

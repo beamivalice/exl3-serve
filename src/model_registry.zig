@@ -1324,7 +1324,7 @@ pub const ModelRegistry = struct {
     /// (2026-08-08). Merge note: this arm came from the branch's
     /// `scheduler.loadErrorFor`, which this function replaced — the name-based
     /// half survived the refactor, the second name did not.
-    pub fn loadErrorFromName(name: ?[]const u8) error{ LoadFailed, InsufficientMemory, ExpertCacheDoesNotFit, ExpertStreamingRequired, SsdBudgetBelowResident, SsdBudgetExceedsWiredLimit, ExpertStreamingMtpUnsupported, ExpertStreamingUnsupportedLayout, ExpertSlabImportCopied, ExpertLayoutUnsupported, Exl3TopKExceedsReduceBank, Exl3TrellisGeometry } {
+    pub fn loadErrorFromName(name: ?[]const u8) error{ LoadFailed, InsufficientMemory, ExpertCacheDoesNotFit, ExpertStreamingRequired, SsdBudgetBelowResident, SsdBudgetExceedsWiredLimit, ExpertStreamingMtpUnsupported, ExpertStreamingUnsupportedLayout, ExpertSlabImportCopied, ExpertLayoutUnsupported, Exl3TopKExceedsReduceBank, Exl3TrellisGeometry, Exl3WindowUnsupported } {
         if (name) |n| {
             if (std.mem.eql(u8, n, "InsufficientMemory")) return error.InsufficientMemory;
             if (std.mem.eql(u8, n, "OutOfMemory")) return error.InsufficientMemory;
@@ -1338,6 +1338,7 @@ pub const ModelRegistry = struct {
             if (std.mem.eql(u8, n, "ExpertLayoutUnsupported")) return error.ExpertLayoutUnsupported;
             if (std.mem.eql(u8, n, "Exl3TopKExceedsReduceBank")) return error.Exl3TopKExceedsReduceBank;
             if (std.mem.eql(u8, n, "Exl3TrellisGeometry")) return error.Exl3TrellisGeometry;
+            if (std.mem.eql(u8, n, "Exl3WindowUnsupported")) return error.Exl3WindowUnsupported;
         }
         return error.LoadFailed;
     }
@@ -1359,6 +1360,7 @@ pub const ModelRegistry = struct {
         try std.testing.expectEqual(error.ExpertLayoutUnsupported, loadErrorFromName("ExpertLayoutUnsupported"));
         try std.testing.expectEqual(error.Exl3TopKExceedsReduceBank, loadErrorFromName("Exl3TopKExceedsReduceBank"));
         try std.testing.expectEqual(error.Exl3TrellisGeometry, loadErrorFromName("Exl3TrellisGeometry"));
+        try std.testing.expectEqual(error.Exl3WindowUnsupported, loadErrorFromName("Exl3WindowUnsupported"));
         // Everything else stays a load failure — guessing a diagnosis is worse
         // than reporting the honest generic one.
         try std.testing.expectEqual(error.LoadFailed, loadErrorFromName("FileNotFound"));

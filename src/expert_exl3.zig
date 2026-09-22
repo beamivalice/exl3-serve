@@ -29,6 +29,63 @@ pub const Codebook = enum(u8) {
     }
 };
 
+/// The codeword width a pack's Viterbi search hashed: a decoder takes the low
+/// `w` bits of the 16-bit sliding window before it decodes. The bitstream and
+/// the bits per weight are the same at every width — only the value each
+/// window decodes to changes. A pack that names no width is w16, which masks
+/// nothing. (Unrelated to the GEMM's row windows.)
+pub const Window = enum(u8) {
+    /// w16 is tag 0, so a zeroed config means "mask nothing" — the pack every
+    /// converter wrote before the field existed.
+    w16 = 0,
+    w12,
+    w13,
+    w14,
+    w15,
+
+    pub const count = 5;
+
+    pub fn bits(self: Window) u8 {
+        return switch (self) {
+            .w12 => 12,
+            .w13 => 13,
+            .w14 => 14,
+            .w15 => 15,
+            .w16 => 16,
+        };
+    }
+
+    pub fn mask(self: Window) u16 {
+        return @truncate((@as(u32, 1) << @intCast(self.bits())) - 1);
+    }
+
+    pub fn index(self: Window) usize {
+        return @intFromEnum(self);
+    }
+
+    pub fn fromBits(w: i64) ?Window {
+        return switch (w) {
+            12 => .w12,
+            13 => .w13,
+            14 => .w14,
+            15 => .w15,
+            16 => .w16,
+            else => null,
+        };
+    }
+};
+
+/// How a pack's trellis decodes. The two travel together — a codeword read
+/// under the wrong window is as wrong as one read under the wrong codebook.
+pub const Decode = struct {
+    codebook: Codebook,
+    window: Window = .w16,
+
+    pub const mul1: Decode = .{ .codebook = .mul1 };
+    pub const mcg: Decode = .{ .codebook = .mcg };
+    pub const tiny: Decode = .{ .codebook = .tiny };
+};
+
 /// A trellis rate K = n/16 bits per weight, `n` being the halfwords a packed
 /// 256-weight tile carries. Weight t's codeword is the 16-bit window ending at
 /// `bitEnd(t)`, so it takes `bitEnd(t) - bitEnd(t-1)` fresh bits; the pattern
@@ -159,13 +216,14 @@ pub fn unpackTile(words: []const u16, rate: Rate, out: *[TILE_VALUES]u16) void {
     }
 }
 
-pub fn decodeTile(words: []const u16, rate: Rate, codebook: Codebook, out: *[TILE_VALUES]u16) void {
+pub fn decodeTile(words: []const u16, rate: Rate, dec: Decode, out: *[TILE_VALUES]u16) void {
     var codewords: [TILE_VALUES]u16 = undefined;
     unpackTile(words, rate, &codewords);
     var perm: [TILE_VALUES]usize = undefined;
     tensorCorePerm(&perm);
+    const mask = dec.window.mask();
     for (codewords, 0..) |cw, i| {
-        out[perm[i]] = decodeCodeword(cw, codebook);
+        out[perm[i]] = decodeCodeword(cw & mask, dec.codebook);
     }
 }
 
@@ -211,7 +269,7 @@ pub fn reconstructInner(
     in_features: usize,
     out_features: usize,
     rate: Rate,
-    codebook: Codebook,
+    dec: Decode,
     out: []u16,
 ) void {
     const in_tiles = in_features / TILE;
@@ -221,7 +279,7 @@ pub fn reconstructInner(
     for (0..in_tiles) |tk| {
         for (0..out_tiles) |tn| {
             const off = (tk * out_tiles + tn) * packed_n;
-            decodeTile(trellis[off..][0..packed_n], rate, codebook, &tile_out);
+            decodeTile(trellis[off..][0..packed_n], rate, dec, &tile_out);
             for (0..TILE) |r| {
                 const dst = (tk * TILE + r) * out_features + tn * TILE;
                 @memcpy(out[dst .. dst + TILE], tile_out[r * TILE ..][0..TILE]);
@@ -238,12 +296,12 @@ pub fn reconstructPublic(
     in_features: usize,
     out_features: usize,
     rate: Rate,
-    codebook: Codebook,
+    dec: Decode,
     out: []u16,
 ) !void {
     const inner = try allocator.alloc(u16, in_features * out_features);
     defer allocator.free(inner);
-    reconstructInner(trellis, in_features, out_features, rate, codebook, inner);
+    reconstructInner(trellis, in_features, out_features, rate, dec, inner);
     const w = try allocator.alloc(f32, in_features * out_features);
     defer allocator.free(w);
     for (inner, 0..) |bits, i| w[i] = f16BitsToF32(bits);
@@ -299,7 +357,7 @@ pub fn innerGemv(
     in_features: usize,
     out_features: usize,
     rate: Rate,
-    codebook: Codebook,
+    dec: Decode,
     out: []f32,
 ) void {
     const in_tiles = in_features / TILE;
@@ -310,7 +368,7 @@ pub fn innerGemv(
     for (0..in_tiles) |tk| {
         for (0..out_tiles) |tn| {
             const off = (tk * out_tiles + tn) * packed_n;
-            decodeTile(trellis[off..][0..packed_n], rate, codebook, &tile_w);
+            decodeTile(trellis[off..][0..packed_n], rate, dec, &tile_w);
             const xbase = tk * TILE;
             const ybase = tn * TILE;
             for (0..TILE) |r| {
@@ -330,7 +388,7 @@ pub fn innerGemvF32(
     in_features: usize,
     out_features: usize,
     rate: Rate,
-    codebook: Codebook,
+    dec: Decode,
     out: []f32,
 ) void {
     const in_tiles = in_features / TILE;
@@ -341,7 +399,7 @@ pub fn innerGemvF32(
     for (0..in_tiles) |tk| {
         for (0..out_tiles) |tn| {
             const off = (tk * out_tiles + tn) * packed_n;
-            decodeTile(trellis[off..][0..packed_n], rate, codebook, &tile_w);
+            decodeTile(trellis[off..][0..packed_n], rate, dec, &tile_w);
             const xbase = tk * TILE;
             const ybase = tn * TILE;
             for (0..TILE) |r| {
@@ -374,13 +432,13 @@ pub fn project(
     in_features: usize,
     out_features: usize,
     rate: Rate,
-    codebook: Codebook,
+    dec: Decode,
     transformed: []f32,
     inner: []f32,
     out: []f32,
 ) void {
     prepareInput(x, suh, transformed);
-    innerGemv(trellis, transformed, in_features, out_features, rate, codebook, inner);
+    innerGemv(trellis, transformed, in_features, out_features, rate, dec, inner);
     finishOutput(inner, svh, out);
 }
 
@@ -600,7 +658,7 @@ fn decodePackedFixture(
     alloc: std.mem.Allocator,
     raw: []const u8,
     rate: Rate,
-    codebook: Codebook,
+    dec: Decode,
 ) !void {
     const t = std.testing;
     var tensors = try parseSafetensors(alloc, raw);
@@ -617,10 +675,10 @@ fn decodePackedFixture(
     const in_features: usize = 128;
     const out_features: usize = 128;
     const got_inner = try alloc.alloc(u16, in_features * out_features);
-    reconstructInner(asU16(trellis), in_features, out_features, rate, codebook, got_inner);
+    reconstructInner(asU16(trellis), in_features, out_features, rate, dec, got_inner);
     try t.expectEqualSlices(u16, asU16(inner), got_inner);
     const got_public = try alloc.alloc(u16, in_features * out_features);
-    try reconstructPublic(alloc, asU16(trellis), asU16(suh), asU16(svh), in_features, out_features, rate, codebook, got_public);
+    try reconstructPublic(alloc, asU16(trellis), asU16(suh), asU16(svh), in_features, out_features, rate, dec, got_public);
     try t.expectEqualSlices(u16, asU16(public), got_public);
 }
 

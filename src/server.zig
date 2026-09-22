@@ -12886,6 +12886,7 @@ test "every load refusal the registry preserves answers under its own name" {
         "ExpertLayoutUnsupported",
         "Exl3TopKExceedsReduceBank",
         "Exl3TrellisGeometry",
+        "Exl3WindowUnsupported",
     };
     for (names) |name| {
         const refusal = loadRefusalFor(model_registry_mod.ModelRegistry.loadErrorFromName(name)) orelse {
@@ -12900,6 +12901,7 @@ test "every load refusal the registry preserves answers under its own name" {
     try t.expectEqualStrings("expert_layout_unsupported", loadRefusalFor(error.ExpertLayoutUnsupported).?.type);
     try t.expectEqualStrings("exl3_topk_exceeds_reduce_bank", loadRefusalFor(error.Exl3TopKExceedsReduceBank).?.type);
     try t.expectEqualStrings("exl3_trellis_geometry", loadRefusalFor(error.Exl3TrellisGeometry).?.type);
+    try t.expectEqualStrings("exl3_window_unsupported", loadRefusalFor(error.Exl3WindowUnsupported).?.type);
     try t.expect(loadRefusalFor(error.LoadFailed) == null);
     try t.expect(loadRefusalFor(error.UnknownModelId) == null);
 }
@@ -12926,6 +12928,7 @@ pub fn loadRefusalFor(err: anyerror) ?LoadRefusal {
         error.ExpertLayoutUnsupported => .{ .type = "expert_layout_unsupported", .message = "This qwen4_exp checkpoint's routed experts are not a uniform EXL3 K4 MUL1 pack this build can load. Re-convert with k=4 and codebook mul1, or serve an affine pack." },
         error.Exl3TopKExceedsReduceBank => .{ .type = "exl3_topk_exceeds_reduce_bank", .message = "This EXL3 pack's num_experts_per_tok exceeds the decode reduce-bank (32). Re-convert with top-k <= 32." },
         error.Exl3TrellisGeometry => .{ .type = "exl3_trellis_geometry", .message = "This EXL3 pack has a routed-expert trellis this build cannot decode, or one that disagrees with the expert count, shape or k its config.json names. Re-convert the pack." },
+        error.Exl3WindowUnsupported => .{ .type = "exl3_window_unsupported", .message = "This EXL3 pack names a codeword window this build cannot decode: expert_quant.window must be an integer from 12 to 16, or absent for 16." },
         error.SsdBudgetBelowResident => .{ .type = "ssd_budget_below_resident", .message = "--ssd-budget-gb leaves no room for an expert cache after the resident trunk, the prefill union and the fill buffers. Raise the budget." },
         error.SsdBudgetExceedsWiredLimit => .{ .type = "ssd_budget_exceeds_wired_limit", .message = "--ssd-budget-gb plus the planned KV cache exceeds the machine's residency limit. Raise iogpu.wired_limit_mb (the server log names the value) or lower the budget." },
         else => null,

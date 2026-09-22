@@ -28948,7 +28948,10 @@ pub const Transformer = struct {
         // Which kernel a dispatch picks is read off ONE process-global
         // codebook, and several EXL3 packs can be resident at once: assert
         // this model's here, not once at its load.
-        expert_exl3_kernels.setCodebook(self.config.expert_quant_codebook);
+        expert_exl3_kernels.setDecodeParams(.{
+            .codebook = self.config.expert_quant_codebook,
+            .window = self.config.expert_quant_window,
+        });
         const xsh = mlx.getShape(expert_x);
         const B = xsh[0];
         const S = xsh[1];
@@ -39372,14 +39375,14 @@ const MimoExl3MoeHarness = struct {
     suh_i: []u16,
     svh_h: []u16,
     xf: []f32,
-    cb: expert_exl3.Codebook,
+    dec: expert_exl3.Decode,
     rows: usize,
 
     const E: usize = 4;
     const hidden: usize = 128;
     const inter: usize = 256;
 
-    fn init(alloc: std.mem.Allocator, s: mlx.mlx_stream, rate: expert_exl3.Rate, rows: usize, seed: u64, cb: expert_exl3.Codebook) !MimoExl3MoeHarness {
+    fn init(alloc: std.mem.Allocator, s: mlx.mlx_stream, rate: expert_exl3.Rate, rows: usize, seed: u64, dec: expert_exl3.Decode) !MimoExl3MoeHarness {
         const packed_n = rate.halfwords();
         const gu_tile = (hidden / 16) * (inter / 16) * packed_n;
         const d_tile = (inter / 16) * (hidden / 16) * packed_n;
@@ -39447,7 +39450,7 @@ const MimoExl3MoeHarness = struct {
             .suh_i = suh_i,
             .svh_h = svh_h,
             .xf = xf,
-            .cb = cb,
+            .dec = dec,
             .rows = rows,
             .mw = .{
                 .router_w = router,
@@ -39481,7 +39484,8 @@ const MimoExl3MoeHarness = struct {
             .model_type = "mimo_v2",
             .expert_layout = .exl3_k4,
             .expert_quant_rate = rate,
-            .expert_quant_codebook = cb,
+            .expert_quant_codebook = dec.codebook,
+            .expert_quant_window = dec.window,
             .num_experts = @intCast(E),
             .num_experts_per_tok = 2,
             .hidden_size = @intCast(hidden),
@@ -39521,10 +39525,10 @@ const MimoExl3MoeHarness = struct {
         defer alloc.free(up_y);
         const gu_tile = (hidden / 16) * (inter / 16) * rate.halfwords();
         const d_tile = (inter / 16) * (hidden / 16) * rate.halfwords();
-        expert_exl3.project(x, self.gate_t[0..gu_tile], self.suh_h[0..hidden], self.svh_i[0..inter], hidden, inter, rate, self.cb, t_hidden, inner, gate_y);
-        expert_exl3.project(x, self.gate_t[0..gu_tile], self.suh_h[0..hidden], self.svh_i[0..inter], hidden, inter, rate, self.cb, t_hidden, inner, up_y);
+        expert_exl3.project(x, self.gate_t[0..gu_tile], self.suh_h[0..hidden], self.svh_i[0..inter], hidden, inter, rate, self.dec, t_hidden, inner, gate_y);
+        expert_exl3.project(x, self.gate_t[0..gu_tile], self.suh_h[0..hidden], self.svh_i[0..inter], hidden, inter, rate, self.dec, t_hidden, inner, up_y);
         for (gate_y, up_y) |*g, u| g.* = (g.* / (1.0 + @exp(-g.*))) * u;
-        expert_exl3.project(gate_y, self.down_t[0..d_tile], self.suh_i[0..inter], self.svh_h[0..hidden], inter, hidden, rate, self.cb, t_inter, inner, out);
+        expert_exl3.project(gate_y, self.down_t[0..d_tile], self.suh_i[0..inter], self.svh_h[0..hidden], inter, hidden, rate, self.dec, t_inter, inner, out);
     }
 
     /// One forward through the engine, scored against this harness's own
@@ -39551,7 +39555,7 @@ const MimoExl3MoeHarness = struct {
         }
         const rel = @sqrt(ss / @max(ref, 1e-20));
         if (!(rel < 0.01)) {
-            std.debug.print("mimo exl3 forward codebook={s} rel_rms={d:.6}\n", .{ @tagName(self.cb), rel });
+            std.debug.print("mimo exl3 forward codebook={s} window={d} rel_rms={d:.6}\n", .{ @tagName(self.dec.codebook), self.dec.window.bits(), rel });
             return error.TestExpectedEqual;
         }
     }
