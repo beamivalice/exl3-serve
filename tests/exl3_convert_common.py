@@ -550,6 +550,17 @@ def ldlq_group_mlx(inner_mx, lblocks_mx, *, k, cb, window: int, scratch_bytes: i
     if lblocks_mx.shape != (n_exp, nb, block, block):
         raise ValueError(f"LDL blocks {lblocks_mx.shape} do not match {(n_exp, nb, block, block)}")
     out_tiles = cols // 16
+    if window == 8 and nb > 1:
+        folded = ldlq_group_mlx(
+            inner_mx.reshape(n_exp * nb, block, cols),
+            lblocks_mx.reshape(n_exp * nb, 1, block, block),
+            k=k, cb=cb, window=window, scratch_bytes=scratch_bytes,
+            block=block, feedback_rows=feedback_rows, want_recon=want_recon)
+        if want_recon:
+            packed, recon = folded
+            return (packed.reshape(n_exp, rows // 16, out_tiles, packed_hw(k)),
+                    recon.reshape(n_exp, rows, cols))
+        return folded.reshape(n_exp, rows // 16, out_tiles, packed_hw(k))
     rows_per_step = feedback_rows
     packed_rows: list = [None] * (rows // 16)
     recon_rows: list = [None] * (rows // 16) if want_recon else []

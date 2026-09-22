@@ -1146,6 +1146,43 @@ class CalibratedRegularizationTests(unittest.TestCase):
 
 
 class LdlTests(unittest.TestCase):
+    def test_narrow_independent_blocks_share_feedback_steps(self):
+        from unittest.mock import patch
+        import mlx.core as mx
+        inner = np.broadcast_to(np.arange(6, dtype=np.float32).reshape(2, 3, 1, 1),
+                                (2, 3, 128, 128)).reshape(2, 384, 128).copy()
+        factors = mx.zeros((2, 3, 128, 128), dtype=mx.float32)
+        expected = np.empty((2, 24, 8, 40), np.uint16)
+        for expert in range(2):
+            for block in range(3):
+                states = np.full((64, 256), expert * 3 + block, np.uint16)
+                expected[expert, block * 8:(block + 1) * 8] = pack_states(states, 2.5, 8, 8)
+        for window in (8, 12):
+            seen = []
+            def search(tiles, **kwargs):
+                seen.append(int(tiles.shape[0]))
+                return tiles, mx.broadcast_to(tiles[:, :1].astype(mx.uint16), tiles.shape)
+            with patch.dict(ldlq_group_mlx.__globals__, _search_mlx=search):
+                packed, recon = ldlq_group_mlx(mx.array(inner), factors, k=2.5, cb=None,
+                                              window=window, scratch_bytes=1 << 26, want_recon=True)
+            np.testing.assert_array_equal(packed, expected)
+            np.testing.assert_array_equal(np.array(recon).view(np.uint32), inner.view(np.uint32))
+            self.assertEqual(seen, [48] * 8 if window == 8 else [16] * 24)
+
+
+    def test_narrow_block_batching_keeps_nonzero_feedback_bytes(self):
+        import mlx.core as mx
+        rng = np.random.default_rng(86)
+        inner = mx.array(rng.standard_normal((2, 384, 128), dtype=np.float32))
+        factors = mx.array(np.tril(rng.standard_normal((2, 3, 128, 128), dtype=np.float32) * 0.01, -1))
+        kwargs = dict(k=2.5, cb=codebook_mode("mul1"), window=8, scratch_bytes=1 << 26)
+        expected = np.concatenate([ldlq_group_mlx(inner[:, b * 128:(b + 1) * 128],
+                                                  factors[:, b:b + 1], **kwargs)
+                                   for b in range(3)], axis=1)
+        actual = ldlq_group_mlx(inner, factors, **kwargs)
+        np.testing.assert_array_equal(actual, expected)
+
+
     def test_a_diagonal_hessian_gives_a_feedbackless_factor(self):
         rng = np.random.default_rng(5)
         v = np.abs(rng.standard_normal(64).astype(np.float32)) + 0.05
