@@ -40818,7 +40818,7 @@ fn mimoExl3ForwardMatchesHost(rate: expert_exl3.Rate, rows: usize, seed: u64) !v
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var h = try MimoExl3MoeHarness.init(alloc, s, rate, rows, seed, .tiny);
+    var h = try MimoExl3MoeHarness.init(alloc, s, rate, rows, seed, .mcg);
     defer h.deinit();
     try h.expectMatchesHost(alloc, rate);
 }
@@ -40835,11 +40835,11 @@ fn exl3CodebookFollowsModel(rows: usize) !void {
     const rate: expert_exl3.Rate = .{ .n = 40 };
     var mul1 = try MimoExl3MoeHarness.init(alloc, s, rate, rows, 101, .mul1);
     defer mul1.deinit();
-    var tiny = try MimoExl3MoeHarness.init(alloc, s, rate, rows, 103, .tiny);
-    defer tiny.deinit();
+    var mcg = try MimoExl3MoeHarness.init(alloc, s, rate, rows, 103, .mcg);
+    defer mcg.deinit();
     for (0..2) |_| {
         try mul1.expectMatchesHost(alloc, rate);
-        try tiny.expectMatchesHost(alloc, rate);
+        try mcg.expectMatchesHost(alloc, rate);
     }
 }
 
@@ -40851,11 +40851,11 @@ test "exl3 prefill rows follow their own model's codebook with two packs residen
     try exl3CodebookFollowsModel(expert_exl3_kernels.DECODE_ROWS_MAX * 2);
 }
 
-test "mimo_v2 EXL3 resident MoE decode rows match the host SwiGLU oracle at K2.5 TINY" {
+test "mimo_v2 EXL3 resident MoE decode rows match the host SwiGLU oracle at K2.5 MCG" {
     try mimoExl3ForwardMatchesHost(.{ .n = 40 }, 4, 71);
 }
 
-test "mimo_v2 EXL3 resident MoE prefill rows match the host SwiGLU oracle at K2.5 TINY" {
+test "mimo_v2 EXL3 resident MoE prefill rows match the host SwiGLU oracle at K2.5 MCG" {
     try mimoExl3ForwardMatchesHost(.{ .n = 40 }, expert_exl3_kernels.DECODE_ROWS_MAX * 2, 73);
 }
 
@@ -40870,7 +40870,7 @@ fn mimoExl3DistinctRouting(rows: usize) !void {
     const I = MimoExl3MoeHarness.inter;
     const E = MimoExl3MoeHarness.E;
     const rate: expert_exl3.Rate = .{ .n = 40 };
-    var h = try MimoExl3MoeHarness.init(alloc, s, rate, rows, 191, .{ .codebook = .tiny, .window = .w12 });
+    var h = try MimoExl3MoeHarness.init(alloc, s, rate, rows, 191, .{ .codebook = .mcg, .window = .w12 });
     defer h.deinit();
     var prng = std.Random.DefaultPrng.init(193);
     const rnd = prng.random();
@@ -41012,7 +41012,7 @@ test "mimo_v2 EXL3 real shard routed fork matches CPU dump oracle" {
     }
     var buf: [256]u8 = undefined;
     const bank = try loadSwitchMlpBank(&weights, &buf, "model", layer, true, &config);
-    var h = try MimoExl3MoeHarness.init(alloc, s, .{ .n = 40 }, 1, 191, .tiny);
+    var h = try MimoExl3MoeHarness.init(alloc, s, .{ .n = 40 }, 1, 191, .mcg);
     defer h.deinit();
     h.xfm.config = config;
     h.mw.router_w = fixture.get("router") orelse return error.MissingWeight;
@@ -41098,7 +41098,7 @@ test "mimo_v2 EXL3 sliced real scales and outliers match the f32 oracle" {
     const alloc = arena.allocator();
     var weights = try model_mod.loadWeightsSingleFile(alloc, std.mem.span(path));
     defer weights.deinit();
-    var h = try MimoExl3MoeHarness.init(alloc, s, .{ .n = 40 }, 1, 313, .{ .codebook = .tiny, .window = .w12 });
+    var h = try MimoExl3MoeHarness.init(alloc, s, .{ .n = 40 }, 1, 313, .{ .codebook = .mcg, .window = .w12 });
     defer h.deinit();
     h.mw.router_w = weights.get("router") orelse return error.MissingWeight;
     h.mw.expert_bias = weights.get("bias") orelse return error.MissingWeight;

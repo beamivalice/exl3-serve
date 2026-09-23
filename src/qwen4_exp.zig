@@ -5,7 +5,7 @@
 //! a token touches 16 rows, so the rows are dequantized from the mmap on the
 //! host and only the [T, 2560] result is sent. Memory cost = page cache.
 //! Format: `ngram_table.bin` is a safetensors-format file holding one merged
-//! table, written by PonyExl3's `serve_convert affine-qwen4`: affine at
+//! table, written by sashimi's `serve_convert affine-qwen4`: affine at
 //! `bits` 2..8 (`weight` U32 [R, dim*bits/32], `scales`/`biases` BF16
 //! [R, dim/gs]) or, at `bits` 16, one raw `weight` BF16 [R, dim] region.
 

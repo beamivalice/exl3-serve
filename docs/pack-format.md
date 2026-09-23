@@ -66,9 +66,9 @@ search and one converted with it differ only in these `suh` values.
 - `format` — must be the string `exl3`; anything else is `ExpertLayoutUnsupported`.
 - `k` — the rate, a JSON number and possibly fractional. It names the WIDEST
   rate a layer packs and is what the engine bills.
-- `codebook` — `mul1`, `tiny` or `mcg`. MCG is the codebook for new packs;
-  MUL1 serves turboderp's packs; TINY is retired (the engine on main still
-  decodes it). The codebook and window follow the MODEL: `moeExl3` sets them
+- `codebook` — `mul1` or `mcg`. MCG is the codebook for new packs; MUL1 serves
+  turboderp's packs; the retired `tiny` is refused by name
+  (`Exl3CodebookUnsupported`, in `expert_quant` or a shard stamp alike). The codebook and window follow the MODEL: `moeExl3` sets them
   (`expert_exl3_kernels.setDecodeParams`) before every dispatch, so packs with
   different codebooks can be resident together, and every weight kernel
   inlines its `exl3_pairh`.
@@ -111,7 +111,7 @@ string, because that is all safetensors stores:
 |---|---|
 | `format` | `exl3` |
 | `k` | the rate as written, e.g. `2.5` or `4` |
-| `codebook` | `mul1` \| `tiny` \| `mcg` |
+| `codebook` | `mul1` \| `mcg` (`tiny` refused) |
 | `window` | the codeword width, e.g. `12` |
 | `quantizer` | which search wrote it (`ldlq` / `direct`) |
 | `g_scale` | the global-scale mode, e.g. `gss` |
@@ -149,7 +149,7 @@ decodes or requantizes. See README.md.
 `src/fixtures/exl3_*_linear.safetensors` are committed and `@embedFile`d by
 `src/expert_exl3.zig` and `src/transformer.zig`. They are produced by the
 private converter; regenerate one only to change the format, and keep the one
-searched and decoded at window 12 (`exl3_k2p5_tiny_w12_linear.safetensors`),
+searched and decoded at window 12 (`exl3_k2p5_mcg_w12_linear.safetensors`),
 which is what certifies a narrowed window against the converter's own decode
 rather than against our own masking of a w16 bitstream.
 

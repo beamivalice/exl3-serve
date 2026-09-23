@@ -47,7 +47,7 @@ const SourceIndex = struct {
     stamps: std.StringHashMap(ShardStamp),
 };
 
-/// The decoder a shard was written for, as PonyExl3's `serve_convert exl3-mimo`
+/// The decoder a shard was written for, as sashimi's `serve_convert exl3-mimo`
 /// stamps it (docs/pack-format.md). Every value is a string there. A shard
 /// naming none predates the stamp and is admitted; one that names a decoder
 /// the config does not is refused, because the same bytes decode to different
@@ -415,6 +415,7 @@ fn validateShardStamps(source: *const SourceIndex, config: *const model.ModelCon
     var it = source.stamps.valueIterator();
     while (it.next()) |stamp| {
         if (stamp.codebook) |name| {
+            if (expert_exl3.Codebook.isRetired(name)) return error.Exl3CodebookUnsupported;
             const cb = expert_exl3.Codebook.fromName(name) orelse return error.Exl3ShardStampMismatch;
             if (cb != config.expert_quant_codebook) return error.Exl3ShardStampMismatch;
         }
@@ -1302,7 +1303,7 @@ fn writeTinySource(io: std.Io, allocator: Allocator, dir: std.Io.Dir, bank: Tiny
         \\ "attention_projection_layout":"fused_qkv",
         \\ "add_swa_attention_sink_bias":false,
         \\ "add_full_attention_sink_bias":false,
-        \\ "expert_quant":{"format":"exl3","k":2.5,"codebook":"tiny"}}
+        \\ "expert_quant":{"format":"exl3","k":2.5,"codebook":"mcg"}}
     });
     const affine: TinyAffine = switch (bank) {
         .affine => |a| a,
@@ -1599,17 +1600,18 @@ test "mimo source refuses an EXL3 shard whose stamp disagrees with the config" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
 
-    // The config every arm parses names k 2.5 / tiny / w16.
+    // The config every arm parses names k 2.5 / mcg / w16.
     const Case = struct { dir: []const u8, stamp: ?[]const u8, window: expert_exl3.Window, rate: ?expert_exl3.Rate = null, want: ?anyerror };
     const cases = [_]Case{
-        .{ .dir = "stamp-matches", .stamp = "\"k\":\"2.5\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w16, .want = null },
-        .{ .dir = "stamp-window", .stamp = "\"k\":\"2.5\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w12, .want = error.Exl3ShardStampMismatch },
+        .{ .dir = "stamp-matches", .stamp = "\"k\":\"2.5\",\"codebook\":\"mcg\",\"window\":\"16\"", .window = .w16, .want = null },
+        .{ .dir = "stamp-window", .stamp = "\"k\":\"2.5\",\"codebook\":\"mcg\",\"window\":\"16\"", .window = .w12, .want = error.Exl3ShardStampMismatch },
         .{ .dir = "stamp-codebook", .stamp = "\"k\":\"2.5\",\"codebook\":\"mul1\",\"window\":\"16\"", .window = .w16, .want = error.Exl3ShardStampMismatch },
+        .{ .dir = "stamp-retired", .stamp = "\"k\":\"2.5\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w16, .want = error.Exl3CodebookUnsupported },
         // The bill prices the config's rate, so a shard WIDER than it refuses.
-        .{ .dir = "stamp-k", .stamp = "\"k\":\"3\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w16, .want = error.Exl3ShardStampMismatch },
+        .{ .dir = "stamp-k", .stamp = "\"k\":\"3\",\"codebook\":\"mcg\",\"window\":\"16\"", .window = .w16, .want = error.Exl3ShardStampMismatch },
         // A tail-bumped pack: the config names the widest rate and the body
         // layers stamp below it. Over-billed, not wrong — it loads.
-        .{ .dir = "stamp-k-below", .stamp = "\"k\":\"2.5\",\"codebook\":\"tiny\",\"window\":\"16\"", .window = .w16, .rate = .{ .n = 64 }, .want = null },
+        .{ .dir = "stamp-k-below", .stamp = "\"k\":\"2.5\",\"codebook\":\"mcg\",\"window\":\"16\"", .window = .w16, .rate = .{ .n = 64 }, .want = null },
         // A pack written before the stamp existed is admitted as legacy.
         .{ .dir = "stamp-absent", .stamp = null, .window = .w12, .want = null },
     };

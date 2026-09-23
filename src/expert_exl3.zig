@@ -8,24 +8,23 @@ pub const K4: u32 = 4;
 pub const K4_PACKED: usize = TILE_VALUES * K4 / 16;
 pub const MCG_MULT: u32 = 0xCBAC1FED;
 pub const MUL1_MULT: u32 = 0x83DCD12D;
-/// TINY keeps MCG's mix and half-pair sum but ADDS the fixed bits: the mantissa
-/// offsets (0x100 low half, 0x200 high half) carry into the exponent with
-/// probability 1/4 and 1/2, which is what closes the gap to MUL1.
-pub const TINY_MASK: u32 = 0x8FFF8FFF;
-pub const TINY_ADD: u32 = 0x32003100;
 
 pub const Codebook = enum(u8) {
     mul1 = 0,
     mcg = 1,
-    tiny = 2,
 
-    pub const count = 3;
+    pub const count = 2;
 
     pub fn fromName(name: []const u8) ?Codebook {
         if (std.mem.eql(u8, name, "mcg")) return .mcg;
         if (std.mem.eql(u8, name, "mul1")) return .mul1;
-        if (std.mem.eql(u8, name, "tiny")) return .tiny;
         return null;
+    }
+
+    /// TINY is retired: a pack written for it is refused by name, never read
+    /// as an unknown layout.
+    pub fn isRetired(name: []const u8) bool {
+        return std.mem.eql(u8, name, "tiny");
     }
 };
 
@@ -79,7 +78,6 @@ pub const Decode = struct {
 
     pub const mul1: Decode = .{ .codebook = .mul1 };
     pub const mcg: Decode = .{ .codebook = .mcg };
-    pub const tiny: Decode = .{ .codebook = .tiny };
 };
 
 /// A trellis rate K = n/16 bits per weight, `n` being the halfwords a packed
@@ -171,19 +169,10 @@ pub fn decodeMul1(codeword: u16) u16 {
     return f32ToF16Bits(@mulAdd(f32, h, inverse, bias));
 }
 
-pub fn decodeTiny(codeword: u16) u16 {
-    const mixed = @as(u32, codeword) *% MCG_MULT;
-    const pair = (mixed & TINY_MASK) +% TINY_ADD;
-    const lo = f16BitsToF32(@truncate(pair));
-    const hi = f16BitsToF32(@truncate(pair >> 16));
-    return f32ToF16Bits(lo + hi);
-}
-
 pub fn decodeCodeword(codeword: u16, codebook: Codebook) u16 {
     return switch (codebook) {
         .mcg => decodeMcg(codeword),
         .mul1 => decodeMul1(codeword),
-        .tiny => decodeTiny(codeword),
     };
 }
 
@@ -419,12 +408,12 @@ pub const fixtures = struct {
     pub const k4 = aligned(@embedFile("fixtures/exl3_k4_linear.safetensors"));
     pub const k3 = aligned(@embedFile("fixtures/exl3_k3_linear.safetensors"));
     pub const k2 = aligned(@embedFile("fixtures/exl3_k2_linear.safetensors"));
-    pub const k2p5_tiny = aligned(@embedFile("fixtures/exl3_k2p5_tiny_linear.safetensors"));
-    pub const k3_tiny = aligned(@embedFile("fixtures/exl3_k3_tiny_linear.safetensors"));
-    /// Searched AND decoded at window 12 by PonyExl3: the only fixture that
+    pub const k2p5_mcg = aligned(@embedFile("fixtures/exl3_k2p5_mcg_linear.safetensors"));
+    pub const k3_mcg = aligned(@embedFile("fixtures/exl3_k3_mcg_linear.safetensors"));
+    /// Searched AND decoded at window 12 by sashimi: the only fixture that
     /// certifies a narrowed window against the library rather than against our
     /// own masking of a w16 bitstream.
-    pub const k2p5_tiny_w12 = aligned(@embedFile("fixtures/exl3_k2p5_tiny_w12_linear.safetensors"));
+    pub const k2p5_mcg_w12 = aligned(@embedFile("fixtures/exl3_k2p5_mcg_w12_linear.safetensors"));
 
     fn aligned(comptime raw: []const u8) *align(8) const [raw.len]u8 {
         const holder = struct {
@@ -547,22 +536,14 @@ test "exl3 MUL1 codebook pins known codewords" {
     try t.expectEqual(@as(u16, 47511), decodeMul1(7));
 }
 
-test "exl3 TINY codebook pins the converter's codewords" {
+test "exl3 codebook names resolve and an unknown or retired name is null" {
     const t = std.testing;
-    try t.expectEqual(@as(u16, 13696), decodeTiny(0));
-    try t.expectEqual(@as(u16, 15406), decodeTiny(1));
-    try t.expectEqual(@as(u16, 49398), decodeTiny(7));
-    try t.expectEqual(@as(u16, 48865), decodeTiny(255));
-    try t.expectEqual(@as(u16, 46719), decodeTiny(4096));
-    try t.expectEqual(@as(u16, 13165), decodeTiny(65535));
-}
-
-test "exl3 codebook names resolve and an unknown name is null" {
-    const t = std.testing;
-    try t.expectEqual(Codebook.tiny, Codebook.fromName("tiny").?);
     try t.expectEqual(Codebook.mul1, Codebook.fromName("mul1").?);
     try t.expectEqual(Codebook.mcg, Codebook.fromName("mcg").?);
     try t.expectEqual(@as(?Codebook, null), Codebook.fromName("mul2"));
+    try t.expectEqual(@as(?Codebook, null), Codebook.fromName("tiny"));
+    try t.expect(Codebook.isRetired("tiny"));
+    try t.expect(!Codebook.isRetired("mcg"));
 }
 
 test "exl3 MUL1 codebook maps a zero codeword to the finite half" {
@@ -688,40 +669,40 @@ test "exl3 K2 packed fixture decodes to the library inner and public f16" {
     try decodePackedFixture(arena.allocator(), fixture_k2_bytes, Rate.fromK(2), .mul1);
 }
 
-const fixture_k2p5_tiny_bytes = fixtures.k2p5_tiny;
-const fixture_k3_tiny_bytes = fixtures.k3_tiny;
+const fixture_k2p5_mcg_bytes = fixtures.k2p5_mcg;
+const fixture_k3_mcg_bytes = fixtures.k3_mcg;
 
-test "exl3 K2.5 TINY packed fixture decodes to the library inner and public f16" {
+test "exl3 K2.5 MCG packed fixture decodes to the library inner and public f16" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    try decodePackedFixture(arena.allocator(), fixture_k2p5_tiny_bytes, .{ .n = 40 }, .tiny);
+    try decodePackedFixture(arena.allocator(), fixture_k2p5_mcg_bytes, .{ .n = 40 }, .mcg);
 }
 
-test "exl3 K3 TINY packed fixture decodes to the library inner and public f16" {
+test "exl3 K3 MCG packed fixture decodes to the library inner and public f16" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    try decodePackedFixture(arena.allocator(), fixture_k3_tiny_bytes, .{ .n = 48 }, .tiny);
+    try decodePackedFixture(arena.allocator(), fixture_k3_mcg_bytes, .{ .n = 48 }, .mcg);
 }
 
-test "exl3 K2.5 TINY w12 packed fixture decodes to the library inner and public f16" {
+test "exl3 K2.5 MCG w12 packed fixture decodes to the library inner and public f16" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    const dec: Decode = .{ .codebook = .tiny, .window = .w12 };
-    try decodePackedFixture(alloc, fixtures.k2p5_tiny_w12, .{ .n = 40 }, dec);
+    const dec: Decode = .{ .codebook = .mcg, .window = .w12 };
+    try decodePackedFixture(alloc, fixtures.k2p5_mcg_w12, .{ .n = 40 }, dec);
 
     // The window is a decode parameter, not a preference: the same bitstream
     // read at w16 is a different weight matrix, so the fixture certifies w12
     // rather than the decoder's arithmetic alone.
-    var tensors = try parseSafetensors(alloc, fixtures.k2p5_tiny_w12);
+    var tensors = try parseSafetensors(alloc, fixtures.k2p5_mcg_w12);
     defer tensors.deinit();
     const trellis = tensors.get("trellis") orelse return error.MissingTrellis;
     const inner = tensors.get("inner") orelse return error.MissingInner;
     const wide = try alloc.alloc(u16, 128 * 128);
-    reconstructInner(asU16(trellis), 128, 128, .{ .n = 40 }, .tiny, wide);
+    reconstructInner(asU16(trellis), 128, 128, .{ .n = 40 }, .mcg, wide);
     try t.expect(!std.mem.eql(u16, asU16(inner), wide));
 }
 
@@ -745,7 +726,7 @@ test "exl3 the reference decode narrows the codeword window at w8 and w10" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    var tensors = try parseSafetensors(arena.allocator(), fixtures.k2p5_tiny);
+    var tensors = try parseSafetensors(arena.allocator(), fixtures.k2p5_mcg);
     defer tensors.deinit();
     const rate: Rate = .{ .n = 40 };
     const tile = asU16(tensors.get("trellis") orelse return error.MissingTrellis)[0..rate.halfwords()];
@@ -754,12 +735,12 @@ test "exl3 the reference decode narrows the codeword window at w8 and w10" {
     var perm: [TILE_VALUES]usize = undefined;
     tensorCorePerm(&perm);
     var wide: [TILE_VALUES]u16 = undefined;
-    decodeTile(tile, rate, .tiny, &wide);
+    decodeTile(tile, rate, .mcg, &wide);
     for ([_]Window{ .w8, .w10 }) |win| {
         var got: [TILE_VALUES]u16 = undefined;
-        decodeTile(tile, rate, .{ .codebook = .tiny, .window = win }, &got);
+        decodeTile(tile, rate, .{ .codebook = .mcg, .window = win }, &got);
         var want: [TILE_VALUES]u16 = undefined;
-        for (codewords, 0..) |cw, i| want[perm[i]] = decodeCodeword(cw & win.mask(), .tiny);
+        for (codewords, 0..) |cw, i| want[perm[i]] = decodeCodeword(cw & win.mask(), .mcg);
         try t.expectEqualSlices(u16, &want, &got);
         // The narrowed window is a different weight matrix, not a rounding of
         // the wide one: a pack read at the wrong width decodes to noise.

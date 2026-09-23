@@ -113,6 +113,7 @@ pub fn parseExpertQuant(obj: std.json.ObjectMap) !Exl3Spec {
     const rate = rateFromConfigK(k_v) orelse return error.ExpertLayoutUnsupported;
     const cb_v = block.object.get("codebook") orelse return error.ExpertLayoutUnsupported;
     if (cb_v != .string) return error.ExpertLayoutUnsupported;
+    if (expert_exl3.Codebook.isRetired(cb_v.string)) return error.Exl3CodebookUnsupported;
     const codebook = expert_exl3.Codebook.fromName(cb_v.string) orelse return error.ExpertLayoutUnsupported;
     const window = windowFromConfig(block.object.get("window")) orelse return error.Exl3WindowUnsupported;
     return .{ .rate = rate, .codebook = codebook, .window = window };
@@ -126,7 +127,7 @@ fn specFromConfigJson(allocator: std.mem.Allocator, raw: []const u8) !Exl3Spec {
 
 test "an EXL3 pack's codeword window is 16 unless its config names one this build decodes" {
     const t = std.testing;
-    const base = "{\"expert_quant\":{\"format\":\"exl3\",\"k\":2.5,\"codebook\":\"tiny\"";
+    const base = "{\"expert_quant\":{\"format\":\"exl3\",\"k\":2.5,\"codebook\":\"mcg\"";
     try t.expectEqual(expert_exl3.Window.w16, (try specFromConfigJson(t.allocator, base ++ "}}")).window);
     try t.expectEqual(expert_exl3.Window.w16, (try specFromConfigJson(t.allocator, base ++ ",\"window\":16}}")).window);
     try t.expectEqual(expert_exl3.Window.w12, (try specFromConfigJson(t.allocator, base ++ ",\"window\":12}}")).window);
@@ -138,6 +139,13 @@ test "an EXL3 pack's codeword window is 16 unless its config names one this buil
     try t.expectError(error.Exl3WindowUnsupported, specFromConfigJson(t.allocator, base ++ ",\"window\":17}}"));
     try t.expectError(error.Exl3WindowUnsupported, specFromConfigJson(t.allocator, base ++ ",\"window\":7}}"));
     try t.expectError(error.Exl3WindowUnsupported, specFromConfigJson(t.allocator, base ++ ",\"window\":\"12\"}}"));
+}
+
+test "an EXL3 pack on the retired TINY codebook is refused by name" {
+    const t = std.testing;
+    try t.expectError(error.Exl3CodebookUnsupported, specFromConfigJson(t.allocator,
+        \\{"expert_quant":{"format":"exl3","k":2.5,"codebook":"tiny","window":12}}
+    ));
 }
 
 pub fn kFromPackedDim(last: u64) ?expert_exl3.Rate {
@@ -1291,7 +1299,7 @@ test "exl3 expert_quant admits integer and fractional K under every served codeb
         .{ .text = "4", .n = 64 },
     };
     for (cases) |c| {
-        for ([_]expert_exl3.Codebook{ .mul1, .tiny, .mcg }) |cb| {
+        for ([_]expert_exl3.Codebook{ .mul1, .mcg }) |cb| {
             var buf: [96]u8 = undefined;
             const raw = try std.fmt.bufPrint(&buf, "{{\"expert_quant\":{{\"format\":\"exl3\",\"k\":{s},\"codebook\":\"{s}\"}}}}", .{ c.text, @tagName(cb) });
             const ok = try std.json.parseFromSlice(std.json.Value, t.allocator, raw, .{});

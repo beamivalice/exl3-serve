@@ -5,7 +5,7 @@ Two phases, run from the torch venv (transformers main carries the arch):
 
   1. `build`  — a random Qwen4ExpForCausalLM at toy geometry, saved in the
      real checkpoint's naming (model.language_model.*, sharded n-gram table),
-     so PonyExl3's `serve_convert affine-qwen4 --src` converts it verbatim.
+     so sashimi's `serve_convert affine-qwen4 --src` converts it verbatim.
   2. `dump`   — the reference forward on OUR dequantized pack (mx.dequantize
      of every quantized tensor written back into the torch model), so the
      fixture measures the ENGINE, not the quantizer. Writes input_ids, the
@@ -13,7 +13,7 @@ Two phases, run from the torch venv (transformers main carries the arch):
      budget, plus the per-layer residual stream for bisecting.
 
   venv/bin/python tests/dump_qwen4_exp_fixtures.py build --out ~/claude-tmp/qwen4-tiny/hf
-  python -m ponyexl3.serve_convert affine-qwen4 --src ~/claude-tmp/qwen4-tiny/hf --dst ~/claude-tmp/qwen4-tiny/pack
+  python -m sashimi.serve_convert affine-qwen4 --src ~/claude-tmp/qwen4-tiny/hf --dst ~/claude-tmp/qwen4-tiny/pack
   venv/bin/python tests/dump_qwen4_exp_fixtures.py dump --hf ~/claude-tmp/qwen4-tiny/hf \
       --pack ~/claude-tmp/qwen4-tiny/pack --out ~/claude-tmp/qwen4-tiny/fixture.safetensors
   QWEN4_TEST_MODEL=~/claude-tmp/qwen4-tiny/pack QWEN4_FIXTURE=~/claude-tmp/qwen4-tiny/fixture.safetensors \

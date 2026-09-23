@@ -13,14 +13,14 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [pack-format](pack-format.
 | File | Role |
 |---|---|
 | `src/expert_quant.zig` | Expert layout detection from PACKED shapes: `.quantized_split` (affine banks) vs `.exl3_k4` (trellis); affine (bits, group_size) solved from geometry; `expert_quant` parse |
-| `src/expert_exl3.zig` | Host reference decoders (`decodeTiny`, MUL1, MCG), `Rate`, `Window`, `Decode`, fixtures |
+| `src/expert_exl3.zig` | Host reference decoders (MUL1, MCG), `Rate`, `Window`, `Decode`, fixtures |
 | `src/expert_exl3_kernels.zig` | Prefill run-aligned 32-row window GEMM (NAX body, K4 fast branch), decode chain (`moeSwigluFused`), `DECODE_ROWS_MAX` (16), `usesPrefillArm` |
 | `src/expert_bf16_kernels.zig` | bf16 selected-expert kernels over a slab (`gateUpSwiglu`; `downReduce`) for the unquantized HF checkpoint |
 
 ## Format as the engine sees it
 
 - Routed experts are stacked per layer as `[E, ...]` so gather kernels index expert e on axis 0; 16x16 tiles,
-  `suh`/`svh` with the H128 Hadamard; `config.json` carries `expert_quant = {format: exl3, k, codebook: mul1|tiny|mcg}`
+  `suh`/`svh` with the H128 Hadamard; `config.json` carries `expert_quant = {format: exl3, k, codebook: mul1|mcg}`
   (plus `window`); per-tensor rate read from the trellis shape. Every other module stays the affine pack's.
 - **A rate is K = n/16**, n the packed halfwords per 256-weight tile (40 = K2.5, 48 = K3, 64 = K4): weight t's
   codeword is the 16-bit window ending at `((t+1)*n)>>4`, so its fresh bits follow from n and the pattern is never
@@ -33,8 +33,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [pack-format](pack-format.
   bitstream decodes to different weights at every other window, so a window can never come from a flag.
 - **The codebook follows the MODEL at every dispatch**: `moeExl3` calls `expert_exl3_kernels.setDecodeParams`
   (codebook + window) before each dispatch because several EXL3 packs can be resident at once; every weight kernel
-  inlines `exl3_pairh` from `codebookHelpers`, built per (codebook, window). TINY = MCG's mix and half-pair sum with
-  the fixed bits ADDED (`TINY_ADD`); it is retired (MCG is the codebook for new packs). A/B lever:
+  inlines `exl3_pairh` from `codebookHelpers`, built per (codebook, window). A pack declaring the retired `tiny` codebook (config or shard stamp) is refused as `Exl3CodebookUnsupported`. A/B lever:
   `MLX_SERVE_EXL3_CODEBOOK_AB=1` on the `codebook A/B` test.
 - **A shard's `__metadata__` stamp is CHECKED against `expert_quant` before upload**
   (`mimo_source.validateShardStamps`): see [pack-format](pack-format.md#the-shard-stamp).
@@ -81,7 +80,7 @@ source FP8→bf16 loader (`usesMimoSourceTrunk`), billed dense by `mimoSourceRes
   saturation. When a pack "mostly works", capture per-layer max|x|, max|gate*up|, max|down inner| on a real prompt
   first.
 - **Score the Metal arms on a real pack's own bytes** (real suh vectors span four decades), not only synthetic
-  trellises. The w12 fixture (`exl3_k2p5_tiny_w12_linear.safetensors`) certifies the window convention against the
+  trellises. The w12 fixture (`exl3_k2p5_mcg_w12_linear.safetensors`) certifies the window convention against the
   converter's own decode.
 - A "systematically wrong but not garbage" pack whose reference decoders agree points at live-path numerics OR at
   the pack's own weights along real activations (a converter-side defect; converter details live in the private

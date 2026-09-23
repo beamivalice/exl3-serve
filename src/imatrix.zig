@@ -1,6 +1,6 @@
 //! Per-input-channel activation statistics ("imatrix") captured while the engine
 //! serves a checkpoint with expert streaming, in the exact contract
-//! PonyExl3's `ponyexl3.serve_convert` writes (`imatrix-qwen4`) and reads
+//! sashimi's `sashimi.serve_convert` writes (`imatrix-qwen4`) and reads
 //! (`exl3-qwen4`).
 //!
 //! Per layer the file carries three entries, whatever the architecture:

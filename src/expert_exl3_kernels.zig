@@ -738,7 +738,6 @@ fn cbSuffix(comptime cb: exl3.Codebook) [:0]const u8 {
     return switch (cb) {
         .mul1 => "",
         .mcg => "_mcg",
-        .tiny => "_tiny",
     };
 }
 
@@ -756,11 +755,6 @@ fn codebookHelpers(comptime cb: exl3.Codebook, comptime win: exl3.Window) [:0]co
         ,
         .mcg =>
         \\  const uint2 r = ((cw * uint2(0xCBAC1FEDu)) & uint2(0x8FFF8FFFu)) ^ uint2(0x3B603B60u);
-        \\  const half4 h = as_type<half4>(r);
-        \\  return half2(h.x + h.y, h.z + h.w);
-        ,
-        .tiny =>
-        \\  const uint2 r = ((cw * uint2(0xCBAC1FEDu)) & uint2(0x8FFF8FFFu)) + uint2(0x32003100u);
         \\  const half4 h = as_type<half4>(r);
         \\  return half2(h.x + h.y, h.z + h.w);
         ,
@@ -2928,20 +2922,20 @@ test "exl3 K2 Metal inner GEMV matches the host tile decode" {
     try metalInnerGemvFixture(exl3.fixtures.k2, exl3.Rate.fromK(2), .mul1);
 }
 
-test "exl3 K2.5 TINY Metal inner GEMV matches the host tile decode" {
-    try metalInnerGemvFixture(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .tiny);
+test "exl3 K2.5 MCG Metal inner GEMV matches the host tile decode" {
+    try metalInnerGemvFixture(exl3.fixtures.k2p5_mcg, .{ .n = 40 }, .mcg);
 }
 
-test "exl3 K3 TINY Metal inner GEMV matches the host tile decode" {
-    try metalInnerGemvFixture(exl3.fixtures.k3_tiny, .{ .n = 48 }, .tiny);
+test "exl3 K3 MCG Metal inner GEMV matches the host tile decode" {
+    try metalInnerGemvFixture(exl3.fixtures.k3_mcg, .{ .n = 48 }, .mcg);
 }
 
 // A w16 bitstream is a valid w12 bitstream — only the value each window decodes
 // to changes — so the existing fixtures are the narrowed packs too, scored
 // against the host reference under the same width.
 test "exl3 Metal inner GEMV matches the host tile decode at a narrowed codeword window" {
-    try metalInnerGemvFixture(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
-    try metalInnerGemvFixture(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w14 });
+    try metalInnerGemvFixture(exl3.fixtures.k2p5_mcg, .{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 });
+    try metalInnerGemvFixture(exl3.fixtures.k2p5_mcg, .{ .n = 40 }, .{ .codebook = .mcg, .window = .w14 });
     try metalInnerGemvFixture(exl3.fixtures.k4, exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w12 });
 }
 
@@ -3958,7 +3952,7 @@ test "exl3 layer ubench production shape rows=1 and 512 per codebook" {
     // GPU clock ramp lands on both; read medians per kernel, never one shot.
     const rounds: usize = if (exl3UbenchOn()) 5 else 1;
     for (0..rounds) |_| {
-        for ([_]exl3.Decode{ .mul1, .tiny }) |dec| try layerUbench(dec);
+        for ([_]exl3.Decode{ .mul1, .mcg }) |dec| try layerUbench(dec);
     }
 }
 
@@ -4428,8 +4422,8 @@ test "exl3 sorted GEMM matches host MUL1 on small shape" {
     try sortedGemmSmallShape(.mul1);
 }
 
-test "exl3 sorted GEMM matches host TINY on small shape" {
-    try sortedGemmSmallShape(.tiny);
+test "exl3 sorted GEMM matches host MCG on small shape" {
+    try sortedGemmSmallShape(.mcg);
 }
 
 test "exl3 a NAX GEMM source the Metal toolchain rejects is declined at the probe, not at prefill" {
@@ -5613,42 +5607,42 @@ test "exl3 fused decode chain matches the host SwiGLU reference" {
     try fusedChainMatchesHost(exl3.fixtures.k4, exl3.Rate.fromK(4), .mul1);
 }
 
-test "exl3 fused decode chain matches the host SwiGLU reference under TINY" {
-    try fusedChainMatchesHost(exl3.fixtures.k4, exl3.Rate.fromK(4), .tiny);
+test "exl3 fused decode chain matches the host SwiGLU reference under MCG" {
+    try fusedChainMatchesHost(exl3.fixtures.k4, exl3.Rate.fromK(4), .mcg);
 }
 
-test "exl3 fused decode chain matches the host SwiGLU reference at K2.5 TINY" {
-    try fusedChainMatchesHost(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .tiny);
+test "exl3 fused decode chain matches the host SwiGLU reference at K2.5 MCG" {
+    try fusedChainMatchesHost(exl3.fixtures.k2p5_mcg, .{ .n = 40 }, .mcg);
 }
 
 test "exl3 fused decode chain matches the host SwiGLU reference at a narrowed codeword window" {
-    try fusedChainMatchesHost(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
-    try fusedChainMatchesHost(exl3.fixtures.k2p5_tiny_w12, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
+    try fusedChainMatchesHost(exl3.fixtures.k2p5_mcg, .{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 });
+    try fusedChainMatchesHost(exl3.fixtures.k2p5_mcg_w12, .{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 });
     try fusedChainMatchesHost(exl3.fixtures.k4, exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w14 });
 }
 
 test "exl3 fused decode chain matches the host SwiGLU reference below window 12" {
-    try fusedChainMatchesHost(exl3.fixtures.k2p5_tiny, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w10 });
+    try fusedChainMatchesHost(exl3.fixtures.k2p5_mcg, .{ .n = 40 }, .{ .codebook = .mcg, .window = .w10 });
 }
 
-test "exl3 cooperative indexed GEMV matches host TINY tile decode at K4 K3 K2" {
+test "exl3 cooperative indexed GEMV matches host MCG tile decode at K4 K3 K2" {
     for (0..PARITY_SEEDS) |i| {
-        try indexedParity(exl3.Rate.fromK(4), 128, 128, 4, 10, 23 + i, .tiny);
-        try indexedParity(exl3.Rate.fromK(3), 128, 128, 4, 10, 1201 + i, .tiny);
-        try indexedParity(exl3.Rate.fromK(2), 128, 128, 4, 10, 1301 + i, .tiny);
+        try indexedParity(exl3.Rate.fromK(4), 128, 128, 4, 10, 23 + i, .mcg);
+        try indexedParity(exl3.Rate.fromK(3), 128, 128, 4, 10, 1201 + i, .mcg);
+        try indexedParity(exl3.Rate.fromK(2), 128, 128, 4, 10, 1301 + i, .mcg);
     }
 }
 
 test "exl3 cooperative indexed GEMV matches the host tile decode at a fractional rate" {
     for (0..PARITY_SEEDS) |i| {
-        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1401 + i, .tiny);
-        try indexedParity(.{ .n = 44 }, 128, 128, 4, 10, 1501 + i, .tiny);
+        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1401 + i, .mcg);
+        try indexedParity(.{ .n = 44 }, 128, 128, 4, 10, 1501 + i, .mcg);
     }
     try indexedParity(.{ .n = 40 }, 2560, 640, 4, 10, 43, .mul1);
     try indexedParity(.{ .n = 44 }, 2560, 640, 4, 10, 47, .mul1);
 }
 
-/// The w12 fixture through the Metal indexed GEMV, scored against PonyExl3's
+/// The w12 fixture through the Metal indexed GEMV, scored against sashimi's
 /// own reference decode (the fixture's `inner`) rather than against our host
 /// decoder — the one bar that certifies the narrowed-window convention on the
 /// GPU end to end.
@@ -5709,22 +5703,22 @@ fn indexedGemvMatchesFixtureInner(fixture: []const u8, rate: exl3.Rate, dec: exl
     try reportGemmParity(try measureInnerGemmParityOn(alloc, s, src[0 .. rows * dim], xh, eids, w, dim, dim));
 }
 
-test "exl3 indexed GEMV decodes the w12 fixture to PonyExl3's own inner weights" {
-    try indexedGemvMatchesFixtureInner(exl3.fixtures.k2p5_tiny_w12, .{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 });
+test "exl3 indexed GEMV decodes the w12 fixture to sashimi's own inner weights" {
+    try indexedGemvMatchesFixtureInner(exl3.fixtures.k2p5_mcg_w12, .{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 });
 }
 
 test "exl3 cooperative indexed GEMV matches the host tile decode at a narrowed codeword window" {
     for (0..PARITY_SEEDS) |i| {
-        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1601 + i, .{ .codebook = .tiny, .window = .w12 });
+        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1601 + i, .{ .codebook = .mcg, .window = .w12 });
         // K4 takes the packed fast branch, which decodes through the same helper.
         try indexedParity(exl3.Rate.fromK(4), 128, 128, 4, 10, 1701 + i, .{ .codebook = .mul1, .window = .w12 });
-        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1801 + i, .{ .codebook = .tiny, .window = .w14 });
+        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1801 + i, .{ .codebook = .mcg, .window = .w14 });
     }
 }
 
 test "exl3 cooperative indexed GEMV matches the host tile decode below window 12" {
     for (0..PARITY_SEEDS) |i| {
-        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1901 + i, .{ .codebook = .tiny, .window = .w10 });
+        try indexedParity(.{ .n = 40 }, 128, 128, 4, 10, 1901 + i, .{ .codebook = .mcg, .window = .w10 });
     }
 }
 
@@ -5789,7 +5783,7 @@ const PARITY_SEEDS: usize = 8;
 
 test "exl3 sorted GEMM matches the host tile decode at a fractional rate" {
     for (0..PARITY_SEEDS) |i| {
-        try sortedGemmParity(.{ .n = 40 }, .tiny, 32, 101 + i);
+        try sortedGemmParity(.{ .n = 40 }, .mcg, 32, 101 + i);
         try sortedGemmParity(.{ .n = 44 }, .mul1, 32, 201 + i);
         try sortedGemmParity(exl3.Rate.fromK(4), .mul1, 16, 301 + i);
     }
@@ -5803,16 +5797,16 @@ test "exl3 sorted GEMM matches the host tile decode at a fractional rate with th
     defer _ = unsetenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK");
     try t.expect(!gemmNaxOn());
     for (0..PARITY_SEEDS) |i| {
-        try sortedGemmParity(.{ .n = 40 }, .tiny, 32, 401 + i);
+        try sortedGemmParity(.{ .n = 40 }, .mcg, 32, 401 + i);
         try sortedGemmParity(.{ .n = 44 }, .mul1, 16, 501 + i);
     }
 }
 
 test "exl3 sorted GEMM matches the host tile decode at a narrowed codeword window" {
     for (0..PARITY_SEEDS) |i| {
-        try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 }, 32, 601 + i);
+        try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 }, 32, 601 + i);
         try sortedGemmParity(exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w12 }, 16, 701 + i);
-        try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .tiny, .window = .w14 }, 16, 801 + i);
+        try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .mcg, .window = .w14 }, 16, 801 + i);
     }
 }
 
@@ -5821,7 +5815,7 @@ test "exl3 the GEMM parity bar convicts a wrong window and a wrong codeword" {
     // the real kernel and give the reference a decode the arm did not use.
     if (!mlx.streamIsGpu(mlx.gpuStream())) return error.SkipZigTest;
     for ([_]Exl3Mutation{ .window, .codeword }) |m| {
-        for ([_]exl3.Decode{ .tiny, .{ .codebook = .mul1, .window = .w12 } }) |dec| {
+        for ([_]exl3.Decode{ .mcg, .{ .codebook = .mul1, .window = .w12 } }) |dec| {
             const st = try sortedGemmParityStats(.{ .n = 40 }, dec, 16, 901, m);
             try std.testing.expect(exl3GemmParityVerdict(st.finite, st.kern_max, st.rms_kern, st.rms_comp, st.ceiling) != null);
         }
@@ -5839,7 +5833,7 @@ test "exl3 sorted GEMM matches the host tile decode at a narrowed window with th
     defer _ = unsetenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK");
     try t.expect(!gemmNaxOn());
     for (0..PARITY_SEEDS) |i| {
-        try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .tiny, .window = .w12 }, 32, 1001 + i);
+        try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 }, 32, 1001 + i);
         try sortedGemmParity(exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w14 }, 16, 1101 + i);
     }
 }
@@ -6302,7 +6296,7 @@ test "mimo_v2 EXL3 arms match the f32 SwiGLU on a real pack's own bytes" {
                 .topk = 8,
                 .rows = rows,
                 .rate = .{ .n = 40 },
-                .dec = .{ .codebook = .tiny, .window = .w12 },
+                .dec = .{ .codebook = .mcg, .window = .w12 },
                 .seed = 4242,
                 .x_scale = xs,
                 .real_blob = blob,
@@ -6346,7 +6340,7 @@ test "mimo_v2 EXL3 arms stay finite where the SwiGLU product passes the f16 ceil
             .topk = 4,
             .rows = rows,
             .rate = .{ .n = 40 },
-            .dec = .{ .codebook = .tiny, .window = .w12 },
+            .dec = .{ .codebook = .mcg, .window = .w12 },
             .seed = 9001 + rows,
             .banks = MIMO_BANKS,
             .x_scale = 512,
@@ -6363,7 +6357,7 @@ test "mimo_v2 EXL3 prefill rows match the host SwiGLU oracle past one GEMM windo
             .topk = 8,
             .rows = rows,
             .rate = .{ .n = 40 },
-            .dec = .{ .codebook = .tiny, .window = .w12 },
+            .dec = .{ .codebook = .mcg, .window = .w12 },
             .seed = 1301 + rows,
         });
     }
@@ -6378,7 +6372,7 @@ test "mimo_v2 EXL3 prefill rows match the fused decode arm at E=256 top-8" {
             .topk = 8,
             .rows = rows,
             .rate = .{ .n = 40 },
-            .dec = .{ .codebook = .tiny, .window = .w12 },
+            .dec = .{ .codebook = .mcg, .window = .w12 },
             .seed = 1401 + rows,
         });
     }
@@ -6393,7 +6387,7 @@ test "mimo_v2 EXL3 prefill rows match the fused decode arm at the served hidden 
             .topk = 8,
             .rows = rows,
             .rate = .{ .n = 40 },
-            .dec = .{ .codebook = .tiny, .window = .w12 },
+            .dec = .{ .codebook = .mcg, .window = .w12 },
             .seed = 1501 + rows,
         });
     }
@@ -6425,7 +6419,7 @@ test "mimo_v2 EXL3 prefill rows match the fused decode arm on every GEMM arm" {
         .topk = 8,
         .rows = 55,
         .rate = .{ .n = 40 },
-        .dec = .{ .codebook = .tiny, .window = .w12 },
+        .dec = .{ .codebook = .mcg, .window = .w12 },
         .seed = 1601,
     };
     for ([_]bool{ true, false }) |nax_off| {
@@ -6454,7 +6448,7 @@ test "mimo_v2 EXL3 prefill layers built lazily keep their own window count and r
         .topk = 8,
         .rows = 55,
         .rate = .{ .n = 40 },
-        .dec = .{ .codebook = .tiny, .window = .w12 },
+        .dec = .{ .codebook = .mcg, .window = .w12 },
         .seed = 0,
     };
     setDecodeParams(c0.dec);
@@ -6868,9 +6862,9 @@ test "exl3 codebook A/B at production shape" {
     const sv_d = mlx.mlx_array_new_data(ones_in.ptr, &[_]c_int{ @intCast(E), @intCast(in_dim) }, 2, .float16);
     defer _ = mlx.mlx_array_free(sv_d);
     const io = std.Io.Threaded.global_single_threaded.io();
-    const arms = [_]exl3.Decode{ .mul1, .tiny };
+    const arms = [_]exl3.Decode{ .mul1, .mcg };
     const rounds: usize = 7;
-    std.debug.print("{s:>5} {s:>10} {s:>10} {s:>9}\n", .{ "rows", "mul1 ms", "tiny ms", "tiny/mul1" });
+    std.debug.print("{s:>5} {s:>10} {s:>10} {s:>9}\n", .{ "rows", "mul1 ms", "mcg ms", "mcg/mul1" });
     for ([_]usize{ 1, 4, 16, 512 }) |R| {
         const iters: usize = if (R >= 64) 3 else 10;
         const xh = try alloc.alloc(u16, R * in_dim);
@@ -6996,8 +6990,8 @@ fn weightReaderExact(comptime n: u32, comptime cb: exl3.Codebook, comptime win: 
 }
 
 test "exl3 n40 NAX codewords and decoded weights are exact" {
-    try n40NaxReaderExact(.tiny, .w12, true);
-    try n40NaxReaderExact(.tiny, .w12, false);
+    try n40NaxReaderExact(.mcg, .w12, true);
+    try n40NaxReaderExact(.mcg, .w12, false);
     try n40NaxReaderExact(.mul1, .w8, false);
     try n40NaxReaderExact(.mul1, .w16, false);
 }
@@ -7011,7 +7005,7 @@ fn n40Bf16Truth(seed: u64, win: c_int, rows: usize, decode: bool) !void {
 }
 
 fn n40Bf16TruthGeometry(seed: u64, win: c_int, rows: usize, decode: bool, hidden: usize, inter: usize) !void {
-    const c = MimoMoeCase{ .e = 8, .hidden = hidden, .inter = inter, .topk = 8, .rows = rows, .rate = .{ .n = 40 }, .dec = .{ .codebook = .tiny, .window = .w12 }, .seed = seed, .banks = MIMO_BANKS, .x_scale = 3 };
+    const c = MimoMoeCase{ .e = 8, .hidden = hidden, .inter = inter, .topk = 8, .rows = rows, .rate = .{ .n = 40 }, .dec = .{ .codebook = .mcg, .window = .w12 }, .seed = seed, .banks = MIMO_BANKS, .x_scale = 3 };
     return bf16TruthCase(c, win, decode);
 }
 
@@ -7338,8 +7332,8 @@ test "exl3 MiMo prefill optimization excludes qwen geometry" {
 }
 
 test "exl3 n40 decode lane codewords and decoded weights are exact" {
-    try n40WeightReaderExact(.tiny, .w12, true, true);
-    try n40WeightReaderExact(.tiny, .w12, false, true);
+    try n40WeightReaderExact(.mcg, .w12, true, true);
+    try n40WeightReaderExact(.mcg, .w12, false, true);
     try n40WeightReaderExact(.mul1, .w8, false, true);
 }
 
@@ -7469,7 +7463,7 @@ test "exl3 prepared mid production geometry BF16 f32 truth" {
     }
 }
 
-test "exl3 TINY half pairs preserve every codeword at windows 8 through 16" {
+test "exl3 MCG half pairs preserve every codeword at windows 8 through 16" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -7492,7 +7486,7 @@ test "exl3 TINY half pairs preserve every codeword at windows 8 through 16" {
     inline for (8..17) |bits| {
         const win = comptime exl3.Window.fromBits(bits).?;
         var slot: ?mlx.mlx_fast_metal_kernel = null;
-        const kernel = try getNamedKernel(&slot, comptime "exl3_tiny_half_pairs" ++ winSuffix(win), &.{"codes"}, &.{"result"}, source, comptime codebookHelpers(.tiny, win));
+        const kernel = try getNamedKernel(&slot, comptime "exl3_mcg_half_pairs" ++ winSuffix(win), &.{"codes"}, &.{"result"}, source, comptime codebookHelpers(.mcg, win));
         defer _ = mlx.mlx_fast_metal_kernel_free(kernel);
         var outputs = mlx.mlx_vector_array_new();
         defer _ = mlx.mlx_vector_array_free(outputs);
@@ -7503,15 +7497,15 @@ test "exl3 TINY half pairs preserve every codeword at windows 8 through 16" {
         try mlx.check(mlx.mlx_array_eval(result));
         const got = mlx.mlx_array_data_uint32(result) orelse return error.U32Unreadable;
         for (codes, 0..) |cw, i| {
-            const lo = exl3.decodeCodeword(@as(u16, @intCast(cw)) & win.mask(), .tiny);
-            const hi = exl3.decodeCodeword(@as(u16, @intCast(65535 - cw)) & win.mask(), .tiny);
+            const lo = exl3.decodeCodeword(@as(u16, @intCast(cw)) & win.mask(), .mcg);
+            const hi = exl3.decodeCodeword(@as(u16, @intCast(65535 - cw)) & win.mask(), .mcg);
             try t.expectEqual(@as(u32, lo) | (@as(u32, hi) << 16), got[i]);
         }
     }
 }
 
 test "exl3 n48 funnel readers preserve codewords and weights on every non-MUL1 codebook" {
-    inline for ([_]exl3.Codebook{ .tiny, .mcg }) |cb| {
+    inline for ([_]exl3.Codebook{ .mcg }) |cb| {
         inline for ([_]bool{ false, true }) |lane_reader| {
             try weightReaderExact(48, cb, .w12, true, lane_reader);
             inline for (8..17) |bits| try weightReaderExact(48, cb, comptime exl3.Window.fromBits(bits).?, false, lane_reader);
@@ -7526,7 +7520,7 @@ fn n48FunnelCase(cb: exl3.Codebook, rows: usize, seed: u64, decode: bool, prepar
 }
 
 test "exl3 the n48 funnel engages for every non-MUL1 codebook" {
-    for ([_]exl3.Codebook{ .tiny, .mcg, .mul1 }) |cb| {
+    for ([_]exl3.Codebook{ .mcg, .mul1 }) |cb| {
         n48_funnel_engaged = @splat(false);
         try n48FunnelCase(cb, 4, 318, true, null);
         try std.testing.expectEqual(cb != .mul1, n48_funnel_engaged[@backingInt(N48FunnelArm.pair)]);
@@ -7542,19 +7536,17 @@ test "exl3 MCG n48 BF16 decode and NAX preserve f32 truth across seeds" {
     for (0..PARITY_SEEDS) |seed| try n48FunnelCase(.mcg, 33, 318 + seed, false, null);
 }
 
-test "exl3 TINY served rates BF16 decode and NAX preserve f32 truth across seeds" {
-    for ([_]u32{ 40, 48 }) |n| {
-        for ([_]bool{ false, true }) |prepared| {
-            prepared_mid_force = prepared;
-            defer prepared_mid_force = null;
-            for (1..9) |rows| {
-                for (0..PARITY_SEEDS) |seed| {
-                    try bf16TruthCase(.{ .e = 16, .hidden = 256, .inter = 128, .topk = if (n == 40) 8 else 10, .rows = rows, .rate = .{ .n = n }, .dec = .{ .codebook = .tiny, .window = .w12 }, .seed = 318 + seed, .banks = MIMO_BANKS, .x_scale = 3 }, 32, true);
-                }
+test "exl3 MCG K2.5 BF16 decode and NAX preserve f32 truth across seeds" {
+    for ([_]bool{ false, true }) |prepared| {
+        prepared_mid_force = prepared;
+        defer prepared_mid_force = null;
+        for (1..9) |rows| {
+            for (0..PARITY_SEEDS) |seed| {
+                try bf16TruthCase(.{ .e = 16, .hidden = 256, .inter = 128, .topk = 8, .rows = rows, .rate = .{ .n = 40 }, .dec = .{ .codebook = .mcg, .window = .w12 }, .seed = 318 + seed, .banks = MIMO_BANKS, .x_scale = 3 }, 32, true);
             }
         }
-        for (0..PARITY_SEEDS) |seed| {
-            try bf16TruthCase(.{ .e = 16, .hidden = 256, .inter = 128, .topk = if (n == 40) 8 else 10, .rows = 33, .rate = .{ .n = n }, .dec = .{ .codebook = .tiny, .window = .w12 }, .seed = 318 + seed, .banks = MIMO_BANKS, .x_scale = 3 }, 32, false);
-        }
+    }
+    for (0..PARITY_SEEDS) |seed| {
+        try bf16TruthCase(.{ .e = 16, .hidden = 256, .inter = 128, .topk = 8, .rows = 33, .rate = .{ .n = 40 }, .dec = .{ .codebook = .mcg, .window = .w12 }, .seed = 318 + seed, .banks = MIMO_BANKS, .x_scale = 3 }, 32, false);
     }
 }
