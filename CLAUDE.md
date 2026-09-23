@@ -2,12 +2,12 @@
 
 Fork of ddalcu's mlx-serve, serving Qwen3.8-Flash-Next (`qwen4_exp`) on Apple Silicon with EXL3 routed experts, resident or SSD-streamed. MiMo-V2.6-Flash (`mimo_v2`) is an experimental text-only bring-up using native MXFP4 expert streaming. Native Zig, OpenAI/Anthropic-compatible HTTP, no Python at serve time.
 
-Everything else in `src/` (media generation, the other architectures, the Swift app, LAN sharing, providers, ANE, the ds4 GGUF engine) is INHERITED upstream code: it builds, it is not supported here, and this file does not document it. The GENERIC GGUF engine (llama.cpp's `libllama`) is CUT: ds4 is the only GGUF engine left, any other `.gguf` is refused by name, and `--engine llama` / `--llama-kv-quant` / `--llama-cache-entries` exit with a message. Upstream's detail docs (`docs/reference.md`, `docs/gotchas/*.md`) are archived in git history: `git show ff1380d:docs/reference.md`.
+Everything else in `src/` (media generation, the other architectures, LAN sharing, providers, ANE, the ds4 GGUF engine) is INHERITED upstream code: it builds, it is not supported here, and this file does not document it. The GENERIC GGUF engine (llama.cpp's `libllama`) is CUT: ds4 is the only GGUF engine left, any other `.gguf` is refused by name, and `--engine llama` / `--llama-kv-quant` / `--llama-cache-entries` exit with a message. Upstream's detail docs (`docs/reference.md`, `docs/gotchas/*.md`) are archived in git history: `git show ff1380d:docs/reference.md`.
 
 **No conversion side here.** Every converter, allocator, imatrix driver and repacker now lives in PonyExl3 as `python -m ponyexl3.serve_convert <subcommand>`; this repo keeps the CONSUMER contract — `docs/pack-format.md`, the Zig shard-stamp check, the committed `src/fixtures/`, and `mlx-serve kld`. The oracle fixture dumpers (`tests/dump_*_fixtures.py`) stay: they verify the engine, they do not make packs.
 
 - `docs/pack-format.md` — what a pack owes the engine (tensor names/shapes, `expert_quant`, the `__metadata__` stamp and its refusal rule, `window`, the g-scale folded into `suh`).
-- `tests/CLAUDE.md` — integration-test matrix (auto-loads in `tests/`). `app/CLAUDE.md` — upstream Swift app notes (inherited).
+- `tests/CLAUDE.md` — integration-test matrix (auto-loads in `tests/`).
 - Skills: `/release` (CalVer, CHANGELOG), `/bench` (llmprobe methodology, comparison traps).
 - **Growth policy (ENFORCED)**: this file stays under 60k bytes; every rule bullet is ≤ 3 lines; no measurements, dates, PR numbers or war stories here — those go in the commit message.
 

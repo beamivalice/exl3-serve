@@ -1782,9 +1782,7 @@ pub fn serve(
         g_lan = null;
         l.shutdown();
     };
-    // The App Store build cannot exec curl (the providers transport), so it
-    // never starts them — same limit as `mlx-serve pull`.
-    if (!build_options.mas) {
+    {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const home = std.mem.span(std.c.getenv("HOME") orelse "/tmp");
         const path = std.fmt.bufPrint(&path_buf, "{s}/.mlx-serve/providers.json", .{home}) catch "";
@@ -2860,12 +2858,6 @@ const OllamaPullSink = struct {
 /// model is immediately loadable by name. Streams NDJSON status lines
 /// unless the client passed `stream:false`.
 fn handleOllamaPull(allocator: std.mem.Allocator, stream: *Conn, body: []const u8) !void {
-    // No `curl`, no arbitrary-path downloads in the App Store build — the Swift
-    // app owns model downloads via URLSession into the container.
-    if (@import("build_options").mas) {
-        try sendOllamaError(allocator, stream, "501 Not Implemented", "model pull is unavailable in this build");
-        return;
-    }
     var requested: []const u8 = "";
     var wants_stream = true;
     var parsed_body: ?std.json.Parsed(std.json.Value) = null;
@@ -12611,7 +12603,6 @@ test "each connection thread handle is detached after spawn" {
         @embedFile("lan.zig"),
         @embedFile("main.zig"),
         @embedFile("metrics.zig"),
-        @embedFile("vz_agent.zig"),
     };
     const discard = "_ = " ++ "std.Thread.spawn";
     const discard_try = "_ = try " ++ "std.Thread.spawn";

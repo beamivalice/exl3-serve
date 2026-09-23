@@ -19,13 +19,8 @@ zig-out/
 /lib/mlx
 /lib/.mlx-build/
 
-# Swift / app build. No leading slash, so it also catches the stray root
-# .build/ SwiftPM drops when a swift command is run from the repo root.
+# SwiftPM output (no leading slash: a swift command run anywhere drops one).
 .build/
-app/.swiftpm/
-app/MLX Core.app/
-app/MLX Serve.app/
-app/*.zip
 
 # macOS
 .DS_Store
@@ -39,7 +34,6 @@ scripts/__pycache__/
 mlx-logo.png
 transformer.o
 test_zig
-app/MLXCore.dmg
 server_err.log
 .vscode
 
@@ -62,20 +56,11 @@ tests/fixtures/acestep/
 tests/fixtures/hy3d/
 tests/fixtures/krea/
 tests/fixtures/ltx/
-/lib/guest/
-
-# XcodeGen output — regenerate with `cd app && xcodegen generate` (spec: app/project.yml)
-/app/MLXCore.xcodeproj/
 tests/llmprobe-smoke-results/
-
-# Guest image build artifacts (`make export` in containers/agent-shell-mlxserve
-# regenerates them; ~137 MB — never checked in)
-containers/agent-shell-mlxserve/rootfs.tar.gz
-containers/agent-shell-mlxserve/rootfs.tar.gz.sha256
 
 # Local working notes, not project context. The mission log's TOP entry is the
 # session handoff — one file, so two copies of "where things stand" cannot
-# drift apart. Checked-in context stays in CLAUDE.md / app/CLAUDE.md.
+# drift apart. Checked-in context stays in CLAUDE.md.
 /missionlog.md
 /.mc.json
 tests/soak_log.csv

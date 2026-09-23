@@ -3,7 +3,7 @@
 **What changed / why**
 
 
-**How I verified it** (chip, macOS, `zig build test` N/0, `swift test` if app, the integration script)
+**How I verified it** (chip, macOS, `zig build test` N/0, the integration script)
 
 
 - [ ] Searched open and closed issues, open PRs and recent commits; linked the existing thread if there is one

@@ -28,8 +28,7 @@ pub fn build(b: *std.Build) void {
     // libmlx is built at deployment target 26.2 (NAX kernels, scripts/
     // build-mlx.sh), so on older macOS the binary can't run anyway; failing at
     // the binary with a clear dyld version error beats "loading" and dying on
-    // the dylib. Matches app LSMinimumSystemVersion + Package.swift. Guard:
-    // tests/test_mlx_staged_nax.sh (binary minos check).
+    // the dylib. Guard: tests/test_mlx_staged_nax.sh (binary minos check).
     const target = b.standardTargetOptions(.{
         .default_target = .{
             .os_version_min = .{ .semver = .{ .major = 26, .minor = 2, .patch = 0 } },
@@ -67,17 +66,12 @@ pub fn build(b: *std.Build) void {
     addPreviewTest(b, b.resolveTargetQuery(.{}));
     if (builtin.os.tag != .macos) return;
 
-    // App version. Release builds pass it explicitly (app/build.sh computes the
-    // next CalVer from the GitHub releases and stamps it into app/Info.plist;
-    // the release workflow passes the tag). A plain `zig build` used to fall
-    // back to a literal "0.1.0-dev", which then showed up as the version in
-    // `--version` AND on the console page — so a dev build reported a version
-    // that exists nowhere. Default to the checked-in Info.plist stamp instead:
-    // one source of truth, already in the repo, and the same string the last
-    // real build shipped. Same pattern as the engine pins below.
-    const version = b.option([]const u8, "version", "Version string") orelse readAppVersion(b) orelse "0.0.0-dev";
-
-    const mas = b.option(bool, "mas", "MAS build (no curl/model-pull subprocess)") orelse false;
+    // Version. Release builds pass it explicitly (the release workflow passes
+    // the tag). A plain `zig build` used to fall back to a literal "0.1.0-dev",
+    // a version that exists nowhere. Default to the newest version the
+    // CHANGELOG documents instead: the one CalVer committed in the repo, and
+    // the same number release.sh gates a dispatch on.
+    const version = b.option([]const u8, "version", "Version string") orelse readChangelogVersion(b) orelse "0.0.0-dev";
 
     // Engine-version pins surfaced by `mlx-serve --version` (the macOS app spawns
     // it and parses the output — see src/version.zig). These are the versions
@@ -90,14 +84,12 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version);
-    build_options.addOption(bool, "mas", mas);
     build_options.addOption([]const u8, "mlx_c_version", mlx_c_version);
     build_options.addOption([]const u8, "ds4_commit", ds4_commit);
     const git_sha = b.option([]const u8, "git-sha", "Engine build id for the round-cost table: a release sha stands for the executable bytes, which are then not hashed; the MLX dylib and metallib fingerprints are always mixed in") orelse "";
     build_options.addOption([]const u8, "git_sha", git_sha);
-    // false for the macOS exe/tests; the iOS static-lib step (`zig build ios-lib`)
-    // builds its own options with ios=true so the engine swaps the macOS-only
-    // ds4 engine for a no-op stub (iOS serves MLX safetensors only).
+    // Constant false with the iOS static-lib target gone: the ds4-vs-stub
+    // selects in chat/server/scheduler/model_registry always take the engine.
     build_options.addOption(bool, "ios", false);
 
     // ds4 Metal kernel sources embedded via @embedFile and exposed as a
@@ -123,9 +115,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "build_options", .module = build_options.createModule() },
             .{ .name = "ds4_metal_sources", .module = ds4_metal_sources },
             .{ .name = "opencode2_plugin", .module = opencode2_plugin },
-            .{ .name = "jinja_c", .module = addCHeaderModule(b, b.path("lib/jinja_cpp/jinja_wrapper.h"), b.path("lib/jinja_cpp"), target, optimize, "") },
-            .{ .name = "stb", .module = addCHeaderModule(b, b.path("lib/stb_image.h"), b.path("lib"), target, optimize, "") },
-            .{ .name = "webp", .module = addCHeaderModule(b, .{ .cwd_relative = "/opt/homebrew/include/webp/decode.h" }, .{ .cwd_relative = "/opt/homebrew/include" }, target, optimize, "") },
+            .{ .name = "jinja_c", .module = addCHeaderModule(b, b.path("lib/jinja_cpp/jinja_wrapper.h"), b.path("lib/jinja_cpp"), target, optimize) },
+            .{ .name = "stb", .module = addCHeaderModule(b, b.path("lib/stb_image.h"), b.path("lib"), target, optimize) },
+            .{ .name = "webp", .module = addCHeaderModule(b, .{ .cwd_relative = "/opt/homebrew/include/webp/decode.h" }, .{ .cwd_relative = "/opt/homebrew/include" }, target, optimize) },
         },
     });
 
@@ -184,7 +176,8 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
     });
 
-    // Ensure Mach-O header has room for install_name_tool path changes (app bundling)
+    // Ensure Mach-O header has room for install_name_tool path changes — the
+    // release tarball rewires @rpath/libmlxc.dylib to @executable_path.
     exe.headerpad_max_install_names = true;
 
     b.installArtifact(exe);
@@ -206,9 +199,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "build_options", .module = build_options.createModule() },
             .{ .name = "ds4_metal_sources", .module = ds4_metal_sources },
             .{ .name = "opencode2_plugin", .module = opencode2_plugin },
-            .{ .name = "jinja_c", .module = addCHeaderModule(b, b.path("lib/jinja_cpp/jinja_wrapper.h"), b.path("lib/jinja_cpp"), target, optimize, "") },
-            .{ .name = "stb", .module = addCHeaderModule(b, b.path("lib/stb_image.h"), b.path("lib"), target, optimize, "") },
-            .{ .name = "webp", .module = addCHeaderModule(b, .{ .cwd_relative = "/opt/homebrew/include/webp/decode.h" }, .{ .cwd_relative = "/opt/homebrew/include" }, target, optimize, "") },
+            .{ .name = "jinja_c", .module = addCHeaderModule(b, b.path("lib/jinja_cpp/jinja_wrapper.h"), b.path("lib/jinja_cpp"), target, optimize) },
+            .{ .name = "stb", .module = addCHeaderModule(b, b.path("lib/stb_image.h"), b.path("lib"), target, optimize) },
+            .{ .name = "webp", .module = addCHeaderModule(b, .{ .cwd_relative = "/opt/homebrew/include/webp/decode.h" }, .{ .cwd_relative = "/opt/homebrew/include" }, target, optimize) },
         },
     });
 
@@ -261,32 +254,6 @@ pub fn build(b: *std.Build) void {
     }
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
-
-    // ── vz-agent: the Agent Sandbox's guest-side binary.
-    //
-    // A standalone static aarch64-linux-musl ELF (~200 KB) that the app injects
-    // into the guest rootfs before boot, exactly like `/.vz-init`. It serves the
-    // vsock exec protocol (`src/vz_agent.zig`), replacing the hvc1 console shell.
-    //
-    // It is NOT imported by main.zig — it links nothing but libc and never runs
-    // on macOS. Its tests do, though: `serveConnection` is OS-agnostic, so the
-    // whole request → spawn → stream → exit path is exercised over a socketpair
-    // here on the host. Wire them into `zig build test` explicitly, since the
-    // main test module's root never reaches this file.
-    addVzAgent(b, target, optimize, test_step);
-
-    // ── iOS on-device engine: a static library (libmlxserve.a) linking the
-    //    MLX-only decode path. ds4 is stubbed (build_options.ios = true). Two
-    //    slices: `zig build ios-lib` (device, arm64-iphoneos) and
-    //    `zig build ios-lib-sim` (arm64 iphonesimulator). Driven by the iPhone
-    //    app project's build scripts (../mlx-iphone/scripts/build-zig-ios.sh),
-    //    which supply the matching --sysroot and copy the artifact out of
-    //    zig-out/ios/<sdk>/lib. `-Dios-include=<dir>` points at the iOS dist's
-    //    include dir for third-party headers (webp); defaults to Homebrew's,
-    //    whose versions are pinned identical by verifyBrewDeps.
-    const ios_include = b.option([]const u8, "ios-include", "Include dir for webp/stb headers when cross-compiling the iOS lib") orelse "/opt/homebrew/include";
-    addIosLib(b, version, ios_include, .{ .step = "ios-lib", .abi = .none, .sdk = "iphoneos" });
-    addIosLib(b, version, ios_include, .{ .step = "ios-lib-sim", .abi = .simulator, .sdk = "iphonesimulator" });
 }
 
 /// Hermetic Latent2RGB + JPEG tests. No MLX, no Homebrew — the only `zig build`
@@ -312,150 +279,6 @@ fn addPreviewTest(b: *std.Build, target: std.Build.ResolvedTarget) void {
     step.dependOn(&run.step);
 }
 
-/// `zig build vz-agent` → `zig-out/guest/vz-agent` (static aarch64 Linux ELF),
-/// plus the host-side unit tests wired into `zig build test`.
-fn addVzAgent(
-    b: *std.Build,
-    host_target: std.Build.ResolvedTarget,
-    host_optimize: std.builtin.OptimizeMode,
-    test_step: *std.Build.Step,
-) void {
-    // Guest binary. musl + static so it runs on ANY base image — the bundled
-    // Debian rootfs for the App Store build, or a user-chosen alpine/slim image.
-    const guest_target = b.resolveTargetQuery(.{
-        .cpu_arch = .aarch64,
-        .os_tag = .linux,
-        .abi = .musl,
-    });
-    const guest = b.addExecutable(.{
-        .name = "vz-agent",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/vz_agent.zig"),
-            .target = guest_target,
-            // Size, not speed: it shuttles bytes between a socket and a pipe.
-            .optimize = .ReleaseSmall,
-            .link_libc = true,
-        }),
-    });
-    const install = b.addInstallArtifact(guest, .{
-        .dest_dir = .{ .override = .{ .custom = "guest" } },
-    });
-    const step = b.step("vz-agent", "Build the Agent Sandbox guest binary (static aarch64-linux)");
-    step.dependOn(&install.step);
-
-    // Host-side tests of the same source.
-    const tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/vz_agent.zig"),
-            .target = host_target,
-            .optimize = host_optimize,
-            .link_libc = true,
-        }),
-    });
-    test_step.dependOn(&b.addRunArtifact(tests).step);
-
-    // A macOS-native build of the SAME source, which listens on a unix socket
-    // instead of vsock. `GuestExecInteropTests` (Swift) drives it, so the host
-    // frame driver and the guest agent are proven against each other without a
-    // VM — the golden-byte tests alone can't catch a streaming bug.
-    const host_agent = b.addExecutable(.{
-        .name = "vz-agent-host",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/vz_agent.zig"),
-            .target = host_target,
-            .optimize = host_optimize,
-            .link_libc = true,
-        }),
-    });
-    const host_step = b.step("vz-agent-host", "Build vz-agent natively (unix-socket mode, for interop tests)");
-    host_step.dependOn(&b.addInstallArtifact(host_agent, .{}).step);
-}
-
-const IosSlice = struct { step: []const u8, abi: std.Target.Abi, sdk: []const u8 };
-
-fn addIosLib(b: *std.Build, version: []const u8, ios_include: []const u8, slice: IosSlice) void {
-    // Min 18.0 to match the MLX metallib (Metal 3.2). abi=.none → device,
-    // abi=.simulator → iOS Simulator slice.
-    const ios_target = b.resolveTargetQuery(.{
-        .cpu_arch = .aarch64,
-        .os_tag = .ios,
-        .os_version_min = .{ .semver = .{ .major = 18, .minor = 0, .patch = 0 } },
-        .abi = slice.abi,
-    });
-
-    const ios_options = b.addOptions();
-    ios_options.addOption([]const u8, "version", version);
-    ios_options.addOption(bool, "ios", true);
-    // Mirror the build options the shared engine sources read (server.zig,
-    // scheduler.zig). iOS is sandboxed (no curl/model-pull subprocess), so
-    // mas=true; ds4 is stubbed here, so its version pin is unreported. Without
-    // these the iOS lib fails to compile ("options has no member named 'mas'").
-    ios_options.addOption(bool, "mas", true);
-    ios_options.addOption([]const u8, "mlx_c_version", "unknown");
-    ios_options.addOption([]const u8, "ds4_commit", "unknown");
-    ios_options.addOption([]const u8, "git_sha", "");
-
-    const mod = b.createModule(.{
-        .root_source_file = b.path("src/ios_lib.zig"),
-        .target = ios_target,
-        .optimize = .ReleaseFast,
-        .link_libc = true,
-        .link_libcpp = true,
-        .imports = &.{
-            .{ .name = "build_options", .module = ios_options.createModule() },
-        },
-    });
-
-    // Apple cross-compiles don't auto-resolve the SDK's libc/frameworks from
-    // --sysroot alone, so wire them explicitly (resolved per slice via xcrun).
-    //
-    // NO iOS SDK → register NOTHING (the `ios-lib` steps just don't exist in
-    // this environment) instead of failing the whole configure: app/build.sh
-    // pins DEVELOPER_DIR to the CommandLineTools for the macOS link, and CLT
-    // ships no iOS SDKs — a @panic here aborted every macOS app build even
-    // though nobody asked for an iOS step.
-    var code: u8 = undefined;
-    const sdk_path = b.runAllowFail(
-        &.{ "xcrun", "--sdk", slice.sdk, "--show-sdk-path" },
-        &code,
-        .ignore, // silent when absent — CLT environments hit this on purpose
-    ) catch return;
-    const ios_sdk = std.mem.trim(u8, sdk_path, " \n\r\t");
-    if (ios_sdk.len == 0) return;
-    mod.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{ios_sdk}) });
-    mod.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{ios_sdk}) });
-
-    // Headers for the @import("jinja_c")/@import("stb") sites (jinja_wrapper.h,
-    // stb_image.h, webp/decode.h). The matching static archives are linked by
-    // Xcode at final app-link time.
-    mod.addIncludePath(b.path("lib/jinja_cpp"));
-    mod.addIncludePath(b.path("lib"));
-    mod.addIncludePath(.{ .cwd_relative = ios_include });
-    mod.addImport("jinja_c", addCHeaderModule(b, b.path("lib/jinja_cpp/jinja_wrapper.h"), b.path("lib/jinja_cpp"), ios_target, .ReleaseFast, ios_sdk));
-    mod.addImport("stb", addCHeaderModule(b, b.path("lib/stb_image.h"), b.path("lib"), ios_target, .ReleaseFast, ios_sdk));
-    mod.addImport("webp", addCHeaderModule(b, .{ .cwd_relative = b.fmt("{s}/webp/decode.h", .{ios_include}) }, .{ .cwd_relative = ios_include }, ios_target, .ReleaseFast, ios_sdk));
-    mod.addCSourceFile(.{ .file = b.path("lib/stb_image_impl.c"), .flags = &.{"-O2"} });
-    mod.addCSourceFile(.{ .file = b.path("lib/stb_image_write_impl.c"), .flags = stb_write_flags });
-    // xatlas UV unwrapping (C++), used by the Hunyuan3D texture paint stage via
-    // src/uvwrap.zig extern decls — compiled into the lib like the macOS exe.
-    mod.addCSourceFile(.{ .file = b.path("lib/xatlas/xatlas.cpp"), .flags = &.{ "-std=c++17", "-O2", "-DNDEBUG" } });
-    mod.addCSourceFile(.{ .file = b.path("lib/xatlas/xatlas_shim.cpp"), .flags = &.{ "-std=c++17", "-O2", "-DNDEBUG" } });
-    mod.addIncludePath(b.path("lib/xatlas"));
-
-    const lib = b.addLibrary(.{
-        .name = "mlxserve",
-        .root_module = mod,
-        .linkage = .static,
-    });
-    lib.bundle_compiler_rt = true;
-
-    const install = b.addInstallArtifact(lib, .{
-        .dest_dir = .{ .override = .{ .custom = b.fmt("ios/{s}/lib", .{slice.sdk}) } },
-    });
-    const step = b.step(slice.step, b.fmt("Build the iOS engine static lib ({s})", .{slice.sdk}));
-    step.dependOn(&install.step);
-}
-
 /// Translates a single C header into an importable module (`@import("name")`
 /// at the call site) via `addTranslateC`, replacing an inline `@cImport` —
 /// removed as a language builtin in 0.17.0-dev.
@@ -465,7 +288,6 @@ fn addCHeaderModule(
     include_dir: std.Build.LazyPath,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    ios_sdk: []const u8,
 ) *std.Build.Module {
     const translate = b.addTranslateC(.{
         .root_source_file = header_path,
@@ -473,13 +295,6 @@ fn addCHeaderModule(
         .optimize = optimize,
     });
     translate.addIncludePath(include_dir);
-    // iOS cross-compile: addTranslateC (0.17's @cImport replacement) does NOT
-    // inherit the parent module's SDK include search the way inline @cImport
-    // used to, so a header that pulls in <stdio.h>/<inttypes.h> can't find the
-    // Apple libc and translation fails. Wire the SDK's system include here.
-    // Host builds pass "" (their toolchain resolves the system headers).
-    if (ios_sdk.len > 0)
-        translate.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{ios_sdk}) });
     return translate.createModule();
 }
 
@@ -556,8 +371,8 @@ fn buildRootHandle(b: *std.Build) std.Io.Dir {
 /// (pinned submodules lib/mlx-src + lib/mlxc-src, deployment target 26.2 so
 /// MLX's NAX kernels are compiled in — the Homebrew bottle ships without them
 /// and hard-wires is_nax_available() false even on M5). Install names are
-/// @rpath/...; the build-tree rpath resolves them in dev, release.yml /
-/// app/build.sh rewrite to @executable_path and re-sign for bundles.
+/// @rpath/...; the build-tree rpath resolves them in dev, release.yml
+/// rewrites them to @executable_path and re-signs for the release tarball.
 /// Guard test: tests/test_mlx_staged_nax.sh.
 fn addMlxLib(b: *std.Build, module: *std.Build.Module) void {
     module.addIncludePath(b.path("lib/mlx/include"));
@@ -597,29 +412,33 @@ fn verifyMlxStage(b: *std.Build) void {
     }
 }
 
+/// The newest version documented in CHANGELOG.md ("## vYY.M.N"), surfaced by
+/// `mlx-serve --version`. Read at configure time so a plain `zig build`
+/// reports the release the tree is written against instead of a made-up
+/// literal. Same rule as release.sh's changelog_top_version; null → "0.0.0-dev".
+fn readChangelogVersion(b: *std.Build) ?[]const u8 {
+    const bytes = buildRootHandle(b).readFileAlloc(
+        b.graph.io,
+        "CHANGELOG.md",
+        b.allocator,
+        .limited(4 * 1024 * 1024),
+    ) catch return null;
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |line| {
+        const rest = std.mem.trimStart(u8, line, " ");
+        if (!std.mem.startsWith(u8, rest, "##")) continue;
+        const after = std.mem.trim(u8, rest[2..], " \t\r");
+        if (!std.mem.startsWith(u8, after, "v")) continue;
+        var end: usize = 1;
+        while (end < after.len and (std.ascii.isDigit(after[end]) or after[end] == '.')) end += 1;
+        if (end > 1) return b.dupe(after[1..end]);
+    }
+    return null;
+}
+
 /// The pinned mlx-c revision from lib/mlx/.version (written by
 /// scripts/build-mlx.sh as "mlx=<sha> mlxc=<sha> target=<ver>"), surfaced in
 /// `mlx-serve --version`. Returns null (→ "unknown") when not staged yet.
-/// `CFBundleShortVersionString` out of the checked-in app/Info.plist — the one
-/// place the current CalVer is committed (app/build.sh stamps it on every real
-/// build). Read at configure time so a plain `zig build` reports the same
-/// version the last shipped build did, instead of a made-up literal.
-fn readAppVersion(b: *std.Build) ?[]const u8 {
-    const bytes = buildRootHandle(b).readFileAlloc(
-        b.graph.io,
-        "app/Info.plist",
-        b.allocator,
-        .limited(64 * 1024),
-    ) catch return null;
-    const key = "<key>CFBundleShortVersionString</key>";
-    const at = std.mem.indexOf(u8, bytes, key) orelse return null;
-    const open = std.mem.indexOfPos(u8, bytes, at + key.len, "<string>") orelse return null;
-    const start = open + "<string>".len;
-    const end = std.mem.indexOfPos(u8, bytes, start, "</string>") orelse return null;
-    const v = std.mem.trim(u8, bytes[start..end], " \t\r\n");
-    return if (v.len > 0) b.dupe(v) else null;
-}
-
 fn readMlxcPin(b: *std.Build) ?[]const u8 {
     const bytes = buildRootHandle(b).readFileAlloc(
         b.graph.io,

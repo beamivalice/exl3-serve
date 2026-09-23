@@ -9,7 +9,7 @@ Timings measured 2026-07-16 on the M4 Max 128 GB, AFTER the `stop_all_engines` p
 
 | # | Step | Command | Time |
 |---|---|---|---|
-| 1 | Hermetic suite | `zig build test` (**must** be 6/6 steps, 0 fail) + `cd app && swift test` | ~1 min |
+| 1 | Hermetic suite | `zig build test` (**must** be 6/6 steps, 0 fail) | ~1 min |
 | 2 | ReleaseFast binary | `zig build -Doptimize=ReleaseFast` → `du -h zig-out/bin/mlx-serve` ≈ **7 MB** (Debug ≈ 2× = fake regression) | ~10 s |
 | 3 | **Perf gate** (did WE regress?) | `./tests/bench.sh` (mlx-serve only, llmprobe) → diff vs the previous column in `benchmarks.md` → append this release's column | ~15 min |
 | 4 | Tool-call correctness | `zig build test -Dtest-filter="format corpus"` + `-Dtest-filter="tool traffic"`; live: `./tests/test_tool_matrix_small.sh` | ~3 min |
@@ -17,7 +17,6 @@ Timings measured 2026-07-16 on the M4 Max 128 GB, AFTER the `stop_all_engines` p
 | 6 | Regression scripts | `integration_test.sh`, `test_anthropic_api.sh`, `test_ollama_api.sh`, `test_stream_keepalive.sh`, `test_disconnect_cancel.sh`, `test_pld_equivalence.sh`, `test_mtp_equivalence.sh` | ~15 min |
 | 7 | Soak (bigger releases) | `SOAK_DURATION_HOURS=1 ./tests/test_soak_24h.sh` — RSS drift < 10% | 1 h |
 | 8 | **Cross-engine check** (only before a public claim) | start each engine yourself, `./tests/bench.sh --url <host:port> -m <id> --full` per engine; record in `~/claude-tmp/bench-<tag>/`, name the engine in every win — `benchmarks.md` carries mlx-serve only | ~90 min |
-| 9 | Bundle | `SKIP_NOTARIZE=1 bash app/build.sh` (both binaries move together) | ~2 min |
 
 **Rules:**
 - **Steps 3 and 8 are different questions.** 3 = "did our code regress" — mlx-serve only, the ONLY one needed every release. 8 = the public comparison; LM Studio/oMLX/MTPLX numbers cannot move when only OUR code changes, so re-run 8 only when an engine version bumps.
@@ -42,11 +41,11 @@ Rules:
 
 ## Versioning & Releases
 
-CalVer `YY.M.N` (e.g., `v26.4.25` = 2026, April, 25th release). `N` auto-increments from the last GitHub release for that `YY.M` prefix; `build.sh` computes via `gh release list`.
+CalVer `YY.M.N` (e.g., `v26.4.25` = 2026, April, 25th release). `N` auto-increments from the last GitHub release for that `YY.M` prefix; release.yml computes it via `gh release list`.
 
-**Version sources**: `app/Info.plist` (`CFBundleVersion`/`CFBundleShortVersionString`), Zig `-Dversion` build option (`build_options.version`), git tag (`gh release create v{version}`). CI derives ONE version and stamps all three — the bundle plist is stamped from it, never shipped as committed (v26.8.1's DMG reported 26.7.12 and nagged forever; `docs/gotchas/app.md`).
+**Version sources**: the top `## vYY.M.N` heading in `CHANGELOG.md` (what a plain `zig build` stamps), the Zig `-Dversion` build option (`build_options.version`), and the release tag. CI derives ONE version and passes it to `-Dversion`; `release.sh` refuses to dispatch unless the CHANGELOG heading agrees with the version the workflow would cut.
 
-**`YY.M` is TZ-pinned** (`America/New_York`, in release.yml + app/build.sh): runners are UTC, so a `workflow_dispatch` cut after ~20:00 local otherwise rolls into next month. **Prefer a tag push over a dispatch** when the version is already decided — the tag-push path takes `version=${GITHUB_REF_NAME#v}` and never consults the clock.
+**`YY.M` is TZ-pinned** (`America/New_York`, in release.yml): runners are UTC, so a `workflow_dispatch` cut after ~20:00 local otherwise rolls into next month. **Prefer a tag push over a dispatch** when the version is already decided — the tag-push path takes `version=${GITHUB_REF_NAME#v}` and never consults the clock.
 
 **Release**:
 1. Update `CHANGELOG.md` with NEXT version (check `gh release list --limit 1` first — never reuse an existing tag)

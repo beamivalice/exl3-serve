@@ -28,7 +28,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Select Xcode (Swift 6.1+ required by MCP swift-sdk)
+      - name: Select Xcode (Metal toolchain for the MLX kernels)
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
@@ -80,9 +80,6 @@ jobs:
       - name: Build mlx-serve (Zig, ReleaseFast)
         run: zig build -Doptimize=ReleaseFast
 
-      - name: Build vz-agent guest binary
-        run: zig build vz-agent
-
       - name: Smoke test mlx-serve binary
         run: |
           ./zig-out/bin/mlx-serve --version
@@ -95,15 +92,3 @@ jobs:
 
       - name: Run Zig tests
         run: zig build test --summary all
-
-      # Do not force one Swift language mode through the dependency graph.
-      # Each package's manifest owns its mode (SwaTex requires Swift 6.1).
-      # `swift test` builds the app target too; the release build is release.yml's.
-      - name: Build and test Swift app
-        working-directory: app
-        run: |
-          # Catch a drifted SwaTex font-lookup patch here rather than at release
-          # time (issue #233). Mirrors app/build.sh.
-          swift package resolve
-          bash ../scripts/patch-swatex-font-lookup.sh .build/checkouts/SwaTex
-          swift test

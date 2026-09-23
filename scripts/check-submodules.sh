@@ -70,7 +70,7 @@ for p in $paths; do
         git submodule update --init -- "$p" \
             || echo "[submodules] WARN: could not update $p — fix manually: git submodule update --init $p"
     else
-        echo "[submodules] WARN: $p is at $(short "$have") but pinned $(short "$pinned") — run: git submodule update --init $p  (./app/build.sh auto-fixes)"
+        echo "[submodules] WARN: $p is at $(short "$have") but pinned $(short "$pinned") — run: git submodule update --init $p"
     fi
 done
 

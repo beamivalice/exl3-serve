@@ -26,11 +26,8 @@ mlx-serve is designed as a **local development tool** running on a single machin
 
 ### By Design
 - **No authentication**: The HTTP API has no auth — it's intended for localhost use only
-- **Agent tool execution**: The agent mode executes shell commands and file operations based on model output. This is inherently powerful and should only be used with trusted models
-- **Workspace confinement**: File tools (readFile, writeFile, editFile, searchFiles, listFiles) are confined to the working directory. Shell commands are not confined
 
 ### Recommendations
 - Bind to `127.0.0.1` (default) — do not expose to the network
 - Only load models from trusted sources
-- Review agent actions in the MLX Core chat UI
 - Do not run the server as root

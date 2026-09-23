@@ -4,11 +4,10 @@ on:
   push:
     tags:
       - 'v*'
-  # PR builds run the FULL packaging pipeline — sign, notarize, DMG — and
+  # PR builds run the FULL packaging pipeline — sign, notarize, tarball — and
   # upload the result as a workflow artifact. They never tag and never create
-  # a GitHub release (step gates below). The Homebrew formula push lives in
-  # homebrew.yml, fired when a release is published. Fork PRs skip the whole
-  # job (no access to signing secrets — job-level `if`).
+  # a GitHub release (step gates below). Fork PRs skip the whole job (no
+  # access to signing secrets — job-level `if`).
   pull_request:
   workflow_dispatch:
     inputs:
@@ -32,12 +31,7 @@ jobs:
     # Fork PRs have no signing/notarization secrets — skip cleanly instead of
     # dying at the certificate import.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    # macos-26 (Tahoe) so the Swift app links against the macOS 26 SDK. SwiftUI's
-    # MenuBarExtra(.window) popover only gets the correct Tahoe resize/height
-    # behavior when linked on-or-after the 26 SDK; building on macos-14 produced a
-    # menu-bar tray that wouldn't expand/collapse or retain height on Tahoe.
-    # Deployment target stays macOS 14 (Package.swift + Info.plist), so the app
-    # still runs on macOS 14+ — only the linked SDK changes.
+    # macos-26 (Tahoe): the runner SDK the shipped binary is built against.
     runs-on: macos-26
     permissions:
       contents: write
@@ -47,7 +41,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Select Xcode (Swift 6.1+ required by MCP swift-sdk)
+      - name: Select Xcode (Metal toolchain for the MLX kernels)
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
@@ -114,10 +108,10 @@ jobs:
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
-          # CalVer's YY.M comes from ONE pinned zone, matching app/build.sh —
-          # cutting v26.8.1 is what forced this. The dispatch ran 01:26 UTC on
+          # CalVer's YY.M comes from ONE pinned zone — cutting v26.8.1 is
+          # what forced this. The dispatch ran 01:26 UTC on
           # Aug 1 while it was still Jul 31 locally, so CI minted 26.8.1 against
-          # a CHANGELOG, Info.plist and perf artifacts that all said 26.7.12.
+          # a CHANGELOG and perf artifacts that all said 26.7.12.
           # Runners are UTC; without the pin the two clocks disagree for a few
           # hours around every month boundary. Guarded by
           # tests/test_release_workflow_gates.sh.
@@ -168,13 +162,6 @@ jobs:
       - name: Build mlx-serve (Zig)
         run: zig build -Doptimize=ReleaseFast -Dversion=${{ steps.version.outputs.version }} -Dgit-sha=${{ github.sha }}
 
-      # The Agent Sandbox's guest-side binary (static aarch64-linux ELF). It
-      # rides inside the .app at Resources/guest/vz-agent — without it the
-      # guest boots the legacy console shell and sandboxed MCP can never
-      # connect (issue #89: the release bundle shipped without it).
-      - name: Build vz-agent guest binary
-        run: zig build vz-agent
-
       - name: Smoke test mlx-serve binary
         run: |
           ./zig-out/bin/mlx-serve --version
@@ -183,8 +170,7 @@ jobs:
       # Static guard: the staged metallib contains the *_nax kernels, minos
       # >= 26.2, and the built binary links no leftover brew mlx/mlx-c. ci.yml
       # runs the same check, but a cache-miss rebuild on THIS runner is the
-      # stage that actually ships in the DMG — guard it here too (mirrors the
-      # brew-bottle silent-fallback class in docs/gotchas/engine-mlx.md).
+      # stage that actually ships in the tarball — guard it here too.
       - name: Verify staged mlx (NAX kernels + minos)
         run: bash tests/test_mlx_staged_nax.sh
 
@@ -193,26 +179,6 @@ jobs:
         # it twice; releases keep the belt-and-braces run.
         if: github.event_name != 'pull_request'
         run: zig build test --summary all
-
-      - name: Build Swift app
-        working-directory: app
-        # Package manifests own their language modes. A global Swift 5 override
-        # would also reach SwaTex, whose source correctly requires Swift 6.1.
-        run: |
-          # SwaTexRender's generated `Bundle.module` looks for its KaTeX fonts
-          # beside the .app, a spot codesign refuses to seal, so it never finds
-          # them in a hand-assembled bundle and traps on the first equation
-          # (issue #233). Mirrors app/build.sh.
-          swift package resolve
-          bash ../scripts/patch-swatex-font-lookup.sh .build/checkouts/SwaTex
-          swift build -c release
-          echo "SWIFT_BIN_PATH=$(swift build -c release --show-bin-path)" >> "$GITHUB_ENV"
-
-      - name: Run Swift tests
-        # Same rationale as the Zig tests — ci.yml covers the PR commit.
-        if: github.event_name != 'pull_request'
-        working-directory: app
-        run: swift test
 
       # ── CLI tarball (standalone binary + libs) ──
       - name: Package CLI binary
@@ -281,160 +247,6 @@ jobs:
 
           ditto -c -k --keepParent "$STAGING" "mlx-serve-cli.zip"
 
-      # ── .app bundle (menu bar app with everything inside) ──
-      - name: Package app bundle
-        env:
-          SIGNING_IDENTITY: "Developer ID Application: David Dalcu (${{ secrets.APPLE_TEAM_ID }})"
-        run: |
-          APP="MLX Core.app"
-          CONTENTS="$APP/Contents"
-          mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Frameworks" "$CONTENTS/Resources"
-
-          # Executables
-          cp "$SWIFT_BIN_PATH/MLXCore" "$CONTENTS/MacOS/MLXCore"
-          cp zig-out/bin/mlx-serve "$CONTENTS/MacOS/mlx-serve"
-
-          # App resources (tray icon etc.)
-          cp -R app/Sources/MLXServe/Resources/* "$CONTENTS/Resources/" 2>/dev/null || true
-
-          # This .app is assembled by hand, so SwiftPM's SwaTex font bundle
-          # must be embedded explicitly (Xcode normally does this for us).
-          SWATEX_RESOURCE_BUNDLE="$SWIFT_BIN_PATH/SwaTex_SwaTexRender.bundle"
-          if [ ! -d "$SWATEX_RESOURCE_BUNDLE" ]; then
-            echo "::error::SwaTex font resource bundle missing"
-            exit 1
-          fi
-          cp -R "$SWATEX_RESOURCE_BUNDLE" "$CONTENTS/Resources/"
-
-          # License + third-party attributions inside the bundle (same reason
-          # as the CLI tarball above: the .app embeds the same Apache-2.0
-          # kernels and jinja.cpp). Mirrors app/build.sh.
-          cp LICENSE LICENSE-APACHE-2.0 NOTICE "$CONTENTS/Resources/"
-
-          # vz-agent guest binary — required in EVERY build variant or the
-          # sandbox boots the legacy console shell and MCP servers can never
-          # connect (issue #89). Mirrors app/build.sh.
-          mkdir -p "$CONTENTS/Resources/guest"
-          cp zig-out/guest/vz-agent "$CONTENTS/Resources/guest/vz-agent"
-          if [ ! -f "$CONTENTS/Resources/guest/vz-agent" ]; then
-            echo "::error::vz-agent missing from the app bundle — sandboxed MCP would be broken (issue #89)"
-            exit 1
-          fi
-
-          # Info.plist — stamped with the version this run is releasing.
-          # Without the stamp the bundle ships whatever the committed plist
-          # happens to say: v26.8.1 shipped an app reporting 26.7.12, so
-          # UpdateChecker saw a permanently newer release and installing it
-          # never helped (the new DMG said 26.7.12 too). Stamp the COPY —
-          # the committed plist stays clean.
-          cp app/Info.plist "$CONTENTS/"
-          /usr/libexec/PlistBuddy -c \
-            "Set :CFBundleVersion ${{ steps.version.outputs.version }}" \
-            "$CONTENTS/Info.plist"
-          /usr/libexec/PlistBuddy -c \
-            "Set :CFBundleShortVersionString ${{ steps.version.outputs.version }}" \
-            "$CONTENTS/Info.plist"
-
-          # App icon
-          if [ -f app/appicon.png ]; then
-            ICON_DIR=$(mktemp -d)
-            ICONSET="$ICON_DIR/AppIcon.iconset"
-            mkdir -p "$ICONSET"
-            for size in 16 32 64 128 256 512; do
-              sips -z $size $size app/appicon.png --out "$ICONSET/icon_${size}x${size}.png" > /dev/null 2>&1
-              double=$((size * 2))
-              sips -z $double $double app/appicon.png --out "$ICONSET/icon_${size}x${size}@2x.png" > /dev/null 2>&1
-            done
-            iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns" 2>/dev/null || true
-            rm -rf "$ICON_DIR"
-          fi
-
-          # Bundled libraries: self-built mlx + mlx-c (scripts/build-mlx.sh) —
-          # libmlxc + libmlx + sibling deps like libjaccl (@rpath-referenced;
-          # missing siblings cause a dyld "no such file" error at startup) +
-          # the NAX-enabled metallib.
-          cp lib/mlx/lib/*.dylib "$CONTENTS/Frameworks/"
-          cp lib/mlx/lib/mlx.metallib "$CONTENTS/Frameworks/"
-
-          # WebP libraries for vision pipeline
-          WEBP_LIB="$(brew --prefix webp)/lib"
-          [ -f "$WEBP_LIB/libwebp.dylib" ] && cp "$WEBP_LIB/libwebp.dylib" "$CONTENTS/Frameworks/"
-          [ -f "$WEBP_LIB/libsharpyuv.dylib" ] && cp "$WEBP_LIB/libsharpyuv.dylib" "$CONTENTS/Frameworks/"
-
-          # YbridOpus + YbridOgg dynamic frameworks (libopus/libogg) pulled by the
-          # SwiftOGG SPM dep — VoicePreprocessor uses them to decode Telegram
-          # Ogg/Opus voice notes. SwiftPM fetched them into app/.build/artifacts;
-          # embed the macOS slice so the app resolves @rpath/Ybrid*.framework at
-          # runtime (without this the .app fails to launch). Mirrors app/build.sh.
-          # NOTE: SwiftPM extracts binary artifacts to .build/artifacts (NOT under
-          # the per-triple bin dir), so go up TWO levels from --show-bin-path
-          # (.build/<triple>/release -> .build) before appending /artifacts.
-          ARTIFACTS="$(dirname "$(dirname "$SWIFT_BIN_PATH")")/artifacts"
-          for fwname in YbridOpus YbridOgg; do
-            fwsrc=$(find "$ARTIFACTS" -path "*macos-arm64*/$fwname.framework" -type d 2>/dev/null | head -1)
-            if [ -n "$fwsrc" ]; then
-              cp -R "$fwsrc" "$CONTENTS/Frameworks/"
-            else
-              echo "::error::$fwname.framework not found under $ARTIFACTS — Telegram voice decode would crash the app"
-              exit 1
-            fi
-          done
-
-          # Fix rpaths
-          install_name_tool -change \
-            "$(otool -L "$CONTENTS/MacOS/mlx-serve" | grep libmlxc | awk '{print $1}')" \
-            "@executable_path/../Frameworks/libmlxc.dylib" \
-            "$CONTENTS/MacOS/mlx-serve" 2>/dev/null || true
-
-          install_name_tool -change \
-            "$(otool -L "$CONTENTS/Frameworks/libmlxc.dylib" | grep libmlx.dylib | head -1 | awk '{print $1}')" \
-            "@loader_path/libmlx.dylib" \
-            "$CONTENTS/Frameworks/libmlxc.dylib" 2>/dev/null || true
-
-          # Add @loader_path to libmlx.dylib's rpath so its @rpath/libjaccl.dylib (and any other
-          # @rpath sibling deps mlx introduces) resolves to the bundled Frameworks dir.
-          install_name_tool -add_rpath @loader_path "$CONTENTS/Frameworks/libmlx.dylib" 2>/dev/null || true
-
-          # Fix webp rpaths
-          if [ -f "$CONTENTS/Frameworks/libwebp.dylib" ]; then
-            install_name_tool -change \
-              "$(otool -L "$CONTENTS/MacOS/mlx-serve" | grep libwebp | awk '{print $1}')" \
-              "@executable_path/../Frameworks/libwebp.dylib" \
-              "$CONTENTS/MacOS/mlx-serve" 2>/dev/null || true
-            install_name_tool -change \
-              "$(otool -L "$CONTENTS/Frameworks/libwebp.dylib" | grep libsharpyuv | awk '{print $1}')" \
-              "@loader_path/libsharpyuv.dylib" \
-              "$CONTENTS/Frameworks/libwebp.dylib" 2>/dev/null || true
-          fi
-
-          # MLXCore loads the Ybrid frameworks via @rpath/Ybrid*.framework; point
-          # @rpath at the bundled Frameworks dir (SwiftPM's dev rpath into
-          # .build/artifacts doesn't survive packaging, so without this the app
-          # can't launch). Mirrors app/build.sh.
-          install_name_tool -add_rpath "@executable_path/../Frameworks" "$CONTENTS/MacOS/MLXCore" 2>/dev/null || true
-
-          # Sign inside-out
-          chmod -R u+w "$APP"
-          for fw in "$CONTENTS/Frameworks/"*.metallib "$CONTENTS/Frameworks/"*.dylib; do
-            [ -f "$fw" ] && codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$fw"
-          done
-          # Embedded .framework bundles (YbridOpus/YbridOgg) — re-sign over the
-          # vendor signature with our Developer ID + hardened runtime so dyld
-          # accepts them and notarization passes.
-          for fw in "$CONTENTS/Frameworks/"*.framework; do
-            [ -d "$fw" ] && codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$fw"
-          done
-          codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$CONTENTS/MacOS/mlx-serve"
-          # MLXCore + the .app need the mic entitlement, or Voice mode is denied
-          # microphone access under hardened runtime without ever prompting.
-          # Frameworks/dylibs and the headless mlx-serve must NOT carry it.
-          codesign --force --options runtime --entitlements app/MLXCore.entitlements --sign "$SIGNING_IDENTITY" "$CONTENTS/MacOS/MLXCore"
-          codesign --force --options runtime --entitlements app/MLXCore.entitlements --sign "$SIGNING_IDENTITY" "$APP"
-
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          ditto -c -k --keepParent "$APP" "MLXCore-app.zip"
-
-      # ── Notarize both ──
       - name: Notarize CLI
         if: ${{ !inputs.dry_run }}
         env:
@@ -447,26 +259,6 @@ jobs:
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
             --wait
-
-      - name: Notarize app bundle
-        if: ${{ !inputs.dry_run }}
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          xcrun notarytool submit "MLXCore-app.zip" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-
-          # Staple the app bundle
-          xcrun stapler staple "MLX Core.app"
-          rm -f "MLXCore-app.zip"
-
-      - name: Create DMG installer
-        run: bash scripts/create-dmg.sh "MLX Core.app" MLXCore.dmg
 
       # ── Package final artifacts ──
       - name: Package CLI tarball
@@ -495,9 +287,8 @@ jobs:
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # The release is created as a DRAFT; the Homebrew formula push happens in
-      # homebrew.yml when the draft is PUBLISHED — pushing it here advertised a
-      # version whose assets weren't downloadable yet.
+      # The release is created as a DRAFT so its assets can be checked before
+      # anyone can download them.
       - name: Create Release
         if: ${{ !inputs.dry_run && github.event_name != 'pull_request' }}
         uses: softprops/action-gh-release@v2
@@ -508,7 +299,6 @@ jobs:
           draft: true
           files: |
             mlx-serve-bin-macos-arm64.tar.gz
-            MLXCore.dmg
 
       - name: Upload PR / dry-run artifacts
         if: ${{ inputs.dry_run || github.event_name == 'pull_request' }}
@@ -519,5 +309,4 @@ jobs:
           name: package-${{ steps.version.outputs.version }}
           path: |
             mlx-serve-bin-macos-arm64.tar.gz
-            MLXCore.dmg
           retention-days: 7

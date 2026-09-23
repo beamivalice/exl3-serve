@@ -1,5 +1,5 @@
 name: Bug report
-description: Crash, wrong output, API misbehavior, or app problem
+description: Crash, wrong output, or API misbehavior
 labels: ["bug"]
 body:
   - type: checkboxes
@@ -28,7 +28,6 @@ body:
         - Server / API (chat, completions, messages, responses, embeddings)
         - Tool calling / agent harness (Claude Code, pi, opencode, ...)
         - Media generation (image / video / audio / 3D / TTS)
-        - Mac app (UI, downloads, model browser)
         - CLI / launch
         - Crash (SIGSEGV / process died)
         - Other
@@ -38,7 +37,7 @@ body:
     id: version
     attributes:
       label: mlx-serve version
-      description: From the app About panel or `mlx-serve --version`
+      description: From `mlx-serve --version`
       placeholder: "26.8.10"
     validations:
       required: true
@@ -65,7 +64,7 @@ body:
     id: repro
     attributes:
       label: Reproduction steps
-      description: Client used (curl / app / agent), endpoint, stream or non-stream, and the smallest request that shows it. If you can, retry with `stream:false` first.
+      description: Client used (curl / agent), endpoint, stream or non-stream, and the smallest request that shows it. If you can, retry with `stream:false` first.
       placeholder: |
         1. Launch with ...
         2. curl http://127.0.0.1:8080/v1/chat/completions -d '...'

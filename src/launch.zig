@@ -1,15 +1,10 @@
 //! `mlx-serve launch <agent>` — configure and launch a third-party coding
 //! agent against the local server, ollama-style (issue #188).
 //!
-//! The Swift app's `CLILauncher` + `AgentConfigs` are the DMG twin of this
-//! file: same dedicated config dirs (`~/.mlx-serve/<agent>/`, NEVER a user's
-//! real agent config), same env vars, same file shapes. Documented
-//! duplication — change a contract on one side, change it on both
-//! (`CLISetupInstructionsTests` pins the Swift side, the tests here and
-//! `tests/test_launch_cmd.sh` pin this one).
+//! Configs go to dedicated dirs (`~/.mlx-serve/<agent>/`, NEVER a user's real
+//! agent config); the tests here and `tests/test_launch_cmd.sh` pin them.
 //!
-//! Flow: probe the server; if it's down, start the MLX Core app (`open -g -a`)
-//! and wait — no app installed means instructions, not a mystery. Then read
+//! Flow: probe the server; if it's down, print how to start one. Then read
 //! `/v1/models`, derive each model's budget from its ADVERTISED context
 //! (AgentBudget's formula: output = clamp(ctx/2, 1024, 65536) — never a
 //! hardcoded window), write the agent's config, and exec it through a login
@@ -21,11 +16,11 @@ const opencode2_plugin = @import("opencode2_plugin");
 
 pub const Budget = struct { context: u64, output: u64 };
 
-/// Mirrors Swift `AgentBudget.fallback` — used when the server advertises no
+/// Used when the server advertises no
 /// context (older build, unloaded stub with no readable config).
 pub const FALLBACK_BUDGET = Budget{ .context = 32768, .output = 8192 };
 
-/// Mirrors Swift `AgentBudget.forServerContext`.
+/// output = clamp(ctx/2, 1024, 65536).
 pub fn budgetForContext(ctx: u64) Budget {
     if (ctx == 0) return FALLBACK_BUDGET;
     return .{ .context = ctx, .output = @min(65536, @max(1024, ctx / 2)) };
@@ -70,10 +65,8 @@ pub const AgentKind = enum {
 
 // ── Config builders (pure — unit-tested below) ──────────────────────────
 
-/// pi `models.json` — same shape the app's `AgentConfigs.piModelsJSON`
-/// writes, with every chat-capable model in the array so in-session
-/// `/model` can switch (the app adds a live-list extension on top; the CLI
-/// bakes the launch-time snapshot).
+/// pi `models.json`, with every chat-capable model in the array so
+/// in-session `/model` can switch (a launch-time snapshot).
 pub fn piModelsJson(allocator: std.mem.Allocator, base_url: []const u8, entries: []const Entry) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
@@ -118,7 +111,7 @@ pub fn piModelsJson(allocator: std.mem.Allocator, base_url: []const u8, entries:
 
 /// oh-my-pi `models.yml` — static chat-capable list, deliberately not omp's
 /// openai-models-list discovery (it would put every media model in the
-/// coding picker at omp's 128k default). Same rationale as the app builder.
+/// coding picker at omp's 128k default).
 pub fn ompModelsYml(allocator: std.mem.Allocator, base_url: []const u8, entries: []const Entry) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
@@ -342,8 +335,7 @@ pub fn codexConfigToml(allocator: std.mem.Allocator, base_url: []const u8, model
 }
 
 /// hermes `config.yaml` — mirrors what `hermes setup`'s custom-endpoint flow
-/// saves (see the app's AgentConfigs.hermesConfigYAML; verified against
-/// hermes_cli source).
+/// saves (verified against hermes_cli source).
 pub fn hermesConfigYaml(allocator: std.mem.Allocator, base_url: []const u8, model: []const u8, entries: []const Entry) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
@@ -427,8 +419,7 @@ fn appendExtras(out: *std.ArrayList(u8), allocator: std.mem.Allocator, extras: [
 
 /// The script body run through `/bin/zsh -l -c` (login shell = the user's
 /// real PATH). Configs are written by `writeConfigs` BEFORE this runs; the
-/// script only exports env and execs the agent — same split as the app's
-/// prepareConfig / scriptBody.
+/// script only exports env and execs the agent.
 /// Below this the agent's own fixed prompt leaves every turn compacting or
 /// truncated: Claude Code sends 40-70k before the first word (tool + MCP
 /// schemas, skills catalogue), opencode ~8k, pi ~2k.
@@ -499,8 +490,7 @@ pub fn scriptFor(allocator: std.mem.Allocator, kind: AgentKind, base_url: []cons
             // PATH first, then the CLI the desktop app bundles (codex's
             // rebranded app installs as ChatGPT.app or Codex.app, bundle id
             // com.openai.codex, CLI at Contents/Resources/codex) — a
-            // desktop-app-only user has no codex on PATH. Mirrors the Swift
-            // AgentConfigs.codexBinResolver.
+            // desktop-app-only user has no codex on PATH.
             try out.appendSlice(allocator,
                 \\export CODEX_HOME="$HOME/.mlx-serve/codex"
                 \\CODEX_BIN="$(command -v codex)"
@@ -561,8 +551,6 @@ fn serverUp(allocator: std.mem.Allocator, io: std.Io, base_url: []const u8) bool
     return true;
 }
 
-/// `open -g -a "MLX Core"` — nonzero exit = the app isn't installed, which is
-/// the detection: no probing of /Applications by hand.
 /// HTTP status of `GET <base_url>/metrics.json`, or null when curl could not
 /// reach the server at all.
 fn metricsStatus(allocator: std.mem.Allocator, io: std.Io, base_url: []const u8) ?u16 {
@@ -577,18 +565,6 @@ fn metricsStatus(allocator: std.mem.Allocator, io: std.Io, base_url: []const u8)
     return std.fmt.parseInt(u16, std.mem.trim(u8, result.stdout, " \r\n"), 10) catch null;
 }
 
-fn tryStartApp(allocator: std.mem.Allocator, io: std.Io) bool {
-    const result = std.process.run(allocator, io, .{
-        .argv = &.{ "open", "-g", "-a", "MLX Core" },
-    }) catch return false;
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    return switch (result.term) {
-        .exited => |code| code == 0,
-        else => false,
-    };
-}
-
 const Models = struct {
     arena: std.heap.ArenaAllocator,
     entries: []Entry,
@@ -599,8 +575,7 @@ const Models = struct {
 };
 
 /// Parse /v1/models into the chat-capable entries (media/embedding models
-/// never enter a coding agent's picker — same rule as the app's
-/// AgentModelEntry.chatEntries). Context comes from meta.context_length,
+/// never enter a coding agent's picker). Context comes from meta.context_length,
 /// falling back to the top-level twin.
 fn fetchChatEntries(allocator: std.mem.Allocator, io: std.Io, base_url: []const u8) !Models {
     const url = try std.fmt.allocPrint(allocator, "{s}/v1/models", .{base_url});
@@ -687,7 +662,7 @@ fn userOpencodeCliPath(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/.config/opencode/cli.json", .{homeDir()});
 }
 
-/// Write the agent's config files (the app's prepareConfig twin). opencode
+/// Write the agent's config files. opencode
 /// carries its config inline and writes nothing.
 fn writeConfigs(allocator: std.mem.Allocator, io: std.Io, kind: AgentKind, base_url: []const u8, model: []const u8, budget: Budget, entries: []const Entry) !void {
     switch (kind) {
@@ -752,7 +727,6 @@ const LaunchArgs = struct {
     url: ?[]const u8 = null,
     port: u16 = 11234,
     print_only: bool = false,
-    no_start: bool = false,
     extras: []const []const u8 = &.{},
 };
 
@@ -781,7 +755,7 @@ fn parseLaunchArgs(args: []const []const u8) !LaunchArgs {
         } else if (std.mem.eql(u8, arg, "--print")) {
             out.print_only = true;
         } else if (std.mem.eql(u8, arg, "--no-start")) {
-            out.no_start = true;
+            // Accepted for existing scripts: a down server is never auto-started.
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             return error.Usage;
         } else {
@@ -803,7 +777,6 @@ fn printLaunchUsage() void {
         \\  --port <n>     Server port for the default URL (default: 11234)
         \\  --print        Write the config files and print the launch script
         \\                 instead of running the agent
-        \\  --no-start     Never auto-start the MLX Core app when the server is down
         \\
         \\Anything after `--` is passed to the agent, e.g.:
         \\  mlx-serve launch codex -- resume
@@ -825,22 +798,9 @@ pub fn cmdLaunch(allocator: std.mem.Allocator, io: std.Io, args: []const []const
     const base_url = parsed.url orelse std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}", .{parsed.port}) catch unreachable;
 
     if (!serverUp(allocator, io, base_url)) {
-        if (parsed.no_start or !tryStartApp(allocator, io)) {
-            log.err("no mlx-serve server at {s}.\n", .{base_url});
-            log.err("start one first:  mlx-serve serve   (or: mlx-serve run <model>)\n", .{});
-            log.err("or install the MLX Core app: https://github.com/ddalcu/mlx-serve/releases\n", .{});
-            std.process.exit(1);
-        }
-        log.info("starting the MLX Core app…\n", .{});
-        var waited: usize = 0;
-        while (!serverUp(allocator, io, base_url)) : (waited += 1) {
-            if (waited >= 60) {
-                log.err("the app started but its server never came up at {s} —\n", .{base_url});
-                log.err("pick a model in the app (or check its port), then rerun.\n", .{});
-                std.process.exit(1);
-            }
-            std.Io.sleep(io, .fromMilliseconds(1000), .real) catch {};
-        }
+        log.err("no mlx-serve server at {s}.\n", .{base_url});
+        log.err("start one first:  mlx-serve serve   (or: mlx-serve run <model>)\n", .{});
+        std.process.exit(1);
     }
 
     // The server may still be scanning/loading right after boot — poll until

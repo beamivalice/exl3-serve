@@ -91,9 +91,8 @@ fn printUsage(io: std.Io) void {
         \\                      (every pulled model loads on demand by name)
         \\  launch <agent>      Configure + launch a coding agent CLI against the
         \\                      local server (claude, pi, omp, opencode, codex,
-        \\                      hermes, aider); starts the MLX Core app if the
-        \\                      server is down. `mlx-serve launch <agent> -h` for
-        \\                      options
+        \\                      hermes, aider). `mlx-serve launch <agent> -h`
+        \\                      for options
         \\  kld capture|compare Write a teacher fixture (full-vocab logits at
         \\                      every greedy position), or teacher-force one
         \\                      through a model and report KLD / top-1 / NLL.
