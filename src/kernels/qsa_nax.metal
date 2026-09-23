@@ -17,8 +17,18 @@ const int p=kL-qL+s, complete=(p+1)/RATIO;
 const int sel_len=min(complete,KB)*RATIO, tail_start=complete*RATIO;
 const int L=sel_len+p+1-tail_start;
 const device int* blk=blocks+(long)bb*blocks_strides[0]+(long)s*blocks_strides[1];
+#if QSA_PACKED
+// k/v are the cache's packed affine words; ksc/kbi/vsc/vbi its per-group scales and biases.
+const device uint32_t* Kp=k+bb*k_strides[0]+hk*k_strides[1];
+const device uint32_t* Vp=v+bb*v_strides[0]+hk*v_strides[1];
+const device T* Kscp=ksc+bb*ksc_strides[0]+hk*ksc_strides[1];
+const device T* Kbip=kbi+bb*kbi_strides[0]+hk*kbi_strides[1];
+const device T* Vscp=vsc+bb*vsc_strides[0]+hk*vsc_strides[1];
+const device T* Vbip=vbi+bb*vbi_strides[0]+hk*vbi_strides[1];
+#else
 const device T* Kp=k+bb*k_strides[0]+hk*k_strides[1];
 const device T* Vp=v+bb*v_strides[0]+hk*v_strides[1];
+#endif
 const device T* Qp=q+bb*q_strides[0]+(long)(hk*gqa)*q_strides[1]+(long)s*q_strides[2]+warp*128;
 threadgroup T KV[BK*LD];
 threadgroup float exchange[2][512];
@@ -38,7 +48,11 @@ for(int t0=0;t0<L;t0+=BK) {
     int r=i>>5,c=i&31; uint4 value=uint4(0);
     if(r<rows) {
       int pos=msv_qsa_pos(blk,t0+r,sel_len,tail_start,RATIO);
+#if QSA_PACKED
+      value=msv_qsa_unpack8<T,BITS,GS>(Kp+(long)pos*k_strides[2],Kscp+(long)pos*ksc_strides[2],Kbip+(long)pos*kbi_strides[2],c);
+#else
       value=*((const device uint4*)(Kp+(long)pos*k_strides[2])+c);
+#endif
     }
     *((threadgroup uint4*)(KV+r*LD)+c)=value;
   }
@@ -87,7 +101,11 @@ for(int t0=0;t0<L;t0+=BK) {
     int r=i>>5,c=i&31; uint4 value=uint4(0);
     if(r<rows) {
       int pos=msv_qsa_pos(blk,t0+r,sel_len,tail_start,RATIO);
+#if QSA_PACKED
+      value=msv_qsa_unpack8<T,BITS,GS>(Vp+(long)pos*v_strides[2],Vscp+(long)pos*vsc_strides[2],Vbip+(long)pos*vbi_strides[2],c);
+#else
       value=*((const device uint4*)(Vp+(long)pos*v_strides[2])+c);
+#endif
     }
     *((threadgroup uint4*)(KV+r*LD)+c)=value;
   }

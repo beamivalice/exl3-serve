@@ -12,6 +12,7 @@
 - **The KV cache is 8-bit by default.** `--kv-quant off` (or `4`), the per-model `kv_quant` setting and the per-request `kv_quant` field still choose another scheme; every load logs its choice as `[kv-cache] <scheme> (<source>)`, and `/props` and `/v1/models` report it as `kv_cache`.
 - **An explicit launch flag now outranks `model-settings.json`**: `--mtp`/`--no-mtp`, `--kv-quant`, `--ctx-size` and `--mtp-typical`/`--mtp-tokenv3` win over the model's `mtp`, `kv_quant`, `ctx_size` and `mtp_acceptance`; each load logs `[mtp] <on|off> (<source>)` and `/props` reports `settings.mtp.source`.
 - **`mlx-serve kld` scores a resident MiMo pack through the model the server serves.** It loads the source FP8 trunk like every other path, so two packs that differ only in their routed experts no longer compare identical.
+- **Qwen3.8 Flash Next attends 16 or more query rows on an 8-bit KV cache without rebuilding the whole cache where that is slower**: a prompt's final span, short follow-up turns and wide verify blocks read the packed cache directly, and prefill chunks below 8k keys gather instead of taking the dense-mask path.
 
 ## Exl3-serve - v26.9.5
 

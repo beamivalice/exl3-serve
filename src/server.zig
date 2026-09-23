@@ -2756,7 +2756,7 @@ pub fn prefillTransientReserveAtKv(
         prefillDequantWeightBytes(config),
         .{
             .qsa_ring_bytes = slotRingBytes(config, kv_bits),
-            .dequant_scratch_bytes = kvDequantScratchBytes(config, seq),
+            .dequant_scratch_bytes = kvDequantScratchBytes(config, seq, @min(chunk, seq)),
         },
     ) + qsaMaskBytes(config, @min(chunk, @max(seq, 1)), seq) +
         slidingBandScoreBytes(config, @min(chunk, @max(seq, 1))) +
@@ -2785,15 +2785,20 @@ pub fn slidingBandScoreBytes(config: *const model_mod.ModelConfig, fwd: u64) u64
 /// the layers that rebuild the sequence have their own head count and two
 /// different K and V widths (mimo_v2: 4 heads of 192+128, against the generic
 /// 8 heads of 192 twice — 2.4x).
-pub fn kvDequantScratchBytes(config: *const model_mod.ModelConfig, seq: u64) u64 {
-    if (config.swaRingTokens() == 0) return 0;
+pub fn kvDequantScratchBytes(config: *const model_mod.ModelConfig, seq: u64, fwd: u64) u64 {
+    // A QSA layer rebuilds only what a forward of this width cannot gather in place.
+    const qsa_rows: ?u64 = if (config.longCtxGated())
+        transformer_mod.qsaDenseRebuildRows(config.indexer_budget, config.indexer_compress_ratio, fwd)
+    else
+        null;
+    if (config.swaRingTokens() == 0 and qsa_rows == null) return 0;
     // A layer whose prefill attention reads the PACKED cache one dispatch at a
     // time (`transformer.fusedSdpaPrefillKv`) never rebuilds more than a
     // dispatch's keys, at `MOE_PREFILL_COEXIST` of them — the dispatches are
     // serially dependent through the softmax carry, so this is the ceiling.
     // The kill switch takes the width off `prefillHeadDimFused` and the whole
     // rebuild comes back with it.
-    const seq_rows: u64 = if (transformer_mod.prefillHeadDimFused(config.prefillScoreHeadDim()))
+    const seq_rows: u64 = if (qsa_rows) |rows| rows else if (transformer_mod.prefillHeadDimFused(config.prefillScoreHeadDim()))
         MOE_PREFILL_COEXIST *| @as(u64, @intCast(transformer_mod.PACKED_KV_SLICE_MAX))
     else
         seq;
@@ -3701,6 +3706,16 @@ fn qsaScoreFusedOffGuard() struct {
     return .{};
 }
 
+/// The incidents these bills reproduce ran an engine that rebuilt the whole kv8 cache per layer.
+fn qsaWholeRebuildGuard() struct {
+    pub fn deinit(_: @This()) void {
+        transformer_mod.qsa_attn_kernel_override = null;
+    }
+} {
+    transformer_mod.qsa_attn_kernel_override = false;
+    return .{};
+}
+
 fn qwen4RequestTestConfig() model_mod.ModelConfig {
     var cfg = model_mod.ModelConfig{};
     cfg.model_type = "qwen4_exp"; // arch-scan-exempt: test fixture, not a gate
@@ -4217,6 +4232,8 @@ test "the per-token widths the request chooser is built on" {
 
 // Bar: the ring is billed once per slot, independent of prompt length.
 test "a 512k QSA session drops the raw-key overbill and bills the ring once" {
+    const whole_rebuild = qsaWholeRebuildGuard();
+    defer whole_rebuild.deinit();
     const t = std.testing;
     transformer_mod.qsa_history_share_override = true;
     defer transformer_mod.qsa_history_share_override = null;
@@ -4970,7 +4987,7 @@ pub fn prefillRequestTerms(config: *const model_mod.ModelConfig, seq: u64, max_t
         .grow_coexist_bytes = growCoexistBytes(config, warm, seq, kv_per_tok),
         .qsa_ring_bytes = slotRingBytes(config, kv_bits) +| head_qsa_ring,
         .mtp_head_kv_bytes = reserved *| head_per_tok,
-        .dequant_scratch_bytes = kvDequantScratchBytes(config, seq),
+        .dequant_scratch_bytes = kvDequantScratchBytes(config, seq, @min(chunk, seq)),
     };
 }
 
@@ -18440,6 +18457,8 @@ test "safeContextForBudget reserves the hot-cache budget (2026-06-19 OOM regress
 }
 
 test "an explicitly raised iogpu.wired_limit_mb is a FLOOR under the ceiling" {
+    const whole_rebuild = qsaWholeRebuildGuard();
+    defer whole_rebuild.deinit();
     // Bar: a raised sysctl lifts the free-RAM term and nothing else; every other arch and the
     // default sysctl keep the old expression byte for byte.
     const t = std.testing;
@@ -18510,6 +18529,8 @@ test "parseWiredMarginGib accepts 2..32 and names a bad value" {
 }
 
 test "a warm append is billed the rows it ALLOCATES, not the rows it already holds" {
+    const whole_rebuild = qsaWholeRebuildGuard();
+    defer whole_rebuild.deinit();
     // Bar: a checked-out restore credits the rows it holds even when the append outgrows the
     // buffer; the grow bills the new capacity plus one eval window of old buffers.
     const t = std.testing;
@@ -21887,6 +21908,8 @@ test "qwen4ExpOomConfig does not leak qsa_score_fused_override" {
 }
 
 test "the 458k prefill's two unbilled terms are billed: retained checkpoints and reserved capacity" {
+    const whole_rebuild = qsaWholeRebuildGuard();
+    defer whole_rebuild.deinit();
     const qsa_fused_off = qsaScoreFusedOffGuard();
     defer qsa_fused_off.deinit();
     const t = std.testing;
@@ -22360,6 +22383,8 @@ test "prefillHeadroomNow subtracts the SSD writer's staged HOST bytes" {
 }
 
 test "adaptivePrefillWidth: the widen prices the QSA sheet at the LIVE KV, not at one chunk" {
+    const whole_rebuild = qsaWholeRebuildGuard();
+    defer whole_rebuild.deinit();
     const qsa_fused_off = qsaScoreFusedOffGuard();
     defer qsa_fused_off.deinit();
     // `prefillTransientReserve` bills the QSA sheet at `kv = chunk`; past the indexer budget the
@@ -22523,6 +22548,8 @@ test "the published hot-cache budget is retired when the cache is dropped" {
 }
 
 test "a WARM turn is not billed for the prefix it is about to SHARE (786,707 @ 19,032 MB)" {
+    const whole_rebuild = qsaWholeRebuildGuard();
+    defer whole_rebuild.deinit();
     const t = std.testing;
     // Live: a 786,707-token warm turn restored its own 786,676-token entry and was then refused
     // by name; the restore hands over the entry's buffers without a second copy, so those
@@ -22648,6 +22675,8 @@ const CheckoutCase = struct {
 };
 
 test "the warm KV credit fires ONLY where the restore checked its entry out" {
+    const whole_rebuild = qsaWholeRebuildGuard();
+    defer whole_rebuild.deinit();
     const t = std.testing;
     transformer_mod.qsa_score_fused_override = false;
     defer transformer_mod.qsa_score_fused_override = null;
@@ -22989,6 +23018,8 @@ fn qwen4ExpLive364kConfig() model_mod.ModelConfig {
 }
 
 test "a WARM append bills the checkpoints its prefill CAPTURES, not the prompt's" {
+    const whole_rebuild = qsaWholeRebuildGuard();
+    defer whole_rebuild.deinit();
     // Turn B: prompt 368,208, restored 364,478 by move, refused by 290 MB at width 512. 1,795 MB
     // of the bill was 32 SSM checkpoints; a warm prefill forwards a 3,730-token tail and captures
     // at most one, and the entry's own checkpoints are already resident and merged at commit.
@@ -23065,6 +23096,8 @@ test "a WARM append bills the checkpoints its prefill CAPTURES, not the prompt's
 }
 
 test "the live 364k session's admission numbers reproduce, to the megabyte" {
+    const whole_rebuild = qsaWholeRebuildGuard();
+    defer whole_rebuild.deinit();
     // The anchor: fed the deployed config and the incident's prompt lengths, the estimator prints
     // the incident's own numbers (Turn A admitted at 16,233 MB; Turn B refused at 13,664 MB).
     const t = std.testing;
@@ -23210,6 +23243,30 @@ test "the sliding ring is billed once per slot and staged per chunk token" {
     try t.expectEqual(@as(u64, 0), prefillStreamBytesPerToken(&plain));
 }
 
+test "a QSA arch's kv-quant dequant scratch follows the widest forward that still gathers from a rebuild" {
+    const t = std.testing;
+    const cfg = qwen4RequestTestConfig();
+    const seq: u64 = 1024 * 1024;
+    const layer_bytes: u64 = 2 * (256 + 256) * 2;
+    const span: u64 = 2048 + 4 - 1 + transformer_mod.FUSED256_MIN_Q_LEN - 1;
+    const split_k: u64 = @intCast(transformer_mod.QSA_ATTN_PACKED_MAX_S);
+    // Split-K widths read the packed cache at every kv: only the dense span rebuilds.
+    try t.expectEqual(span * layer_bytes, kvDequantScratchBytes(&cfg, seq, split_k));
+    try t.expectEqual(span * layer_bytes, kvDequantScratchBytes(&cfg, 2 * seq, 16));
+    // A wider forward rebuilds only while its rows would stage each packed row over 4 times.
+    try t.expectEqual(512 * 2048 / 4 * layer_bytes, kvDequantScratchBytes(&cfg, seq, 512));
+    try t.expectEqual(seq * layer_bytes, kvDequantScratchBytes(&cfg, seq, 8192));
+    // A short prompt never rebuilds more than it stores.
+    try t.expectEqual(@as(u64, 1000) * layer_bytes, kvDequantScratchBytes(&cfg, 1000, 16));
+    // Either kill switch brings the whole-cache rebuild (the generic term) back.
+    transformer_mod.qsa_attn_kernel_override = false;
+    try t.expectEqual(@as(u64, 0), kvDequantScratchBytes(&cfg, seq, 16));
+    transformer_mod.qsa_attn_kernel_override = null;
+    transformer_mod.qsa_gather_override = false;
+    defer transformer_mod.qsa_gather_override = null;
+    try t.expectEqual(@as(u64, 0), kvDequantScratchBytes(&cfg, seq, 16));
+}
+
 test "a ringed arch's kv-quant dequant scratch is one layer's rebuild, not the model's" {
     const t = std.testing;
     const cfg = mimoV2BillConfig();
@@ -23219,31 +23276,31 @@ test "a ringed arch's kv-quant dequant scratch is one layer's rebuild, not the m
     // 2 kv heads of qk 192 + v 128. The sliding layers rebuild their ring.
     transformer_mod.fused256_override = false;
     defer transformer_mod.fused256_override = null;
-    try t.expectEqual(seq * 2 * (192 + 128) * 2, kvDequantScratchBytes(&cfg, seq));
+    try t.expectEqual(seq * 2 * (192 + 128) * 2, kvDequantScratchBytes(&cfg, seq, 1024));
     // The generic expression this replaces reads the SLIDING head count and
     // doubles the qk width: 1.8x here, 2.4x at the shipped 4/8-head geometry.
     const generic: u64 = 2 * seq * cfg.num_key_value_heads * cfg.head_dim * 2;
-    try t.expect(generic > kvDequantScratchBytes(&cfg, seq));
+    try t.expect(generic > kvDequantScratchBytes(&cfg, seq, 1024));
 
     // Fused: the global layers read the packed cache per dispatch, so their
     // rebuild stops scaling with the prompt at all.
     transformer_mod.fused256_override = true;
-    const fused = kvDequantScratchBytes(&cfg, seq);
+    const fused = kvDequantScratchBytes(&cfg, seq, 1024);
     try t.expectEqual(
         MOE_PREFILL_COEXIST * @as(u64, @intCast(transformer_mod.PACKED_KV_SLICE_MAX)) * 2 * (192 + 128) * 2,
         fused,
     );
-    try t.expectEqual(fused, kvDequantScratchBytes(&cfg, 2 * seq));
+    try t.expectEqual(fused, kvDequantScratchBytes(&cfg, 2 * seq, 1024));
     transformer_mod.fused256_override = false;
 
     // A short prompt never rebuilds more than it stores, and below the ring the
     // widest layer is a SLIDING one: it carries more KV heads than a global.
-    try t.expectEqual(@as(u64, 256) * 3 * (192 + 128) * 2, kvDequantScratchBytes(&cfg, 256));
+    try t.expectEqual(@as(u64, 256) * 3 * (192 + 128) * 2, kvDequantScratchBytes(&cfg, 256, 1024));
 
     // Every arch whose caching layers share one geometry keeps the generic term.
     var plain = cfg;
     plain.model_type = "qwen3";
-    try t.expectEqual(@as(u64, 0), kvDequantScratchBytes(&plain, seq));
+    try t.expectEqual(@as(u64, 0), kvDequantScratchBytes(&plain, seq, 1024));
 
     // fp16 KV never rebuilds anything, whatever the arch.
     const dense_kv = prefillMemoryNeeded(seq, 4, 3, cfg.kvBytesPerToken(), 192, 192, 384, 1024, 16, 1024, seq, 0, 0, .{ .dequant_scratch_bytes = 1 << 30 });
