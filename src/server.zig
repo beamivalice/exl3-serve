@@ -12982,6 +12982,7 @@ test "every load refusal the registry preserves answers under its own name" {
     const names = [_][]const u8{
         "InsufficientMemory",
         "OutOfMemory",
+        "ArchitectureUnsupported",
         "GgufEngineUnsupported",
         "ExpertCacheDoesNotFit",
         "ExpertStreamingRequired",
@@ -13004,6 +13005,7 @@ test "every load refusal the registry preserves answers under its own name" {
         try t.expect(refusal.type.len > 0);
         try t.expect(refusal.message.len > 0);
     }
+    try t.expectEqualStrings("architecture_unsupported", loadRefusalFor(error.ArchitectureUnsupported).?.type);
     try t.expectEqualStrings("expert_streaming_unsupported_layout", loadRefusalFor(error.ExpertStreamingUnsupportedLayout).?.type);
     try t.expectEqualStrings("expert_slab_import_copied", loadRefusalFor(error.ExpertSlabImportCopied).?.type);
     try t.expectEqualStrings("expert_layout_unsupported", loadRefusalFor(error.ExpertLayoutUnsupported).?.type);
@@ -13029,6 +13031,7 @@ pub fn loadRefusalFor(err: anyerror) ?LoadRefusal {
     return switch (err) {
         error.NotEnoughMemory => .{ .type = "out_of_memory", .message = not_enough_memory_message },
         error.InsufficientMemory => .{ .type = "out_of_memory", .message = insufficient_free_memory_message },
+        error.ArchitectureUnsupported => .{ .type = "architecture_unsupported", .message = "This checkpoint's model_type is not served by this build, which loads only qwen4_exp (Qwen3.8-Flash-Next) and mimo_v2 (MiMo-V2.6-Flash)." },
         error.GgufEngineUnsupported => .{ .type = "gguf_engine_unsupported", .message = "This .gguf is not a ds4-loadable checkpoint, and the generic llama.cpp engine is not part of this build. Serve an MLX safetensors checkpoint, or a DeepSeek-V4/V4.1/Qwen3.8-Flash-Next/GLM-5 GGUF from the ds4 converters." },
         error.ExpertCacheDoesNotFit => .{ .type = "expert_cache_does_not_fit", .message = "The requested expert cache, full-union workspace, bounce buffers, resident trunk, and serving state do not fit under the GPU memory ceiling. Lower --expert-cache-gb or free memory." },
         error.ExpertStreamingMtpUnsupported => .{ .type = "expert_streaming_mtp_unsupported", .message = expert_stream_mod.MTP_UNSUPPORTED },

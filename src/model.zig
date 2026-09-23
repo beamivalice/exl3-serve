@@ -4026,6 +4026,17 @@ pub fn mimoSourceResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_d
     return @import("mimo_source.zig").residentBytes(io, allocator, model_dir);
 }
 
+/// The architectures this build serves. Every other `model_type` is refused
+/// by name at the loader, so the inherited forwards behind it are unreachable.
+pub const served_model_types = [_][]const u8{ "qwen4_exp", "mimo_v2" };
+
+pub fn isServedArch(model_type: []const u8) bool {
+    for (served_model_types) |t| {
+        if (std.mem.eql(u8, model_type, t)) return true;
+    }
+    return false;
+}
+
 /// The ONE weight-loader decision. A second construction site is how a
 /// subcommand ends up forwarding through a model the server never serves —
 /// a MiMo pack read without its source trunk binds the raw FP8 fused QKV.
@@ -4036,6 +4047,10 @@ pub fn loadWeightsForConfig(
     config: *const ModelConfig,
     load_vision: bool,
 ) !Weights {
+    if (!isServedArch(config.model_type)) {
+        log.err("model_type \"{s}\" is not served by this build (qwen4_exp, mimo_v2 only)\n", .{config.model_type});
+        return error.ArchitectureUnsupported;
+    }
     if (config.expert_streaming) return loadWeightsStreaming(io, allocator, model_dir, config.expert_layout);
     if (config.usesMimoSourceTrunk()) return loadWeightsMimoSource(io, allocator, model_dir);
     if (load_vision) return loadWeightsWithVision(io, allocator, model_dir);
@@ -8517,4 +8532,19 @@ test "mimo_v2 streaming leaves trunk keys intact and excludes only routed banks"
     }
     try testing.expect(qwen4StreamingWeightKey(.mxfp4_split, &buf, "model.layers.1.mlp.switch_mlp.gate_proj.weight") == null);
     try testing.expect(qwen4StreamingWeightKey(.mxfp4_split, &buf, "model.layers.1.mlp.switch_mlp.down_proj.scales") == null);
+}
+
+test "the loader refuses a model_type this build does not serve, by name, before reading the checkpoint" {
+    const missing = "/nonexistent/mlx-serve-arch-gate";
+    const llama = ModelConfig{ .model_type = "llama" };
+    try std.testing.expectError(error.ArchitectureUnsupported, loadWeightsForConfig(std.testing.io, std.testing.allocator, missing, &llama, false));
+    // The served archs pass the gate and fail on the missing directory instead.
+    for ([_][]const u8{ "qwen4_exp", "mimo_v2" }) |mt| {
+        const cfg = ModelConfig{ .model_type = mt };
+        if (loadWeightsForConfig(std.testing.io, std.testing.allocator, missing, &cfg, false)) |w| {
+            var owned = w;
+            owned.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expect(err != error.ArchitectureUnsupported);
+    }
 }
