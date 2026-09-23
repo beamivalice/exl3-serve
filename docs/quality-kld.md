@@ -77,6 +77,10 @@ teacher top-2 gap ≤ 0.5 nats, flat across the context); the affine iq2.7 pack 
 | turboderp K3, MUL1 w16 | 0.0946 | 90.79% | 2.88% | 0.0866 |
 | MUL1 K3 w12 (in-house experts, turboderp dense) | 0.1031 | 90.44% | 3.15% | 0.0951 |
 | MCG K3 w12 (served; in-house experts, turboderp dense) | 0.1041 | 90.22% | 3.21% | 0.0958 |
+| MCG K3 w15 (in-house experts, turboderp dense; sashimi eebb3e9, pre-#17 skew rule; binary 7ed9795) | 0.1012 | 90.26% | 3.14% | 0.0931 |
+
+w12 -> w15 bought 2.8% of KLD on MCG; the remaining gap to turboderp's MUL1 w16 (0.0946) is not mostly the window.
+Raw: scratchpad `qwen_w15_kld.json` (session 3ede61a6); pack `/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w15-mcg-plugged`.
 
 Raw: `/Users/beam/claude-tmp/bench-tiny-vs/kld16x512_*.json`. Binaries a05d15f / 28d7fab (the KLD tool is unchanged
 between them).
