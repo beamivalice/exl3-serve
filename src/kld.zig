@@ -2053,10 +2053,11 @@ test "kld: a resident mimo_v2 load takes the source trunk and its logits follow 
 
         const loaded = try loadModel(io, allocator, .{ .model_dir = path_buf[0..path_len] });
         defer loaded.deinit();
-        // The served trunk is the source loader's rank-local split; the raw
-        // fused FP8 tensor never reaches a kernel.
-        try testing.expect(loaded.weights.get("model.layers.0.self_attn.q_proj.weight") != null);
-        try testing.expect(loaded.weights.get("model.layers.0.self_attn.qkv_proj.weight") == null);
+        // The served QKV is the source's rank-local FP8 bytes, which only the
+        // FP8 kernels read; no generic split of it is bound.
+        const qkv = loaded.weights.get("model.layers.0.self_attn.qkv_proj.weight") orelse return error.MissingWeight;
+        try testing.expectEqual(mlx.mlx_dtype.uint8, mlx.mlx_array_dtype(qkv));
+        try testing.expect(loaded.weights.get("model.layers.0.self_attn.q_proj.weight") == null);
 
         var ctx = loaded.xfm.defaultCtx();
         const logits = try forwardPrompt(allocator, loaded, &ctx, &ids);

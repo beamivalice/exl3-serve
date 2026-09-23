@@ -1,15 +1,17 @@
 //! Direct loader for the raw MiMo-V2.6-Flash HF text trunk.
 //!
 //! The source checkpoint is not an MLX checkpoint: routed experts remain
-//! individual native tensors for the expert-store adapter, while resident
-//! trunk projections are decoded FP8 -> bf16. This loader is the KLD teacher
-//! path, so the trunk carries no quantization step of its own.
+//! individual native tensors for the expert-store adapter, while the FP8 trunk
+//! projections stay their source bytes (e4m3 codes + f32 tile scales) for
+//! `fp8_block`. This loader is the KLD teacher path, so the trunk carries no
+//! quantization step of its own.
 
 const std = @import("std");
 const mlx = @import("mlx.zig");
 const model = @import("model.zig");
 const expert_exl3 = @import("expert_exl3.zig");
 const expert_quant = @import("expert_quant.zig");
+const fp8_block = @import("fp8_block.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -75,31 +77,6 @@ const QkvGeometry = struct {
     }
 };
 
-const QkvTp = struct {
-    tp: usize,
-    rows_per_rank: usize,
-    blocks_per_rank: usize,
-};
-
-fn freeArray(arr: *mlx.mlx_array) void {
-    if (arr.ctx != null) _ = mlx.mlx_array_free(arr.*);
-    arr.* = .{};
-}
-
-const DecodedQkv = struct {
-    q: []f32,
-    k: []f32,
-    v: []f32,
-    allocator: Allocator,
-
-    fn deinit(self: *DecodedQkv) void {
-        self.allocator.free(self.q);
-        self.allocator.free(self.k);
-        self.allocator.free(self.v);
-        self.* = undefined;
-    }
-};
-
 pub fn loadWeights(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -134,18 +111,7 @@ pub fn loadWeights(
                 try putWeight(&weights, allocator, key, arr);
                 arr = .{};
             },
-            .fp8_weight => {
-                try loadFp8Weight(
-                    &weights,
-                    allocator,
-                    model_dir,
-                    config,
-                    key,
-                    meta,
-                    &source,
-                    stream,
-                );
-            },
+            .fp8_weight => try loadFp8Weight(&weights, allocator, model_dir, key, meta, &source),
         }
     }
 
@@ -153,7 +119,7 @@ pub fn loadWeights(
     return weights;
 }
 
-/// Exact resident byte count of the bf16-dequantized raw source trunk.
+/// Exact resident byte count of the raw source trunk as served.
 pub fn residentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !u64 {
     if (model_dir.len == 0 or !std.fs.path.isAbsolute(model_dir))
         return error.InvalidMimoModelPath;
@@ -164,7 +130,7 @@ pub fn residentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []cons
 
 /// Variant for callers that already parsed the source config. The returned
 /// value counts only arrays emitted into `model.Weights`; expert banks, MTP,
-/// media, and the source FP8 scale grids are not resident trunk bytes.
+/// and media are not resident trunk bytes; FP8 scale grids are.
 pub fn residentBytesWithConfig(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -178,22 +144,6 @@ pub fn residentBytesWithConfig(
     var source = try loadSourceIndex(io, scratch, model_dir);
     try validatePlan(&source, scratch, config);
     return countResidentBytes(&source, scratch, config);
-}
-
-/// E4M3FN as used by the MiMo pack converter: exponent 0 is subnormal,
-/// exponent 15/mantissa 7 is NaN, and the other exponent-15 values are
-/// finite (the maximum is 448).
-pub fn fp8E4M3FnValue(code: u8) f32 {
-    const sign: f32 = if ((code & 0x80) != 0) -1.0 else 1.0;
-    const exponent: u8 = (code >> 3) & 0x0f;
-    const mantissa: u8 = code & 0x07;
-    if (exponent == 0x0f and mantissa == 0x07) return std.math.nan(f32);
-    if (exponent == 0) {
-        return sign * (@as(f32, @floatFromInt(mantissa)) / 8.0) * @exp2(-6.0);
-    }
-    return sign *
-        (1.0 + @as(f32, @floatFromInt(mantissa)) / 8.0) *
-        @exp2(@as(f32, @floatFromInt(exponent)) - 7.0);
 }
 
 fn validateConfig(config: *const model.ModelConfig) !void {
@@ -580,36 +530,8 @@ fn expectShape(meta: TensorMeta, expected: []const u64) !void {
     }
 }
 
-fn denseBf16Bytes(rows: u64, cols: u64) !u64 {
-    if (rows == 0 or cols == 0) return error.InvalidMimoTrunkGeometry;
-    const elements = std.math.mul(u64, rows, cols) catch
-        return error.ResidentBytesOverflow;
-    return std.math.mul(u64, elements, 2) catch error.ResidentBytesOverflow;
-}
-
-fn inferQkvTp(
-    geometry: QkvGeometry,
-    scale_rows: u64,
-) !QkvTp {
-    const total = geometry.total();
-    var candidate: ?QkvTp = null;
-    for ([_]usize{ 8, 4 }) |tp| {
-        if (geometry.q_rows % tp != 0 or geometry.k_rows % tp != 0 or
-            geometry.v_rows % tp != 0)
-            continue;
-        const rows_per_rank_u64 = total / tp;
-        const blocks_u64 = (rows_per_rank_u64 + FP8_BLOCK - 1) / FP8_BLOCK;
-        if (scale_rows != @as(u64, tp) * blocks_u64) continue;
-        if (candidate != null) return error.AmbiguousQkvTensorParallelism;
-        candidate = .{
-            .tp = tp,
-            .rows_per_rank = std.math.cast(usize, rows_per_rank_u64) orelse
-                return error.InvalidQkvGeometry,
-            .blocks_per_rank = std.math.cast(usize, blocks_u64) orelse
-                return error.InvalidQkvGeometry,
-        };
-    }
-    return candidate orelse error.InvalidQkvGeometry;
+fn qkvSplit(geometry: QkvGeometry, scale_rows: u64) !fp8_block.RowSplit {
+    return fp8_block.RowSplit.qkv(geometry.q_rows, geometry.k_rows, geometry.v_rows, scale_rows);
 }
 
 fn isQkvWeightKey(key: []const u8) bool {
@@ -649,7 +571,7 @@ fn validateFp8Pair(
         if (rows != geometry.total()) return error.InvalidQkvGeometry;
         if (scale_meta.shape[1] != cols / FP8_BLOCK)
             return error.InvalidFp8ScaleShape;
-        _ = try inferQkvTp(geometry, scale_meta.shape[0]);
+        _ = try qkvSplit(geometry, scale_meta.shape[0]);
     } else {
         var expected_rows = rows;
         var expected_cols = cols;
@@ -911,17 +833,10 @@ fn countResidentBytes(
                     return error.ResidentBytesOverflow;
             },
             .fp8_weight => {
-                const ref = layerKey(key) orelse return error.UnclassifiedMimoTensor;
                 const scale_key = try scaleKey(allocator, key);
                 const scale_meta = source.tensors.get(scale_key) orelse
                     return error.MissingFp8Scale;
-                const bytes = if (isQkvWeightKey(key)) blk: {
-                    const geometry = qkvGeometry(config, ref.layer);
-                    _ = try inferQkvTp(geometry, scale_meta.shape[0]);
-                    break :blk try denseBf16Bytes(geometry.q_rows, meta.shape[1]) +
-                        try denseBf16Bytes(geometry.k_rows, meta.shape[1]) +
-                        try denseBf16Bytes(geometry.v_rows, meta.shape[1]);
-                } else try denseBf16Bytes(meta.shape[0], meta.shape[1]);
+                const bytes = try payloadBytes(meta, .fp8_e4m3) + try payloadBytes(scale_meta, .f32);
                 total = std.math.add(u64, total, bytes) catch
                     return error.ResidentBytesOverflow;
             },
@@ -975,130 +890,18 @@ fn uploadDense(raw: []const u8, meta: TensorMeta, stream: mlx.mlx_stream) !mlx.m
     );
 }
 
-fn f32At(bytes: []const u8, index: usize) !f32 {
-    const begin = std.math.mul(usize, index, 4) catch return error.SafetensorsShapeOverflow;
-    if (begin + 4 > bytes.len) return error.SafetensorsPayloadMismatch;
-    const bits = std.mem.readInt(u32, bytes[begin..][0..4], .little);
-    const value: f32 = @bitCast(bits);
-    if (!std.math.isFinite(value)) return error.InvalidFp8Scale;
-    return value;
-}
-
-const fp8_values: [256]f32 = blk: {
-    @setEvalBranchQuota(10000);
-    var values: [256]f32 = undefined;
-    for (&values, 0..) |*value, code| value.* = fp8E4M3FnValue(@intCast(code));
-    break :blk values;
-};
-
-fn decodedFp8Value(code: u8, scale: f32) !f32 {
-    const value = fp8_values[code] * scale;
+/// A NaN code, or a scale whose largest product leaves bf16 (the prefill
+/// scratch `fp8_block.dequantize` writes), is a broken checkpoint.
+fn validateFp8Payload(codes: []const u8, scales: []const u8) !void {
+    for (codes) |code| {
+        if (code & 0x7f == 0x7f) return error.InvalidFp8Value;
+    }
+    if (scales.len % 4 != 0) return error.SafetensorsPayloadMismatch;
     const bf16_max: f32 = @bitCast(@as(u32, 0x7f7f0000));
-    if (!std.math.isFinite(value) or @abs(value) > bf16_max) return error.InvalidFp8Value;
-    return value;
-}
-
-fn decodeBlocks(
-    allocator: Allocator,
-    raw: []const u8,
-    rows: usize,
-    cols: usize,
-    scales: []const u8,
-    scale_rows: usize,
-    scale_cols: usize,
-) ![]f32 {
-    if (cols == 0 or cols % @as(usize, @intCast(FP8_BLOCK)) != 0 or
-        scale_cols != cols / @as(usize, @intCast(FP8_BLOCK)) or
-        scale_rows * @as(usize, @intCast(FP8_BLOCK)) < rows)
-        return error.InvalidFp8ScaleShape;
-    const elements = std.math.mul(usize, rows, cols) catch return error.SafetensorsShapeOverflow;
-    if (raw.len != elements or scales.len != scale_rows * scale_cols * 4)
-        return error.SafetensorsPayloadMismatch;
-    const out = try allocator.alloc(f32, elements);
-    errdefer allocator.free(out);
-    for (0..rows) |row| {
-        for (0..cols) |col| {
-            const scale_index = (row / 128) * scale_cols + col / 128;
-            const scale = try f32At(scales, scale_index);
-            out[row * cols + col] = try decodedFp8Value(raw[row * cols + col], scale);
-        }
+    for (0..scales.len / 4) |i| {
+        const scale: f32 = @bitCast(std.mem.readInt(u32, scales[i * 4 ..][0..4], .little));
+        if (!std.math.isFinite(scale) or @abs(scale) * 448.0 > bf16_max) return error.InvalidFp8Scale;
     }
-    return out;
-}
-
-fn decodeQkv(
-    allocator: Allocator,
-    raw: []const u8,
-    rows: usize,
-    cols: usize,
-    scales: []const u8,
-    scale_rows: usize,
-    scale_cols: usize,
-    geometry: QkvGeometry,
-) !DecodedQkv {
-    if (geometry.total() != rows or cols == 0 or cols % 128 != 0 or
-        scale_cols != cols / 128)
-        return error.InvalidQkvGeometry;
-    const tp_info = try inferQkvTp(geometry, scale_rows);
-    const q_rows = std.math.cast(usize, geometry.q_rows) orelse return error.InvalidQkvGeometry;
-    const k_rows = std.math.cast(usize, geometry.k_rows) orelse return error.InvalidQkvGeometry;
-    const v_rows = std.math.cast(usize, geometry.v_rows) orelse return error.InvalidQkvGeometry;
-    const elements = std.math.mul(usize, rows, cols) catch return error.SafetensorsShapeOverflow;
-    if (raw.len != elements or scales.len != scale_rows * scale_cols * 4)
-        return error.SafetensorsPayloadMismatch;
-    const q = try allocator.alloc(f32, q_rows * cols);
-    errdefer allocator.free(q);
-    const k = try allocator.alloc(f32, k_rows * cols);
-    errdefer allocator.free(k);
-    const v = try allocator.alloc(f32, v_rows * cols);
-    errdefer allocator.free(v);
-
-    const q_per = q_rows / tp_info.tp;
-    const k_per = k_rows / tp_info.tp;
-    const v_per = v_rows / tp_info.tp;
-    for (0..tp_info.tp) |rank| {
-        const source_rank_row = rank * tp_info.rows_per_rank;
-        const scale_rank_row = rank * tp_info.blocks_per_rank;
-        for (0..tp_info.rows_per_rank) |local_row| {
-            const source_row = source_rank_row + local_row;
-            const scale_row = scale_rank_row + local_row / 128;
-            const source = raw[source_row * cols ..][0..cols];
-            const destination: []f32 = if (local_row < q_per) blk: {
-                break :blk q[(rank * q_per + local_row) * cols ..][0..cols];
-            } else if (local_row < q_per + k_per) blk: {
-                break :blk k[(rank * k_per + local_row - q_per) * cols ..][0..cols];
-            } else blk: {
-                break :blk v[(rank * v_per + local_row - q_per - k_per) * cols ..][0..cols];
-            };
-            for (0..cols) |col| {
-                const scale_index = scale_row * scale_cols + col / 128;
-                destination[col] = try decodedFp8Value(source[col], try f32At(scales, scale_index));
-            }
-        }
-    }
-    return .{ .q = q, .k = k, .v = v, .allocator = allocator };
-}
-
-/// The decoded rows as a dense `[rows, cols]` bf16 weight, the orientation
-/// every other dense checkpoint ships (the transformer pre-transposes at bind).
-fn uploadDecodedBf16(
-    values: []const f32,
-    rows: usize,
-    cols: usize,
-    stream: mlx.mlx_stream,
-) !mlx.mlx_array {
-    if (values.len != rows * cols) return error.InvalidMimoTrunkGeometry;
-    var shape = [_]c_int{
-        std.math.cast(c_int, rows) orelse return error.InvalidMimoTrunkGeometry,
-        std.math.cast(c_int, cols) orelse return error.InvalidMimoTrunkGeometry,
-    };
-    const dense = mlx.mlx_array_new_data(@ptrCast(values.ptr), &shape, 2, .float32);
-    defer _ = mlx.mlx_array_free(dense);
-    var bf16 = mlx.mlx_array_new();
-    errdefer _ = mlx.mlx_array_free(bf16);
-    try mlx.check(mlx.mlx_astype(&bf16, dense, .bfloat16, stream));
-    try mlx.check(mlx.mlx_array_eval(bf16));
-    return bf16;
 }
 
 fn putWeight(weights: *model.Weights, allocator: Allocator, key: []const u8, arr: mlx.mlx_array) !void {
@@ -1108,39 +911,15 @@ fn putWeight(weights: *model.Weights, allocator: Allocator, key: []const u8, arr
     try weights.map.put(owned_key, arr);
 }
 
-fn putDense(
-    weights: *model.Weights,
-    allocator: Allocator,
-    base: []const u8,
-    arr: *mlx.mlx_array,
-) !void {
-    errdefer freeArray(arr);
-    const key = try std.fmt.allocPrint(allocator, "{s}.weight", .{base});
-    defer allocator.free(key);
-    try putWeight(weights, allocator, key, arr.*);
-    arr.* = .{};
-}
-
-fn outputQkvBase(allocator: Allocator, source_key: []const u8, projection: []const u8) ![]u8 {
-    const source_base = fp8Base(source_key);
-    const suffix = ".self_attn.qkv_proj";
-    if (!std.mem.endsWith(u8, source_base, suffix)) return error.InvalidQkvGeometry;
-    return std.fmt.allocPrint(
-        allocator,
-        "{s}.{s}_proj",
-        .{ source_base[0 .. source_base.len - ".qkv_proj".len], projection },
-    );
-}
-
+/// The codes and their tile scales as stored, under `{base}.weight` and
+/// `{base}.scales`; a QKV keeps its rank-local rows (the forward splits them).
 fn loadFp8Weight(
     weights: *model.Weights,
     allocator: Allocator,
     model_dir: []const u8,
-    config: *const model.ModelConfig,
     key: []const u8,
     meta: TensorMeta,
     source: *const SourceIndex,
-    stream: mlx.mlx_stream,
 ) !void {
     const scale_name = try scaleKey(allocator, key);
     defer allocator.free(scale_name);
@@ -1149,46 +928,20 @@ fn loadFp8Weight(
     defer allocator.free(raw);
     const scale_raw = try readTensor(allocator, model_dir, scale_meta);
     defer allocator.free(scale_raw);
+    try validateFp8Payload(raw, scale_raw);
 
-    const ref = layerKey(key) orelse return error.UnclassifiedMimoTensor;
-    if (isQkvWeightKey(key)) {
-        const geometry = qkvGeometry(config, ref.layer);
-        const rows = std.math.cast(usize, meta.shape[0]) orelse return error.InvalidQkvGeometry;
-        const cols = std.math.cast(usize, meta.shape[1]) orelse return error.InvalidQkvGeometry;
-        const scale_rows = std.math.cast(usize, scale_meta.shape[0]) orelse return error.InvalidQkvGeometry;
-        const scale_cols = std.math.cast(usize, scale_meta.shape[1]) orelse return error.InvalidQkvGeometry;
-        var decoded = try decodeQkv(
-            allocator,
-            raw,
-            rows,
-            cols,
-            scale_raw,
-            scale_rows,
-            scale_cols,
-            geometry,
-        );
-        defer decoded.deinit();
-        for ([_][]const u8{ "q", "k", "v" }, [_][]const f32{ decoded.q, decoded.k, decoded.v }) |projection, values| {
-            const base = try outputQkvBase(allocator, key, projection);
-            defer allocator.free(base);
-            const part_rows: usize = switch (projection[0]) {
-                'q' => std.math.cast(usize, geometry.q_rows) orelse return error.InvalidQkvGeometry,
-                'k' => std.math.cast(usize, geometry.k_rows) orelse return error.InvalidQkvGeometry,
-                else => std.math.cast(usize, geometry.v_rows) orelse return error.InvalidQkvGeometry,
-            };
-            var dense = try uploadDecodedBf16(values, part_rows, cols, stream);
-            try putDense(weights, allocator, base, &dense);
-        }
-    } else {
-        const rows = std.math.cast(usize, meta.shape[0]) orelse return error.InvalidFp8Shape;
-        const cols = std.math.cast(usize, meta.shape[1]) orelse return error.InvalidFp8Shape;
-        const scale_rows = std.math.cast(usize, scale_meta.shape[0]) orelse return error.InvalidFp8Shape;
-        const scale_cols = std.math.cast(usize, scale_meta.shape[1]) orelse return error.InvalidFp8Shape;
-        const values = try decodeBlocks(allocator, raw, rows, cols, scale_raw, scale_rows, scale_cols);
-        defer allocator.free(values);
-        var dense = try uploadDecodedBf16(values, rows, cols, stream);
-        try putDense(weights, allocator, fp8Base(key), &dense);
-    }
+    var shape: [4]c_int = undefined;
+    const w_shape = try shapeForUpload(meta, &shape);
+    var w = mlx.mlx_array_new_data(@ptrCast(raw.ptr), w_shape.ptr, @intCast(w_shape.len), .uint8);
+    errdefer _ = mlx.mlx_array_free(w);
+    try putWeight(weights, allocator, key, w);
+    w = .{};
+    var sc = try uploadDense(scale_raw, scale_meta, .{ .ctx = null });
+    errdefer _ = mlx.mlx_array_free(sc);
+    const sc_key = try std.fmt.allocPrint(allocator, "{s}.scales", .{fp8Base(key)});
+    defer allocator.free(sc_key);
+    try putWeight(weights, allocator, sc_key, sc);
+    sc = .{};
 }
 
 const TestTensor = struct {
@@ -1828,115 +1581,6 @@ test "mimo source refuses an EXL3 shard whose stamp disagrees with the config" {
     }
 }
 
-test "mimo source FP8 E4M3FN decodes all 256 codes" {
-    for (0..256) |i| {
-        const code: u8 = @intCast(i);
-        const value = fp8E4M3FnValue(code);
-        if ((code & 0x7f) == 0x7f) {
-            try std.testing.expect(std.math.isNan(value));
-            try std.testing.expect(std.math.isNan(fp8_values[code]));
-        } else {
-            const exponent: u32 = (code >> 3) & 15;
-            const mantissa: u32 = code & 7;
-            const magnitude_bits: u32 = if (exponent == 0)
-                @bitCast(@as(f32, @floatFromInt(mantissa)) / 512)
-            else
-                ((exponent + 120) << 23) | (mantissa << 20);
-            const expected_bits = magnitude_bits | (@as(u32, code & 0x80) << 24);
-            try std.testing.expectEqual(expected_bits, @as(u32, @bitCast(value)));
-            try std.testing.expectEqual(expected_bits, @as(u32, @bitCast(fp8_values[code])));
-            try std.testing.expect(std.math.isFinite(value));
-            const negative = fp8E4M3FnValue(code ^ 0x80);
-            if (value == 0) {
-                if ((code & 0x80) == 0) {
-                    try std.testing.expect(std.math.isNegativeZero(negative));
-                } else {
-                    try std.testing.expect(!std.math.isNegativeZero(negative));
-                }
-            } else {
-                try std.testing.expectEqual(-value, negative);
-            }
-        }
-    }
-    try std.testing.expectEqual(@as(f32, 0.0), fp8E4M3FnValue(0));
-    try std.testing.expectEqual(@as(f32, 1.0), fp8E4M3FnValue(0x38));
-    try std.testing.expectEqual(@as(f32, 448.0), fp8E4M3FnValue(0x7e));
-    try std.testing.expectEqual(@as(f32, @exp2(-9.0)), fp8E4M3FnValue(1));
-}
-
-fn qkvBoundaryFixture(
-    allocator: Allocator,
-    tp: usize,
-) !DecodedQkv {
-    const q_per = 128;
-    const k_per = 96;
-    const v_per = 64;
-    const geometry = QkvGeometry{
-        .q_rows = q_per * tp,
-        .k_rows = k_per * tp,
-        .v_rows = v_per * tp,
-    };
-    const rows = std.math.cast(usize, geometry.total()) orelse return error.InvalidQkvGeometry;
-    const cols = 128;
-    const blocks = (rows / tp + 127) / 128;
-    const raw = try allocator.alloc(u8, rows * cols);
-    defer allocator.free(raw);
-    @memset(raw, 0x38);
-    const scales = try allocator.alloc(u8, tp * blocks * 4);
-    defer allocator.free(scales);
-    for (0..tp * blocks) |i| {
-        const value: f32 = @floatFromInt(i + 1);
-        std.mem.writeInt(u32, scales[i * 4 ..][0..4], @bitCast(value), .little);
-    }
-    return decodeQkv(
-        allocator,
-        raw,
-        rows,
-        cols,
-        scales,
-        tp * blocks,
-        1,
-        geometry,
-    );
-}
-
-test "mimo source TP4 and TP8 QKV regroup keeps rank-local K/V tiles" {
-    for ([_]usize{ 4, 8 }) |tp| {
-        var decoded = try qkvBoundaryFixture(std.testing.allocator, tp);
-        defer decoded.deinit();
-        const q_per = 128;
-        const k_per = 96;
-        const v_per = 64;
-        const cols = 128;
-        for (0..tp) |rank| {
-            for (0..q_per) |row| {
-                try std.testing.expectEqual(
-                    @as(f32, @floatFromInt(rank * 3 + 1)),
-                    decoded.q[(rank * q_per + row) * cols],
-                );
-            }
-            for (0..k_per) |row| {
-                try std.testing.expectEqual(
-                    @as(f32, @floatFromInt(rank * 3 + 2)),
-                    decoded.k[(rank * k_per + row) * cols],
-                );
-            }
-            for (0..32) |row| {
-                try std.testing.expectEqual(
-                    @as(f32, @floatFromInt(rank * 3 + 2)),
-                    decoded.v[(rank * v_per + row) * cols],
-                );
-            }
-            for (32..v_per) |row| {
-                try std.testing.expectEqual(
-                    @as(f32, @floatFromInt(rank * 3 + 3)),
-                    decoded.v[(rank * v_per + row) * cols],
-                );
-            }
-        }
-    }
-}
-
 test "mimo source rejects QKV input width that differs from hidden size" {
     const t = std.testing;
     var tmp = t.tmpDir(.{});
@@ -1959,49 +1603,53 @@ test "mimo source rejects QKV input width that differs from hidden size" {
 }
 
 test "mimo source rejects malformed FP8 scale grids" {
-    var raw: [128]u8 = undefined;
-    @memset(&raw, 0x38);
-    const bad_scales = [_]u8{0};
-    try std.testing.expectError(
-        error.InvalidFp8ScaleShape,
-        decodeBlocks(std.testing.allocator, &raw, 1, 128, &bad_scales, 1, 0),
-    );
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try makeTinySourceFixture(t.io, t.allocator, &tmp);
+    defer fixture.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var source = try loadSourceIndex(t.io, arena.allocator(), fixture.path);
+    const key = "model.layers.0.self_attn.qkv_proj.weight";
+    const scales = source.tensors.getPtr("model.layers.0.self_attn.qkv_proj.weight_scale_inv").?;
+    // Five tiles explain no rank count of [128 | 128 | 128] rows.
+    scales.shape = &.{ 5, 1 };
+    scales.data_end = scales.data_start + 5 * 4;
+    try t.expectError(error.InvalidQkvGeometry, validateFp8Pair(&source, arena.allocator(), &fixture.config, key, source.tensors.get(key).?));
 }
 
-test "mimo source rejects nonfinite and BF16-overflowing decoded weights" {
+test "mimo source refuses NaN codes and scales whose products leave bf16" {
     const t = std.testing;
-    const cases = [_]struct { code: u8, scale: f32 }{
-        .{ .code = 0x7f, .scale = 1 },
-        .{ .code = 0xff, .scale = 1 },
-        .{ .code = 0x7e, .scale = std.math.floatMax(f32) },
-        .{ .code = 0x38, .scale = std.math.floatMax(f32) },
+    const bf16_max: f32 = @bitCast(@as(u32, 0x7f7f0000));
+    const cases = [_]struct { code: u8, scale: f32, want: ?anyerror }{
+        .{ .code = 0x7f, .scale = 1, .want = error.InvalidFp8Value },
+        .{ .code = 0xff, .scale = 1, .want = error.InvalidFp8Value },
+        .{ .code = 0x38, .scale = std.math.inf(f32), .want = error.InvalidFp8Scale },
+        .{ .code = 0x38, .scale = std.math.nan(f32), .want = error.InvalidFp8Scale },
+        .{ .code = 0x38, .scale = bf16_max / 256.0, .want = error.InvalidFp8Scale },
+        .{ .code = 0x7e, .scale = bf16_max / 512.0, .want = null },
     };
     for (cases) |case| {
-        var raw: [384 * 128]u8 = @splat(case.code);
-        var scales: [16]u8 = undefined;
-        for (0..4) |i| std.mem.writeInt(u32, scales[i * 4 ..][0..4], @bitCast(case.scale), .little);
-        if (decodeBlocks(t.allocator, raw[0..128], 1, 128, scales[0..4], 1, 1)) |values| {
-            t.allocator.free(values);
-            return error.TestExpectedError;
-        } else |err| try t.expectEqual(error.InvalidFp8Value, err);
-        if (decodeQkv(t.allocator, &raw, 384, 128, &scales, 4, 1, .{ .q_rows = 128, .k_rows = 128, .v_rows = 128 })) |result| {
-            var values = result;
-            values.deinit();
-            return error.TestExpectedError;
-        } else |err| try t.expectEqual(error.InvalidFp8Value, err);
+        const codes: [128]u8 = @splat(case.code);
+        var scales: [4]u8 = undefined;
+        std.mem.writeInt(u32, &scales, @bitCast(case.scale), .little);
+        if (case.want) |want| {
+            try t.expectError(want, validateFp8Payload(&codes, &scales));
+        } else try validateFp8Payload(&codes, &scales);
     }
 }
 
-test "mimo source loads a complete split map and preserves dense bytes" {
+test "mimo source keeps the FP8 trunk in its source bytes and bills them" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var fixture = try makeTinySourceFixture(io, std.testing.allocator, &tmp);
     defer fixture.deinit();
 
-    // 34560 bytes of already-bf16 trunk plus six 128x128 FP8 projections at
-    // two bytes per element.
-    const expected_bytes: u64 = 34560 + 6 * 128 * 128 * 2;
+    // 34560 bytes of already-bf16 trunk plus the FP8 codes and f32 scale
+    // grids exactly as stored: QKV [384,128] + [4,1], three MLP [128,128] + [1,1].
+    const expected_bytes: u64 = 34560 + (384 * 128 + 4 * 4) + 3 * (128 * 128 + 4);
     try std.testing.expectEqual(
         expected_bytes,
         try residentBytesWithConfig(io, std.testing.allocator, fixture.path, &fixture.config),
@@ -2013,12 +1661,8 @@ test "mimo source loads a complete split map and preserves dense bytes" {
 
     var weights = try loadWeights(io, std.testing.allocator, fixture.path, &fixture.config);
     defer weights.deinit();
-    try std.testing.expectEqual(@as(u32, 12), weights.count());
-    try std.testing.expect(weights.get("model.layers.0.self_attn.qkv_proj.weight") == null);
-    try std.testing.expect(weights.get("model.layers.0.self_attn.q_proj.weight") != null);
-    // The prepared trunk is dense bf16, so the dense linear path must find no
-    // quantization side channel at all.
-    try std.testing.expect(weights.get("model.layers.0.self_attn.k_proj.scales") == null);
+    try std.testing.expectEqual(@as(u32, 14), weights.count());
+    try std.testing.expect(weights.get("model.layers.0.self_attn.q_proj.weight") == null);
     try std.testing.expect(weights.get("model.layers.0.mlp.gate_proj.biases") == null);
     try std.testing.expect(weights.get("model.layers.0.mlp.experts.0.gate_proj.weight") == null);
     try std.testing.expect(weights.get("model.mtp.layers.0.fake.weight") == null);
@@ -2032,32 +1676,22 @@ test "mimo source loads a complete split map and preserves dense bytes" {
         try std.testing.expectEqual(want, embed_data[i]);
     }
 
-    const geometry = QkvGeometry{
-        .q_rows = 128,
-        .k_rows = 128,
-        .v_rows = 128,
+    const cases = [_]struct { base: []const u8, codes: []const u8, scales: []const u8, shape: [2]c_int, grid: [2]c_int }{
+        .{ .base = "model.layers.0.self_attn.qkv_proj", .codes = fixture.qkv_weight, .scales = fixture.qkv_scales, .shape = .{ 384, 128 }, .grid = .{ 4, 1 } },
+        .{ .base = "model.layers.0.mlp.gate_proj", .codes = fixture.mlp_weight, .scales = fixture.mlp_scales, .shape = .{ 128, 128 }, .grid = .{ 1, 1 } },
+        .{ .base = "model.layers.0.mlp.down_proj", .codes = fixture.mlp_weight, .scales = fixture.mlp_scales, .shape = .{ 128, 128 }, .grid = .{ 1, 1 } },
     };
-    var decoded = try decodeQkv(
-        std.testing.allocator,
-        fixture.qkv_weight,
-        384,
-        128,
-        fixture.qkv_scales,
-        4,
-        1,
-        geometry,
-    );
-    defer decoded.deinit();
-    const loaded_weight = weights.get("model.layers.0.self_attn.q_proj.weight").?;
-    try std.testing.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(loaded_weight));
-    try std.testing.expectEqualSlices(c_int, &[_]c_int{ 128, 128 }, mlx.getShape(loaded_weight));
-    const got = mlx.mlx_array_data_bfloat16(loaded_weight) orelse return error.TestUnexpectedNullData;
-    for (decoded.q, 0..) |want, i| try std.testing.expectEqual(bf16BitsRne(want), got[i]);
-}
-
-/// Round-to-nearest-even f32 -> bf16, the conversion `mlx_astype` performs.
-fn bf16BitsRne(value: f32) u16 {
-    const bits: u32 = @bitCast(value);
-    const rounded = bits +% 0x7fff +% ((bits >> 16) & 1);
-    return @truncate(rounded >> 16);
+    var name_buf: [96]u8 = undefined;
+    for (cases) |case| {
+        const w = weights.get(try std.fmt.bufPrint(&name_buf, "{s}.weight", .{case.base})).?;
+        try std.testing.expectEqual(mlx.mlx_dtype.uint8, mlx.mlx_array_dtype(w));
+        try std.testing.expectEqualSlices(c_int, &case.shape, mlx.getShape(w));
+        const codes = mlx.mlx_array_data_uint8(w) orelse return error.TestUnexpectedNullData;
+        try std.testing.expectEqualSlices(u8, case.codes, codes[0..case.codes.len]);
+        const sc = weights.get(try std.fmt.bufPrint(&name_buf, "{s}.scales", .{case.base})).?;
+        try std.testing.expectEqual(mlx.mlx_dtype.float32, mlx.mlx_array_dtype(sc));
+        try std.testing.expectEqualSlices(c_int, &case.grid, mlx.getShape(sc));
+        const grid = mlx.mlx_array_data_float32(sc) orelse return error.TestUnexpectedNullData;
+        try std.testing.expectEqualSlices(u8, case.scales, std.mem.sliceAsBytes(grid[0 .. case.scales.len / 4]));
+    }
 }

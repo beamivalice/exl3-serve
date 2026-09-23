@@ -11,6 +11,7 @@ const chat_mod = @import("chat.zig");
 const rp_mod = @import("reasoning_protocol.zig");
 const token_mask = @import("token_mask.zig");
 const expert_stream_mod = @import("expert_stream.zig");
+const fp8_block = @import("fp8_block.zig");
 const model_mod = @import("model.zig");
 const dsv4_mod = @import("deepseek_v4.zig");
 const qwen_vision = @import("qwen_vision.zig");
@@ -2760,6 +2761,7 @@ pub fn prefillTransientReserveAtKv(
         },
     ) + qsaMaskBytes(config, @min(chunk, @max(seq, 1)), seq) +
         slidingBandScoreBytes(config, @min(chunk, @max(seq, 1))) +
+        fp8DequantScratchBytes(config, @min(chunk, @max(seq, 1))) +
         (if (config.expert_streaming) config.expert_fill_peak_bytes else 0);
 }
 
@@ -2776,6 +2778,21 @@ pub fn slidingBandScoreBytes(config: *const model_mod.ModelConfig, fwd: u64) u64
     if (!transformer_mod.prefillHeadDimFused(config.prefillScoreHeadDim())) return 0;
     const keys: u64 = @as(u64, config.sliding_window) +| fwd -| 1;
     return MOE_PREFILL_COEXIST *| @as(u64, config.num_attention_heads) *| fwd *| keys *| 2;
+}
+
+/// The bf16 copy `fp8_block.project` dequantizes a source FP8 linear into when
+/// a forward is wider than its GEMV: the widest linear's, and one more for the
+/// copy MLX's buffer cache still holds when the next linear dequantizes.
+pub fn fp8DequantScratchBytes(config: *const model_mod.ModelConfig, fwd: u64) u64 {
+    if (!config.usesMimoSourceTrunk() or fwd <= @as(u64, @intCast(fp8_block.gemv_max_rows))) return 0;
+    var widest: u64 = config.intermediate_size;
+    for (0..config.num_hidden_layers) |i| {
+        const l: u32 = @intCast(i);
+        const qkv: u64 = @as(u64, config.layerNumHeads(l)) * config.layerHeadDim(l) +
+            @as(u64, config.layerKVHeads(l)) * (config.layerHeadDim(l) + config.layerVHeadDim(l));
+        widest = @max(widest, qkv);
+    }
+    return 2 *| widest *| config.hidden_size *| 2;
 }
 
 /// Dense bytes ONE layer's `KVCache.denseView` rebuild costs at this prompt
@@ -5228,6 +5245,7 @@ pub fn prefillNeededAtChunk(
     return prefillMemoryNeeded(seq, heads, kv_heads, config.kvBytesPerToken(), hdim, config.prefillScoreHeadDim(), hidden, ffn, kv_bits, chunk, config.prefillAttnKeys(seq), prefillStreamBytesPerToken(config), prefillDequantWeightBytes(config), prefillRequestTerms(config, seq, max_tokens, kv_bits, chunk, warm)) +
         qsaMaskBytes(config, @min(chunk, @max(seq, 1)), seq) +
         slidingBandScoreBytes(config, @min(chunk, @max(seq, 1))) +
+        fp8DequantScratchBytes(config, @min(chunk, @max(seq, 1))) +
         (if (config.expert_streaming) config.expert_fill_peak_bytes else 0);
 }
 
@@ -23387,6 +23405,24 @@ test "mimo_v2 prefill bill: fusing qk 192 drops the global score sheet and bills
     plain.model_type = "qwen3";
     transformer_mod.fused256_override = true;
     try t.expectEqual(@as(u64, 0), slidingBandScoreBytes(&plain, chunk));
+}
+
+test "mimo_v2 prefill bill carries the FP8 trunk's dequant scratch past the GEMV width" {
+    const t = std.testing;
+    var cfg = mimoV2BillConfig();
+    cfg.intermediate_size = 1536;
+    cfg.expert_layout = .exl3_k4;
+    try t.expect(cfg.usesMimoSourceTrunk());
+    // The widest source FP8 linear is a sliding layer's QKV: 4*192 + 3*192 + 3*128 rows.
+    const scratch: u64 = 2 * 1728 * 384 * 2;
+    try t.expectEqual(scratch, fp8DequantScratchBytes(&cfg, 512));
+    try t.expectEqual(@as(u64, 0), fp8DequantScratchBytes(&cfg, @intCast(fp8_block.gemv_max_rows)));
+    // Both admission paths carry it, and a trunk with no FP8 linears does not.
+    var dense = cfg;
+    dense.expert_layout = .bf16_fused;
+    try t.expectEqual(@as(u64, 0), fp8DequantScratchBytes(&dense, 512));
+    try t.expectEqual(scratch, prefillNeededAtChunk(&cfg, 4096, 256, 8, 512, .{}) - prefillNeededAtChunk(&dense, 4096, 256, 8, 512, .{}));
+    try t.expectEqual(scratch, prefillTransientReserveAtKv(&cfg, 8, 512, 4096) - prefillTransientReserveAtKv(&dense, 8, 512, 4096));
 }
 
 test "generated think tags require an unambiguous literal template opener" {

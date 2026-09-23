@@ -7,6 +7,7 @@ const imatrix_capture = @import("imatrix.zig");
 const expert_exl3_kernels = @import("expert_exl3_kernels.zig");
 const expert_exl3 = @import("expert_exl3.zig");
 const expert_quant_mod = @import("expert_quant.zig");
+const fp8_block = @import("fp8_block.zig");
 // The qwen4_exp MTP head shares the sidecar head's draft-rerank scheme
 // (`mtp.rerankSelect` + `QLinear`), which reads only the TARGET's lm_head and
 // so has no head-shaped state of its own. mtp.zig imports this file back for
@@ -17197,6 +17198,8 @@ pub const Transformer = struct {
     // ── Core ops ──
 
     inline fn qmatmul(self: *const Transformer, x: mlx.mlx_array, w: mlx.mlx_array, sc: mlx.mlx_array, bi: mlx.mlx_array) !mlx.mlx_array {
+        // u8 codes + f32 tile scales = an FP8 source linear (`mimo_source`).
+        if (mlx.mlx_array_dtype(w) == .uint8) return fp8_block.linear(self.s, x, w, sc);
         // Resolve (bits, group_size, mode) per weight. Most weights inherit the
         // global config; per-weight overrides (mixed-precision checkpoints, e.g.
         // affine 8-bit shared MLP inside an nvfp4 QAT model) are detected on
@@ -26655,14 +26658,22 @@ pub const Transformer = struct {
         const none_mask = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(none_mask);
 
-        // Split projection weights are authoritative for both converted packs
-        // and native fused-QKV checkpoints (the latter is split at load).
-        const q_proj = try self.qmatmul(x, fa.q_w, fa.q_s, fa.q_b);
-        defer _ = mlx.mlx_array_free(q_proj);
-        const k_proj = try self.qmatmul(x, fa.k_w, fa.k_s, fa.k_b);
-        defer _ = mlx.mlx_array_free(k_proj);
-        const v_proj = try self.qmatmul(x, fa.v_w, fa.v_s, fa.v_b);
-        defer _ = mlx.mlx_array_free(v_proj);
+        var proj: [3]mlx.mlx_array = .{ .{}, .{}, .{} };
+        defer for (proj) |a| {
+            _ = mlx.mlx_array_free(a);
+        };
+        if (mlx.mlx_array_dtype(fa.q_w) == .uint8) {
+            // The source FP8 QKV: q_w holds all three, rank-local.
+            const split = try fp8_block.RowSplit.qkv(@intCast(h_count * hd), @intCast(kv_h * hd), @intCast(kv_h * vhd), @intCast(mlx.getShape(fa.q_s)[0]));
+            try fp8_block.project(self.s, x, fa.q_w, fa.q_s, split, &proj);
+        } else {
+            proj[0] = try self.qmatmul(x, fa.q_w, fa.q_s, fa.q_b);
+            proj[1] = try self.qmatmul(x, fa.k_w, fa.k_s, fa.k_b);
+            proj[2] = try self.qmatmul(x, fa.v_w, fa.v_s, fa.v_b);
+        }
+        const q_proj = proj[0];
+        const k_proj = proj[1];
+        const v_proj = proj[2];
 
         var q_r = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(q_r);
@@ -31266,7 +31277,19 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
             var v_w: mlx.mlx_array = undefined;
             var v_s: mlx.mlx_array = undefined;
             var v_b: mlx.mlx_array = undefined;
-            if (getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.qkv_proj.weight")) |fused_w| {
+            const fused_opt = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.qkv_proj.weight");
+            if (fused_opt != null and mlx.mlx_array_dtype(fused_opt.?) == .uint8) {
+                // FP8 source QKV: rank-local rows the forward splits (`mimoAttnWith`).
+                q_w = fused_opt.?;
+                q_s = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.qkv_proj.scales") orelse return error.MissingWeight;
+                q_b = mlx.mlx_array_new();
+                k_w = mlx.mlx_array_new();
+                k_s = mlx.mlx_array_new();
+                k_b = mlx.mlx_array_new();
+                v_w = mlx.mlx_array_new();
+                v_s = mlx.mlx_array_new();
+                v_b = mlx.mlx_array_new();
+            } else if (fused_opt) |fused_w| {
                 const fused_s = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.qkv_proj.scales") orelse mlx.mlx_array_new();
                 const fused_b = getLayerWeightOpt(weights, name_buf, prefix, li, "self_attn.qkv_proj.biases") orelse mlx.mlx_array_new();
                 const own_fused_s = fused_s.ctx == null;
@@ -35430,21 +35453,7 @@ const LMHEAD_PRUNE_HEADER =
     \\    return as_type<float>(uint(b) << 23);
     \\}
     \\
-    \\// Bit-parallel e4m3fn decode of one packed word (4 codes) into 4 floats.
-    \\// Per byte b the half bit pattern is sign<<15 | (b&127)<<7 — fp8.h's
-    \\// (b&127)<<7 construction with the sign applied as the half sign bit.
-    \\// IEEE multiply is sign-magnitude symmetric, so (sign-packed half)*256h
-    \\// equals sign*((b&127)-half * 256h) bit-for-bit for every code,
-    \\// including -0 (code 0x80). Decoded floats are byte order b0..b3.
-    \\static inline float4 mlxserve_e4m3_decode4(uint w) {
-    \\    uint lo = ((w & 0x007F007Fu) << 7) | ((w & 0x00800080u) << 8);
-    \\    uint hs = w >> 8;
-    \\    uint hi = ((hs & 0x007F007Fu) << 7) | ((hs & 0x00800080u) << 8);
-    \\    half2 h02 = as_type<half2>(lo) * half2((half)256.0f);
-    \\    half2 h13 = as_type<half2>(hi) * half2((half)256.0f);
-    \\    return float4(float(h02.x), float(h13.x), float(h02.y), float(h13.y));
-    \\}
-;
+++ fp8_block.E4M3_HEADER;
 
 /// Coarse pass: one simdgroup per row (8 rows / 256-thread threadgroup), each
 /// lane owning K/1024 consecutive 32-element groups. Word-parallel e4m3

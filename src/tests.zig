@@ -57,6 +57,7 @@ test {
     _ = @import("kv_disk_writer.zig");
     _ = @import("model_discovery.zig");
     _ = @import("mimo_source.zig");
+    _ = @import("fp8_block.zig");
     _ = @import("model_registry.zig");
     _ = @import("scheduler.zig");
     _ = @import("ane.zig");

@@ -1519,8 +1519,8 @@ pub fn parseConfig(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
         const first_moe: u16 = @intCast(config.first_k_dense_replace);
         if (expert_quant.layoutOfDirWithFirstMoe(allocator, io, config.model_type, model_dir, layers, first_moe)) |layout| {
             config.expert_layout = layout;
-            // The MiMo source trunk loader hands back SPLIT q/k/v whatever
-            // the checkpoint's own projection layout names.
+            // The MiMo binder reads the source QKV itself; the generic
+            // fused-QKV names never apply to it.
             if (config.usesMimoSourceTrunk()) config.attn_fused_qkv = false;
             if (layout == .mxfp4_individual) {
                 config.quant_mode = .mxfp4;
@@ -4014,14 +4014,14 @@ pub fn loadWeights(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
 pub fn loadWeightsMimoSource(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !Weights {
     var config = try parseConfig(io, allocator, model_dir);
     defer config.deinit(allocator);
-    log.info("[mimo-source] loading original shards: {s} experts, bf16-dequantized trunk and split QKV\n", .{
+    log.info("[mimo-source] loading original shards: {s} experts, FP8 trunk in source bytes\n", .{
         if (config.expert_layout == .exl3_k4) "resident EXL3" else "native MXFP4",
     });
     return @import("mimo_source.zig").loadWeights(io, allocator, model_dir, &config);
 }
 
-/// Resident bytes of a MiMo pack the source loader prepares: the bf16 trunk
-/// plus, under EXL3, the routed banks it holds resident.
+/// Resident bytes of a MiMo pack the source loader prepares: the trunk as
+/// served (FP8 codes + scale grids, bf16 rest) plus any resident routed banks.
 pub fn mimoSourceResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !u64 {
     return @import("mimo_source.zig").residentBytes(io, allocator, model_dir);
 }

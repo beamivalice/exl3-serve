@@ -92,7 +92,7 @@ Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter=
 
 ## MiMo-V2.6-Flash (`mimo_v2`, experimental)
 
-- **Original checkpoint**: `.mxfp4_individual` streams per-expert U8 payloads directly into U32 slabs without changing bytes. `mimo_source.zig` dequantizes the resident FP8 trunk to dense bf16 — the KLD teacher carries no quantization of its own — and splits rank-local QKV in memory; sources are read-only, MTP/media excluded, residency billed after conversion.
+- **Original checkpoint**: `.mxfp4_individual` streams per-expert U8 payloads directly into U32 slabs without changing bytes. `mimo_source.zig` keeps the FP8 trunk as stored (e4m3 + f32 128x128 tile scales, rank-local QKV) for `fp8_block` (f32 decode GEMV; wider forwards dequantize one linear to bf16 scratch) — the KLD teacher carries no quantization of its own; sources are read-only, MTP/media excluded, residency billed as stored.
 - **Converted pack**: the MiMo pack converter (`serve_convert pack-mimo-v2`) optionally restacks the same MXFP4 bytes into `model.layers.N.mlp.switch_mlp` U32 weights + U8 e8m0/32 scales, without biases, and prepares the trunk ahead of time. Both source layouts use the same streaming kernels.
 - **Packed QKV is rank-local**: dequantize each rank's FP8 tiles independently, then regroup `[Q_rank | K_rank | V_rank]` into global Q/K/V. Extra scale rows belong to partial rank-local tiles, not trailing padding on the full tensor.
 - **Geometry**: `hybrid_layer_pattern` 0 = global, 1 = sliding; read heads, KV heads and K/V widths per layer. Rotate only the first `int(head_dim * partial_rotary_factor)` channels; multiply V by `attention_value_scale` BEFORE caching.
