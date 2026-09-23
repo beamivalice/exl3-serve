@@ -2304,6 +2304,13 @@ pub fn applyModelSettings(config: *ModelConfig, o: model_settings.Override) void
         log.warn("[model-settings] ssd_budget_gb ignored: this checkpoint does not stream experts from SSD\n", .{});
 }
 
+/// The verify-rows arms a forward microbench width runs.
+fn ubenchRowArms(rows: usize, is_mimo: bool, both: bool) []const bool {
+    const eligible = is_mimo and rows > 1 and rows <= transformer_mod.MIMO_VERIFY_ROWS_MAX;
+    if (!eligible) return &.{false};
+    return if (both) &.{ false, true } else &.{true};
+}
+
 /// A load's MTP decision: `--mtp`/`--no-mtp` > the per-model `mtp` > on.
 pub fn mtpChoiceFor(mtp_enabled: bool, mtp_explicit: bool, config: *const ModelConfig) model_settings.MtpChoice {
     return model_settings.MtpChoice.resolve(model_settings.launchFlag(bool, mtp_enabled, mtp_explicit), config.mtp_override, true);
@@ -3234,14 +3241,19 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
                 }
                 log.info("[fwd-ubench] prefilled {d} tokens\n", .{done_pre});
             }
+            // SUSHI_DECODE_FWD_UBENCH_ROW_ARMS=1: a MiMo verify width runs twice, the
+            // prefill-shaped forward first, then the verify rows (decode arithmetic per row).
+            const row_arms = std.c.getenv("SUSHI_DECODE_FWD_UBENCH_ROW_ARMS") != null;
             for (widths[0..n_widths]) |rows| {
+            for (ubenchRowArms(rows, xfm_ptr.config.isMimo(), row_arms)) |verify_rows| {
             const tok_slice = try sch.allocator.alloc(i32, @min(rows, 4096));
             defer sch.allocator.free(tok_slice);
             for (tok_slice, 0..) |*v, i| v.* = @intCast(1 + (i % 997));
             const tok = tok_slice.ptr;
             const tsh = [_]c_int{ 1, @intCast(tok_slice.len) };
             ctx.capture_ssm_seq = rows > 1 and rows <= 16 and ctx.ssm_entries != null; // verify widths capture, prefill chunks do not
-            log.info("[fwd-ubench] rows={d} capture={}\n", .{ tok_slice.len, ctx.capture_ssm_seq });
+            ctx.verify_rows = verify_rows;
+            log.info("[fwd-ubench] rows={d} capture={} verify_rows={}\n", .{ tok_slice.len, ctx.capture_ssm_seq, verify_rows });
             // Warm: first forward pays kernel JIT + lazy weight materialization.
             for (0..3) |_| {
                 const ti = mlx.mlx_array_new_data(tok, &tsh, 2, .int32);
@@ -3336,6 +3348,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
                     _ = mlx.mlx_array_free(lg);
                 }
                 transformer_mod.decodeProfileSession(0);
+            }
             }
             }
             xfm_ptr.diagProjBench(20, &ctx);

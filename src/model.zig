@@ -1056,6 +1056,10 @@ pub const ModelConfig = struct {
             (self.quant_bits == 0 or self.expert_layout == .mxfp4_individual);
     }
 
+    pub fn isMimo(self: *const ModelConfig) bool {
+        return std.mem.eql(u8, self.model_type, "mimo_v2");
+    }
+
     /// A MiMo affine pack carries its widths PER LAYER, so the config-wide
     /// `quant_bits` stays 0 — which is the dense-checkpoint tell everywhere
     /// else. The layout, not the width, says these experts are already packed.

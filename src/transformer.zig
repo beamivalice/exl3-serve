@@ -6249,11 +6249,16 @@ const KvPrefixView = struct {
     owned: [8]mlx.mlx_array = @splat(.{}),
 
     fn init(s: mlx.mlx_stream, source: DenseKVView, length: c_int) !KvPrefixView {
+        return initRange(s, source, 0, length);
+    }
+
+    /// Rows `[start, end)` of `source`: the view a decode tick saw when `end` was its last key.
+    fn initRange(s: mlx.mlx_stream, source: DenseKVView, start: c_int, end: c_int) !KvPrefixView {
         var result = KvPrefixView{ .view = source };
         errdefer result.deinit();
         inline for (.{ "k", "v", "k_triple_q", "k_triple_scales", "k_triple_biases", "v_triple_q", "v_triple_scales", "v_triple_biases" }, 0..) |name, i| {
             if (i < 2 or source.has_quant_triple) {
-                result.owned[i] = try sliceAttentionSeq(s, @field(source, name), 0, length);
+                result.owned[i] = try sliceAttentionSeq(s, @field(source, name), start, end);
                 @field(result.view, name) = result.owned[i];
             }
         }
@@ -14343,6 +14348,9 @@ pub const ForwardCtx = struct {
     /// for the verify pass on a GDN model; the flag reaches the layers via
     /// `Transformer.spec_capture_ssm`.
     capture_ssm_seq: bool = false,
+    /// MiMo spec verify: every row of this multi-row forward computes with its
+    /// own decode tick's arithmetic (`mimoVerifyRowsAttn`), so greedy MTP is serial.
+    verify_rows: bool = false,
     vision_embeddings: ?mlx.mlx_array,
     /// Chunked vision prefill (issue #197): number of image/audio placeholder
     /// tokens already spliced by earlier chunks of this prefill. The splice's
@@ -15605,6 +15613,106 @@ pub fn mimoGlobalDecodeRebuildMaxKeys() u64 {
     const floor = @max(packedDecodeFloor(QKV_MPP_DECODE_MIN_TK), packedDecodeFloor(QKV_SPLITK_DECODE_MIN_TK));
     return @intCast(@max(floor, 1) - 1);
 }
+
+/// The additive `[1, 1, 1, kv_len]` bf16 mask a sliding decode row applies.
+fn slidingDecodeMask(s: mlx.mlx_stream, kv_len: c_int, window: c_int) !mlx.mlx_array {
+    var positions = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(positions);
+    try mlx.check(mlx.mlx_arange(&positions, 0, @floatFromInt(kv_len), 1, .int32, s));
+    const window_start = mlx.mlx_array_new_int(kv_len - window);
+    defer _ = mlx.mlx_array_free(window_start);
+    var too_old = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(too_old);
+    try mlx.check(mlx.mlx_less(&too_old, positions, window_start, s));
+    const zero = bf16Scalar(0.0, s);
+    defer _ = mlx.mlx_array_free(zero);
+    const neg_inf = bf16Scalar(-std.math.inf(f32), s);
+    defer _ = mlx.mlx_array_free(neg_inf);
+    var sw_mask = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(sw_mask);
+    try mlx.check(mlx.mlx_where(&sw_mask, too_old, neg_inf, zero, s));
+    const mask_shape = [_]c_int{ 1, 1, 1, kv_len };
+    var mask_4d = mlx.mlx_array_new();
+    try mlx.check(mlx.mlx_reshape(&mask_4d, sw_mask, &mask_shape, 4, s));
+    return mask_4d;
+}
+
+/// One MiMo query row attending `total_kv` keys with a decode tick's arithmetic. `view`
+/// is what that tick's cache update returned; `decode_mask` is the forward's sliding
+/// decode mask (built whenever the forward reaches past the `window`).
+fn mimoDecodeAttn(
+    s: mlx.mlx_stream,
+    window: c_int,
+    q: mlx.mlx_array,
+    view: *const DenseKVView,
+    sinks: mlx.mlx_array,
+    is_global: bool,
+    total_kv: c_int,
+    attn_scale: f32,
+    decode_mask: mlx.mlx_array,
+) !mlx.mlx_array {
+    // The packed arm follows the cache's length every step, never the request's admission-time `kv_attn_fused`.
+    if (is_global and sinks.ctx == null) {
+        const packed_read = switch (mimoGlobalDecodeArm(view, 1, mimoDecodeUsesNax())) {
+            .mpp => try qkvAttnMppKernel(s, q, view, attn_scale, ""),
+            .split_k => try qkvAttnSplitKKernel(s, q, view, attn_scale, ""),
+            .dense => null,
+        };
+        if (packed_read) |out| return out;
+    }
+    const windowed = !is_global and total_kv > window;
+    const none_mask = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(none_mask);
+    var out = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(out);
+    try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&out, q, view.k, view.v, attn_scale, if (windowed) "array" else "", if (windowed) decode_mask else none_mask, sinks, false, s));
+    return out;
+}
+
+/// A spec verify's rows, each attending exactly the keys its own decode tick would have
+/// seen through `mimoDecodeAttn`, so an accepted row is the serial row bit for bit.
+/// `kv_view` is the verify's cache update: it ends at the last row's key.
+fn mimoVerifyRowsAttn(
+    s: mlx.mlx_stream,
+    window: c_int,
+    q_rope: mlx.mlx_array,
+    kv_view: *const DenseKVView,
+    sinks: mlx.mlx_array,
+    is_global: bool,
+    offset: c_int,
+    seq_len: c_int,
+    attn_scale: f32,
+    decode_mask: mlx.mlx_array,
+) !mlx.mlx_array {
+    if (seq_len > MIMO_VERIFY_ROWS_MAX) return error.MimoVerifyRowsTooWide;
+    const view_len = mlx.getShape(kv_view.k)[2];
+    var parts: [MIMO_VERIFY_ROWS_MAX]mlx.mlx_array = @splat(.{});
+    defer for (parts) |part| {
+        if (part.ctx != null) _ = mlx.mlx_array_free(part);
+    };
+    for (0..@intCast(seq_len)) |ri| {
+        const r: c_int = @intCast(ri);
+        const total_r = offset + r + 1;
+        const end = view_len - (seq_len - 1 - r);
+        const len_r = if (is_global) end else @min(total_r, window);
+        if (len_r > end) return error.MimoVerifyViewTooShort;
+        var rows = try KvPrefixView.initRange(s, kv_view.*, end - len_r, end);
+        defer rows.deinit();
+        const q_r = try sliceAttentionSeq(s, q_rope, r, r + 1);
+        defer _ = mlx.mlx_array_free(q_r);
+        parts[ri] = try mimoDecodeAttn(s, window, q_r, &rows.view, sinks, is_global, total_r, attn_scale, decode_mask);
+    }
+    const vec = mlx.mlx_vector_array_new_data(&parts, @intCast(seq_len));
+    defer _ = mlx.mlx_vector_array_free(vec);
+    var out = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(out);
+    try mlx.check(mlx.mlx_concatenate_axis(&out, vec, 2, s));
+    return out;
+}
+
+/// Widest MiMo spec verify: the FP8 trunk GEMV keeps a decode row's arithmetic only up
+/// to `fp8_block.gemv_direct_max_rows` rows.
+pub const MIMO_VERIFY_ROWS_MAX: c_int = 4;
 
 var kv_attn_fused_engaged: bool = false; // one-shot log guard
 fn logKvAttnFusedEngaged(view: *const DenseKVView, q: mlx.mlx_array, t_q: c_int) void {
@@ -24305,7 +24413,9 @@ pub const Transformer = struct {
             const sw: c_int = @intCast(cfg.sliding_window);
             const total_kv: c_int = @as(c_int, @intCast(offset)) + seq_len;
             const sliding = slidingViewFor(cfg, total_kv, seq_len);
-            if (is_prefill) {
+            // A MiMo spec verify attends row by row with the decode arithmetic.
+            const verify_rows = is_mimo and ctx.verify_rows;
+            if (is_prefill and !verify_rows) {
                 // Skipped when the fused hd-256 kernel band-masks in-kernel
                 // (the mask itself is chunk x kv_len — GBs at long ctx);
                 // gemma4MoeAttnWith/lagunaAttnWith lazily build it if a call
@@ -24315,7 +24425,7 @@ pub const Transformer = struct {
                     local_prefill_mask = try self.createSlidingWindowMask(seq_len, sliding.kv_len, sw);
                 }
             }
-            if (!is_prefill and total_kv > sw) {
+            if ((!is_prefill or verify_rows) and total_kv > sw) {
                 const local_kv_len: c_int = @min(total_kv, sw);
                 local_decode_mask = try self.createSlidingWindowDecodeMask(local_kv_len, sw);
             }
@@ -27116,105 +27226,39 @@ pub const Transformer = struct {
 
         var attn_out = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(attn_out);
-        if (is_global) {
+        if (ctx.verify_rows and seq_len > 1) {
+            _ = mlx.mlx_array_free(attn_out);
+            attn_out = try mimoVerifyRowsAttn(self.s, @intCast(cfg.sliding_window), q_rope, &kv_view, fa.sinks, is_global, offset, seq_len, attn_scale, local_decode_mask);
+        } else if (!is_prefill) {
+            _ = mlx.mlx_array_free(attn_out);
+            attn_out = try mimoDecodeAttn(self.s, @intCast(cfg.sliding_window), q_rope, &kv_view, fa.sinks, is_global, offset + seq_len, attn_scale, local_decode_mask);
+        } else if (is_global) {
             // MLX has no fused prefill kernel at qk 192 (steel_attention ships
             // bd 64/96/128 and a 256 dsplit), so the composed arm materializes
             // [heads, chunk, total_kv] — 32 GiB at a 512k prompt. A global layer
-            // that carries sinks keeps it: only the band arm's sink is proven. A packed
-            // decode reads the cache in place rather than dequantizing it whole; its arm follows
-            // the cache's length every step, never the request's admission-time `kv_attn_fused`.
-            const pd: ?mlx.mlx_array = if (is_prefill and fa.sinks.ctx == null)
+            // that carries sinks keeps it: only the band arm's sink is proven.
+            const pd: ?mlx.mlx_array = if (fa.sinks.ctx == null)
                 try fusedSdpaPrefillKv(self.s, q_rope, &kv_view, attn_scale, 0, .{ .ctx = null })
-            else if (!is_prefill and fa.sinks.ctx == null) switch (mimoGlobalDecodeArm(&kv_view, seq_len, mimoDecodeUsesNax())) {
-                .mpp => try qkvAttnMppKernel(self.s, q_rope, &kv_view, attn_scale, ""),
-                .split_k => try qkvAttnSplitKKernel(self.s, q_rope, &kv_view, attn_scale, ""),
-                .dense => null,
-            } else null;
+            else
+                null;
             if (pd) |fused| {
                 _ = mlx.mlx_array_free(attn_out);
                 attn_out = fused;
             } else {
-                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
-                    &attn_out,
-                    q_rope,
-                    kv_view.k,
-                    kv_view.v,
-                    attn_scale,
-                    if (is_prefill) "causal" else "",
-                    none_mask,
-                    fa.sinks,
-                    false,
-                    self.s,
-                ));
+                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&attn_out, q_rope, kv_view.k, kv_view.v, attn_scale, "causal", none_mask, fa.sinks, false, self.s));
             }
         } else {
             const sw: c_int = @intCast(cfg.sliding_window);
-            const total_kv = offset + seq_len;
-            const fused: ?mlx.mlx_array = if (is_prefill)
-                try slidingPrefillAttn(self.s, cfg, q_rope, &kv_view, attn_scale, fa.sinks)
-            else
-                null;
-            if (fused) |out| {
+            if (try slidingPrefillAttn(self.s, cfg, q_rope, &kv_view, attn_scale, fa.sinks)) |out| {
                 _ = mlx.mlx_array_free(attn_out);
                 attn_out = out;
-            } else if (is_prefill and total_kv <= sw) {
-                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
-                    &attn_out,
-                    q_rope,
-                    kv_view.k,
-                    kv_view.v,
-                    attn_scale,
-                    "causal",
-                    none_mask,
-                    fa.sinks,
-                    false,
-                    self.s,
-                ));
-            } else if (is_prefill) {
+            } else if (offset + seq_len <= sw) {
+                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&attn_out, q_rope, kv_view.k, kv_view.v, attn_scale, "causal", none_mask, fa.sinks, false, self.s));
+            } else {
                 if (local_prefill_mask.ctx == null) {
                     local_prefill_mask.* = try self.createSlidingWindowMask(seq_len, sliding.kv_len, sw);
                 }
-                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
-                    &attn_out,
-                    q_rope,
-                    kv_view.k,
-                    kv_view.v,
-                    attn_scale,
-                    "array",
-                    local_prefill_mask.*,
-                    fa.sinks,
-                    false,
-                    self.s,
-                ));
-            } else if (total_kv <= sw) {
-                // The ABSOLUTE position, never the stored row count: a ringed
-                // layer's rows are a window, and the mask the caller built keys
-                // on this same `total_kv > sw`.
-                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
-                    &attn_out,
-                    q_rope,
-                    kv_view.k,
-                    kv_view.v,
-                    attn_scale,
-                    "",
-                    none_mask,
-                    fa.sinks,
-                    false,
-                    self.s,
-                ));
-            } else {
-                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
-                    &attn_out,
-                    q_rope,
-                    kv_view.k,
-                    kv_view.v,
-                    attn_scale,
-                    "array",
-                    local_decode_mask,
-                    fa.sinks,
-                    false,
-                    self.s,
-                ));
+                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&attn_out, q_rope, kv_view.k, kv_view.v, attn_scale, "array", local_prefill_mask.*, fa.sinks, false, self.s));
             }
         }
 
@@ -30882,25 +30926,7 @@ pub const Transformer = struct {
     }
 
     fn createSlidingWindowDecodeMask(self: *const Transformer, kv_len: c_int, window: c_int) !mlx.mlx_array {
-        var positions = mlx.mlx_array_new();
-        defer _ = mlx.mlx_array_free(positions);
-        try mlx.check(mlx.mlx_arange(&positions, 0, @floatFromInt(kv_len), 1, .int32, self.s));
-        const window_start = mlx.mlx_array_new_int(kv_len - window);
-        defer _ = mlx.mlx_array_free(window_start);
-        var too_old = mlx.mlx_array_new();
-        defer _ = mlx.mlx_array_free(too_old);
-        try mlx.check(mlx.mlx_less(&too_old, positions, window_start, self.s));
-        const zero = bf16Scalar(0.0, self.s);
-        defer _ = mlx.mlx_array_free(zero);
-        const neg_inf = bf16Scalar(-std.math.inf(f32), self.s);
-        defer _ = mlx.mlx_array_free(neg_inf);
-        var sw_mask = mlx.mlx_array_new();
-        defer _ = mlx.mlx_array_free(sw_mask);
-        try mlx.check(mlx.mlx_where(&sw_mask, too_old, neg_inf, zero, self.s));
-        const mask_shape = [_]c_int{ 1, 1, 1, kv_len };
-        var mask_4d = mlx.mlx_array_new();
-        try mlx.check(mlx.mlx_reshape(&mask_4d, sw_mask, &mask_shape, 4, self.s));
-        return mask_4d;
+        return slidingDecodeMask(self.s, kv_len, window);
     }
 
     fn createSlidingWindowMask(self: *const Transformer, q_len: c_int, kv_len: c_int, window: c_int) !mlx.mlx_array {
@@ -43709,6 +43735,98 @@ test "mimoGlobalDecodeRebuildMaxKeys: the dense decode arm serves every length o
     try testing.expectEqual(MimoDecodeArm.dense, mimoGlobalDecodeArm(&view, 1, true));
     try testing.expectEqual(MimoDecodeArm.dense, mimoGlobalDecodeArm(&view, 1, false));
     try testing.expectEqual(std.math.maxInt(u64), mimoGlobalDecodeRebuildMaxKeys());
+}
+
+/// Serial decode ticks against one verify forward over the same rows, on twin caches.
+fn mimoVerifyRowsIdentityCase(config: KVQuantConfig, is_global: bool, prefix: c_int, width: c_int) !void {
+    const s = mlx.gpuStream();
+    const a = testing.allocator;
+    const window: c_int = 128;
+    const hq: c_int = 16;
+    const hkv: c_int = if (is_global) 1 else 2;
+    const scale: f32 = 1.0 / @sqrt(192.0);
+    var caches: [2]KVCache = undefined;
+    for (&caches) |*c| {
+        c.* = try KVCache.initWithConfig(a, 1, config);
+        if (!is_global) c.setSwaRing(@intCast(window));
+    }
+    defer for (&caches) |*c| c.deinit();
+    const span = struct {
+        fn of(global: bool, w: c_int, rows: c_int) u32 {
+            return if (global) 0 else slidingTailSpan(@intCast(w), @intCast(rows), SLIDING_TRIM_UNBOUNDED);
+        }
+    };
+    const k0 = try qkvIdentityArray(s, hkv, prefix + width, 192, 0.7, .bfloat16);
+    defer _ = mlx.mlx_array_free(k0);
+    const v0 = try qkvIdentityArray(s, hkv, prefix + width, 128, 2.1, .bfloat16);
+    defer _ = mlx.mlx_array_free(v0);
+    const q = try qkvIdentityArray(s, hq, width, 192, 1.9, .bfloat16);
+    defer _ = mlx.mlx_array_free(q);
+    const sinks = if (is_global) mlx.mlx_array{ .ctx = null } else try qkvSinks(s, hq);
+    defer if (sinks.ctx != null) {
+        _ = mlx.mlx_array_free(sinks);
+    };
+    const mask = try slidingDecodeMask(s, window, window);
+    defer _ = mlx.mlx_array_free(mask);
+    for (&caches) |*c| {
+        const kp = try sliceAttentionSeq(s, k0, 0, prefix);
+        defer _ = mlx.mlx_array_free(kp);
+        const vp = try sliceAttentionSeq(s, v0, 0, prefix);
+        defer _ = mlx.mlx_array_free(vp);
+        var view = try c.update(0, kp, vp, s, span.of(is_global, window, prefix));
+        view.deinit();
+    }
+    const kw = try sliceAttentionSeq(s, k0, prefix, prefix + width);
+    defer _ = mlx.mlx_array_free(kw);
+    const vw = try sliceAttentionSeq(s, v0, prefix, prefix + width);
+    defer _ = mlx.mlx_array_free(vw);
+    var verify_view = try caches[1].update(0, kw, vw, s, span.of(is_global, window, width));
+    defer verify_view.deinit();
+    const verify = try mimoVerifyRowsAttn(s, window, q, &verify_view, sinks, is_global, prefix, width, scale, mask);
+    defer _ = mlx.mlx_array_free(verify);
+    for (0..@intCast(width)) |ri| {
+        const r: c_int = @intCast(ri);
+        const kr = try sliceAttentionSeq(s, k0, prefix + r, prefix + r + 1);
+        defer _ = mlx.mlx_array_free(kr);
+        const vr = try sliceAttentionSeq(s, v0, prefix + r, prefix + r + 1);
+        defer _ = mlx.mlx_array_free(vr);
+        var tick_view = try caches[0].update(0, kr, vr, s, span.of(is_global, window, 1));
+        defer tick_view.deinit();
+        const qr = try sliceAttentionSeq(s, q, r, r + 1);
+        defer _ = mlx.mlx_array_free(qr);
+        const tick = try mimoDecodeAttn(s, window, qr, &tick_view, sinks, is_global, prefix + r + 1, scale, mask);
+        defer _ = mlx.mlx_array_free(tick);
+        const row = try sliceAttentionSeq(s, verify, r, r + 1);
+        defer _ = mlx.mlx_array_free(row);
+        qkvExpectBitsEqual(s, tick, row) catch |err| {
+            std.debug.print("mimo verify row {d}: global={} prefix={d} width={d} kv={s}\n", .{ r, is_global, prefix, width, @tagName(config.scheme) });
+            return err;
+        };
+    }
+}
+
+fn qkvSinks(s: mlx.mlx_stream, heads: c_int) !mlx.mlx_array {
+    var buf: [64]f32 = undefined;
+    for (buf[0..@intCast(heads)], 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.37) * 2.0;
+    const raw = mlx.mlx_array_new_data(&buf, &[_]c_int{heads}, 1, .float32);
+    defer _ = mlx.mlx_array_free(raw);
+    var out = mlx.mlx_array_new();
+    try mlx.check(mlx.mlx_astype(&out, raw, .bfloat16, s));
+    return out;
+}
+
+test "mimo verify rows attend with each serial decode tick's arithmetic (dense, kv8, window edge, ring, packed global)" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    for ([_]KVQuantConfig{ KVQuantConfig.dense, KVQuantConfig.affine(8) }) |config| {
+        for ([_]bool{ false, true }) |is_global| {
+            for ([_]c_int{ 1, 60, 125, 126, 700 }) |prefix| {
+                for ([_]c_int{ 2, 3, 4 }) |width| try mimoVerifyRowsIdentityCase(config, is_global, prefix, width);
+            }
+        }
+    }
+    // The packed global reads (matmul2d / split-K) serve from their key floor; the second block straddles it.
+    try mimoVerifyRowsIdentityCase(KVQuantConfig.affine(8), true, QKV_MPP_DECODE_MIN_TK + 3, 4);
+    try mimoVerifyRowsIdentityCase(KVQuantConfig.affine(8), true, QKV_MPP_DECODE_MIN_TK - 2, 4);
 }
 
 test "kvAttnFusedEligible: fused reads are decode-width (t_q == 1) only" {
@@ -69224,6 +69342,80 @@ test "mimo v2 fixture full and cached forwards track the HF reference (MIMO_V2_M
         @memcpy(ours_cache[t * vocab ..][0..vocab], step_rows);
     }
     try mimoExpectClose("cached logits", ours_cache, ref_cache, 5e-3);
+}
+
+/// Prefill `prefix`, then either decode `rows` ids one tick at a time or verify them in
+/// one `verify_rows` forward; the logits rows, `[rows, vocab]` f32.
+fn mimoVerifyOrTicks(alloc: std.mem.Allocator, xfm: *Transformer, ids: []const i32, prefix: usize, rows: usize, verify: bool, kv: KVQuantConfig) ![]f32 {
+    const s = xfm.s;
+    try xfm.cache.reinit(xfm.config.num_hidden_layers, kv);
+    xfm.cache.setSwaRing(xfm.config.sliding_window);
+    xfm.moe_seq_offset = 0;
+    var ctx = xfm.defaultCtx();
+    const pre = mlx.mlx_array_new_data(ids.ptr, &[_]c_int{ 1, @intCast(prefix) }, 2, .int32);
+    defer _ = mlx.mlx_array_free(pre);
+    const pre_logits = try xfm.forwardWith(&ctx, pre);
+    try mlx.check(mlx.mlx_array_eval(pre_logits));
+    _ = mlx.mlx_array_free(pre_logits);
+    const vocab: usize = @intCast(xfm.config.vocab_size);
+    const out = try alloc.alloc(f32, rows * vocab);
+    errdefer alloc.free(out);
+    if (verify) {
+        ctx.verify_rows = true;
+        const block = mlx.mlx_array_new_data(ids[prefix..].ptr, &[_]c_int{ 1, @intCast(rows) }, 2, .int32);
+        defer _ = mlx.mlx_array_free(block);
+        const logits = try xfm.forwardWith(&ctx, block);
+        defer _ = mlx.mlx_array_free(logits);
+        const host = try qwen4ReadF32(alloc, logits, s);
+        defer alloc.free(host);
+        @memcpy(out, host);
+    } else {
+        for (0..rows) |r| {
+            const one = mlx.mlx_array_new_data(ids[prefix + r ..].ptr, &[_]c_int{ 1, 1 }, 2, .int32);
+            defer _ = mlx.mlx_array_free(one);
+            const logits = try xfm.forwardWith(&ctx, one);
+            defer _ = mlx.mlx_array_free(logits);
+            const host = try qwen4ReadF32(alloc, logits, s);
+            defer alloc.free(host);
+            @memcpy(out[r * vocab ..][0..vocab], host);
+        }
+    }
+    return out;
+}
+
+test "mimo v2 verify rows equal serial decode ticks bit for bit across the sliding window (MIMO_V2_MODEL)" {
+    const model_dir = std.c.getenv("MIMO_V2_MODEL") orelse return error.SkipZigTest;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const a = testing.allocator;
+    const s = mlx.gpuStream();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var config = try model_mod.parseConfig(io, a, std.mem.span(model_dir));
+    defer if (config.ngram_table_path) |p| a.free(p);
+    // The served loader, so a real pack (MIMO_V2_MODEL=<pack>, a heavy GPU job) runs the same check.
+    var weights = try model_mod.loadWeightsForConfig(io, a, std.mem.span(model_dir), &config, false);
+    defer weights.deinit();
+    try stackMimoFixtureExperts(&weights, config, s);
+    model_mod.resolveWeightPrefix(&config, &weights);
+    var xfm = try Transformer.init(io, a, config, &weights);
+    defer xfm.deinit();
+    var ids: [140]i32 = undefined;
+    for (&ids, 0..) |*v, i| v.* = @intCast(2 + (i * 37) % (config.vocab_size - 2));
+    for ([_]KVQuantConfig{ KVQuantConfig.dense, KVQuantConfig.affine(8) }) |kv| {
+        for ([_]usize{ 20, 126, 136 }) |prefix| {
+            for ([_]usize{ 2, 4 }) |rows| {
+                const ticks = try mimoVerifyOrTicks(a, &xfm, &ids, prefix, rows, false, kv);
+                defer a.free(ticks);
+                const verify = try mimoVerifyOrTicks(a, &xfm, &ids, prefix, rows, true, kv);
+                defer a.free(verify);
+                for (ticks, verify, 0..) |x, y, i| {
+                    if (@as(u32, @bitCast(x)) != @as(u32, @bitCast(y))) {
+                        std.debug.print("mimo verify row differs: kv={s} prefix={d} rows={d} at {d}: {d} vs {d}\n", .{ @tagName(kv.scheme), prefix, rows, i, x, y });
+                        return error.RowNotBitIdentical;
+                    }
+                }
+            }
+        }
+    }
 }
 
 test "mimo v2 mixed-precision streamed and resident forwards agree" {

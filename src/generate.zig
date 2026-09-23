@@ -7139,7 +7139,8 @@ pub const Generator = struct {
         // snapshot is taken at all. A hypothetical pure-attention target
         // (ssm_entries == null) keeps the proven snapshot + re-forward path.
         const kv_step_snap = self.ctx.cache.step;
-        var kv_snap: ?transformer_mod.KVCacheSnapshot = if (self.ctx.ssm_entries != null) null else try self.ctx.cache.snapshot();
+        // MiMo is attention-only: a truncate IS its rollback, rings included.
+        var kv_snap: ?transformer_mod.KVCacheSnapshot = if (self.ctx.ssm_entries != null or self.xfm.config.isMimo()) null else try self.ctx.cache.snapshot();
         errdefer if (kv_snap) |*snap| snap.deinit();
         const moe_seq_offset_snap = self.ctx.moe_seq_offset.*;
 
@@ -7218,6 +7219,8 @@ pub const Generator = struct {
         // chain runs, then sync ONCE (`flushDeferredPle`, below) before Phase
         // 4 evaluates anything. Other arches never set `ple_pending`.
         self.ctx.ple_defer = true;
+        self.ctx.verify_rows = xfm.config.isMimo();
+        defer self.ctx.verify_rows = false;
         const verify_logits = xfm.forwardWithCaptureAll(&self.ctx, st.verify_input, &new_hidden, &verify_hidden_all) catch |e| {
             self.ctx.ple_defer = false;
             self.ctx.capture_ssm_seq = false;
@@ -7891,7 +7894,13 @@ pub const Generator = struct {
 
         var re_new_hidden = mlx.mlx_array_new();
         errdefer _ = mlx.mlx_array_free(re_new_hidden);
-        if (gdn_captured) {
+        if (self.ctx.ssm_entries == null and xfm.config.isMimo()) {
+            const accepted_len: usize = 1 + @as(usize, accepted);
+            try self.ctx.cache.truncate(moe_seq_offset_snap + accepted_len, s);
+            self.ctx.moe_seq_offset.* = moe_seq_offset_snap + accepted_len;
+            const vh_shape = mlx.getShape(verify_hidden_all);
+            try mlx.check(mlx.mlx_slice(&re_new_hidden, verify_hidden_all, &.{ 0, @intCast(accepted), 0 }, 3, &.{ 1, @as(c_int, @intCast(accepted)) + 1, vh_shape[2] }, 3, &.{ 1, 1, 1 }, 3, s));
+        } else if (gdn_captured) {
             const accepted_len: usize = 1 + @as(usize, accepted);
             // `truncate` overwrites cache.step with its length arg; on this
             // family cache.step is a stale counter the model never reads
