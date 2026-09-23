@@ -3194,23 +3194,29 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
             const io_u = @import("io_util.zig");
             const tio = std.Io.Threaded.global_single_threaded.io();
             var ctx = xfm_ptr.defaultCtx();
-            // SUSHI_DECODE_FWD_UBENCH_S=<rows>: verify-width forwards
-            // (per-position SSM capture on, as spec verify runs them).
+            // SUSHI_DECODE_FWD_UBENCH_S=<rows>[,<rows>...]: verify-width forwards
+            // (per-position SSM capture on, as spec verify runs them), one pass per width.
             // SUSHI_DECODE_FWD_UBENCH_KV=<tokens>: prefill that many
             // tokens first so the meter runs at a real context length.
-            const rows: usize = blk: {
-                const r = std.c.getenv("SUSHI_DECODE_FWD_UBENCH_S") orelse break :blk 1;
-                break :blk @max(1, std.fmt.parseInt(usize, std.mem.sliceTo(r, 0), 10) catch 1);
-            };
+            // SUSHI_DECODE_FWD_UBENCH_PROFILE=1: one more pass per width under the
+            // sub-block profiler (`[decode-prof]`).
+            var widths: [16]usize = @splat(1);
+            var n_widths: usize = 1;
+            if (std.c.getenv("SUSHI_DECODE_FWD_UBENCH_S")) |r| {
+                n_widths = 0;
+                var it = std.mem.tokenizeScalar(u8, std.mem.sliceTo(r, 0), ',');
+                while (it.next()) |w| {
+                    if (n_widths == widths.len) break;
+                    widths[n_widths] = @max(1, std.fmt.parseInt(usize, w, 10) catch 1);
+                    n_widths += 1;
+                }
+                n_widths = @max(n_widths, 1);
+            }
+            const profile_pass = std.c.getenv("SUSHI_DECODE_FWD_UBENCH_PROFILE") != null;
             const kv_pre: usize = blk: {
                 const r = std.c.getenv("SUSHI_DECODE_FWD_UBENCH_KV") orelse break :blk 0;
                 break :blk std.fmt.parseInt(usize, std.mem.sliceTo(r, 0), 10) catch 0;
             };
-            const tok_slice = try sch.allocator.alloc(i32, @min(rows, 4096));
-            defer sch.allocator.free(tok_slice);
-            for (tok_slice, 0..) |*v, i| v.* = @intCast(1 + (i % 997));
-            const tok = tok_slice.ptr;
-            const tsh = [_]c_int{ 1, @intCast(tok_slice.len) };
             if (kv_pre > 0) {
                 var done_pre: usize = 0;
                 const pre_buf = try sch.allocator.alloc(i32, 2048);
@@ -3228,6 +3234,12 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
                 }
                 log.info("[fwd-ubench] prefilled {d} tokens\n", .{done_pre});
             }
+            for (widths[0..n_widths]) |rows| {
+            const tok_slice = try sch.allocator.alloc(i32, @min(rows, 4096));
+            defer sch.allocator.free(tok_slice);
+            for (tok_slice, 0..) |*v, i| v.* = @intCast(1 + (i % 997));
+            const tok = tok_slice.ptr;
+            const tsh = [_]c_int{ 1, @intCast(tok_slice.len) };
             ctx.capture_ssm_seq = rows > 1 and rows <= 16 and ctx.ssm_entries != null; // verify widths capture, prefill chunks do not
             log.info("[fwd-ubench] rows={d} capture={}\n", .{ tok_slice.len, ctx.capture_ssm_seq });
             // Warm: first forward pays kernel JIT + lazy weight materialization.
@@ -3314,6 +3326,18 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
             const ms_nolm = @as(f64, @floatFromInt(sw_nolm.read())) / 1.0e6 / @as(f64, @floatFromInt(@max(done_nolm, 1)));
             ctx.skip_lm_head = false;
             log.info("[fwd-ubench] without lm_head: {d:.3} ms/forward  => lm_head = {d:.3} ms\n", .{ ms_nolm, ms - ms_nolm });
+            if (profile_pass) {
+                transformer_mod.decodeProfileSession(@intCast(rows));
+                for (0..n) |_| {
+                    const ti = mlx.mlx_array_new_data(tok, &tsh, 2, .int32);
+                    defer _ = mlx.mlx_array_free(ti);
+                    const lg = xfm_ptr.forwardWith(&ctx, ti) catch break;
+                    _ = mlx.mlx_array_eval(lg);
+                    _ = mlx.mlx_array_free(lg);
+                }
+                transformer_mod.decodeProfileSession(0);
+            }
+            }
             xfm_ptr.diagProjBench(20, &ctx);
             log.info("[fwd-ubench] done\n", .{});
             xfm_ptr.resetCache() catch {};

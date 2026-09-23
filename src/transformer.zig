@@ -24273,7 +24273,7 @@ pub const Transformer = struct {
         defer if (is_mimo) {
             if (self.expert_stream) |engine| engine.finishForward(@intCast(batch * seq_len));
         };
-        const prof = prof_on and seq_len == 1; // profile decode only
+        const prof = prof_on and seq_len <= decodeProfileRows();
         if (prof) {
             try mlx.check(mlx.mlx_array_eval(h));
             decode_prof.embed_ns += pclk.lap();
@@ -30375,8 +30375,8 @@ pub const Transformer = struct {
             }
             break :blk cur;
         };
-        // Decode MoE-internals profiler (SUSHI_DECODE_PROFILE=1, S==1 only).
-        const moe_prof = decodeProfileEnabled() and mlx.getShape(expert_x)[1] == 1;
+        // Decode MoE-internals profiler (SUSHI_DECODE_PROFILE=<rows>).
+        const moe_prof = decodeProfileEnabled() and mlx.getShape(expert_x)[1] <= decodeProfileRows();
         var mclk: ProfClock = if (moe_prof) ProfClock.init() else undefined;
         // Per-expert-weight params: mixed-precision MoE checkpoints vary bits
         // (and, with non-affine modes, group size + mode) per weight — resolve
@@ -34433,6 +34433,28 @@ fn decodeProfileEnabled() bool {
     const v = std.c.getenv("SUSHI_DECODE_PROFILE") != null;
     decode_prof_enabled = v;
     return v;
+}
+
+/// Widest forward the profiler times: `SUSHI_DECODE_PROFILE=<rows>` also times verify widths.
+fn decodeProfileRows() c_int {
+    if (decode_prof_forced_rows > 0) return decode_prof_forced_rows;
+    const raw = std.c.getenv("SUSHI_DECODE_PROFILE") orelse return 0;
+    return @max(1, std.fmt.parseInt(c_int, std.mem.sliceTo(raw, 0), 10) catch 1);
+}
+var decode_prof_forced_rows: c_int = 0;
+
+/// The forward microbench's profiled pass: `rows > 0` times forwards up to that
+/// width, `rows == 0` reports what was timed and restores the env's setting.
+pub fn decodeProfileSession(rows: c_int) void {
+    if (rows > 0) {
+        decode_prof = .{};
+        decode_prof_forced_rows = rows;
+        decode_prof_enabled = true;
+        return;
+    }
+    decodeProfReport();
+    decode_prof_forced_rows = 0;
+    decode_prof_enabled = null;
 }
 
 // MoE decode expert compute: our self-built libmlx serializes `gather_qmm` at
