@@ -371,19 +371,6 @@ fn printUsage(io: std.Io) void {
         \\  --api-key-env <VAR> Read the key from environment variable VAR
         \\                        instead of argv (the process table is
         \\                        world-readable). Unset/empty VAR = no auth.
-        \\  --lan-share <all|id,...>
-        \\                      Share models with the local network: advertise
-        \\                        this server over Bonjour and let LAN clients
-        \\                        run inference on the listed models (or all).
-        \\                        Everything else stays host-local. Off by
-        \\                        default. Prompts sent to shared models are
-        \\                        visible to this machine.
-        \\  --lan-discover      Discover models other mlx-serve hosts share on
-        \\                        the LAN: they appear in /v1/models as
-        \\                        <id>@<peer> and requests naming one are
-        \\                        proxied to that host. Off by default.
-        \\  --lan-name <name>   Bonjour instance name for --lan-share
-        \\                        (default: this Mac's hostname).
         \\  --log-level <lvl>   Log level: error, warn, info, debug (default: info)
         \\  --log-file <path>   Persist the server log ("off" disables).
         \\                      Default: ~/.mlx-serve/logs/mlx-serve-<port>.log
@@ -705,16 +692,6 @@ pub fn main(init: std.process.Init) !void {
                     if (key.len > 0) server_mod.g_api_key = key;
                 }
             }
-        } else if (std.mem.eql(u8, args[i], "--lan-share") and i + 1 < args.len) {
-            i += 1;
-            // Borrowed from argv, like --api-key. serve() starts the LAN
-            // subsystem (src/lan.zig) once the listener is bound.
-            if (args[i].len > 0) server_mod.g_lan_share_spec = args[i];
-        } else if (std.mem.eql(u8, args[i], "--lan-name") and i + 1 < args.len) {
-            i += 1;
-            if (args[i].len > 0) server_mod.g_lan_name = args[i];
-        } else if (std.mem.eql(u8, args[i], "--lan-discover")) {
-            server_mod.g_lan_discover = true;
         } else if (std.mem.eql(u8, args[i], "--no-drafter")) {
             no_drafter = true;
         } else if (std.mem.eql(u8, args[i], "--no-mtp")) {
@@ -1082,15 +1059,15 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         }
         // Above every serve dispatch (GGUF/headless/media return early below).
-        if (server_mod.shouldWarnOpenBind(host_explicit, server_mod.g_lan_share_spec != null, host)) {
+        if (server_mod.shouldWarnOpenBind(host_explicit, host)) {
             log.warn("Listening on {s}:{d} — reachable by every device on the network this Mac is on.\n", .{ host, port });
             log.warn("Restrict to this Mac with --host 127.0.0.1 (a future version will make that the default).\n", .{});
         }
     }
 
     // `mlx-serve run` on a TTY: chat REPL on a side thread. It polls
-    // /health until the model is up, then drives the server's own /api/chat
-    // (Ollama NDJSON) endpoint. (Logs were already quieted to warn above,
+    // /health until the model is up, then drives the server's own
+    // /v1/chat/completions (SSE) endpoint. (Logs were already quieted to warn above,
     // before discovery, so streamed tokens aren't interleaved with [info]
     // lines.)
     if (repl_after_serve and serve_mode) {

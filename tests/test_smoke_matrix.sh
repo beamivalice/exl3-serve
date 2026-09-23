@@ -16,8 +16,8 @@
 # --ssd-budget-gb.
 # Per boot: chat non-stream/stream, thinking on/off, tools, json_schema,
 # logprobs, max_tokens cap, prefix-cache hit, 2-way concurrency, /v1/completions,
-# /v1/messages (both modes), /v1/responses (both modes), Ollama /api/chat +
-# /api/generate, /v1/models, /metrics.json.
+# /v1/messages (both modes), /v1/responses (both modes), /v1/models,
+# /metrics.json.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -199,13 +199,6 @@ print(json.dumps({"c":c,"rc":rc}))' 2>/dev/null)
     check "responses non-stream: output_text" "$([[ -n "$(echo "$r" | J '[c["text"] for o in d["output"] if o["type"]=="message" for c in o["content"] if c["type"]=="output_text"][0]')" ]] && echo 0 || echo 1)" "$(echo "$r" | head -c 200)"
     r=$(curl -sN --max-time 300 "$BASE/v1/responses" -H "Content-Type: application/json" -d "{\"model\":\"m\",\"input\":\"$Q\",\"max_output_tokens\":600,\"stream\":true}")
     check "responses stream: sequence_number + completed" "$(echo "$r" | grep -q '"sequence_number"' && echo "$r" | grep -q 'response.completed' && echo 0 || echo 1)" "$(echo "$r" | head -c 200)"
-
-    # 11. Ollama
-    local mid; mid=$(curl -s "$BASE/api/tags" | J 'd["models"][0]["name"]')
-    r=$(post /api/chat "{\"model\":\"$mid\",\"messages\":[{\"role\":\"user\",\"content\":\"$Q\"}],\"stream\":true,\"options\":{\"num_predict\":600}}")
-    check "ollama /api/chat stream: NDJSON ends done:true" "$(echo "$r" | tail -1 | J 'd["done"]' | grep -q True && echo 0 || echo 1)" "$(echo "$r" | tail -c 200)"
-    r=$(post /api/generate "{\"model\":\"$mid\",\"prompt\":\"$Q\",\"stream\":false,\"options\":{\"num_predict\":600}}")
-    check "ollama /api/generate: response" "$([[ -n "$(echo "$r" | J 'd["response"]')" ]] && echo 0 || echo 1)" "$(echo "$r" | head -c 200)"
 
     # 12. discovery + metrics
     r=$(curl -s "$BASE/v1/models")

@@ -97,11 +97,8 @@ test {
     _ = @import("multipart.zig");
     _ = @import("gen.zig");
     _ = @import("gen_sse.zig");
-    _ = @import("ollama.zig");
     _ = @import("kld.zig");
     _ = @import("cli.zig");
     _ = @import("launch.zig");
-    _ = @import("lan.zig");
-    _ = @import("providers.zig");
     _ = @import("mlx.zig");
 }

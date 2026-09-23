@@ -283,7 +283,6 @@ test "a NON-streaming job still gets a cancellation probe, and writes no SSE" {
     try std.testing.expect(std.c.socketpair(1, 1, 0, &sv) == 0); // AF_UNIX, SOCK_STREAM
     var conn: Conn = undefined;
     conn.stream = .{ .socket = .{ .handle = sv[0], .address = undefined } };
-    conn.ollama_sink = null;
 
     var sctx = StreamCtx{ .conn = &conn, .stream = false };
     const p = sctx.progress();

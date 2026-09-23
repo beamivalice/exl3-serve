@@ -16,7 +16,7 @@
 //! in-process HTTP client: spawning curl would fork the resident MLX process.
 
 const std = @import("std");
-const ollama = @import("ollama.zig");
+const chat = @import("chat.zig");
 const model_discovery = @import("model_discovery.zig");
 const log = @import("log.zig");
 const status = @import("status.zig");
@@ -115,6 +115,14 @@ pub const Resolved = struct {
     gguf_file: []const u8 = "",
 };
 
+/// "name:tag" → "name"; a ':' before a '/' is part of the name (a host:port).
+fn stripTag(name: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, name, ':')) |i| {
+        if (std.mem.indexOfScalarPos(u8, name, i, '/') == null) return name[0..i];
+    }
+    return name;
+}
+
 /// Short name / repo ref → HF repo id. Accepts:
 ///   "gemma4" / "gemma4:12b"           (alias table)
 ///   "org/repo" / "org/repo:tag"       (direct, tag stripped)
@@ -128,7 +136,7 @@ pub fn resolveShortName(name: []const u8) ?Resolved {
             break;
         }
     }
-    n = ollama.stripTag(n);
+    n = stripTag(n);
     if (n.len == 0) return null;
     if (std.mem.indexOfScalar(u8, n, '/') != null) {
         // Direct org/repo reference.
@@ -675,30 +683,29 @@ pub fn formatMemorySummary(buf: []u8, real_bytes: u64, free_bytes: u64, total_by
 // ── REPL (mlx-serve run) ────────────────────────────────────────────────
 //
 // The REPL is deliberately a real HTTP client against the server's own
-// /api/chat endpoint (via curl, streaming NDJSON) — it dogfoods the Ollama
-// surface on every keystroke instead of poking internal functions.
+// /v1/chat/completions endpoint (streaming SSE) — it dogfoods the API on
+// every keystroke instead of poking internal functions.
 
 pub const Turn = struct {
     role: []const u8,
     content: []const u8,
 };
 
-/// /api/chat request body for the REPL conversation so far.
+/// /v1/chat/completions request body for the REPL conversation so far.
 pub fn buildReplChatBody(allocator: std.mem.Allocator, history: []const Turn) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    const w = &out.writer;
-    try w.writeAll("{\"model\":\"mlx-serve\",\"stream\":true,\"messages\":[");
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\"model\":\"mlx-serve\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"messages\":[");
     for (history, 0..) |turn, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"role\":");
-        try ollama.writeJsonString(w, turn.role);
-        try w.writeAll(",\"content\":");
-        try ollama.writeJsonString(w, turn.content);
-        try w.writeAll("}");
+        if (i > 0) try out.append(allocator, ',');
+        try out.appendSlice(allocator, "{\"role\":");
+        try chat.appendJsonString(allocator, &out, turn.role);
+        try out.appendSlice(allocator, ",\"content\":");
+        try chat.appendJsonString(allocator, &out, turn.content);
+        try out.append(allocator, '}');
     }
-    try w.writeAll("]}");
-    return allocator.dupe(u8, out.written());
+    try out.appendSlice(allocator, "]}");
+    return out.toOwnedSlice(allocator);
 }
 
 pub const ReplDelta = struct {
@@ -710,50 +717,64 @@ pub const ReplDelta = struct {
     err: ?[]u8 = null,
 };
 
-/// One NDJSON line from /api/chat → the piece the REPL prints.
+/// One SSE line from /v1/chat/completions → the piece the REPL prints.
+/// Non-event lines (blank, `:` comments) return null.
 pub fn parseReplLine(allocator: std.mem.Allocator, line: []const u8) ?ReplDelta {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return null;
+    const trimmed = std.mem.trimEnd(u8, line, "\r");
+    if (!std.mem.startsWith(u8, trimmed, "data:")) return null;
+    const payload = std.mem.trim(u8, trimmed["data:".len..], " ");
+    if (std.mem.eql(u8, payload, "[DONE]")) return .{ .content = allocator.dupe(u8, "") catch return null, .done = true };
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch return null;
     defer parsed.deinit();
     if (parsed.value != .object) return null;
     const root = parsed.value.object;
     if (root.get("error")) |e| {
-        if (e == .string) {
-            return .{
-                .content = allocator.dupe(u8, "") catch return null,
-                .done = true,
-                .err = allocator.dupe(u8, e.string) catch return null,
-            };
-        }
+        const msg = switch (e) {
+            .string => |str| str,
+            .object => |o| if (o.get("message")) |m| (if (m == .string) m.string else "error") else "error",
+            else => "error",
+        };
+        return .{
+            .content = allocator.dupe(u8, "") catch return null,
+            .done = true,
+            .err = allocator.dupe(u8, msg) catch return null,
+        };
     }
     var content: []const u8 = "";
-    if (root.get("message")) |m| {
-        if (m == .object) {
-            if (m.object.get("content")) |c| {
-                if (c == .string) content = c.string;
+    if (root.get("choices")) |choices| {
+        if (choices == .array and choices.array.items.len > 0 and choices.array.items[0] == .object) {
+            if (choices.array.items[0].object.get("delta")) |d| {
+                if (d == .object) if (d.object.get("content")) |c| {
+                    if (c == .string) content = c.string;
+                };
             }
         }
     }
-    const done = if (root.get("done")) |d| (d == .bool and d.bool) else false;
     var eval_count: u64 = 0;
     var eval_ns: u64 = 0;
-    if (done) {
-        if (root.get("eval_count")) |v| {
+    if (root.get("timings")) |t| if (t == .object) {
+        if (t.object.get("predicted_n")) |v| {
             if (v == .integer and v.integer > 0) eval_count = @intCast(v.integer);
         }
-        if (root.get("eval_duration")) |v| {
-            if (v == .integer and v.integer > 0) eval_ns = @intCast(v.integer);
+        if (t.object.get("predicted_ms")) |v| {
+            const ms: f64 = switch (v) {
+                .float => |f| f,
+                .integer => |n| @floatFromInt(n),
+                else => 0,
+            };
+            if (ms > 0) eval_ns = @intFromFloat(ms * 1e6);
         }
-    }
+    };
     return .{
         .content = allocator.dupe(u8, content) catch return null,
-        .done = done,
+        .done = false,
         .eval_count = eval_count,
         .eval_duration_ns = eval_ns,
     };
 }
 
 /// Interactive loop on the calling thread. Waits for the server to answer
-/// /health, then reads prompts from stdin and streams /api/chat responses.
+/// /health, then reads prompts from stdin and streams /v1/chat/completions.
 /// Returns when the user exits (/bye or EOF); caller shuts the server down.
 pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
     const health_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/health", .{port});
@@ -775,7 +796,7 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
     }
     if (!ready) return error.ReplServerNotReady;
 
-    const chat_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/api/chat", .{port});
+    const chat_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/v1/chat/completions", .{port});
     defer allocator.free(chat_url);
 
     var out_buf: [4096]u8 = undefined;
@@ -829,7 +850,7 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
     }
 }
 
-/// POST the body, stream NDJSON, print content deltas as they arrive.
+/// POST the body, stream SSE, print content deltas as they arrive.
 /// Returns the full assistant reply (owned).
 fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body: []const u8, w: *std.Io.Writer) ![]u8 {
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
@@ -862,6 +883,8 @@ fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body
 
     var full = std.ArrayList(u8).empty;
     errdefer full.deinit(allocator);
+    var eval_count: u64 = 0;
+    var eval_ns: u64 = 0;
 
     while (true) {
         const line = r.takeDelimiter('\n') catch break orelse break;
@@ -879,10 +902,14 @@ fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body
             try w.flush();
             try full.appendSlice(allocator, delta.content);
         }
+        if (delta.eval_count > 0) {
+            eval_count = delta.eval_count;
+            eval_ns = delta.eval_duration_ns;
+        }
         if (delta.done) {
-            if (delta.eval_count > 0 and delta.eval_duration_ns > 0) {
-                const tok_s = @as(f64, @floatFromInt(delta.eval_count)) * 1e9 / @as(f64, @floatFromInt(delta.eval_duration_ns));
-                try w.print("\n[{d} tokens, {d:.1} tok/s]", .{ delta.eval_count, tok_s });
+            if (eval_count > 0 and eval_ns > 0) {
+                const tok_s = @as(f64, @floatFromInt(eval_count)) * 1e9 / @as(f64, @floatFromInt(eval_ns));
+                try w.print("\n[{d} tokens, {d:.1} tok/s]", .{ eval_count, tok_s });
             }
             break;
         }
@@ -1036,7 +1063,7 @@ test "cli: parseTreeJson uses lfs size and skips directories" {
     try testing.expectEqual(@as(u64, 5_300_000_000), files[1].size);
 }
 
-test "cli: buildReplChatBody and parseReplLine round-trip" {
+test "cli: buildReplChatBody and parseReplLine speak /v1/chat/completions SSE" {
     const allocator = testing.allocator;
     const history = [_]Turn{
         .{ .role = "user", .content = "hi \"there\"\n" },
@@ -1050,22 +1077,31 @@ test "cli: buildReplChatBody and parseReplLine round-trip" {
     try testing.expectEqual(@as(usize, 2), msgs.len);
     try testing.expectEqualStrings("hi \"there\"\n", msgs[0].object.get("content").?.string);
     try testing.expect(parsed.value.object.get("stream").?.bool);
+    try testing.expect(parsed.value.object.get("stream_options").?.object.get("include_usage").?.bool);
 
-    const d1 = parseReplLine(allocator, "{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"Hey\"},\"done\":false}").?;
+    const d1 = parseReplLine(allocator, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hey\"},\"finish_reason\":null}]}").?;
     defer allocator.free(d1.content);
     try testing.expectEqualStrings("Hey", d1.content);
     try testing.expect(!d1.done);
 
-    const d2 = parseReplLine(allocator, "{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"eval_count\":50,\"eval_duration\":2000000000}").?;
+    const d2 = parseReplLine(allocator, "data: {\"choices\":[],\"usage\":{\"completion_tokens\":50},\"timings\":{\"predicted_n\":50,\"predicted_ms\":2000.0}}").?;
     defer allocator.free(d2.content);
-    try testing.expect(d2.done);
+    try testing.expect(!d2.done);
     try testing.expectEqual(@as(u64, 50), d2.eval_count);
+    try testing.expectEqual(@as(u64, 2_000_000_000), d2.eval_duration_ns);
 
-    const d3 = parseReplLine(allocator, "{\"error\":\"boom\"}").?;
+    const d3 = parseReplLine(allocator, "data: [DONE]").?;
     defer allocator.free(d3.content);
-    defer if (d3.err) |e| allocator.free(e);
     try testing.expect(d3.done);
-    try testing.expectEqualStrings("boom", d3.err.?);
+
+    const d4 = parseReplLine(allocator, "data: {\"error\":{\"message\":\"boom\",\"type\":\"x\"}}").?;
+    defer allocator.free(d4.content);
+    defer if (d4.err) |e| allocator.free(e);
+    try testing.expect(d4.done);
+    try testing.expectEqualStrings("boom", d4.err.?);
+
+    // SSE comments and keepalives carry no event.
+    try testing.expect(parseReplLine(allocator, ": keepalive") == null);
 }
 
 test "cli: formatSize" {

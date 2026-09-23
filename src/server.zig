@@ -52,12 +52,12 @@ var shutdown_requested = std.atomic.Value(bool).init(false);
 var active_conn_threads = std.atomic.Value(u32).init(0);
 /// Set from main.zig before serve() is called when --metrics is on; null
 /// otherwise. Gates the gauge-sampler thread and the /metrics + /metrics.json
-/// routes. When null, `/metrics*` return 503 and the index page shows no panel.
+/// routes. When null, `/metrics*` return 503.
 pub var g_metrics: ?*instr.Metrics = null;
 /// Optional global API key (`--api-key`). When set, every NON-LOOPBACK request
 /// (i.e. from another machine over the network) except the `/health` probe and
-/// CORS preflight requires the key — the OpenAI/Anthropic/Ollama APIs AND the
-/// index page + metrics panel/feed. Loopback (127.0.0.0/8, ::1) is TRUSTED and
+/// CORS preflight requires the key — the OpenAI/Anthropic APIs AND the
+/// metrics feed. Loopback (127.0.0.0/8, ::1) is TRUSTED and
 /// exempt, so the local app + a local browser keep working with no credentials;
 /// the key protects the surface that actually matters — network exposure
 /// (`--host 0.0.0.0`). Accepted as `Authorization: Bearer <key>`, `x-api-key:
@@ -84,60 +84,15 @@ pub var g_api_key_strict: bool = false;
 /// mistyped value reaches the client verbatim, which strict clients reject.
 pub var g_tool_autocorrect: bool = true;
 
-/// LAN model sharing (src/lan.zig). Started by `serve()` when `--lan-share`
-/// and/or `--lan-discover` are set (the three `g_lan_*` config globals below
-/// are written by main.zig, mirroring the `g_api_key` pattern). When sharing
-/// is on and NO api-key is configured, non-loopback requests are limited to
-/// the shared inference surface (`lanShareDenial`); when discovery is on,
-/// requests naming a `<id>@<peer>` model are tunneled to that peer.
-pub var g_lan: ?*lan_mod.Lan = null;
-pub var g_lan_share_spec: ?[]const u8 = null;
-pub var g_lan_name: ?[]const u8 = null;
-pub var g_lan_discover: bool = false;
-
-/// Upstream chat providers (src/providers.zig): `~/.mlx-serve/providers.json`,
-/// rows mirrored into /v1/models as `<id>@<name>`, `/v1/chat/completions`
-/// proxied with the provider's key. Started by `serve()` beside the LAN.
-pub var g_providers: ?*providers_mod.Providers = null;
-
 /// Should boot print the open-bind warning? True only when serve mode is about
 /// to listen on a non-loopback address the user never chose: no explicit
-/// `--host` (the default is still 0.0.0.0) and no `--lan-share` (which needs
-/// the wide bind). A future release flips the default to 127.0.0.1 — at which
-/// point the host check silences this without a code change.
-pub fn shouldWarnOpenBind(host_explicit: bool, lan_share: bool, host: []const u8) bool {
-    if (host_explicit or lan_share) return false;
+/// `--host` (the default is still 0.0.0.0). A future release flips the default
+/// to 127.0.0.1 — at which point the host check silences this without a code change.
+pub fn shouldWarnOpenBind(host_explicit: bool, host: []const u8) bool {
+    if (host_explicit) return false;
     return !(std.mem.startsWith(u8, host, "127.") or
         std.mem.eql(u8, host, "::1") or
         std.mem.eql(u8, host, "localhost"));
-}
-
-test "ollamaTagEntryOf: reads config unless the entry is mid-load" {
-    // Bar: a `.loading` entry's retained CPU state can be freed off-mutex, so it must not be read.
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var reg = try model_registry_mod.ModelRegistry.init(std.testing.allocator, io, null, 3, 0, null);
-    defer reg.deinit();
-    const e = try reg.registerStubWithArch("m", "/path/to/m", 1024, "arch-hint");
-
-    var cfg = std.mem.zeroes(model_mod.ModelConfig);
-    cfg.model_type = "from-config";
-    e.config = &cfg;
-    // A borrowed stack config must not reach `reg.deinit`, failure or not.
-    defer {
-        e.config = null;
-        e.state = .unloaded;
-    }
-
-    // Unloaded but retained: still fully listable, which is the retention contract.
-    e.state = .unloaded;
-    try std.testing.expectEqualStrings("from-config", ollamaTagEntryOf(io, e).family);
-
-    e.state = .ready;
-    try std.testing.expectEqualStrings("from-config", ollamaTagEntryOf(io, e).family);
-
-    // Mid-load: the pointer may be freed under us, so fall back to the hint.
-    e.state = .loading;
-    try std.testing.expectEqualStrings("arch-hint", ollamaTagEntryOf(io, e).family);
 }
 
 test "textGenTargetOf: reads config unless the entry is mid-load" {
@@ -173,24 +128,18 @@ test "textGenTargetOf: reads config unless the entry is mid-load" {
 test "shouldWarnOpenBind: warn only on an UNCHOSEN non-loopback bind" {
     // Default bind (0.0.0.0, nobody asked) → warn: a first-launch user is
     // serving whatever network the laptop joins.
-    try std.testing.expect(shouldWarnOpenBind(false, false, "0.0.0.0"));
-    // Someone who CHOSE the bind is not nagged — explicit --host (any value)…
-    try std.testing.expect(!shouldWarnOpenBind(true, false, "0.0.0.0"));
-    // …or --lan-share, which needs the wide bind by design.
-    try std.testing.expect(!shouldWarnOpenBind(false, true, "0.0.0.0"));
+    try std.testing.expect(shouldWarnOpenBind(false, "0.0.0.0"));
+    // Someone who CHOSE the bind is not nagged — explicit --host (any value).
+    try std.testing.expect(!shouldWarnOpenBind(true, "0.0.0.0"));
     // Loopback defaults never warn (the future 127.0.0.1 default).
-    try std.testing.expect(!shouldWarnOpenBind(false, false, "127.0.0.1"));
-    try std.testing.expect(!shouldWarnOpenBind(false, false, "localhost"));
-    try std.testing.expect(!shouldWarnOpenBind(false, false, "::1"));
+    try std.testing.expect(!shouldWarnOpenBind(false, "127.0.0.1"));
+    try std.testing.expect(!shouldWarnOpenBind(false, "localhost"));
+    try std.testing.expect(!shouldWarnOpenBind(false, "::1"));
 }
 
 const io_util = @import("io_util.zig");
-const lan_mod = @import("lan.zig");
-const providers_mod = @import("providers.zig");
 const multipart = @import("multipart.zig");
 const ws_mod = @import("ws.zig");
-const ollama_mod = @import("ollama.zig");
-const cli_mod = @import("cli.zig");
 const build_options = @import("build_options");
 const nowSecs = io_util.nowSecs;
 const nowMs = io_util.nowMs;
@@ -316,12 +265,6 @@ pub const Conn = struct {
     /// True once this connection has written a `text/event-stream` head: past it a generation
     /// failure can only be an SSE `error` event. Set only in `sendSseHeaders`.
     sse_headers_sent: bool = false,
-    /// Non-null while an Ollama /api/* handler runs an inner /v1 handler:
-    /// every write the inner handler makes is fed to the sink (SSE → NDJSON
-    /// re-framing) instead of the socket. The sink writes its translated
-    /// output through `writer()` directly, bypassing this hook — same
-    /// interception pattern as `ws_mode`. See src/ollama.zig.
-    ollama_sink: ?*ollama_mod.Sink = null,
 
     pub fn init(c: *Conn, stream: std.Io.net.Stream, io: std.Io) void {
         c.stream = stream;
@@ -329,7 +272,6 @@ pub const Conn = struct {
         c.write_state = stream.writer(io, &c.write_buf);
         c.read_state = stream.reader(io, &c.read_buf);
         c.ws_mode = null;
-        c.ollama_sink = null;
         c.sse_headers_sent = false;
         c.heartbeat = .{ .last_write_ms = nowMsMonotonic(io) };
     }
@@ -350,20 +292,17 @@ pub const Conn = struct {
 
     pub fn writeAll(c: *Conn, data: []const u8) !void {
         c.heartbeat.noteWrite(nowMsMonotonic(c.io));
-        if (c.ollama_sink) |s| return s.feed(data);
         try c.writer().writeAll(data);
         try c.writer().flush();
     }
 
     pub fn writeAllNoFlush(c: *Conn, data: []const u8) !void {
         c.heartbeat.noteWrite(nowMsMonotonic(c.io));
-        if (c.ollama_sink) |s| return s.feed(data);
         try c.writer().writeAll(data);
     }
 
     pub fn flush(c: *Conn) !void {
         c.heartbeat.noteWrite(nowMsMonotonic(c.io));
-        if (c.ollama_sink != null) return;
         try c.writer().flush();
     }
 
@@ -760,16 +699,6 @@ pub fn parseModelFromBody(body: []const u8) ?[]const u8 {
 /// instead of 404 — and a path's existence has nothing to do with model state.
 /// The drift guard is a test that reads the dispatch chain out of this file.
 const ROUTE_PATHS = [_][]const u8{
-    "/",
-    "/api/chat",
-    "/api/embed",
-    "/api/embeddings",
-    "/api/generate",
-    "/api/ps",
-    "/api/pull",
-    "/api/show",
-    "/api/tags",
-    "/api/version",
     "/detokenize",
     "/health",
     "/metrics",
@@ -788,8 +717,6 @@ const ROUTE_PATHS = [_][]const u8{
     "/v1/messages",
     "/v1/models",
     "/v1/models/rescan",
-    "/v1/providers",
-    "/v1/providers/reload",
     "/v1/responses",
     "/v1/responses/compact",
     "/v1/unload-model",
@@ -1050,8 +977,7 @@ pub var max_concurrent: u32 = 1;
 /// via `--embedding-max-length N`. Over-limit inputs earn a structured 400
 /// naming the input index, its token count and the effective limit — never a
 /// silent truncation (the Python-server `max_length=512` class). Applies to
-/// every embedding route (/v1/embeddings, /api/embed, legacy /api/embeddings
-/// — they all funnel into `handleEmbeddings`).
+/// the embedding route (/v1/embeddings → `handleEmbeddings`).
 pub var embedding_max_length: u32 = 0;
 
 /// Effective per-input embedding token ceiling: the tighter of the operator
@@ -1081,9 +1007,6 @@ pub fn embedOverflowMessage(buf: []u8, index: usize, tokens: usize, limit: u32) 
 // and `global_model_id` singletons were removed. The `discovered_models`
 // slice was also removed — `/v1/models` iterates `registry.entries` directly.
 
-/// Port the HTTP server is bound to. Used by the landing page's curl
-/// example so users can copy-paste a working command.
-var global_port: u16 = 0;
 
 /// Decode a slice of token IDs to bytes, routing through the ds4 engine when
 /// the loaded model is GGUF-backed (no MLX tokenizer in that case). Used by
@@ -1734,7 +1657,6 @@ pub fn serve(
     } else {
         log.info("Concurrency: --max-concurrent={d}, batched decode off (arch: {s}); concurrent requests interleave serially\n", .{ max_concurrent, config.model_type });
     }
-    global_port = port;
     // Install signal handlers for graceful shutdown
     const sigact = std.posix.Sigaction{
         .handler = .{ .handler = signalHandler },
@@ -1760,41 +1682,6 @@ pub fn serve(
     const ip_addr: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = ip4_bytes, .port = port } };
     var server = try ip_addr.listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
-
-    // ── LAN sharing/discovery (src/lan.zig): started HERE — the one chokepoint
-    //    every serve path (model/headless/gen/ds4) flows through — so the
-    //    advertised port is always the bound port. Bonjour being unavailable
-    //    degrades to a warning; it must never kill the server.
-    if (g_lan_share_spec != null or g_lan_discover) {
-        g_lan = lan_mod.Lan.start(allocator, .{
-            .port = port,
-            .share_spec = g_lan_share_spec,
-            .name = g_lan_name,
-            .discover = g_lan_discover,
-        }) catch |err| blk: {
-            log.warn("[lan] failed to start ({s}); LAN sharing disabled\n", .{@errorName(err)});
-            break :blk null;
-        };
-    }
-    // Runs after the conn-thread drain below (LIFO), so no tunnel is mid-pump
-    // and no request is mid-lookup when the peer table is freed.
-    defer if (g_lan) |l| {
-        g_lan = null;
-        l.shutdown();
-    };
-    {
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const home = std.mem.span(std.c.getenv("HOME") orelse "/tmp");
-        const path = std.fmt.bufPrint(&path_buf, "{s}/.mlx-serve/providers.json", .{home}) catch "";
-        g_providers = providers_mod.Providers.start(allocator, io, path, port) catch |err| blk: {
-            log.warn("[providers] failed to start ({s}); providers disabled\n", .{@errorName(err)});
-            break :blk null;
-        };
-    }
-    defer if (g_providers) |p| {
-        g_providers = null;
-        p.shutdown();
-    };
 
     // Freeze the auto-context NOW, at startup, while the model is freshly
     // loaded and nothing else has taken RAM. Clients read this number once
@@ -2091,13 +1978,12 @@ fn handleConnection(
     logHttpRequest(method, raw_path, request_body);
 
     // ── API-key auth gate. When --api-key is set, every NON-LOOPBACK request
-    //    requires the key (the OpenAI/Anthropic/Ollama APIs AND the index page
-    //    + metrics panel/feed) — EXCEPT `/health` and CORS preflight, which
-    //    load balancers and browsers must reach unauthenticated. Loopback is
+    //    requires the key (the OpenAI/Anthropic APIs AND the metrics feed) —
+    //    EXCEPT `/health` and CORS preflight, which load balancers and browsers must reach unauthenticated. Loopback is
     //    trusted (the local app connects via 127.0.0.1), so it's exempt: the app
     //    + a local browser never need credentials, and the key protects network
     //    exposure. Browser-facing pages get a `WWW-Authenticate: Basic`
-    //    challenge so the index + metrics panel prompt for the key; API clients
+    //    challenge so a browser prompts for the key; API clients
     //    pass Bearer / x-api-key. null key ⇒ fully open. See `apiKeyAuthorized`.
     if (apiKeyGateApplies(g_api_key != null, g_api_key_strict, peerIsLoopback(stream)) and
         !std.mem.eql(u8, method, "OPTIONS") and
@@ -2109,45 +1995,15 @@ fn handleConnection(
         return;
     }
 
-    // ── LAN sharing gate. With sharing ON and no --api-key set, a non-loopback
-    //    client gets exactly the shared inference surface: allowlisted routes
-    //    (lan.routeClass) on shared models only. With a key set, unauthorized
-    //    non-loopback requests already died above and key-holders keep full
-    //    access — so this gate only exists in keyless mode.
-    if (lanGateApplies(stream)) {
-        if (lanShareDenial(g_lan.?, registry, method, path, request_body, request_content_type, isTunneledRequest(request[0..header_end_pos]))) |denial| {
-            log.debug("{s} {s} -> 403 (lan: {s})\n", .{ method, path, denial });
-            try sendErrorResponse(allocator, stream, "403 Forbidden", "forbidden", denial, 403);
-            return;
-        }
-    }
-
     // ── Plan 05: routes that don't depend on a loaded model (connectivity
     //    probes + CORS preflight + listing endpoints). Handle these BEFORE
     //    `scheduler.ensureLoaded` so they don't trigger a cold load of the
     //    default model just to read metadata. `/v1/models` and the GET-side
     //    of the Responses API are pure registry/store reads — no model
     //    needed.
-    if (std.mem.eql(u8, method, "HEAD") and std.mem.eql(u8, path, "/")) {
-        log.debug("HEAD / -> 200\n", .{});
-        try sendResponse(stream, "200 OK", "text/plain", "");
-        return;
-    }
     if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/health")) {
         log.debug("GET  /health -> 200\n", .{});
         try sendResponse(stream, "200 OK", "application/json", "{\"status\":\"ok\"}");
-        return;
-    }
-    // The console. It belongs here, above resolution, for the same reason
-    // /v1/models does: it IS the model picker, so it has to render before
-    // anything is loaded. Dispatched after resolution it rendered one
-    // *LoadedModel and a headless boot (`mlx-serve serve`, and every
-    // app-launched server) answered 503 "No default model configured" at the
-    // root — the first page a person opens. Everything it used to render from
-    // the model it now fetches from /v1/models + /props client-side.
-    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/")) {
-        log.debug("GET  / -> 200 (console)\n", .{});
-        try handleStatusPage(allocator, stream);
         return;
     }
     // Prometheus scrape endpoint. 503 when --metrics is off. Behind the global
@@ -2164,15 +2020,14 @@ fn handleConnection(
         }
         return;
     }
-    // JSON feed — drives the live metrics panel on the index page. Behind the
-    // global API-key gate above when --api-key is set (same-origin browser
-    // fetch inherits the page's Basic credentials).
+    // JSON feed of the same counters. Behind the global API-key gate above
+    // when --api-key is set.
     if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/metrics.json")) {
         if (g_metrics) |m| {
             var out: std.Io.Writer.Allocating = .init(allocator);
             defer out.deinit();
             try instr.renderJson(m, &out.writer);
-            // Quiet: the index panel polls this ~1 Hz — don't log the body.
+            // Quiet: dashboards poll this ~1 Hz — don't log the body.
             try sendResponseQuiet(stream, "200 OK", "application/json", out.written());
         } else {
             try sendResponse(stream, "503 Service Unavailable", "application/json", "{\"error\":\"metrics not enabled — start with --metrics\"}");
@@ -2186,14 +2041,7 @@ fn handleConnection(
     }
     if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/v1/models")) {
         log.debug("GET  /v1/models -> 200\n", .{});
-        // A keyless LAN peer sees only shared models and never the remote
-        // stubs (a mirrored entry would invite multi-hop loops). Peer
-        // discovery fetches self-identify with the X-MLX-LAN marker and get
-        // the SAME filtered view even over loopback — two servers on one Mac
-        // resolve each other loopback-first, and the unfiltered list leaked
-        // remote stubs into `@a@b` re-export chains (live 2026-07-21).
-        try handleModels(allocator, stream, lanGateApplies(stream) or
-            (g_lan != null and isTunneledRequest(request[0..header_end_pos])));
+        try handleModels(allocator, stream);
         return;
     }
     if (std.mem.eql(u8, method, "GET") and std.mem.startsWith(u8, path, "/v1/responses/")) {
@@ -2228,30 +2076,11 @@ fn handleConnection(
         try handleUnloadModelStrict(allocator, stream, request_body);
         return;
     }
-    if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/v1/providers/reload")) {
-        try handleProvidersReload(allocator, stream);
-        return;
-    }
-    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/v1/providers")) {
-        const body = if (g_providers) |p| try p.statusJson(allocator) else try allocator.dupe(u8, "{\"providers\":[]}");
-        defer allocator.free(body);
-        try sendResponse(stream, "200 OK", "application/json", body);
-        return;
-    }
     if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/v1/models/rescan")) {
         // Absorb models downloaded AFTER boot (the Model Browser pulls while
         // the server runs; discovery only walks the roots at startup).
         try handleModelsRescan(allocator, stream);
         return;
-    }
-
-    // ── Ollama-compatible API (/api/*): endpoints that must not trigger a
-    //    model load (version/tags/ps/show/pull/unsupported) are handled
-    //    here; /api/chat, /api/generate and /api/embed(dings) fall through
-    //    to the model-resolution path below. Glue lives at the bottom of
-    //    this file; pure translation in src/ollama.zig.
-    if (std.mem.startsWith(u8, path, "/api/")) {
-        if (try handleOllamaEarly(allocator, stream, method, path, request_body)) return;
     }
 
     // ── Plan 05 Phase D: resolve the request's target model via the
@@ -2278,50 +2107,20 @@ fn handleConnection(
     // silently fell through to the default model — a 400 "does not support
     // this media modality" on the gen endpoints, and a wrong-model answer on
     // chat (live from the iPhone app, 2026-07-25). Canonicalise once, here,
-    // so every consumer below (proxy, peek, ensureLoaded) sees the real id.
+    // so every consumer below (peek, ensureLoaded) sees the real id.
     var model_id_buf: [512]u8 = undefined;
     var query_model_buf: [512]u8 = undefined;
-    var requested_model_id = lan_mod.unescapeJsonSlashes(
+    var requested_model_id = unescapeJsonSlashes(
         &model_id_buf,
         parseModelFromRequest(request_body, request_content_type) orelse queryModel(&query_model_buf, raw_path) orelse "",
     );
-    // ── LAN-discovered remote model (`<id>@<peer>`) → proxy the request to
-    //    its host byte-for-byte, model field rewritten to the bare id.
-    //    Any DIRECT client may initiate the hop (loopback app, the
-    //    agent-sandbox VM over its NAT interface, LAN clients); a request
-    //    that itself arrived through a peer's tunnel never hops again —
-    //    that marker, not loopback-ness, is the multi-hop bound. A
-    //    registered LOCAL id containing '@' keeps winning via the peek; an
-    //    offline peer is an honest 404, never a silent local-default answer.
-    // ── Configured provider (`<id>@<provider>`) → proxied to its
-    //    /v1/chat/completions with the provider's key. Checked before the LAN
-    //    table: a provider is a URL the user typed, a peer is discovered.
-    if (g_providers) |prov| if (lan_mod.splitRemoteId(requested_model_id)) |rid| if (prov.isProvider(rid.peer) and
-        !isTunneledRequest(request[0..header_end_pos]) and registry.peek(requested_model_id) == null)
-    {
-        try handleProviderProxy(allocator, stream, prov, path, request_body, requested_model_id);
-        return;
-    };
-    if (g_lan != null and lan_mod.splitRemoteId(requested_model_id) != null and
-        !isTunneledRequest(request[0..header_end_pos]) and registry.peek(requested_model_id) == null)
-    {
-        try handleLanProxy(allocator, stream, g_lan.?, method, raw_path, request_body, requested_model_id);
-        return;
-    }
     if (requested_model_id.len > 0 and !std.mem.eql(u8, requested_model_id, "mlx-serve")) {
         if (registry.peek(requested_model_id) == null) {
-            // Ollama clients send tagged/short names ("qwen3.6:latest");
-            // resolve them against registry ids before giving up. Scoped to
-            // /api/ paths so /v1 fallback semantics stay pinned.
-            var resolved: ?[]const u8 = null;
-            if (std.mem.startsWith(u8, path, "/api/")) {
-                resolved = ollamaResolveRegistryId(stream.io, registry, requested_model_id);
-            }
             // Unknown id — fall back to the default model rather than 404,
             // so off-the-shelf SDK clients keep working. Multi-model
             // clients that care about routing precision pass an exact id
             // we registered (and `peek` will find it).
-            requested_model_id = resolved orelse "";
+            requested_model_id = "";
         }
     }
     // Text-gen route aimed at a KNOWN non-text model: reject before
@@ -2343,8 +2142,6 @@ fn handleConnection(
             if (textGenRejectReason(t)) |reason| {
                 if (std.mem.eql(u8, path, "/v1/messages")) {
                     try sendAnthropicError(allocator, stream, "invalid_request_error", reason, 400);
-                } else if (std.mem.startsWith(u8, path, "/api/")) {
-                    try sendOllamaError(allocator, stream, "400 Bad Request", reason);
                 } else {
                     try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", reason, 400);
                 }
@@ -2358,8 +2155,7 @@ fn handleConnection(
     // `model` in the body, resolution SUCCEEDS — cold-loading the checkpoint —
     // and the unknown path only 404s afterwards. `POST /v1/load` (the route is
     // /v1/load-model) cost 2m42s and 121 GB resident for a typo, and the same
-    // one-liner pins the box for anyone who sends it. Placed below the LAN
-    // proxy so a `<id>@<peer>` hop is unchanged, and above every load.
+    // one-liner pins the box for anyone who sends it. Placed above every load.
     if (!routeExists(path)) {
         try sendErrorResponse(allocator, stream, "404 Not Found", "not_found", "Unknown endpoint", 404);
         return;
@@ -2539,471 +2335,10 @@ fn handleConnection(
         const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
         const body = request[header_end + 4 .. total_read];
         try handleGen(allocator, stream, body, lm, .mesh);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/api/chat")) {
-        if (text_gen_reject) |reason| {
-            try sendOllamaError(allocator, stream, "400 Bad Request", reason);
-            return;
-        }
-        try handleOllamaChat(allocator, stream, request_body, lm);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/api/generate")) {
-        if (text_gen_reject) |reason| {
-            try sendOllamaError(allocator, stream, "400 Bad Request", reason);
-            return;
-        }
-        try handleOllamaGenerate(allocator, stream, request_body, lm);
-    } else if (std.mem.eql(u8, method, "POST") and (std.mem.eql(u8, path, "/api/embed") or std.mem.eql(u8, path, "/api/embeddings"))) {
-        try handleOllamaEmbed(allocator, stream, request_body, lm, std.mem.eql(u8, path, "/api/embeddings"));
     } else {
         log.warn("{s} {s} -> 404\n", .{ method, path });
         try sendErrorResponse(allocator, stream, "404 Not Found", "not_found", "The requested endpoint does not exist", null);
     }
-}
-
-// ── Ollama-compatible API (/api/*) glue ─────────────────────────────────
-// Pure translation (request shapes, SSE→NDJSON sink, renderers) lives in
-// src/ollama.zig; this section owns routing targets, registry access, and
-// the Conn sink hook. The inner /v1 handlers are reused verbatim — an
-// /api/chat request becomes a /v1/chat/completions body whose SSE output
-// the Sink re-frames into Ollama NDJSON on the real socket.
-
-/// Sink output path: writes translated bytes DIRECTLY through the Conn's
-/// writer interface, bypassing the `ollama_sink` hook in writeAll.
-fn ollamaSinkOut(impl: *anyopaque, data: []const u8) anyerror!void {
-    const c: *Conn = @ptrCast(@alignCast(impl));
-    try c.writer().writeAll(data);
-    try c.writer().flush();
-}
-
-fn ollamaSinkNowMs(impl: *anyopaque) i64 {
-    const c: *Conn = @ptrCast(@alignCast(impl));
-    return nowMs(c.io);
-}
-
-fn sendOllamaError(allocator: std.mem.Allocator, stream: *Conn, status: []const u8, message: []const u8) !void {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    try out.writer.writeAll("{\"error\":");
-    try ollama_mod.writeJsonString(&out.writer, message);
-    try out.writer.writeAll("}");
-    try sendResponse(stream, status, "application/json", out.written());
-}
-
-/// /api/* endpoints that must not trigger a model load. Returns true when
-/// the request was fully handled.
-fn handleOllamaEarly(allocator: std.mem.Allocator, stream: *Conn, method: []const u8, path: []const u8, body: []const u8) !bool {
-    const is_get = std.mem.eql(u8, method, "GET");
-    const is_post = std.mem.eql(u8, method, "POST");
-    if ((is_get or std.mem.eql(u8, method, "HEAD")) and std.mem.eql(u8, path, "/api/version")) {
-        log.debug("{s} /api/version -> 200\n", .{method});
-        const vbody = try std.fmt.allocPrint(allocator, "{{\"version\":\"{s}\"}}", .{build_options.version});
-        defer allocator.free(vbody);
-        try sendResponse(stream, "200 OK", "application/json", if (is_get) vbody else "");
-        return true;
-    }
-    if (is_get and std.mem.eql(u8, path, "/api/tags")) {
-        log.debug("GET  /api/tags -> 200\n", .{});
-        try handleOllamaTags(allocator, stream, false);
-        return true;
-    }
-    if (is_get and std.mem.eql(u8, path, "/api/ps")) {
-        log.debug("GET  /api/ps -> 200\n", .{});
-        try handleOllamaTags(allocator, stream, true);
-        return true;
-    }
-    if (is_post and std.mem.eql(u8, path, "/api/show")) {
-        try handleOllamaShow(allocator, stream, body);
-        return true;
-    }
-    if (is_post and std.mem.eql(u8, path, "/api/pull")) {
-        try handleOllamaPull(allocator, stream, body);
-        return true;
-    }
-    // Registry-mutating Ollama endpoints we deliberately don't support get
-    // an explicit, actionable error instead of a bare 404.
-    const unsupported = [_][]const u8{ "/api/create", "/api/copy", "/api/delete", "/api/push", "/api/blobs" };
-    for (unsupported) |prefix| {
-        if (std.mem.startsWith(u8, path, prefix)) {
-            log.warn("{s} {s} -> 501 (unsupported ollama endpoint)\n", .{ method, path });
-            try sendOllamaError(allocator, stream, "501 Not Implemented", "this Ollama endpoint is not supported by mlx-serve; manage models via /v1/load-model, /api/pull, or the MLX Core app");
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Ollama-style model name → registered model id, or null. Registry ids
-/// are stable for the process lifetime (unload keeps the stub), so the
-/// returned slice stays valid after the mutex drops.
-fn ollamaResolveRegistryId(io: std.Io, registry: *ModelRegistry, name: []const u8) ?[]const u8 {
-    registry.mutex.lockUncancelable(io);
-    defer registry.mutex.unlock(io);
-    var ids_buf: [128][]const u8 = undefined;
-    var n: usize = 0;
-    var it = registry.entries.valueIterator();
-    while (it.next()) |ep| {
-        if (n >= ids_buf.len) break;
-        ids_buf[n] = ep.*.id;
-        n += 1;
-    }
-    const idx = ollama_mod.resolveName(name, ids_buf[0..n]) orelse return null;
-    return ids_buf[idx];
-}
-
-fn ollamaQuantOf(id: []const u8) []const u8 {
-    if (std.ascii.findIgnoreCase(id, "4bit") != null) return "4bit";
-    if (std.ascii.findIgnoreCase(id, "8bit") != null) return "8bit";
-    if (std.ascii.findIgnoreCase(id, "bf16") != null) return "BF16";
-    if (std.ascii.findIgnoreCase(id, "nvfp4") != null) return "NVFP4";
-    if (std.ascii.findIgnoreCase(id, "q4") != null) return "Q4";
-    if (std.ascii.findIgnoreCase(id, "q8") != null) return "Q8";
-    return "";
-}
-
-/// Which backend serves this entry — surfaced as `meta.engine` in /v1/models
-/// so the app's engine-aware Settings UI never has to INFER it from
-/// `architecture`: a NATIVE deepseek_v4 safetensors dir and a DeepSeek GGUF
-/// on the embedded ds4 engine report the SAME model_type. "gguf" = an
-/// unloaded GGUF stub whose engine is only known once the header is read at
-/// load time.
-fn modelEngineName(has_ds4: bool, path: []const u8, arch_hint: []const u8) []const u8 {
-    if (has_ds4) return "ds4";
-    if (std.mem.endsWith(u8, path, ".gguf") or std.mem.eql(u8, arch_hint, "gguf")) return "gguf";
-    return "mlx";
-}
-
-/// Snapshot one registry entry into the pure TagEntry shape. Caller holds
-/// the registry mutex; id/arch_hint slices are entry-owned and stable.
-fn ollamaTagEntryOf(io: std.Io, e: *LoadedModel) ollama_mod.TagEntry {
-    // `releaseRetainedCpuState`'s reader contract. Not `== .ready`: an
-    // unloaded entry retains its config and must stay fully listable.
-    const ready = e.state != .loading;
-    const family: []const u8 = if (ready and e.config != null) e.config.?.model_type else (if (e.arch_hint.len > 0) e.arch_hint else "unknown");
-    // arch_hint "gguf" covers unloaded discovery stubs whose PATH is a
-    // directory of .gguf files (issue #59) — no engine yet, no .gguf suffix.
-    const is_gguf = e.ds4_engine != null or
-        std.mem.endsWith(u8, e.path, ".gguf") or std.mem.eql(u8, e.arch_hint, "gguf");
-    var modified_ms: i64 = 0;
-    // config.json mtime; .gguf entries fall back to 0 (epoch) rather than
-    // paying a parent-dir walk. Guard the absolute-path precondition —
-    // openDirAbsolute on a non-absolute path is ReleaseFast UB (CLAUDE.md).
-    if (!is_gguf and e.path.len > 0 and std.fs.path.isAbsolute(e.path)) {
-        if (std.Io.Dir.openDirAbsolute(io, e.path, .{})) |d| {
-            var dir = d;
-            defer dir.close(io);
-            if (dir.statFile(io, "config.json", .{})) |st| {
-                modified_ms = st.mtime.toMilliseconds();
-            } else |_| {}
-        } else |_| {}
-    }
-    return .{
-        .id = e.id,
-        .size_bytes = e.bytes_on_disk orelse 0,
-        .modified_ms = modified_ms,
-        .family = family,
-        .format = if (is_gguf) "gguf" else "safetensors",
-        .quant = ollamaQuantOf(e.id),
-    };
-}
-
-/// GET /api/tags (`ps_only=false`: every registered model) and GET /api/ps
-/// (`ps_only=true`: only GPU-resident entries, with residency bytes).
-fn handleOllamaTags(allocator: std.mem.Allocator, stream: *Conn, ps_only: bool) !void {
-    const registry = global_registry orelse {
-        try sendOllamaError(allocator, stream, "503 Service Unavailable", "registry not ready");
-        return;
-    };
-    var body: []u8 = undefined;
-    {
-        registry.mutex.lockUncancelable(stream.io);
-        defer registry.mutex.unlock(stream.io);
-        if (ps_only) {
-            var entries = std.ArrayList(ollama_mod.PsEntry).empty;
-            defer entries.deinit(allocator);
-            var it = registry.entries.valueIterator();
-            while (it.next()) |ep| {
-                const e = ep.*;
-                if (e.state != .ready) continue;
-                try entries.append(allocator, .{
-                    .tag = ollamaTagEntryOf(stream.io, e),
-                    .resident_bytes = e.bytes_resident,
-                });
-            }
-            body = try ollama_mod.renderPsJson(allocator, entries.items);
-        } else {
-            var entries = std.ArrayList(ollama_mod.TagEntry).empty;
-            defer entries.deinit(allocator);
-            var it = registry.entries.valueIterator();
-            while (it.next()) |ep| {
-                try entries.append(allocator, ollamaTagEntryOf(stream.io, ep.*));
-            }
-            body = try ollama_mod.renderTagsJson(allocator, entries.items);
-        }
-    }
-    defer allocator.free(body);
-    try sendResponse(stream, "200 OK", "application/json", body);
-}
-
-/// POST /api/show — model metadata + capabilities.
-fn handleOllamaShow(allocator: std.mem.Allocator, stream: *Conn, body: []const u8) !void {
-    const registry = global_registry orelse {
-        try sendOllamaError(allocator, stream, "503 Service Unavailable", "registry not ready");
-        return;
-    };
-    var requested: []const u8 = "";
-    var parsed_body: ?std.json.Parsed(std.json.Value) = null;
-    defer if (parsed_body) |*p| p.deinit();
-    if (std.json.parseFromSlice(std.json.Value, allocator, body, .{})) |parsed| {
-        parsed_body = parsed;
-        if (parsed.value == .object) {
-            // "model" is current; "name" is the pre-0.5 client field.
-            if (parsed.value.object.get("model")) |m| {
-                if (m == .string) requested = m.string;
-            } else if (parsed.value.object.get("name")) |m| {
-                if (m == .string) requested = m.string;
-            }
-        }
-    } else |_| {}
-    if (requested.len == 0) {
-        try sendOllamaError(allocator, stream, "400 Bad Request", "model is required");
-        return;
-    }
-
-    var rendered: ?[]u8 = null;
-    {
-        registry.mutex.lockUncancelable(stream.io);
-        defer registry.mutex.unlock(stream.io);
-        var ids_buf: [128][]const u8 = undefined;
-        var n: usize = 0;
-        var entry_buf: [128]*LoadedModel = undefined;
-        var it = registry.entries.valueIterator();
-        while (it.next()) |ep| {
-            if (n >= ids_buf.len) break;
-            ids_buf[n] = ep.*.id;
-            entry_buf[n] = ep.*;
-            n += 1;
-        }
-        if (ollama_mod.resolveName(requested, ids_buf[0..n])) |idx| {
-            const e = entry_buf[idx];
-            // Same contract as `ollamaTagEntryOf`, and it matters more here:
-            // `chat_template` is copied into the response body.
-            const e_ready = e.state != .loading;
-            const template: []const u8 = if (e_ready and e.chat_config != null) e.chat_config.?.chat_template else "";
-            const is_encoder = if (e_ready and e.config != null) e.config.?.is_encoder_only else std.mem.eql(u8, e.arch_hint, "bert");
-            // Embedding capability is wider than encoder-ness: a pooling-
-            // contracted decoder (Qwen3-Embedding) reports it too (issue #116).
-            const has_embedding = if (e_ready and e.config != null) e.config.?.hasEmbeddingCapability() else std.mem.eql(u8, e.arch_hint, "bert");
-            const has_chat = !is_encoder;
-            rendered = try ollama_mod.renderShowJson(allocator, .{
-                .tag = ollamaTagEntryOf(stream.io, e),
-                .context_length = if (e_ready and e.config != null) getEffectiveContextLength(e.config.?) else 0,
-                .template = template,
-                .has_chat = has_chat,
-                .has_tools = has_chat,
-                .has_vision = e.vision_encoder != null,
-                .has_thinking = has_chat and chatTemplateSupportsThinking(template),
-                .has_embedding = has_embedding,
-            });
-        }
-    }
-    if (rendered) |r| {
-        defer allocator.free(r);
-        log.debug("POST /api/show -> 200 ({s})\n", .{requested});
-        try sendResponse(stream, "200 OK", "application/json", r);
-    } else {
-        log.warn("POST /api/show -> 404 (unknown model {s})\n", .{requested});
-        try sendOllamaError(allocator, stream, "404 Not Found", "model not found");
-    }
-}
-
-/// Progress reporter for /api/pull: each status line becomes an Ollama
-/// NDJSON `{"status":"…"}` chunk on the wire.
-const OllamaPullSink = struct {
-    stream: *Conn,
-    allocator: std.mem.Allocator,
-    quiet: bool = false,
-    headers_sent: bool = false,
-    write_failed: bool = false,
-
-    fn report(impl: *anyopaque, line: []const u8) void {
-        const self: *OllamaPullSink = @ptrCast(@alignCast(impl));
-        if (self.quiet) return;
-        self.emit("status", line) catch {
-            self.write_failed = true;
-        };
-    }
-
-    fn emit(self: *OllamaPullSink, key: []const u8, line: []const u8) !void {
-        if (!self.headers_sent) {
-            self.headers_sent = true;
-            try self.stream.writeAll("HTTP/1.1 200 OK\r\n" ++
-                "Content-Type: application/x-ndjson\r\n" ++
-                "Cache-Control: no-cache\r\n" ++
-                "Connection: close\r\n" ++
-                "Access-Control-Allow-Origin: *\r\n" ++
-                "\r\n");
-        }
-        var out: std.Io.Writer.Allocating = .init(self.allocator);
-        defer out.deinit();
-        try out.writer.writeAll("{\"");
-        try out.writer.writeAll(key);
-        try out.writer.writeAll("\":");
-        try ollama_mod.writeJsonString(&out.writer, line);
-        try out.writer.writeAll("}\n");
-        try self.stream.writeAll(out.written());
-    }
-};
-
-/// POST /api/pull — native HF download into ~/.mlx-serve/models (same
-/// resolver + layout as `mlx-serve pull`), then register-by-path so the
-/// model is immediately loadable by name. Streams NDJSON status lines
-/// unless the client passed `stream:false`.
-fn handleOllamaPull(allocator: std.mem.Allocator, stream: *Conn, body: []const u8) !void {
-    var requested: []const u8 = "";
-    var wants_stream = true;
-    var parsed_body: ?std.json.Parsed(std.json.Value) = null;
-    defer if (parsed_body) |*p| p.deinit();
-    if (std.json.parseFromSlice(std.json.Value, allocator, body, .{})) |parsed| {
-        parsed_body = parsed;
-        if (parsed.value == .object) {
-            if (parsed.value.object.get("model")) |m| {
-                if (m == .string) requested = m.string;
-            } else if (parsed.value.object.get("name")) |m| {
-                if (m == .string) requested = m.string;
-            }
-            if (parsed.value.object.get("stream")) |s| {
-                wants_stream = s == .bool and s.bool;
-            }
-        }
-    } else |_| {}
-    if (requested.len == 0) {
-        try sendOllamaError(allocator, stream, "400 Bad Request", "model is required");
-        return;
-    }
-    const resolved = cli_mod.resolveShortName(requested) orelse {
-        try sendOllamaError(allocator, stream, "404 Not Found", "unknown model name; use a known short name or a HuggingFace 'org/repo' id");
-        return;
-    };
-    const home = std.mem.span(std.c.getenv("HOME") orelse "/tmp");
-    const dest = try cli_mod.modelDestPath(allocator, home, resolved.repo);
-    defer allocator.free(dest);
-
-    log.info("POST /api/pull {s} -> {s}\n", .{ requested, dest });
-    var sink = OllamaPullSink{ .stream = stream, .allocator = allocator, .quiet = !wants_stream };
-    const reporter = cli_mod.Reporter{ .impl = &sink, .reportFn = &OllamaPullSink.report };
-    if (!cli_mod.modelPresent(stream.io, dest)) {
-        cli_mod.pullRepo(allocator, stream.io, resolved, dest, reporter, false) catch {
-            if (sink.headers_sent) {
-                sink.emit("error", "pull failed (partials kept — retry to resume)") catch {};
-            } else {
-                try sendOllamaError(allocator, stream, "500 Internal Server Error", "pull failed (partials kept — retry to resume)");
-            }
-            return;
-        };
-    }
-    // Make it loadable by name right away. GGUF-only dirs (no config.json)
-    // aren't registerable this way — they still work via --model / the app.
-    if (global_registry) |registry| {
-        _ = registry.registerByPath(stream.io, dest) catch {};
-    }
-    sink.quiet = false;
-    sink.emit("status", "success") catch {};
-}
-
-fn handleOllamaChat(allocator: std.mem.Allocator, stream: *Conn, body: []const u8, lm: *LoadedModel) !void {
-    var tr = ollama_mod.translateChatRequest(allocator, body) catch |err| switch (err) {
-        error.InvalidRequest => {
-            log.warn("POST /api/chat -> 400 (invalid request)\n", .{});
-            try sendOllamaError(allocator, stream, "400 Bad Request", "invalid chat request: model and messages are required");
-            return;
-        },
-        error.OutOfMemory => return error.OutOfMemory,
-    };
-    defer tr.deinit(allocator);
-    log.debug("POST /api/chat (stream={any}) -> inner /v1/chat/completions\n", .{tr.wants_stream});
-    var sink = ollama_mod.Sink.init(allocator, .{
-        .mode = .chat,
-        .wants_stream = tr.wants_stream,
-        .model = tr.model,
-        .out_impl = stream,
-        .outFn = &ollamaSinkOut,
-        .nowMsFn = &ollamaSinkNowMs,
-    });
-    defer sink.deinit();
-    stream.ollama_sink = &sink;
-    defer stream.ollama_sink = null;
-    try handleChatCompletions(allocator, stream, tr.body, lm);
-    stream.ollama_sink = null;
-    try sink.finish();
-}
-
-fn handleOllamaGenerate(allocator: std.mem.Allocator, stream: *Conn, body: []const u8, lm: *LoadedModel) !void {
-    var tr = ollama_mod.translateGenerateRequest(allocator, body) catch |err| switch (err) {
-        error.InvalidRequest => {
-            log.warn("POST /api/generate -> 400 (invalid request)\n", .{});
-            try sendOllamaError(allocator, stream, "400 Bad Request", "invalid generate request: prompt is required");
-            return;
-        },
-        error.OutOfMemory => return error.OutOfMemory,
-    };
-    defer tr.deinit(allocator);
-    if (tr.load_only) {
-        log.info("POST /api/generate (no prompt) -> load handshake for {s}\n", .{tr.model});
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        defer out.deinit();
-        var iso_buf: [32]u8 = undefined;
-        try out.writer.writeAll("{\"model\":");
-        try ollama_mod.writeJsonString(&out.writer, tr.model);
-        try out.writer.writeAll(",\"created_at\":");
-        try ollama_mod.writeJsonString(&out.writer, ollama_mod.formatIso8601(&iso_buf, nowMs(stream.io)));
-        try out.writer.writeAll(",\"response\":\"\",\"done\":true,\"done_reason\":\"load\"}");
-        try sendResponse(stream, "200 OK", "application/json", out.written());
-        return;
-    }
-    log.debug("POST /api/generate (stream={any}, raw={any}) -> inner {s}\n", .{ tr.wants_stream, tr.raw, if (tr.raw) "/v1/completions" else "/v1/chat/completions" });
-    var sink = ollama_mod.Sink.init(allocator, .{
-        .mode = .generate,
-        .wants_stream = tr.wants_stream,
-        .model = tr.model,
-        .out_impl = stream,
-        .outFn = &ollamaSinkOut,
-        .nowMsFn = &ollamaSinkNowMs,
-    });
-    defer sink.deinit();
-    stream.ollama_sink = &sink;
-    defer stream.ollama_sink = null;
-    if (tr.raw) {
-        try handleCompletions(allocator, stream, tr.body, lm);
-    } else {
-        try handleChatCompletions(allocator, stream, tr.body, lm);
-    }
-    stream.ollama_sink = null;
-    try sink.finish();
-}
-
-fn handleOllamaEmbed(allocator: std.mem.Allocator, stream: *Conn, body: []const u8, lm: *LoadedModel, legacy: bool) !void {
-    var tr = ollama_mod.translateEmbedRequest(allocator, body, legacy) catch |err| switch (err) {
-        error.InvalidRequest => {
-            log.warn("POST /api/embed -> 400 (invalid request)\n", .{});
-            try sendOllamaError(allocator, stream, "400 Bad Request", if (legacy) "invalid request: prompt is required" else "invalid request: input is required");
-            return;
-        },
-        error.OutOfMemory => return error.OutOfMemory,
-    };
-    defer tr.deinit(allocator);
-    var sink = ollama_mod.Sink.init(allocator, .{
-        .mode = .chat, // unused for embed; finishEmbed re-renders the capture
-        .wants_stream = false,
-        .model = tr.model,
-        .out_impl = stream,
-        .outFn = &ollamaSinkOut,
-        .nowMsFn = &ollamaSinkNowMs,
-    });
-    defer sink.deinit();
-    stream.ollama_sink = &sink;
-    defer stream.ollama_sink = null;
-    try handleEmbeddings(allocator, stream, tr.body, lm);
-    stream.ollama_sink = null;
-    try sink.finishEmbed(legacy);
 }
 
 /// Percentage of the memory-derived ceiling we actually admit as context when
@@ -6608,7 +5943,7 @@ fn readyCapsJson(allocator: std.mem.Allocator, c: ReadyCaps) !std.ArrayList(u8) 
 
 /// Facts about a request's target model that decide whether a TEXT-
 /// GENERATION route (/v1/chat/completions, /v1/completions, /v1/messages,
-/// /v1/responses + WS, /api/chat, /api/generate) may serve it. Extracted
+/// /v1/responses + WS) may serve it. Extracted
 /// from a LoadedModel by `textGenTargetOf`; kept as plain facts so the
 /// decision is hermetically testable.
 const TextGenTarget = struct {
@@ -6693,8 +6028,7 @@ fn textGenTargetOf(lm: *LoadedModel) TextGenTarget {
 
 /// True for a read-only route that reports on a model without using it.
 /// `GET /props` is the only one: every other status endpoint either answers
-/// before `ensureLoaded` (the Ollama block returns from `handleOllamaEarly`,
-/// and `/health`, `/metrics`, `/v1/models` return above it) or is a real load
+/// before `ensureLoaded` (`/health`, `/metrics`, `/v1/models` return above it) or is a real load
 /// (`/v1/load-model`). `/props` alone falls through to the shared
 /// `ensureLoaded`/release pair, so without this a poll stamps `last_used_ms`
 /// and a client polling faster than `--idle-evict-secs` pins every model.
@@ -6709,13 +6043,24 @@ fn isTextGenRoute(method: []const u8, path: []const u8) bool {
     if (std.mem.eql(u8, method, "POST")) {
         const routes = [_][]const u8{
             "/v1/chat/completions", "/v1/completions", "/v1/messages",
-            "/v1/responses",        "/api/chat",       "/api/generate",
+            "/v1/responses",
         };
         for (routes) |r| if (std.mem.eql(u8, path, r)) return true;
         return false;
     }
     // WebSocket upgrade handshake for /v1/responses.
     return std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/v1/responses");
+}
+
+/// Which backend serves this entry — surfaced as `meta.engine` in /v1/models
+/// so a client never has to INFER it from `architecture`: a NATIVE
+/// deepseek_v4 safetensors dir and a DeepSeek GGUF on the embedded ds4 engine
+/// report the SAME model_type. "gguf" = an unloaded GGUF stub whose engine is
+/// only known once the header is read at load time.
+fn modelEngineName(has_ds4: bool, path: []const u8, arch_hint: []const u8) []const u8 {
+    if (has_ds4) return "ds4";
+    if (std.mem.endsWith(u8, path, ".gguf") or std.mem.eql(u8, arch_hint, "gguf")) return "gguf";
+    return "mlx";
 }
 
 /// pulls full capabilities/dimensions off the resident config/chat_config;
@@ -7016,13 +6361,7 @@ fn renderModelEntry(
     , .{ entry.id, state_str, bytes_on_disk_str, streaming_part, err_part, top_ctx_part, caps_part, mods_part, arch_part, engine_part, dims_part, bytes_on_disk_str });
 }
 
-fn handleModels(
-    allocator: std.mem.Allocator,
-    stream: *Conn,
-    /// True for a keyless LAN peer: list only shared models, and never the
-    /// remote stubs (mirroring a peer's peer invites multi-hop loops).
-    lan_filtered: bool,
-) !void {
+fn handleModels(allocator: std.mem.Allocator, stream: *Conn) !void {
     // Plan 05 Phase E: emit every registry entry (loaded + unloaded), not
     // just the default model + flat discovery list. Default model is sorted
     // first so single-model clients reading `data[0]` continue to work.
@@ -7060,7 +6399,6 @@ fn handleModels(
         std.sort.pdq(*LoadedModel, ordered.items, default_id, Cmp.lt);
 
         for (ordered.items) |entry| {
-            if (lan_filtered and !g_lan.?.sharedAllows(entry.id)) continue;
             if (entries_buf.items.len > 0) try entries_buf.append(allocator, ',');
             const json = try renderModelEntry(allocator, stream.io, entry);
             defer allocator.free(json);
@@ -7068,35 +6406,11 @@ fn handleModels(
         }
     }
 
-    // Discovered LAN models and configured providers ride the same list for
-    // local clients; neither is re-exported to the LAN.
-    if (!lan_filtered) if (g_lan) |l| try l.appendRemoteEntries(allocator, &entries_buf);
-    if (!lan_filtered) if (g_providers) |p| try p.appendEntries(allocator, &entries_buf);
-
     const body = try std.fmt.allocPrint(allocator,
         \\{{"object":"list","data":[{s}]}}
     , .{entries_buf.items});
     defer allocator.free(body);
-    try sendModelsResponse(stream, body);
-}
-
-/// `/v1/models` responses carry the per-process LAN token
-/// (`X-MLX-LAN-Token`) when LAN mode is on, so a discovering server can
-/// recognize a fetch that landed on ITSELF: a stale Bonjour record of a
-/// former self (same name + port, different TXT token) walks through the
-/// resolve-time TXT check, and the loopback-first fetch would install our
-/// own models as a "peer" (live self-mirror after a restart, 2026-07-21).
-fn sendModelsResponse(stream: *Conn, body: []const u8) !void {
-    logHttpResponse("200 OK", "application/json", body);
-    const l = g_lan orelse return sendResponseFramed(stream, "200 OK", "application/json", body);
-    if (stream.ws_mode != null) return sendResponseFramed(stream, "200 OK", "application/json", body);
-    var hdr_buf: [512]u8 = undefined;
-    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-MLX-LAN-Token: {s}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n\r\n", .{
-        body.len,
-        &l.token_hex,
-    }) catch return error.Overflow;
-    try stream.writeAll(hdr);
-    if (body.len > 0) try stream.writeAll(body);
+    try sendResponse(stream, "200 OK", "application/json", body);
 }
 
 /// `POST /v1/models/rescan`: re-walk the boot roots and register stubs for
@@ -7154,22 +6468,6 @@ fn handleLoadModelStrict(allocator: std.mem.Allocator, stream: *Conn, request_bo
         }
     } else |_| {
         requested_id = parseModelFromBody(request_body) orelse "";
-    }
-    // A LAN-discovered remote id: nothing to load here — the peer loads on
-    // demand when the first proxied request arrives. Answer 200 with the
-    // mirrored entry so client flows (load → generate → unload) work
-    // unchanged on network models. Unknown peer/model falls through to
-    // ensureLoaded's honest 404.
-    if (lan_mod.splitRemoteId(requested_id) != null) {
-        const remote_entry: ?[]u8 = if (g_providers) |p| p.entryFor(allocator, requested_id) else null;
-        const entry_opt = remote_entry orelse if (g_lan) |l| l.remoteEntryFor(allocator, requested_id) else null;
-        if (entry_opt) |entry| {
-            defer allocator.free(entry);
-            const body = try std.fmt.allocPrint(allocator, "{{\"model\":{s}}}", .{entry});
-            defer allocator.free(body);
-            try sendResponse(stream, "200 OK", "application/json", body);
-            return;
-        }
     }
     // Register-by-path: an absolute path to a model directory OUTSIDE the
     // --model-dir scan (e.g. the app's auto-downloaded embedding encoder).
@@ -7398,15 +6696,6 @@ fn handleUnloadModelStrict(allocator: std.mem.Allocator, stream: *Conn, request_
         // A discovered entry is keyed `org/name`, so the path is the only exact handle.
         const by_path = if (global_registry) |r| r.peekByPath(trimmed) else null;
         requested_id = if (by_path) |e| e.id else std.fs.path.basename(trimmed);
-    }
-
-    // Remote ids hold no residency on THIS host — idempotent 200, matching
-    // the load-model no-op (the peer's owner controls its memory).
-    if ((g_lan != null or g_providers != null) and lan_mod.splitRemoteId(requested_id) != null and
-        (global_registry == null or global_registry.?.peek(requested_id) == null))
-    {
-        try sendResponse(stream, "200 OK", "application/json", "{\"status\":\"ok\"}");
-        return;
     }
 
     scheduler.unloadModel(requested_id) catch |err| switch (err) {
@@ -7726,65 +7015,6 @@ fn handlePropsNoModel(allocator: std.mem.Allocator, stream: *Conn) !void {
     , .{ active_mem, peak_mem, available_mem, scheduler_mod.MAX_BATCH_GROUP });
     defer allocator.free(body);
     try sendResponse(stream, "200 OK", "application/json", body);
-}
-
-/// Render the built-in console at `GET /`: a chat playground, image
-/// generate/edit and audio tools, the live metrics panel, and the full API
-/// reference. Self-contained — no external assets, no CDN.
-///
-/// Takes NO model. Everything model-shaped (the picker, capabilities, memory)
-/// is fetched client-side from `/v1/models` + `/props`, which is what lets the
-/// page render on a server with nothing loaded — the default boot mode — and
-/// what makes the picker follow loads/unloads without a refresh.
-fn handleStatusPage(allocator: std.mem.Allocator, stream: *Conn) !void {
-    const version_esc = try htmlEscape(allocator, build_options.version);
-    defer allocator.free(version_esc);
-
-    // Optional live-metrics panel: a mount div + the polling script (which also
-    // carries the panel markup and injects it into the mount). Rendered into
-    // the header's `{s}` slot — but ONLY when --metrics is on; off ⇒ empty
-    // string, so nothing polls a 503 feed.
-    const METRICS_SECTION = "\n<div id=mlx-metrics></div>\n<script>\n" ++ @embedFile("html/metrics.js") ++ "\n</script>\n";
-    const metrics_section: []const u8 = if (g_metrics != null) METRICS_SECTION else "";
-
-    // The page lives in src/html/index.html (@embedFile resolves relative to
-    // this source file, so no build.zig change) and is a std.fmt FORMAT
-    // STRING: every literal `{`/`}` in it must be doubled. That is exactly why
-    // the CSS and JS are separate files injected as RUNTIME `{s}` args —
-    // std.fmt does not re-parse a runtime argument, so app.css/app.js/
-    // metrics.js can be ordinary CSS and JavaScript. Don't inline them back.
-    const body = try std.fmt.allocPrint(allocator, @embedFile("html/index.html"), .{
-        // <title> version
-        version_esc,
-        // <style> — src/html/app.css
-        @embedFile("html/app.css"),
-        // header version
-        version_esc,
-        // optional live-metrics panel (empty when --metrics is off)
-        metrics_section,
-        // curl example port
-        global_port,
-        // <script> — src/html/app.js
-        @embedFile("html/app.js"),
-    });
-    defer allocator.free(body);
-    try sendResponse(stream, "200 OK", "text/html; charset=utf-8", body);
-}
-
-/// Minimal HTML escape — covers the five chars that matter inside element
-/// content + double-quoted attribute values. Caller frees.
-fn htmlEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var buf = std.ArrayList(u8).empty;
-    errdefer buf.deinit(allocator);
-    for (input) |c| switch (c) {
-        '&' => try buf.appendSlice(allocator, "&amp;"),
-        '<' => try buf.appendSlice(allocator, "&lt;"),
-        '>' => try buf.appendSlice(allocator, "&gt;"),
-        '"' => try buf.appendSlice(allocator, "&quot;"),
-        '\'' => try buf.appendSlice(allocator, "&#39;"),
-        else => try buf.append(allocator, c),
-    };
-    return try buf.toOwnedSlice(allocator);
 }
 
 /// `<bos> ids <eos>` for bidirectional embedding models. Either special is
@@ -12233,156 +11463,35 @@ fn peerIsLoopback(conn: *const Conn) bool {
     return ipIsLoopback(conn.stream.socket.address);
 }
 
-/// True when the LAN-share gate governs this request: sharing on, keyless
-/// mode (a configured --api-key already gated non-loopback traffic), and the
-/// client is not local.
-fn lanGateApplies(stream: *const Conn) bool {
-    const l = g_lan orelse return false;
-    return l.sharing() and g_api_key == null and !peerIsLoopback(stream);
-}
-
-/// True when this request arrived through another mlx-serve's LAN tunnel
-/// (`lan.tunnel` stamps `X-MLX-LAN: 1` on every request it forwards).
-/// Tunneled requests are never proxied again — THAT is the multi-hop bound
-/// (depth 1 by construction), so proxying no longer keys on loopback-ness:
-/// any direct client (the local app, the agent-sandbox VM arriving over the
-/// NAT interface, a phone on the LAN) may initiate the single hop.
-fn isTunneledRequest(raw_headers: []const u8) bool {
-    return findHeaderValueCI(raw_headers, "x-mlx-lan") != null;
-}
-
-/// LAN-share gate decision for one non-loopback request; null = allowed.
-/// The effective model resolves exactly like dispatch will (unknown/absent
-/// ids fall back to the default model), so the gate can never disagree with
-/// what would actually run.
-fn lanShareDenial(l: *lan_mod.Lan, registry: *ModelRegistry, method: []const u8, path: []const u8, body: []const u8, content_type: []const u8, tunneled: bool) ?[]const u8 {
-    switch (lan_mod.routeClass(method, path)) {
-        .open => return null,
-        .denied => return "This endpoint is host-local; LAN sharing exposes inference on shared models only",
-        .model_gated => {},
+/// Collapse JSON's optional `\/` escape to `/`. Swift's JSONSerialization
+/// (and PHP's json_encode) escape every slash, and a model id is read out of
+/// the RAW body, so `org\/name` would miss the registry. Returns the input
+/// verbatim (zero-copy) when there is nothing to collapse or the scratch
+/// buffer is too small.
+fn unescapeJsonSlashes(buf: []u8, s: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, s, "\\/") == null or s.len > buf.len) return s;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\' and i + 1 < s.len and s[i + 1] == '/') continue;
+        buf[n] = s[i];
+        n += 1;
     }
-    var mid_buf: [512]u8 = undefined;
-    const mid = lan_mod.unescapeJsonSlashes(
-        &mid_buf,
-        parseModelFromRequest(body, content_type) orelse "",
-    );
-    if (lan_mod.splitRemoteId(mid)) |rid| if (registry.peek(mid) == null) {
-        // A provider is the host owner's paid key: never reachable from the LAN.
-        if (g_providers) |p| if (p.isProvider(rid.peer)) return "Provider models are host-local";
-    };
-    if (lan_mod.splitRemoteId(mid) != null and registry.peek(mid) == null) {
-        // A remote (@peer) id from a DIRECT client is allowed — dispatch
-        // proxies exactly one hop and the peer's own gate governs its model
-        // (the old blanket deny also 403'd the agent-sandbox guest, which is
-        // non-loopback by construction; live 2026-07-21). A request that
-        // arrived through a peer's tunnel never hops again.
-        if (tunneled) return "Remote (@peer) model ids cannot be proxied onward — ask that peer directly";
-        return null;
-    }
-    const effective = if (mid.len > 0 and !std.mem.eql(u8, mid, "mlx-serve") and registry.peek(mid) != null)
-        mid
-    else
-        registry.default_id;
-    if (!l.sharedAllows(effective)) return "Model not shared on this host";
-    return null;
+    return buf[0..n];
 }
 
-/// How long a proxied request waits for discovery to converge before the
-/// honest "peer offline" 404. Covers a local restart's cold peer table AND a
-/// peer Mac mid-reboot/redeploy: the peer needs to boot, advertise, and be
-/// re-fetched — seconds, not milliseconds. A genuinely dead peer costs the
-/// client this long once; an unlisted model or discovery-off never waits.
-const LAN_PEER_WAIT_MS: i64 = 15_000;
-
-/// Proxy a request naming `<bare>@<peer>` to that peer (lan.tunnel). The
-/// failure modes are deliberately distinct — the live bite was one instant
-/// "peer offline" 404 covering all three:
-///   • discovery off on THIS server → say so (a share-only boot can never
-///     resolve a peer, and "offline" sent the user debugging the wrong Mac);
-///   • peer known but model unlisted → fail fast, honestly;
-///   • peer unknown → poke discovery and wait up to LAN_PEER_WAIT_MS
-///     (client disconnect abandons the wait), then 404.
-/// 502 when the peer resolves but stops accepting. Never a silent fallback
-/// to the local default model.
-fn handleLanProxy(allocator: std.mem.Allocator, stream: *Conn, l: *lan_mod.Lan, method: []const u8, raw_path: []const u8, body: []const u8, full_id: []const u8) !void {
-    // Swift/PHP clients escape '/' as '\/', so the raw body slice can read
-    // `ddalcu\/gemma…@peer` while the peer table stores the canonical id
-    // (live 404 "no longer shares this model" from the app). Look up with
-    // the CANONICAL form — and splice the canonical bare id into the
-    // forwarded body too, or the peer's own scanner would miss it and
-    // silently serve its default model.
-    var canon_buf: [512]u8 = undefined;
-    const canon = lan_mod.unescapeJsonSlashes(&canon_buf, full_id);
-    const rid = lan_mod.splitRemoteId(canon).?;
-    if (!l.discover) {
-        try sendErrorResponse(allocator, stream, "404 Not Found", "model_not_found", "This id names a LAN peer's model, but LAN discovery is off on this server — start it with --lan-discover (app: Settings > LAN Sharing > Use models shared by other Macs)", 404);
-        return;
-    }
-    const deadline = nowMsMonotonic(stream.io) + LAN_PEER_WAIT_MS;
-    const remote: lan_mod.Remote = remote: while (true) {
-        switch (l.lookupRemote(canon)) {
-            .found => |r| break :remote r,
-            .model_unlisted => {
-                try sendErrorResponse(allocator, stream, "404 Not Found", "model_not_found", "The LAN peer no longer shares this model", 404);
-                return;
-            },
-            .peer_unknown => {
-                if (nowMsMonotonic(stream.io) >= deadline) {
-                    try sendErrorResponse(allocator, stream, "404 Not Found", "model_not_found", "LAN peer for this model is offline (waited 15 s for discovery)", 404);
-                    return;
-                }
-                if (stream.peerClosed()) return; // client gave up while we waited
-                l.pokeDiscovery();
-                const ts = std.c.timespec{ .sec = 0, .nsec = 250_000_000 };
-                _ = std.c.nanosleep(&ts, null);
-            },
-        }
-    };
-    const rewritten = try lan_mod.rewriteModelValue(allocator, body, full_id, rid.bare);
-    defer allocator.free(rewritten);
-    log.info("[lan] proxy {s} {s} -> \"{s}\" @ {d}.{d}.{d}.{d}:{d}\n", .{ method, raw_path, rid.peer, remote.ip4[0], remote.ip4[1], remote.ip4[2], remote.ip4[3], remote.port });
-    lan_mod.tunnel(remote, method, raw_path, rewritten, stream) catch {
-        try sendErrorResponse(allocator, stream, "502 Bad Gateway", "lan_peer_unreachable", "LAN peer did not accept the connection", 502);
-    };
-}
-
-/// Proxy `<bare>@<provider>` to the provider's /v1/chat/completions. Only that
-/// surface exists upstream, so every other model-gated route is a named 400
-/// rather than a request the provider would reject in its own words.
-fn handleProviderProxy(allocator: std.mem.Allocator, stream: *Conn, prov: *providers_mod.Providers, path: []const u8, body: []const u8, full_id: []const u8) !void {
-    if (!std.mem.eql(u8, path, "/v1/chat/completions")) {
-        try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", "Provider models are served on /v1/chat/completions only", 400);
-        return;
-    }
-    var canon_buf: [512]u8 = undefined;
-    const canon = lan_mod.unescapeJsonSlashes(&canon_buf, full_id);
-    var up = prov.lookup(allocator, canon) orelse {
-        try sendErrorResponse(allocator, stream, "404 Not Found", "model_not_found", "No such provider", 404);
-        return;
-    };
-    defer up.deinit(allocator);
-    const rewritten = try lan_mod.rewriteModelValue(allocator, body, full_id, up.bare);
-    defer allocator.free(rewritten);
-    log.info("[providers] proxy \"{s}\" -> {s}/chat/completions\n", .{ up.bare, up.url });
-    providers_mod.proxyChat(allocator, stream.io, up, rewritten, stream) catch {
-        try sendErrorResponse(allocator, stream, "502 Bad Gateway", "provider_unreachable", "Provider did not answer", 502);
-    };
-}
-
-fn handleProvidersReload(allocator: std.mem.Allocator, stream: *Conn) !void {
-    const p = g_providers orelse {
-        try sendErrorResponse(allocator, stream, "503 Service Unavailable", "providers_unavailable", "Providers are disabled on this server", 503);
-        return;
-    };
-    const n = p.reload() catch |err| {
-        const msg = try std.fmt.allocPrint(allocator, "providers.json could not be read: {s}", .{@errorName(err)});
-        defer allocator.free(msg);
-        try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", msg, 400);
-        return;
-    };
-    const body = try std.fmt.allocPrint(allocator, "{{\"providers\":{d}}}", .{n});
-    defer allocator.free(body);
-    try sendResponse(stream, "200 OK", "application/json", body);
+test "JSON-escaped slashes in a model id canonicalize (Swift clients send org\\/name)" {
+    const t = std.testing;
+    var buf: [256]u8 = undefined;
+    try t.expectEqualStrings("ddalcu/gemma-e2b", unescapeJsonSlashes(&buf, "ddalcu\\/gemma-e2b"));
+    // No escapes → the INPUT slice comes back verbatim (zero-copy).
+    const plain = "ddalcu/gemma-e2b";
+    try t.expect(unescapeJsonSlashes(&buf, plain).ptr == plain.ptr);
+    // Only the two-byte sequence `\/` collapses; other backslashes survive.
+    try t.expectEqualStrings("a\\b/c", unescapeJsonSlashes(&buf, "a\\b\\/c"));
+    // Oversized input degrades to verbatim rather than truncating.
+    var tiny: [4]u8 = undefined;
+    try t.expectEqualStrings("x\\/y", unescapeJsonSlashes(tiny[0..2], "x\\/y"));
 }
 
 /// Case-insensitive HTTP header lookup in the raw header block. `name_lower`
@@ -12502,64 +11611,6 @@ test "apiKeyAuthorized accepts Bearer, x-api-key, Basic, and query param" {
     try std.testing.expect(apiKeyAuthorized("", "/v1/chat/completions"));
 }
 
-test "lanShareDenial: shared inference surface only, resolved like dispatch" {
-    const a = std.testing.allocator;
-    const reg = try ModelRegistry.init(a, std.Io.Threaded.global_single_threaded.io(), null, 8, 0, null);
-    defer reg.deinit();
-    const shared_entry = try reg.registerStub("gemma-4-e4b-it-4bit", "/m/g", 1);
-    _ = try reg.registerStub("qwen3.6-27b", "/m/q", 1);
-    reg.default_id = shared_entry.id;
-
-    var l = lan_mod.Lan{
-        .alloc = a,
-        .port = 0,
-        .discover = false,
-        .peers = .init(a),
-        .known = .init(a),
-        .share = try lan_mod.SharedSet.parse(a, "gemma-4-e4b-it-4bit"),
-    };
-    defer {
-        l.share.?.deinit(a);
-        l.peers.deinit();
-        l.known.deinit();
-    }
-
-    // Open routes pass with no model check; host-local ones are denied.
-    try std.testing.expect(lanShareDenial(&l, reg, "GET", "/health", "", "application/json", false) == null);
-    try std.testing.expect(lanShareDenial(&l, reg, "GET", "/v1/models", "", "application/json", false) == null);
-    try std.testing.expect(lanShareDenial(&l, reg, "OPTIONS", "/v1/messages", "", "application/json", false) == null);
-    try std.testing.expect(lanShareDenial(&l, reg, "POST", "/v1/load-model", "{}", "application/json", false) != null);
-    try std.testing.expect(lanShareDenial(&l, reg, "GET", "/metrics", "", "application/json", false) != null);
-    try std.testing.expect(lanShareDenial(&l, reg, "GET", "/", "", "application/json", false) != null);
-
-    // Shared model allowed; unshared denied — on chat AND media surfaces.
-    try std.testing.expect(lanShareDenial(&l, reg, "POST", "/v1/chat/completions", "{\"model\":\"gemma-4-e4b-it-4bit\"}", "application/json", false) == null);
-    try std.testing.expect(lanShareDenial(&l, reg, "POST", "/v1/chat/completions", "{\"model\":\"qwen3.6-27b\"}", "application/json", false) != null);
-    try std.testing.expect(lanShareDenial(&l, reg, "POST", "/v1/images/generations", "{\"model\":\"qwen3.6-27b\"}", "application/json", false) != null);
-
-    // Omitted / unknown ids resolve to the default model exactly like
-    // dispatch will — here the default is shared, so both pass.
-    try std.testing.expect(lanShareDenial(&l, reg, "POST", "/v1/chat/completions", "{}", "application/json", false) == null);
-    try std.testing.expect(lanShareDenial(&l, reg, "POST", "/v1/messages", "{\"model\":\"gpt-4\"}", "application/json", false) == null);
-
-    // @peer ids: a DIRECT client (not tunneled) may initiate the single hop —
-    // the old blanket deny also 403'd the agent-sandbox guest, which reaches
-    // this host over the VM NAT interface (live 2026-07-21). A request that
-    // ARRIVED through a peer's tunnel never hops again (the multi-hop bound).
-    try std.testing.expect(lanShareDenial(&l, reg, "POST", "/v1/messages", "{\"model\":\"x@peer\"}", "application/json", false) == null);
-    try std.testing.expect(lanShareDenial(&l, reg, "POST", "/v1/messages", "{\"model\":\"x@peer\"}", "application/json", true) != null);
-
-    // `/v1/images/edits` is model_gated but its body is multipart, so a
-    // JSON-only scan reads NO id and every edit silently gets default-model
-    // semantics — the gate would then disagree with what dispatch runs, which
-    // is the one thing this function promises it never does.
-    const mp_ct = "multipart/form-data; boundary=B";
-    const mp_unshared = "--B\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nqwen3.6-27b\r\n--B--\r\n";
-    const mp_shared = "--B\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngemma-4-e4b-it-4bit\r\n--B--\r\n";
-    try std.testing.expect(lanShareDenial(&l, reg, "POST", "/v1/images/edits", mp_unshared, mp_ct, false) != null);
-    try std.testing.expect(lanShareDenial(&l, reg, "POST", "/v1/images/edits", mp_shared, mp_ct, false) == null);
-}
-
 test "the route-existence 404 is answered BEFORE the model is resolved" {
     // A path we do not serve must cost nothing. Resolution ran first, so
     // `POST /v1/load` (the real route is /v1/load-model) with a `model` field
@@ -12600,7 +11651,6 @@ test "each connection thread handle is detached after spawn" {
     const sources = [_][]const u8{
         src,
         @embedFile("scheduler.zig"),
-        @embedFile("lan.zig"),
         @embedFile("main.zig"),
         @embedFile("metrics.zig"),
     };
@@ -12727,7 +11777,7 @@ test "ROUTE_PATHS covers every path the dispatch chain compares (drift guard)" {
         }
     }
     // The scan itself must not silently find nothing.
-    try std.testing.expect(checked >= 30);
+    try std.testing.expect(checked >= 20);
 }
 
 test "every streaming chat emitter carries logprobs (silently-ignored-field guard)" {
@@ -12810,27 +11860,6 @@ test "every streaming chat emitter carries logprobs (silently-ignored-field guar
     try std.testing.expect(std.mem.indexOfPos(u8, src, chunk_at, interpolates) != null);
 }
 
-test "the index page documents every endpoint the server serves (drift guard)" {
-    // The API reference on `GET /` is hand-written prose, so it drifts the
-    // moment a route ships without someone remembering the page: it documented
-    // 22 of 31 endpoints and had silently omitted the ENTIRE Ollama `/api/*`
-    // surface (nine paths) since that surface was added. "Are we missing
-    // endpoints?" has to be a test, not an inspection.
-    //
-    // Same shape as the ROUTE_PATHS↔dispatch-chain guard above: two lists that
-    // must agree, checked against the file rather than trusted.
-    const page = @embedFile("html/index.html");
-    for (ROUTE_PATHS) |p| {
-        // "/" is the page itself — trivially present and not worth documenting
-        // as an endpoint row.
-        if (std.mem.eql(u8, p, "/")) continue;
-        if (std.mem.indexOf(u8, page, p) == null) {
-            std.debug.print("endpoint missing from the index page: {s}\n", .{p});
-            return error.EndpointNotDocumented;
-        }
-    }
-}
-
 test "parseModelFromRequest reads the model out of a multipart form, not just JSON" {
     // `/v1/images/edits` is the ONE endpoint whose body is multipart, and model
     // resolution runs BEFORE the route translates that form to JSON. A JSON-only
@@ -12869,13 +11898,6 @@ test "parseModelFromRequest reads the model out of a multipart form, not just JS
     // A multipart content-type with a JSON body (or a truncated form) degrades
     // to "no id" rather than misreading one.
     try std.testing.expect(parseModelFromRequest("{\"model\":\"m1\"}", ct) == null);
-}
-
-test "isTunneledRequest keys on the lan.tunnel marker header, case-insensitive" {
-    try std.testing.expect(isTunneledRequest("X-MLX-LAN: 1\r\n"));
-    try std.testing.expect(isTunneledRequest("x-mlx-lan: 1\r\n"));
-    try std.testing.expect(!isTunneledRequest("Content-Type: application/json\r\n"));
-    try std.testing.expect(!isTunneledRequest(""));
 }
 
 test "ipIsLoopback exempts local addresses only" {
@@ -13288,8 +12310,8 @@ fn jsonEscapeValid(allocator: std.mem.Allocator, input: []const u8) ![]const u8 
 }
 
 test "EVERY JSON string escaper survives bytes that are not valid UTF-8" {
-    // Class guard over the four escapers (OpenAI/Anthropic, Responses, the prompt
-    // render, Ollama NDJSON): one passing bytes through loses a whole reply.
+    // Class guard over the three escapers (OpenAI/Anthropic, Responses, the prompt
+    // render): one passing bytes through loses a whole reply.
     const a = std.testing.allocator;
     const cases = [_][]const u8{
         "near\xe8\x91\xe4\xb8\x89 in", // 3-byte lead, one continuation, then another lead
@@ -13309,11 +12331,6 @@ test "EVERY JSON string escaper survives bytes that are not valid UTF-8" {
         defer buf.deinit(a);
         try chat_mod.appendJsonString(a, &buf, bad);
         try std.testing.expect(std.unicode.utf8ValidateSlice(buf.items));
-
-        var out: std.Io.Writer.Allocating = .init(a);
-        defer out.deinit();
-        try ollama_mod.writeJsonString(&out.writer, bad);
-        try std.testing.expect(std.unicode.utf8ValidateSlice(out.written()));
     }
     // Valid input is passed through byte for byte.
     const good = try jsonEscape(a, "héllo \u{1F600}");
@@ -22008,14 +21025,11 @@ test "isTextGenRoute covers exactly the guarded surfaces" {
     try std.testing.expect(isTextGenRoute("POST", "/v1/completions"));
     try std.testing.expect(isTextGenRoute("POST", "/v1/messages"));
     try std.testing.expect(isTextGenRoute("POST", "/v1/responses"));
-    try std.testing.expect(isTextGenRoute("POST", "/api/chat"));
-    try std.testing.expect(isTextGenRoute("POST", "/api/generate"));
     try std.testing.expect(isTextGenRoute("GET", "/v1/responses")); // WS upgrade
     // Media + embedding routes must NOT be gated — they serve these models.
     try std.testing.expect(!isTextGenRoute("POST", "/v1/images/generations"));
     try std.testing.expect(!isTextGenRoute("POST", "/v1/audio/speech"));
     try std.testing.expect(!isTextGenRoute("POST", "/v1/embeddings"));
-    try std.testing.expect(!isTextGenRoute("POST", "/api/embed"));
     try std.testing.expect(!isTextGenRoute("GET", "/v1/models"));
 }
 
@@ -22026,14 +21040,6 @@ test "isStatusRoute: only /props reaches the shared release" {
     try std.testing.expect(!isStatusRoute("POST", "/v1/completions"));
     // An explicit load is use — it is the whole point of the request.
     try std.testing.expect(!isStatusRoute("POST", "/v1/load-model"));
-    // The Ollama status routes never reach the release: `handleOllamaEarly`
-    // answers and returns above `ensureLoaded`, so listing them here would be
-    // dead code that reads as coverage. Measured — polling each of these
-    // against a resident model with a 5s window evicts on schedule.
-    try std.testing.expect(!isStatusRoute("GET", "/api/ps"));
-    try std.testing.expect(!isStatusRoute("GET", "/api/tags"));
-    try std.testing.expect(!isStatusRoute("GET", "/api/version"));
-    try std.testing.expect(!isStatusRoute("POST", "/api/show"));
     // Method matters: the path alone is not the predicate.
     try std.testing.expect(!isStatusRoute("POST", "/props"));
 }
@@ -23416,7 +22422,7 @@ test "request body cap is per route: media bodies are base64 frame payloads" {
         "/v1/audio/music-generations",
         "/v1/3d/generations",
     }) |p| try std.testing.expectEqual(max_media_request_bytes, maxRequestBytesFor(p));
-    for ([_][]const u8{ "/v1/chat/completions", "/v1/messages", "/api/chat", "/", "" }) |p|
+    for ([_][]const u8{ "/v1/chat/completions", "/v1/messages", "/", "" }) |p|
         try std.testing.expectEqual(max_request_bytes, maxRequestBytesFor(p));
 }
 

@@ -2,13 +2,13 @@
 # --idle-evict-secs: a model nobody is using leaves residency, and the next
 # request cold-loads it back.
 #
-# The reload this makes routine is also what the test is for. Three endpoints
-# read an entry's RETAINED CPU state (config, chat template) without holding a
-# refcount — /api/tags, /api/show, and the pre-load text-gen gate on a chat
-# request — and a reload frees that state. So each cycle fires all three
-# concurrently with the reload. Residency is read back from /api/ps rather than
-# trusting the `state` field: "unloaded" with the memory still held is the
-# failure this flag exists to prevent.
+# The reload this makes routine is also what the test is for. Two readers
+# touch an entry's RETAINED CPU state (config, chat template) without holding a
+# refcount — /v1/models and the pre-load text-gen gate on a chat request — and
+# a reload frees that state. So each cycle fires both concurrently with the
+# reload. Residency is read back as the `loaded` rows of /v1/models: "unloaded"
+# with the memory still held is the failure this flag exists to prevent, so
+# the RSS arm below backs that read.
 #
 # Usage: ./tests/test_idle_evict.sh [root] [port]
 
@@ -67,8 +67,8 @@ chat() {  # prints the HTTP status
         -H 'Content-Type: application/json' \
         -d "{\"model\":\"$M\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi.\"}],\"max_tokens\":4}"
 }
-# Resident entries only — /api/ps lists `.ready` models with their bytes.
-resident_count() { curl -fs "$BASE/api/ps" | grep -o '"name"' | wc -l | tr -d ' '; }
+# Resident entries only — `.ready` rows render `"loaded":true`.
+resident_count() { curl -fs "$BASE/v1/models" | grep -o '"loaded":true' | wc -l | tr -d ' '; }
 server_rss_mb() { ps -o rss= -p $SERVER_PID | awk '{printf "%d", $1/1024}'; }
 
 wait_unloaded() {  # 0 = nothing resident within the timeout
@@ -105,8 +105,7 @@ else
 fi
 
 # A status poll must not be USE, either. /props is the only status route that
-# reaches it: the Ollama endpoints answer in handleOllamaEarly, above
-# ensureLoaded. /props shares handleConnection's
+# reaches ensureLoaded. /props shares handleConnection's
 # ensureLoaded/release pair with the generation routes, so a release that
 # restamps the idle clock lets a 1s watcher (or the app's 3s tray) hold every
 # model resident forever while the sweep sits armed and never fires.
@@ -125,15 +124,13 @@ else
     echo -e "${RED}FAIL${NC} /props polling pinned the model for 20s against a 2s window"; FAIL=1
 fi
 
-# Each cycle reloads the model while three unrefcounted readers of its retained
-# CPU state run against it.
+# Each cycle reloads the model while unrefcounted readers of its retained CPU
+# state run against it.
 for i in $(seq 2 "$CYCLES"); do
     PIDS=()
     for _ in 1 2 3; do ( chat >/dev/null ) & PIDS+=($!); done
     for _ in 1 2 3 4 5 6; do
-        ( curl -fs "$BASE/api/tags" >/dev/null ) & PIDS+=($!)
-        ( curl -fs -X POST "$BASE/api/show" -H 'Content-Type: application/json' \
-            -d "{\"model\":\"$M\"}" >/dev/null ) & PIDS+=($!)
+        ( curl -fs "$BASE/v1/models" >/dev/null ) & PIDS+=($!)
     done
     for p in "${PIDS[@]}"; do wait "$p" || { echo -e "${RED}FAIL${NC} cycle $i: a concurrent request failed"; FAIL=1; }; done
     curl -fs "$BASE/health" >/dev/null || { echo -e "${RED}FAIL${NC} cycle $i: server died"; FAIL=1; break; }

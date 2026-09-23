@@ -2,7 +2,7 @@
 
 Fork of ddalcu's mlx-serve, serving Qwen3.8-Flash-Next (`qwen4_exp`) on Apple Silicon with EXL3 routed experts, resident or SSD-streamed. MiMo-V2.6-Flash (`mimo_v2`) is an experimental text-only bring-up using native MXFP4 expert streaming. Native Zig, OpenAI/Anthropic-compatible HTTP, no Python at serve time.
 
-Everything else in `src/` (media generation, the other architectures, LAN sharing, providers, ANE, the ds4 GGUF engine) is INHERITED upstream code: it builds, it is not supported here, and this file does not document it. The loader refuses any other `model_type` by name (`model.served_model_types`, `ArchitectureUnsupported` → 503). The GENERIC GGUF engine (llama.cpp's `libllama`) is CUT: ds4 is the only GGUF engine left, any other `.gguf` is refused by name, and `--engine llama` / `--llama-kv-quant` / `--llama-cache-entries` exit with a message. Upstream's docs are archived: `git show ff1380d:docs/reference.md`.
+Everything else in `src/` (media generation, the other architectures, ANE, the ds4 GGUF engine) is INHERITED upstream code: it builds, it is not supported here, and this file does not document it. The loader refuses any other `model_type` by name (`model.served_model_types`, `ArchitectureUnsupported` → 503). The GENERIC GGUF engine (llama.cpp's `libllama`) is CUT: ds4 is the only GGUF engine left, any other `.gguf` is refused by name, and `--engine llama` / `--llama-kv-quant` / `--llama-cache-entries` exit with a message. Upstream's docs are archived: `git show ff1380d:docs/reference.md`.
 
 **No conversion side here.** Every converter, allocator, imatrix driver and repacker now lives in PonyExl3 as `python -m ponyexl3.serve_convert <subcommand>`; this repo keeps the CONSUMER contract — `docs/pack-format.md`, the Zig shard-stamp check, the committed `src/fixtures/`, and `mlx-serve kld`. The oracle fixture dumpers (`tests/dump_*_fixtures.py`) stay: they verify the engine, they do not make packs.
 
@@ -21,7 +21,7 @@ Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds)
 |---|---|
 | `main.zig` | Entry, CLI flags + subcommands (`run/pull/list/serve/launch/kld`) |
 | `cli.zig` | alias → HF repo, resumable pull into `~/.mlx-serve/models/<org>/<repo>`, `list`, `run` REPL |
-| `launch.zig` | `mlx-serve launch <agent>` (claude/pi/omp/opencode/opencode2/codex/hermes/aider): reads `/v1/models`, writes agent configs into `~/.mlx-serve/<agent>/` |
+| `launch.zig` | `mlx-serve launch <agent>` (claude/pi/omp/opencode/codex/hermes/aider): reads `/v1/models`, writes agent configs into `~/.mlx-serve/<agent>/` |
 | `mlx.zig` | mlx-c FFI |
 | `model.zig` | Config parse + safetensors loading; weight-prefix probing |
 | `mimo_source.zig` | Original MiMo source headers, selective trunk loading, rank-local FP8 QKV reconstruction and in-memory FP8→bf16 dequantization |
@@ -43,7 +43,7 @@ Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds)
 | `chat.zig` | Chat templates (Jinja2 + fallback), thinking tags, tool-call parsing/repair/coercion |
 | `reasoning_protocol.zig` | Bounded reasoning/header masks and authoritative JSON response routing |
 | `json_schema.zig` / `json_grammar.zig` / `token_mask.zig` / `regex.zig` | Schema IR → streaming grammar → per-token mask for constrained decoding |
-| `server.zig` | All HTTP: `/v1/*` (chat/completions/messages/responses/embeddings/models/load/unload), `/metrics(.json)`, WS, `--api-key`, console at `GET /` |
+| `server.zig` | All HTTP: `/v1/*` (chat/completions/messages/responses/embeddings/models/load/unload), `/metrics(.json)`, WS, `--api-key` |
 | `responses.zig` / `ws.zig` | Responses API data + `ResponseStore`; RFC 6455 framing |
 | `model_settings.zig` | Per-model `~/.mlx-serve/model-settings.json` (`ctx_size`, `kv_quant`, `mtp`, `mtp_acceptance`, `ssd_budget_gb`), stamped at BOTH load construction sites |
 | `model_discovery.zig` / `model_registry.zig` | Discovery (two-level org/name, multi-root, streaming stubs), multi-model registry |

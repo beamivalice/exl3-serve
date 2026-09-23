@@ -1,6 +1,6 @@
 #!/bin/bash
-# test_api_edges.sh — request-validation edges across the four text surfaces
-# and Ollama, on one small model. Every check is a server CONTRACT (status +
+# test_api_edges.sh — request-validation edges across the four text surfaces,
+# on one small model. Every check is a server CONTRACT (status +
 # shape), never a checkpoint expectation: what a request that is malformed,
 # out of range, or unsupported gets back, and that the server is still alive.
 #
@@ -9,7 +9,7 @@
 # Found on first run (2026-09-16): top_p 0 masked every token (uniform garbage),
 # stop "" matched at position 0 (empty reply), json_schema without a schema
 # fell open silently, an undecodable image_url vanished from the prompt, an
-# empty embedding input was a 500, and Ollama's load handshake was a 400.
+# and an empty embedding input was a 500.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -145,15 +145,6 @@ req POST /v1/embeddings '{"model":"m","input":["hello","world"]}'
 [[ "$R" == 200 && "$(echo "$BODY" | J 'len(d["data"])')" == 2 ]] && ok "embedding array answers one vector per input" || bad "embedding array" "$R"
 req POST /tokenize '{"content":"hello world"}'
 [[ "$(echo "$BODY" | J 'len(d["tokens"])')" -ge 2 ]] && ok "/tokenize" || bad "/tokenize" "$BODY"
-
-echo "=== Ollama ==="
-req POST /api/generate '{"model":"m"}'
-[[ "$R" == 200 && "$(echo "$BODY" | J 'd["done"]')" == True && "$(echo "$BODY" | J 'd["done_reason"]')" == load ]] && ok "/api/generate with no prompt is the load handshake" || bad "/api/generate load handshake" "$R $(echo "$BODY" | head -c 160)"
-req POST /api/generate '{"model":"m","prompt":"The capital of France is","raw":true,"stream":false,"options":{"num_predict":5,"temperature":0}}'
-[[ "$R" == 200 && -n "$(echo "$BODY" | J 'd["response"]')" ]] && ok "/api/generate raw" || bad "/api/generate raw" "$R"
-req POST /api/chat '{"model":"m","messages":[{"role":"user","content":"weather in Paris?"}],"stream":false,"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"options":{"num_predict":60,"temperature":0}}'
-[[ "$R" == 200 ]] && ok "/api/chat with tools answers" || bad "/api/chat tools" "$R"
-req POST /api/show '{"name":"zzz"}';                                   expect_status 404 "/api/show unknown model"
 
 echo "=== Responses API ==="
 req POST /v1/responses '{"model":"m"}';                                expect_status 400 "responses: no input"
