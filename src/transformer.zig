@@ -2340,11 +2340,13 @@ const ATTN_PD_KERNEL_SOURCE =
     \\  const int rows_k = metal::min(BK, kL - c0);
     \\
     \\  // Stage K transposed (Ks[d][kk]): uint4 global loads (8 bf16 each),
-    \\  // scalar transposed scatter into smem.
+    \\  // scalar transposed scatter into smem. Consecutive lanes take consecutive
+    \\  // KEY rows, so a store lands on adjacent addresses of one Ks row; lanes
+    \\  // spread over head-dim chunks would stride 8*LDK halves, one bank.
     \\  threadgroup_barrier(metal::mem_flags::mem_threadgroup);
     \\  for (int i = tix; i < BK * NWK; i += NT) {
-    \\    const int r = i / NWK;
-    \\    const int c8 = i % NWK;
+    \\    const int r = i % BK;
+    \\    const int c8 = i / BK;
     \\    uint4 w = uint4(0);
     \\    if (r < rows_k) {
     \\      w = *((const device uint4*)(Kp + (long)(c0 + r) * k_strides[2]) + c8);
