@@ -19,7 +19,6 @@ const model_settings_mod = @import("model_settings.zig");
 const vision_mod = @import("vision.zig");
 const ds4_arch = @import("arch/ds4.zig");
 const ds4_ffi = @import("ds4_ffi.zig");
-const gen_mod = @import("gen.zig");
 const cli_mod = @import("cli.zig");
 const kld_mod = @import("kld.zig");
 const launch_mod = @import("launch.zig");
@@ -56,9 +55,6 @@ var ds4_dspark: bool = false;
 // lossy int8/fp16). File-level like ds4_dspark so the headless serve path
 // reads the same flag (the runHeadlessServe flag-eater class).
 var ane_prefill: bool = false;
-// `--ane-image/--ane-video/--ane-audio` + `--ane-split`: the media DiTs' MLP
-// offload, published as ONE value (`ane.media_offload`) after the parse.
-var ane_media: ane_mod.MediaOffload = .{};
 // Serve-mode default for requests that omit max_tokens (0 = flag not given).
 var serve_default_max_tokens: u32 = 0;
 
@@ -174,14 +170,6 @@ fn printUsage(io: std.Io) void {
         \\                        MLP rows to the Neural Engine (qwen3_5-family
         \\                        only; int8/fp16, lossy; needs >= 96 GB RAM).
         \\                        MLX_SERVE_ANE_SPLIT tunes the share (0.40).
-        \\  --ane-image         Run a share of each image DiT block's MLP on the
-        \\  --ane-video           Neural Engine beside the GPU (Krea / MiniMax-H3 /
-        \\  --ane-audio           ACE-Step; int8/fp16, lossy; off by default). The
-        \\                        share is calibrated once per Mac and model on
-        \\                        the first request (~1 s) and reused; the server
-        \\                        declines by name where the copy does not fit.
-        \\  --ane-split <f>     Force the media offload's ANE share (0..1) instead
-        \\                        of calibrating it per model (MLX_SERVE_ANE_SPLIT is the same).
         \\  --mtp               Force the MTP head ON for MoE targets too.
         \\                        Requests default to MTP only on DENSE models;
         \\                        a MoE checkpoint that ships a sidecar is
@@ -442,19 +430,11 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(1);
             }
             run_model_dir = try cli_mod.ensureModelAvailable(allocator, io, args[2]);
-            // `run` is the chat UX — refuse non-chat models up front with
-            // the serve alternative instead of booting a server whose chat
-            // surface can only 400 (pre-guard it SIGSEGV'd: the media stub
-            // tokenizer yields 0 tokens and prefill derefs a null
-            // transformer — see server.zig textGenRejectReason).
+            // `run` is the chat UX — refuse non-chat models up front instead
+            // of booting a server whose chat surface can only 400.
             if (model_discovery.classifyModelPath(io, allocator, run_model_dir.?)) |kind| {
                 if (kind != .chat) {
                     log.err("'{s}' is {s} — `mlx-serve run` starts a chat REPL, which it can't serve.\n", .{ args[2], kind.describe() });
-                    if (kind.genEndpoint()) |ep| {
-                        log.err("serve it for API/app use instead:\n", .{});
-                        log.err("  mlx-serve --model \"{s}\" --serve\n", .{run_model_dir.?});
-                        log.err("  then POST {s}\n", .{ep});
-                    }
                     std.process.exit(1);
                 }
             }
@@ -710,20 +690,6 @@ pub fn main(init: std.process.Init) !void {
             // are named [ane] log lines at load; MLX_SERVE_ANE_SPLIT tunes
             // the row share.
             ane_prefill = true;
-        } else if (std.mem.eql(u8, args[i], "--ane-image")) {
-            ane_media.image = true;
-        } else if (std.mem.eql(u8, args[i], "--ane-video")) {
-            ane_media.video = true;
-        } else if (std.mem.eql(u8, args[i], "--ane-audio")) {
-            ane_media.audio = true;
-        } else if (std.mem.eql(u8, args[i], "--ane-split") and i + 1 < args.len) {
-            i += 1;
-            const v = std.fmt.parseFloat(f32, args[i]) catch 0;
-            if (!(v > 0) or v > 1) {
-                log.err("--ane-split must be in (0, 1], got '{s}'\n", .{args[i]});
-                std.process.exit(1);
-            }
-            ane_media.share = v;
         } else if (std.mem.eql(u8, args[i], "--dspark")) {
             // DSpark (DeepSeek-V4 draft stages) is OPT-IN: the stages cost
             // ~11 GB resident, so the default leaves them lazy and serves
@@ -944,11 +910,6 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         }
     }
-
-    // One value for the three media seams (they run under gen.zig with no
-    // server config in reach); the env stays the benching override.
-    if (ane_media.share == null) ane_media.share = ane_mod.explicitShareEnv();
-    ane_mod.media_offload = ane_media;
 
     transformer_mod.Transformer.mtp_head_kv_quant_flag = mtp_head_kv_quant;
     generate_mod.mtp_acceptance_default = mtp_acceptance.parse(mtp_typical_raw, mtp_tokenv3_raw) catch |err| {
@@ -1185,18 +1146,6 @@ pub fn main(init: std.process.Init) !void {
             const discovery_for_registry = discovery_storage;
             discovery_storage = null; // ownership moves to the registry
             try runHeadlessServe(io, allocator, discovery_for_registry, host, port, ctx_size, timeout, reasoning_budget, max_resident_models, max_resident_mem, max_resident_mem_explicit, idle_evict_secs, kv_quant_config, kv_quant_explicit, enable_mtp, mtp_explicit, cli_pld);
-            return;
-        }
-
-        // Native media generation (image FLUX / audio Qwen3-TTS / video LTX):
-        // these bypass the MLX transformer but are now hosted by the ONE main
-        // server via the registry (modality engine on the LoadedModel). Peek
-        // model_type from config.json BEFORE the transformer-shaped parseConfig
-        // and route the primary model through the media serve path.
-        if (gen_mod.detectModality(io, allocator, model_dir)) |modality| {
-            const discovery_for_registry = discovery_storage;
-            discovery_storage = null; // ownership moves to the registry
-            try runGenServe(io, allocator, model_dir, modality, discovery_for_registry, host, port, ctx_size, timeout, reasoning_budget, max_resident_models, max_resident_mem, max_resident_mem_explicit, idle_evict_secs);
             return;
         }
     }
@@ -1785,106 +1734,6 @@ fn dirBasename(path: []const u8) []const u8 {
     return p;
 }
 
-/// Native media-generation serve mode (image / audio / video) with the media
-/// model as the PRIMARY (default) model. Builds a modality stub
-/// (config/tok/chat_config) and hands it to `Scheduler.init`; the gen load arm
-/// dispatches off the stub config's media `model_type` and opens the modality
-/// engine on the inference thread. Coexists with on-demand chat/media loads via
-/// the registry (`discovery`). Mirrors `runDs4Serve`.
-fn runGenServe(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    model_dir: []const u8,
-    modality: gen_mod.Modality,
-    discovery: ?model_discovery.DiscoveryResult,
-    host: []const u8,
-    port: u16,
-    ctx_size: u32,
-    timeout: u32,
-    reasoning_budget: i32,
-    max_resident_models: u32,
-    max_resident_mem: u64,
-    max_resident_mem_explicit: bool,
-    idle_evict_secs: ?u32,
-) !void {
-    log.info("mlx-serve {s} (native {s} engine)\n", .{ VERSION, @tagName(modality) });
-    log.info("[args] model: {s}\n", .{model_dir});
-    log.info("[args] serve: {s}:{d}\n", .{ host, port });
-
-    var stub = try gen_mod.buildStubCpuState(allocator, modality);
-    var config_owned_by_registry = false;
-    errdefer if (!config_owned_by_registry) gen_mod.freeStubCpuState(allocator, &stub);
-
-    const model_id = dirBasename(model_dir);
-
-    const effective_max_resident_mem = autoResidentMemBytes(max_resident_mem_explicit, max_resident_mem);
-    if (effective_max_resident_mem > 0) {
-        log.info("[registry] max_resident_models={d}, max_resident_mem={d:.1} GB\n", .{ max_resident_models, @as(f64, @floatFromInt(effective_max_resident_mem)) / 1_073_741_824.0 });
-    } else {
-        log.info("[registry] max_resident_models={d}, max_resident_mem=unlimited\n", .{max_resident_models});
-    }
-
-    const registry = try model_registry_mod.ModelRegistry.init(allocator, io, discovery, max_resident_models, effective_max_resident_mem, idle_evict_secs);
-    defer registry.deinit();
-
-    const entry = if (registry.peek(model_id)) |e|
-        e
-    else if (registry.peekByPath(model_dir)) |e|
-        e
-    else
-        try registry.registerStubWithArch(model_id, model_dir, null, modality.modelType());
-    try registry.setDefault(entry.id);
-
-    // Registry takes ownership of the stub if the inference thread installed it.
-    defer if (entry.config != null) {
-        config_owned_by_registry = true;
-    };
-
-    const params = scheduler_mod.LoadParams{
-        .registry = registry,
-        .entry = entry,
-        .config = stub.config,
-        .tok = stub.tok,
-        .chat_config = stub.chat_config,
-        .model_dir = model_dir,
-        .ctx_size = ctx_size,
-        .load_vision = false,
-        .warmup_eager = false,
-        .draft_block_size = 0,
-        .draft_block_size_explicit = false,
-        .kv_quant_config = transformer_mod.KVQuantConfig.dense,
-        .prefix_cache_capacity = 0,
-        .prefix_cache_mem_bytes = 0,
-        .expert_cache_bytes = expert_cache_bytes,
-        .ssd_budget_bytes = ssd_budget_bytes,
-        .expert_cache_fit_resolver = server_mod.expertCacheFitForLoad,
-        .tokenize_cache_entries = 0,
-        .ds4_mtp = ds4_mtp,
-        .ds4_dspark = ds4_dspark,
-        .ane_prefill = ane_prefill,
-        .ane_chunk_resolver = server_mod.pinPrefillChunk,
-        .ane_headroom_resolver = server_mod.aneGateHeadroom,
-        .metrics = server_mod.g_metrics,
-    };
-
-    try server_mod.serve(io, allocator, params, stub.config, host, port, .{
-        .max_context_size = ctx_size,
-        .request_timeout_sec = timeout,
-        .default_reasoning_budget = reasoning_budget,
-        .default_max_tokens = serve_default_max_tokens,
-        .default_temperature = null,
-        .default_top_p = null,
-        .default_top_k = null,
-        // PLD is unreachable on this path (decode never routes through the
-        // PLD-capable generator), so say so once instead of three literals
-        // that read like a decision but drift like a typo.
-        .default_enable_pld = server_mod.PldDefaults.off.enable,
-        .default_pld_draft_len = server_mod.PldDefaults.off.draft_len,
-        .default_pld_key_len = server_mod.PldDefaults.off.key_len,
-        .kv_attn_mode = .auto,
-    });
-}
-
 /// Headless serve mode: start with NO primary model. The registry holds all
 /// discovery stubs; chat AND media models load on demand via `/v1/load-model`
 /// (or a request targeting a discovered id), coexisting under one memory
@@ -1912,8 +1761,8 @@ fn runHeadlessServe(
     log.info("mlx-serve {s} (headless — models load on demand)\n", .{VERSION});
     log.info("[args] serve: {s}:{d}\n", .{ host, port });
 
-    var stub = try gen_mod.buildStubCpuState(allocator, .image);
-    defer gen_mod.freeStubCpuState(allocator, &stub);
+    var stub = try scheduler_mod.headlessStubCpuState(allocator);
+    defer scheduler_mod.freeCpuState(allocator, &stub);
 
     const effective_max_resident_mem = autoResidentMemBytes(max_resident_mem_explicit, max_resident_mem);
     if (effective_max_resident_mem > 0) {

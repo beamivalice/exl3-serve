@@ -15,14 +15,6 @@ comptime {
     }
 }
 
-/// stb_image_write's JPEG bit-packer relies on WRAPPING left shifts of a signed
-/// int (`bitBuf <<= 8`), which is UB by the letter of C and which Zig's C
-/// frontend TRAPS under UBSan — so a Debug build of any graph that encodes a
-/// JPEG aborts inside libc. One flag list, used at every site that compiles it,
-/// because the flag is about the C source and not about which graph it is in
-/// (`zig build test` is Debug and ran 6 crashed tests without it).
-const stb_write_flags: []const []const u8 = &.{ "-O2", "-fno-sanitize=undefined" };
-
 pub fn build(b: *std.Build) void {
     // Pin LC_BUILD_VERSION minos to macOS 26.2 — the honest floor: the linked
     // libmlx is built at deployment target 26.2 (NAX kernels, scripts/
@@ -56,14 +48,6 @@ pub fn build(b: *std.Build) void {
         verifyMlxStage(b);
     }
 
-    // Hermetic Latent2RGB/JPEG tests: the COMPILED artifact links no MLX and
-    // no Homebrew webp, which is what lets a Linux Cloud Agent build it — on
-    // Linux this is the only graph registered. On a Mac the step builds the
-    // same hermetic artifact, but `verifyBrewDeps`/`verifyMlxStage` above run
-    // at CONFIGURE time for every step, so it is not a way to build without a
-    // staged mlx.
-    // Native query — do not inherit the macOS 26.2 minos default_target.
-    addPreviewTest(b, b.resolveTargetQuery(.{}));
     if (builtin.os.tag != .macos) return;
 
     // Version. Release builds pass it explicitly (the release workflow passes
@@ -123,15 +107,7 @@ pub fn build(b: *std.Build) void {
 
     // stb_image for JPEG/PNG decoding in the vision pipeline
     mod.addCSourceFile(.{ .file = b.path("lib/stb_image_impl.c"), .flags = &.{"-O2"} });
-    // stb_image_write for PNG encoding (native image-generation endpoint)
-    mod.addCSourceFile(.{ .file = b.path("lib/stb_image_write_impl.c"), .flags = stb_write_flags });
     mod.addIncludePath(b.path("lib"));
-
-    // xatlas UV unwrapping (MIT, vendored amalgamation) + C shim for the
-    // Hunyuan3D texture paint stage. See lib/xatlas/xatlas_shim.h + src/uvwrap.zig.
-    mod.addCSourceFile(.{ .file = b.path("lib/xatlas/xatlas.cpp"), .flags = &.{ "-std=c++17", "-O2", "-DNDEBUG" } });
-    mod.addCSourceFile(.{ .file = b.path("lib/xatlas/xatlas_shim.cpp"), .flags = &.{ "-std=c++17", "-O2", "-DNDEBUG" } });
-    mod.addIncludePath(b.path("lib/xatlas"));
 
     // ds4 inference engine for DSV4-Flash (Metal backend, macOS only). See
     // `lib/ds4/` submodule pinned at 9139e2a and `src/arch/ds4.zig`. Kernel
@@ -201,11 +177,7 @@ pub fn build(b: *std.Build) void {
     test_mod.addObjectFile(b.path("lib/jinja_cpp/libjinja.a"));
     test_mod.addIncludePath(b.path("lib/jinja_cpp"));
     test_mod.addCSourceFile(.{ .file = b.path("lib/stb_image_impl.c"), .flags = &.{"-O2"} });
-    test_mod.addCSourceFile(.{ .file = b.path("lib/stb_image_write_impl.c"), .flags = stb_write_flags });
     test_mod.addIncludePath(b.path("lib"));
-    test_mod.addCSourceFile(.{ .file = b.path("lib/xatlas/xatlas.cpp"), .flags = &.{ "-std=c++17", "-O2", "-DNDEBUG" } });
-    test_mod.addCSourceFile(.{ .file = b.path("lib/xatlas/xatlas_shim.cpp"), .flags = &.{ "-std=c++17", "-O2", "-DNDEBUG" } });
-    test_mod.addIncludePath(b.path("lib/xatlas"));
     addDs4Sources(b, test_mod);
     test_mod.addIncludePath(b.path("lib/ds4"));
     addAneSources(b, test_mod);
@@ -247,29 +219,6 @@ pub fn build(b: *std.Build) void {
     }
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
-}
-
-/// Hermetic Latent2RGB + JPEG tests. No MLX, no Homebrew — the only `zig build`
-/// graph that is valid on Linux (issue #208). The ARTIFACT is hermetic, the
-/// STEP is not a way around a missing mlx: `verifyBrewDeps` + `verifyMlxStage`
-/// run at configure time for every step, so on a Mac `lib/mlx/` must be staged
-/// before this builds. UBSan is off for stb (its bit shifts trip the sanitizer).
-fn addPreviewTest(b: *std.Build, target: std.Build.ResolvedTarget) void {
-    const mod = b.createModule(.{
-        .root_source_file = b.path("src/preview.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-        .link_libc = true,
-    });
-    mod.addCSourceFile(.{ .file = b.path("lib/stb_image_write_impl.c"), .flags = stb_write_flags });
-    mod.addIncludePath(b.path("lib"));
-    const tests = b.addTest(.{
-        .name = "preview-test",
-        .root_module = mod,
-    });
-    const run = b.addRunArtifact(tests);
-    const step = b.step("preview-test", "Hermetic JPEG / Latent2RGB preview tests (no MLX)");
-    step.dependOn(&run.step);
 }
 
 /// Translates a single C header into an importable module (`@import("name")`

@@ -1,30 +1,24 @@
 #!/bin/bash
-# Multi-client stress test — the "several pi's + several chats + voice + image gen" mix.
+# Multi-client stress test — the "several pi's + several chats" mix.
 #
-# Simulates the load pattern of multiple concurrent agent CLIs (pi) plus app chat
-# tabs plus voice (TTS) plus image generation, all against ONE server, across
-# MULTIPLE models (two chat models = per-model batch groups + multi-model
-# registry; Kokoro TTS + FLUX klein ride the gen_queue on the same inference
-# thread). Video is deliberately excluded (heavy, minutes-long).
+# Simulates the load pattern of multiple concurrent agent CLIs (pi) plus chat
+# tabs, all against ONE server, across MULTIPLE models (two chat models =
+# per-model batch groups + multi-model registry).
 #
 # What it asserts is CORRECTNESS UNDER LOAD, not latency: every stream
-# terminates cleanly ([DONE], finish_reason), every media request returns real
-# bytes, no request is lost, and the server is alive and functional afterwards.
-# A media generation legitimately stalls chat decode (single GPU, accepted
-# design) — client timeouts here are generous on purpose.
+# terminates cleanly ([DONE], finish_reason), no request is lost, and the server
+# is alive and functional afterwards. Client timeouts are generous on purpose.
 #
 # Usage:
 #   ./tests/test_multiclient_stress.sh [port]
 # Env:
 #   STRESS_CHAT_A   agent-workload chat model dir (default gemma-4-e4b-it-4bit)
 #   STRESS_CHAT_B   plain-chat model dir, should differ from A (default gemma-4-e2b-it-4bit)
-#   STRESS_TTS      TTS model dir (default Kokoro-82M-MLX-Serve; empty to skip leg)
-#   STRESS_IMAGE    image model dir (default FLUX.2-klein-4B-mflux-4bit; empty to skip leg)
-#   N_AGENTS=3 N_PLAIN=2 N_TTS=3 N_IMG=2 MAX_TOKENS=200 ROUNDS=1
+#   N_AGENTS=3 N_PLAIN=2 MAX_TOKENS=200 ROUNDS=1
 #   STRESS_THINK=1   send enable_thinking on chat A (reasoning models)
 #   STRESS_MTP=1     send enable_mtp on chat A (MoE default is off)
 #   N_ABORT=0        clients that DISCONNECT mid-stream (the pi-stop pattern)
-#   N_CHURN=0        load/unload cycles on chat B (the app's media load→gen→unload pattern)
+#   N_CHURN=0        load/unload cycles on chat B (load → generate → unload)
 #   SOAK_WAVES=1     repeat the whole concurrent mix N times against ONE server,
 #                    sampling /props memory after each wave; with >= 3 waves the
 #                    final active_bytes must stay within 1.5x of wave 2's
@@ -40,12 +34,8 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 MODELS_ROOT="$HOME/.mlx-serve/models"
 CHAT_A="${STRESS_CHAT_A:-$MODELS_ROOT/mlx-community/gemma-4-e4b-it-4bit}"
 CHAT_B="${STRESS_CHAT_B:-$MODELS_ROOT/mlx-community/gemma-4-e2b-it-4bit}"
-TTS="${STRESS_TTS-$MODELS_ROOT/ddalcu/Kokoro-82M-MLX-Serve}"
-IMAGE="${STRESS_IMAGE-$MODELS_ROOT/Runpod/FLUX.2-klein-4B-mflux-4bit}"
 N_AGENTS=${N_AGENTS:-3}
 N_PLAIN=${N_PLAIN:-2}
-N_TTS=${N_TTS:-3}
-N_IMG=${N_IMG:-2}
 N_ABORT=${N_ABORT:-0}
 N_CHURN=${N_CHURN:-0}
 MAX_TOKENS=${MAX_TOKENS:-200}
@@ -56,8 +46,6 @@ BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
 [ -x "$BINARY" ] || { echo -e "${RED}FAIL${NC} $BINARY not found (zig build -Doptimize=ReleaseFast)"; exit 1; }
 [ -d "$CHAT_A" ] || { echo -e "${YELLOW}SKIP${NC} chat model A not found: $CHAT_A (set STRESS_CHAT_A)"; exit 0; }
 [ -d "$CHAT_B" ] || { echo -e "${YELLOW}SKIP${NC} chat model B not found: $CHAT_B (set STRESS_CHAT_B)"; exit 0; }
-[ -n "$TTS" ] && [ ! -d "$TTS" ] && { echo "note: TTS model missing, skipping TTS leg"; TTS=""; }
-[ -n "$IMAGE" ] && [ ! -d "$IMAGE" ] && { echo "note: image model missing, skipping image leg"; IMAGE=""; }
 
 if curl -sf "$BASE/health" >/dev/null 2>&1; then
     echo -e "${RED}FAIL${NC} port $PORT already serving — pick another port"; exit 1
@@ -76,7 +64,7 @@ trap cleanup EXIT
 # ---------------------------------------------------------------- worker ----
 cat > "$TMP/worker.py" <<'PY'
 """One stress worker. Argv: kind label base model extra...
-kind: agent | plain | tts | img
+kind: agent | plain | abort | churn
 Writes PASS/FAIL + detail to stdout; exit 0 on pass."""
 import json, os, sys, time, urllib.request, urllib.error
 
@@ -188,24 +176,6 @@ def run_plain():
         assert content.strip(), f"round {r}: empty content"
     return "plain rounds clean"
 
-def run_tts():
-    for r in range(ROUNDS):
-        wav = post("/v1/audio/speech",
-                   {"model": model, "input": f"Stress test utterance number {r} from worker {label}."})
-        assert len(wav) > 10000, f"round {r}: tiny audio ({len(wav)} bytes)"
-        assert wav[:4] == b"RIFF", f"round {r}: not a WAV"
-    return "tts rounds clean"
-
-def run_img():
-    for r in range(ROUNDS):
-        out = json.loads(post("/v1/images/generations",
-                              {"model": model, "prompt": f"a small {['red', 'blue', 'green'][r % 3]} triangle on white",
-                               "steps": 4, "size": "512x512"}))
-        import base64
-        png = base64.b64decode(out["data"][0]["b64_json"])
-        assert png[:8] == bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), f"round {r}: not a PNG"
-    return "img rounds clean"
-
 def run_abort():
     """Start streams and vanish mid-generation — the killed-pi / closed-tab
     pattern. Server must cancel the slot and stay healthy."""
@@ -217,8 +187,8 @@ def run_abort():
     return "aborted streams issued"
 
 def run_churn():
-    """The app's media flow: load -> use -> unload, repeatedly, while chat
-    traffic runs against OTHER models."""
+    """Load -> use -> unload, repeatedly, while chat traffic runs against
+    OTHER models."""
     for r in range(ROUNDS):
         post("/v1/load-model", {"model": model})
         content, _, _, done = stream_chat(
@@ -229,7 +199,7 @@ def run_churn():
 
 t0 = time.time()
 try:
-    detail = {"agent": run_agent, "plain": run_plain, "tts": run_tts, "img": run_img,
+    detail = {"agent": run_agent, "plain": run_plain,
               "abort": run_abort, "churn": run_churn}[kind]()
     print(f"PASS {label}: {detail} ({time.time() - t0:.1f}s)")
 except Exception as e:
@@ -255,14 +225,10 @@ print(next((m['id'] for m in d['data'] if m['id'].lower().endswith(want)), ''))"
 ID_A=$(resolve_id "$CHAT_A"); ID_B=$(resolve_id "$CHAT_B")
 [ -n "$ID_A" ] || { echo -e "${RED}FAIL${NC} chat A not discovered ($CHAT_A)"; exit 1; }
 [ -n "$ID_B" ] || { echo -e "${RED}FAIL${NC} chat B not discovered ($CHAT_B)"; exit 1; }
-ID_TTS=""; ID_IMG=""; ID_A2=""
-[ -n "$TTS" ] && ID_TTS=$(resolve_id "$TTS")
-[ -n "$IMAGE" ] && ID_IMG=$(resolve_id "$IMAGE")
+ID_A2=""
 [ -n "${STRESS_CHAT_A2:-}" ] && [ -d "${STRESS_CHAT_A2}" ] && ID_A2=$(resolve_id "$STRESS_CHAT_A2")
 echo "   chat A: $ID_A"
 echo "   chat B: $ID_B"
-[ -n "$ID_TTS" ] && echo "   tts:    $ID_TTS"
-[ -n "$ID_IMG" ] && echo "   image:  $ID_IMG"
 [ -n "$ID_A2" ] && echo "   chat A2 (even waves): $ID_A2"
 
 mem_sample() {  # -> "active_mb cache_mb"
@@ -273,16 +239,13 @@ print(m.get('active_bytes', 0) // (1 << 20), m.get('cache_bytes', 0) // (1 << 20
 }
 
 # ---------------------------------------------------------------- fire ------
-TTS_N=0; IMG_N=0
-[ -n "$ID_TTS" ] && TTS_N=$N_TTS
-[ -n "$ID_IMG" ] && IMG_N=$N_IMG
 SOAK_WAVES=${SOAK_WAVES:-1}
 FAILED=0
 MEM_WAVE2=""
 for wave in $(seq 1 "$SOAK_WAVES"); do
     WAVE_A="$ID_A"
     [ -n "$ID_A2" ] && [ $((wave % 2)) -eq 0 ] && WAVE_A="$ID_A2"
-    echo "== wave $wave/$SOAK_WAVES: $N_AGENTS agent($WAVE_A) + $N_PLAIN plain + $TTS_N tts + $IMG_N img + $N_ABORT abort + $N_CHURN churn =="
+    echo "== wave $wave/$SOAK_WAVES: $N_AGENTS agent($WAVE_A) + $N_PLAIN plain + $N_ABORT abort + $N_CHURN churn =="
     PIDS=(); NAMES=()
     spawn() {  # kind label model rounds
         python3 "$TMP/worker.py" "$1" "$2" "$BASE" "$3" "$MAX_TOKENS" "$4" \
@@ -293,8 +256,6 @@ for wave in $(seq 1 "$SOAK_WAVES"); do
     # count is gated before its loop.
     [ "$N_AGENTS" -gt 0 ] && for i in $(seq 1 "$N_AGENTS"); do spawn agent "w$wave-agent$i" "$WAVE_A" "$ROUNDS"; done
     [ "$N_PLAIN" -gt 0 ] && for i in $(seq 1 "$N_PLAIN"); do spawn plain "w$wave-plain$i" "$ID_B" "$ROUNDS"; done
-    [ -n "$ID_TTS" ] && spawn tts "w$wave-tts" "$ID_TTS" "$N_TTS"
-    [ -n "$ID_IMG" ] && spawn img "w$wave-img" "$ID_IMG" "$N_IMG"
     [ "$N_ABORT" -gt 0 ] && for i in $(seq 1 "$N_ABORT"); do spawn abort "w$wave-abort$i" "$WAVE_A" "$ROUNDS"; done
     [ "$N_CHURN" -gt 0 ] && for i in $(seq 1 "$N_CHURN"); do spawn churn "w$wave-churn$i" "$ID_B" "$ROUNDS"; done
 
@@ -361,8 +322,6 @@ engaged() {  # pattern expected_count leg
 }
 engaged "model id=$ID_A ready" 1 "chat A load"
 engaged "model id=$ID_B ready" 1 "chat B load"
-[ -n "$ID_IMG" ] && engaged '\[image\] -> [0-9]+ PNG bytes' $((N_IMG * SOAK_WAVES)) "image generations"
-[ -n "$ID_TTS" ] && engaged ' -> [0-9]+ WAV bytes' $((N_TTS * SOAK_WAVES)) "TTS generations"
 
 if [ "$FAILED" -gt 0 ]; then
     echo -e "${RED}FAIL${NC} $FAILED worker(s) failed (server survived)"

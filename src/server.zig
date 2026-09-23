@@ -28,7 +28,6 @@ const ds4_ffi = if (@import("build_options").ios) @import("ds4_ffi_stub.zig") el
 const model_registry_mod = @import("model_registry.zig");
 const model_discovery = @import("model_discovery.zig");
 const model_settings = @import("model_settings.zig");
-const media_mod = @import("gen.zig");
 const stb = @import("stb");
 const webp = @import("webp");
 const metrics = @import("status.zig");
@@ -138,7 +137,6 @@ test "shouldWarnOpenBind: warn only on an UNCHOSEN non-loopback bind" {
 }
 
 const io_util = @import("io_util.zig");
-const multipart = @import("multipart.zig");
 const ws_mod = @import("ws.zig");
 const build_options = @import("build_options");
 const nowSecs = io_util.nowSecs;
@@ -705,14 +703,9 @@ const ROUTE_PATHS = [_][]const u8{
     "/metrics.json",
     "/props",
     "/tokenize",
-    "/v1/3d/generations",
-    "/v1/audio/music-generations",
-    "/v1/audio/speech",
     "/v1/chat/completions",
     "/v1/completions",
     "/v1/embeddings",
-    "/v1/images/edits",
-    "/v1/images/generations",
     "/v1/load-model",
     "/v1/messages",
     "/v1/models",
@@ -720,7 +713,6 @@ const ROUTE_PATHS = [_][]const u8{
     "/v1/responses",
     "/v1/responses/compact",
     "/v1/unload-model",
-    "/v1/video/generations",
 };
 
 /// Is `path` an endpoint this server serves at all (any method)?
@@ -732,41 +724,16 @@ fn routeExists(path: []const u8) bool {
 }
 
 pub const max_request_bytes: usize = 64 * 1024 * 1024;
-pub const max_media_request_bytes: usize = 512 * 1024 * 1024;
-
-/// Per-route request-body cap. Media bodies are base64 payloads — a single
-/// ref2va reference video is ~100 MB of JPEG frames, three plus full-res
-/// reference images approach 500 MB (issue #151) — while no JSON chat body
-/// has any business near 64 MB.
-pub fn maxRequestBytesFor(path: []const u8) usize {
-    for ([_][]const u8{ "/v1/images/", "/v1/video/", "/v1/audio/", "/v1/3d/" }) |p|
-        if (std.mem.startsWith(u8, path, p)) return max_media_request_bytes;
-    return max_request_bytes;
-}
 
 /// The 413 names BOTH numbers it compared (context-overflow-400 class): a
 /// refusal that only names the cap reads as "this should have worked".
 fn payloadTooLargeMessage(buf: []u8, got: usize, cap: usize) []const u8 {
     const mb = 1024 * 1024;
-    return std.fmt.bufPrint(buf, "Request body too large: {d} MB exceeds this endpoint's {d} MB limit", .{
+    return std.fmt.bufPrint(buf, "Request body too large: {d} MB exceeds the {d} MB limit", .{
         (got + mb - 1) / mb, cap / mb,
     }) catch "Request body too large";
 }
 
-/// The requested model id from a request body of EITHER shape.
-///
-/// Every endpoint we serve takes JSON except `/v1/images/edits`, which is
-/// `multipart/form-data` — and model resolution runs BEFORE that route
-/// translates the form to JSON, so a JSON-only scan reads no id and the request
-/// silently falls back to the default model. Live via Open WebUI (2026-07-25):
-/// an edit naming a Mage-Flow model ran against the default CHAT model and 400'd
-/// "Target model does not support this media modality"; on a headless boot with
-/// no default it 503'd "No default model configured" instead. Both existing edit
-/// tests boot with `--model <the image model>`, so the default was always the
-/// right one and neither could see it.
-///
-/// Every consumer of the requested id must go through here, so the LAN gate and
-/// dispatch can't disagree about which model a request names.
 /// `?model=<id>` for bodiless GETs (`/props`), percent-decoded into `buf`.
 fn queryModel(buf: []u8, raw_path: []const u8) ?[]const u8 {
     const q = raw_path[(std.mem.indexOfScalar(u8, raw_path, '?') orelse return null) + 1 ..];
@@ -779,17 +746,6 @@ fn queryModel(buf: []u8, raw_path: []const u8) ?[]const u8 {
         return std.Uri.percentDecodeInPlace(buf[0..v.len]);
     }
     return null;
-}
-
-pub fn parseModelFromRequest(body: []const u8, content_type: []const u8) ?[]const u8 {
-    if (multipart.boundaryFromContentType(content_type)) |boundary| {
-        var it = multipart.Iterator.init(body, boundary) catch return null;
-        while (it.next()) |part| {
-            if (std.mem.eql(u8, part.name, "model") and part.data.len > 0) return part.data;
-        }
-        return null;
-    }
-    return parseModelFromBody(body);
 }
 
 /// Module-level capacity for plan 03 hot prefix cache. main.zig writes this
@@ -1934,19 +1890,10 @@ fn handleConnection(
     // Phase 2: Allocate buffer for full request and read remaining body
     const cl = content_length orelse 0;
     const total_size = header_end_pos + cl;
-    // The cap is per ROUTE, so peek the path off the request line we already
-    // have — media bodies carry base64 frames and dwarf any JSON chat body.
-    const req_path = blk: {
-        const line_end = std.mem.indexOf(u8, hdr_buf[0..header_end_pos], "\r\n") orelse break :blk "";
-        var it = std.mem.splitScalar(u8, hdr_buf[0..line_end], ' ');
-        _ = it.next();
-        break :blk it.next() orelse "";
-    };
-    const max_request_size = maxRequestBytesFor(req_path);
-    if (total_size > max_request_size) {
+    if (total_size > max_request_bytes) {
         var msg_buf: [128]u8 = undefined;
-        const msg = payloadTooLargeMessage(&msg_buf, total_size, max_request_size);
-        log.warn("[http] 413 {s}: {s}\n", .{ req_path, msg });
+        const msg = payloadTooLargeMessage(&msg_buf, total_size, max_request_bytes);
+        log.warn("[http] 413: {s}\n", .{msg});
         try sendErrorResponse(allocator, stream, "413 Payload Too Large", "invalid_request_error", msg, 413);
         return;
     }
@@ -1971,10 +1918,6 @@ fn handleConnection(
     // Strip query string for route matching (e.g. /v1/messages?beta=true -> /v1/messages)
     const path = if (std.mem.indexOf(u8, raw_path, "?")) |qpos| raw_path[0..qpos] else raw_path;
     const request_body = if (total_read > header_end_pos) request[header_end_pos..total_read] else "";
-    // Needed before model resolution, not just at the handler: `/v1/images/edits`
-    // carries its model in a multipart FIELD, which only the content-type's
-    // boundary lets us find (`parseModelFromRequest`).
-    const request_content_type = findHeaderValue(request[0..header_end_pos], "content-type") orelse "";
     logHttpRequest(method, raw_path, request_body);
 
     // ── API-key auth gate. When --api-key is set, every NON-LOOPBACK request
@@ -2112,7 +2055,7 @@ fn handleConnection(
     var query_model_buf: [512]u8 = undefined;
     var requested_model_id = unescapeJsonSlashes(
         &model_id_buf,
-        parseModelFromRequest(request_body, request_content_type) orelse queryModel(&query_model_buf, raw_path) orelse "",
+        parseModelFromBody(request_body) orelse queryModel(&query_model_buf, raw_path) orelse "",
     );
     if (requested_model_id.len > 0 and !std.mem.eql(u8, requested_model_id, "mlx-serve")) {
         if (registry.peek(requested_model_id) == null) {
@@ -2302,39 +2245,6 @@ fn handleConnection(
         const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
         const body = request[header_end + 4 .. total_read];
         try handleDetokenize(allocator, stream, body, lm);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/v1/images/generations")) {
-        const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
-        const body = request[header_end + 4 .. total_read];
-        try handleGen(allocator, stream, body, lm, .image);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/v1/images/edits")) {
-        // OpenAI's image-EDIT surface: multipart/form-data, not JSON. Translated
-        // into the `/v1/images/generations` edit body (gen.openaiEditFormToJson)
-        // and served by the identical path — no second inference route.
-        const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
-        const ct = findHeaderValue(request[0..header_end], "content-type") orelse "";
-        const body = request[header_end + 4 .. total_read];
-        const json = media_mod.openaiEditFormToJson(allocator, body, ct) catch |err| {
-            try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", media_mod.editFormErrorMessage(err), 400);
-            return;
-        };
-        defer allocator.free(json);
-        try handleGen(allocator, stream, json, lm, .image);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/v1/audio/speech")) {
-        const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
-        const body = request[header_end + 4 .. total_read];
-        try handleGen(allocator, stream, body, lm, .speech);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/v1/audio/music-generations")) {
-        const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
-        const body = request[header_end + 4 .. total_read];
-        try handleGen(allocator, stream, body, lm, .music);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/v1/video/generations")) {
-        const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
-        const body = request[header_end + 4 .. total_read];
-        try handleGen(allocator, stream, body, lm, .video);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/v1/3d/generations")) {
-        const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
-        const body = request[header_end + 4 .. total_read];
-        try handleGen(allocator, stream, body, lm, .mesh);
     } else {
         log.warn("{s} {s} -> 404\n", .{ method, path });
         try sendErrorResponse(allocator, stream, "404 Not Found", "not_found", "The requested endpoint does not exist", null);
@@ -2619,8 +2529,7 @@ pub fn mlxCacheLimitFromEnv(raw: ?[]const u8, total_ram: u64) u64 {
 /// hand-rolled per-path config is exactly how `runHeadlessServe` (the mode the
 /// app always launches) came to silently eat the `--pld*` flags.
 ///
-/// Never RAISES a tighter existing cap: `scheduler.runGenRequest` drops the pool
-/// to 1 GB on small-RAM machines during media gen, and iOS boots at 384 MB.
+/// Never RAISES a tighter existing cap.
 pub fn applyMlxCacheLimit() void {
     const env: ?[]const u8 = if (std.c.getenv("MLX_SERVE_CACHE_LIMIT")) |p|
         std.mem.span(p)
@@ -5876,9 +5785,7 @@ fn optSamplingRecJson(allocator: std.mem.Allocator, comptime T: type, v: ?T) ![]
 
 /// Render the JSON metadata fragment for one entry. For `.ready` entries
 /// Capability flags for a READY registry entry, kept as plain booleans so the
-/// JSON assembly below is hermetically testable without a LoadedModel. Every
-/// engine slot on LoadedModel must have a flag here — a missing arm renders a
-/// ready model with an empty capabilities list (the live `.mesh`/"3d" hole).
+/// JSON assembly below is hermetically testable without a LoadedModel.
 const ReadyCaps = struct {
     has_chat: bool = false,
     has_vision: bool = false,
@@ -5887,13 +5794,6 @@ const ReadyCaps = struct {
     /// Encoder-only (BERT/EmbeddingGemma) OR a decoder with a pooling contract
     /// (Qwen3-Embedding) — `config.hasEmbeddingCapability()`. Issue #116.
     has_embedding: bool = false,
-    has_image_engine: bool = false,
-    has_audio_engine: bool = false,
-    /// Audio engine's backend is the ACE-Step music generator (advertises
-    /// "music" ADDITIVELY beside "audio", the ready-model "3d" precedent).
-    has_music_backend: bool = false,
-    has_video_engine: bool = false,
-    has_mesh_engine: bool = false,
 };
 
 /// Chat capability for a READY entry. Template presence is NOT the gate for
@@ -5931,12 +5831,6 @@ fn readyCapsJson(allocator: std.mem.Allocator, c: ReadyCaps) !std.ArrayList(u8) 
     if (c.has_reasoning) try append_cap(allocator, &caps, &n_caps, "reasoning");
     if (c.has_chat) try append_cap(allocator, &caps, &n_caps, "json_schema");
     if (c.has_embedding) try append_cap(allocator, &caps, &n_caps, "embeddings");
-    // Native media-generation engines (resident).
-    if (c.has_image_engine) try append_cap(allocator, &caps, &n_caps, "image");
-    if (c.has_audio_engine and !c.has_audio) try append_cap(allocator, &caps, &n_caps, "audio");
-    if (c.has_music_backend) try append_cap(allocator, &caps, &n_caps, "music");
-    if (c.has_video_engine) try append_cap(allocator, &caps, &n_caps, "video");
-    if (c.has_mesh_engine) try append_cap(allocator, &caps, &n_caps, "3d");
     try caps.append(allocator, ']');
     return caps;
 }
@@ -5948,26 +5842,12 @@ fn readyCapsJson(allocator: std.mem.Allocator, c: ReadyCaps) !std.ArrayList(u8) 
 /// decision is hermetically testable.
 const TextGenTarget = struct {
     is_encoder_only: bool = false,
-    arch_hint: []const u8 = "",
-    has_image_engine: bool = false,
-    has_audio_engine: bool = false,
-    has_video_engine: bool = false,
-    has_mesh_engine: bool = false,
     /// A text-capable LM is resident (transformer / ds4 engine) —
     /// or the entry isn't loaded yet, in which case stubs default to
     /// "assume text until the arch hint or a load says otherwise".
     has_text_lm: bool = true,
 };
 
-/// Reason a text-generation route must reject this model with a 400, or
-/// null when it can serve text. Crash class (live SIGSEGV 2026-07-06): a
-/// chat request routed at a media model has only the gen stub CPU state —
-/// the empty stub tokenizer produced 0 prompt tokens and prefill deref'd
-/// `transformer == null`, killing the whole server from one request (any
-/// remote client naming a media model could down it). Media entries are
-/// detected BOTH pre-load (discovery arch_hint) and post-load (engine
-/// slots) — either alone has gaps: `--model` primaries carry no hint,
-/// engines exist only while resident.
 /// A request carrying images/video/audio on a model serving WITHOUT its tower
 /// (`--no-vision`, or a checkpoint with no vision weights) is refused by name.
 /// Before this the media parts were parsed and then silently dropped — the
@@ -5990,21 +5870,11 @@ test "mediaRejectReason: media on a tower-less model is refused by name, text pa
     try t.expect(std.mem.indexOf(u8, mediaRejectReason(&aud).?, "audio") != null);
 }
 
+/// Reason a text-generation route must reject this model with a 400, or null
+/// when it can serve text: a request that reached prefill with no language
+/// model resident would dereference a null transformer.
 fn textGenRejectReason(t: TextGenTarget) ?[]const u8 {
     if (t.is_encoder_only) return "Encoder-only models do not support text generation. Use /v1/embeddings instead.";
-    const modality: ?media_mod.Modality = blk: {
-        if (t.has_image_engine) break :blk .image;
-        if (t.has_video_engine) break :blk .video;
-        if (t.has_mesh_engine) break :blk .mesh;
-        if (t.has_audio_engine) break :blk .audio;
-        break :blk media_mod.modalityFromType(t.arch_hint);
-    };
-    if (modality) |m| return switch (m) {
-        .image => "This is an image generation model; it cannot serve chat/text requests. Use POST /v1/images/generations instead.",
-        .audio => "This is an audio generation model; it cannot serve chat/text requests. Use POST /v1/audio/speech (TTS) or /v1/audio/music-generations (music) instead.",
-        .video => "This is a video generation model; it cannot serve chat/text requests. Use POST /v1/video/generations instead.",
-        .mesh => "This is a 3D generation model; it cannot serve chat/text requests. Use POST /v1/3d/generations instead.",
-    };
     if (!t.has_text_lm) return "This model cannot serve text generation (no language model resident).";
     return null;
 }
@@ -6016,11 +5886,6 @@ fn textGenTargetOf(lm: *LoadedModel) TextGenTarget {
     const cpu_state_stable = lm.state != .loading;
     return .{
         .is_encoder_only = cpu_state_stable and lm.config != null and lm.config.?.is_encoder_only,
-        .arch_hint = lm.arch_hint,
-        .has_image_engine = lm.image_engine != null,
-        .has_audio_engine = lm.audio_engine != null,
-        .has_video_engine = lm.video_engine != null,
-        .has_mesh_engine = lm.mesh_engine != null,
         .has_text_lm = lm.state != .ready or lm.transformer != null or
             lm.ds4_engine != null,
     };
@@ -6037,7 +5902,7 @@ fn isStatusRoute(method: []const u8, path: []const u8) bool {
 }
 
 /// True for the routes textGenRejectReason protects — used for the
-/// pre-load peek so naming a media model in a chat request doesn't
+/// pre-load peek so naming an encoder in a chat request doesn't
 /// cold-load gigabytes just to earn its 400.
 fn isTextGenRoute(method: []const u8, path: []const u8) bool {
     if (std.mem.eql(u8, method, "POST")) {
@@ -6096,14 +5961,6 @@ fn renderModelEntry(
             .has_audio = has_audio,
             .has_reasoning = has_chat and chatTemplateSupportsThinking(chat_config.chat_template),
             .has_embedding = config.hasEmbeddingCapability(),
-            .has_image_engine = entry.image_engine != null,
-            .has_audio_engine = entry.audio_engine != null,
-            .has_music_backend = if (entry.audio_engine) |ae| switch (ae.backend) {
-                .music, .music3 => true,
-                else => false,
-            } else false,
-            .has_video_engine = entry.video_engine != null,
-            .has_mesh_engine = entry.mesh_engine != null,
         });
         defer caps.deinit(allocator);
 
@@ -6265,17 +6122,7 @@ fn renderModelEntry(
     // template is adopted at load), so advertise the chat capability set the
     // ready path would.
     const is_gguf_stub = std.mem.eql(u8, entry.arch_hint, "gguf");
-    // Native media-gen stub (image/audio/video) — advertise the modality from
-    // the discovery-peeked arch_hint so the app can find it before loading.
-    const media_modality = media_mod.modalityFromType(entry.arch_hint);
     const caps_part: []const u8 = blk: {
-        if (media_modality) |m| {
-            // The music backend advertises "music" beside "audio" on the stub
-            // too (matches the ready-path readyCapsJson additive rule).
-            if (m == .audio and media_mod.audioBackendKindForType(entry.arch_hint).servesMusic())
-                break :blk try allocator.dupe(u8, ",\"capabilities\":[\"audio\",\"music\"]");
-            break :blk try std.fmt.allocPrint(allocator, ",\"capabilities\":[\"{s}\"]", .{m.capability()});
-        }
         if (is_encoder_stub) break :blk try allocator.dupe(u8, ",\"capabilities\":[\"embeddings\"]");
         if (is_gguf_stub) break :blk try allocator.dupe(u8, ",\"capabilities\":[\"chat\",\"tool_use\",\"streaming\",\"json_schema\"]");
         if (!sm.found or !(sm.has_chat or sm.has_vision or stub_has_embedding)) break :blk try allocator.dupe(u8, "");
@@ -6492,10 +6339,6 @@ fn handleLoadModelStrict(allocator: std.mem.Allocator, stream: *Conn, request_bo
                 try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", "Model at that path has an unsupported quantization mode", 400);
                 return;
             },
-            error.IncompleteMediaPack => {
-                try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", "Model at that path is an incomplete media pack (weights still downloading, or a partial copy)", 400);
-                return;
-            },
             else => return err,
         };
     }
@@ -6565,64 +6408,6 @@ fn handleLoadModelStrict(allocator: std.mem.Allocator, stream: *Conn, request_bo
     });
     defer allocator.free(body);
     try sendResponse(stream, "200 OK", "application/json", body);
-}
-
-/// Media-generation job payload. Carries the connection + body + resolved
-/// model into the inference thread, where `genJobRun` runs the actual
-/// generation (mlx + SSE writes) on the GPU-stream-owning thread.
-const GenJob = struct {
-    allocator: std.mem.Allocator,
-    conn: *Conn,
-    body: []const u8,
-    lm: *model_registry_mod.LoadedModel,
-    route: media_mod.GenRoute,
-};
-
-/// Inference-thread entry point for a gen job. Dispatches on the engine slot
-/// and writes the full HTTP/SSE response to the (parked) connection.
-fn genJobRun(ctx: *anyopaque) void {
-    const job: *GenJob = @ptrCast(@alignCast(ctx));
-    const result = switch (job.route) {
-        .image => if (job.lm.image_engine) |e| media_mod.handleImage(job.allocator, job.conn, job.body, e) else error.WrongModality,
-        .speech => if (job.lm.audio_engine) |e| media_mod.handleAudio(job.allocator, job.conn, job.body, e) else error.WrongModality,
-        .music => if (job.lm.audio_engine) |e| media_mod.handleMusic(job.allocator, job.conn, job.body, e) else error.WrongModality,
-        .video => if (job.lm.video_engine) |e| media_mod.handleVideo(job.conn.io, job.allocator, job.conn, job.body, e) else error.WrongModality,
-        .mesh => if (job.lm.mesh_engine) |e| media_mod.handleMesh(job.allocator, job.conn, job.body, e) else error.WrongModality,
-    };
-    result catch |err| {
-        log.warn("[gen] {s} job failed: {s}\n", .{ @tagName(job.route), @errorName(err) });
-    };
-}
-
-/// Dispatch a media-generation request to the inference thread. `lm` is the
-/// already-resolved + refcounted model (so it can't be evicted mid-gen). The
-/// generation runs on the scheduler's inference thread (the sole mlx caller);
-/// the body writes its own response. A wrong-modality target gets a clear 400.
-fn handleGen(allocator: std.mem.Allocator, stream: *Conn, body: []const u8, lm: *model_registry_mod.LoadedModel, route: media_mod.GenRoute) !void {
-    const scheduler = global_scheduler orelse {
-        try sendErrorResponse(allocator, stream, "503 Service Unavailable", "internal_error", "Scheduler not ready", 503);
-        return;
-    };
-    const ok = switch (route.modality()) {
-        .image => lm.image_engine != null,
-        .audio => lm.audio_engine != null,
-        .video => lm.video_engine != null,
-        .mesh => lm.mesh_engine != null,
-    };
-    if (!ok) {
-        try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", "Target model does not support this media modality. Load the matching image/audio/video/3D model and target it by id.", 400);
-        return;
-    }
-    var job = GenJob{ .allocator = allocator, .conn = stream, .body = body, .lm = lm, .route = route };
-    var req = scheduler_mod.GenRequest{ .ctx = &job, .run = genJobRun, .model = lm };
-    scheduler.runGeneration(&req) catch |err| switch (err) {
-        error.Shutdown => {
-            try sendErrorResponse(allocator, stream, "503 Service Unavailable", "shutting_down", "Server is shutting down", 503);
-            return;
-        },
-        else => return err,
-    };
-    // The job body wrote the full HTTP/SSE response on the inference thread.
 }
 
 /// Does an unload body carry keys but no usable `"model"`? `{"model_id": id}`
@@ -11400,25 +11185,6 @@ fn findContentLength(headers: []const u8) ?usize {
     return null;
 }
 
-/// Case-insensitive header lookup returning the trimmed VALUE (`Content-Type`
-/// carries the multipart boundary, so `/v1/images/edits` can't be parsed from
-/// the body alone like every other endpoint).
-fn findHeaderValue(headers: []const u8, comptime name_lower: []const u8) ?[]const u8 {
-    var lines = std.mem.splitSequence(u8, headers, "\r\n");
-    while (lines.next()) |line| {
-        if (line.len <= name_lower.len or line[name_lower.len] != ':') continue;
-        var match = true;
-        for (0..name_lower.len) |j| {
-            if (std.ascii.toLower(line[j]) != name_lower[j]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) return std.mem.trim(u8, line[name_lower.len + 1 ..], " \t");
-    }
-    return null;
-}
-
 // ── API-key auth helpers (used only when --api-key / g_api_key is set) ──
 
 /// True if the connection's peer is a loopback address (127.0.0.0/8, ::1, or an
@@ -11741,7 +11507,6 @@ test "routeExists answers endpoint existence without consulting the model" {
     // the server implements EVERYTHING (llmprobe: "server answers unknown paths
     // with HTTP 503" → every surface scored absent, live 2026-07-25).
     try std.testing.expect(routeExists("/v1/chat/completions"));
-    try std.testing.expect(routeExists("/v1/images/edits"));
     try std.testing.expect(routeExists("/v1/embeddings"));
     try std.testing.expect(routeExists("/health"));
     // `/v1/responses/{id}` is served by prefix, not by an exact literal.
@@ -11750,6 +11515,7 @@ test "routeExists answers endpoint existence without consulting the model" {
 
     try std.testing.expect(!routeExists("/v1/__llmprobe_no_such_endpoint__"));
     try std.testing.expect(!routeExists("/v1/audio/transcriptions")); // real OpenAI route we don't serve
+    try std.testing.expect(!routeExists("/v1/images/generations")); // media generation left this build
     try std.testing.expect(!routeExists("/nope"));
     try std.testing.expect(!routeExists(""));
 }
@@ -11860,45 +11626,6 @@ test "every streaming chat emitter carries logprobs (silently-ignored-field guar
     try std.testing.expect(std.mem.indexOfPos(u8, src, chunk_at, interpolates) != null);
 }
 
-test "parseModelFromRequest reads the model out of a multipart form, not just JSON" {
-    // `/v1/images/edits` is the ONE endpoint whose body is multipart, and model
-    // resolution runs BEFORE the route translates that form to JSON. A JSON-only
-    // scan finds no `"model":` key, so the request silently ran against the
-    // DEFAULT model: live via Open WebUI (2026-07-25) an edit naming a Mage-Flow
-    // model hit the default chat model and 400'd "Target model does not support
-    // this media modality"; headless with no default it 503'd instead.
-    const ct = "multipart/form-data; boundary=abc123";
-    // aiohttp (Open WebUI's client) writes the scalar fields first, each with
-    // its own Content-Type line, and the file part last.
-    const body =
-        "--abc123\r\nContent-Type: text/plain; charset=utf-8\r\n" ++
-        "Content-Disposition: form-data; name=\"model\"\r\n\r\nddalcu/Mage-Flow-Edit-Turbo-MLX-Serve-8bit\r\n" ++
-        "--abc123\r\nContent-Type: text/plain; charset=utf-8\r\n" ++
-        "Content-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it winter\r\n" ++
-        "--abc123\r\nContent-Disposition: form-data; name=\"image\"; filename=\"i.png\"\r\n" ++
-        "Content-Type: image/png\r\n\r\n\x89PNG\r\n\x1a\n\x00\r\n--abc123--\r\n";
-    try std.testing.expectEqualStrings(
-        "ddalcu/Mage-Flow-Edit-Turbo-MLX-Serve-8bit",
-        parseModelFromRequest(body, ct) orelse "",
-    );
-
-    // A form with no `model` part is "use the default", same as JSON.
-    const no_model = "--abc123\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nhi\r\n--abc123--\r\n";
-    try std.testing.expect(parseModelFromRequest(no_model, ct) == null);
-    // An empty value is not an id either (aiohttp sends str(None) as "None",
-    // but an unset field arrives empty).
-    const empty = "--abc123\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n\r\n--abc123--\r\n";
-    try std.testing.expect(parseModelFromRequest(empty, ct) == null);
-
-    // JSON bodies are untouched — same answers as the JSON-only scanner, for
-    // every other endpoint we serve.
-    try std.testing.expectEqualStrings("m1", parseModelFromRequest("{\"model\":\"m1\"}", "application/json") orelse "");
-    try std.testing.expectEqualStrings("m1", parseModelFromRequest("{\"model\":\"m1\"}", "") orelse "");
-    try std.testing.expect(parseModelFromRequest("{\"prompt\":\"x\"}", "application/json") == null);
-    // A multipart content-type with a JSON body (or a truncated form) degrades
-    // to "no id" rather than misreading one.
-    try std.testing.expect(parseModelFromRequest("{\"model\":\"m1\"}", ct) == null);
-}
 
 test "ipIsLoopback exempts local addresses only" {
     // IPv4 loopback (whole 127.0.0.0/8) is exempt; a LAN address is not.
@@ -20985,50 +20712,21 @@ test "optSamplingRecJson emits number when present, null when absent" {
     try std.testing.expectEqualStrings("null", none);
 }
 
-test "textGenRejectReason: media + encoder models rejected, chat models pass (SIGSEGV class 2026-07-06)" {
+test "textGenRejectReason: encoder and LM-less entries rejected, chat models pass" {
     // Chat-capable targets pass — resident MLX LM, embedded engines, and
-    // unloaded stubs with a chat arch hint (or none: benefit of the doubt
-    // until load).
-    try std.testing.expect(textGenRejectReason(.{ .arch_hint = "gemma4" }) == null);
-    try std.testing.expect(textGenRejectReason(.{ .arch_hint = "gguf" }) == null);
+    // unloaded stubs (benefit of the doubt until load).
     try std.testing.expect(textGenRejectReason(.{}) == null);
-
-    // The live crash shape: a resident image model — engine slot set, no
-    // transformer. Must reject, never reach prefill.
-    {
-        const r = textGenRejectReason(.{ .has_image_engine = true, .has_text_lm = false });
-        try std.testing.expect(r != null);
-        try std.testing.expect(std.mem.indexOf(u8, r.?, "/v1/images/generations") != null);
-    }
-    // Pre-load detection via the discovery arch hint — no engine resident yet.
-    {
-        const r = textGenRejectReason(.{ .arch_hint = "flux2-klein-4b" });
-        try std.testing.expect(std.mem.indexOf(u8, r.?, "/v1/images/generations") != null);
-    }
-    try std.testing.expect(std.mem.indexOf(u8, textGenRejectReason(.{ .arch_hint = "hunyuan3d_2_1" }).?, "/v1/3d/generations") != null);
-    try std.testing.expect(std.mem.indexOf(u8, textGenRejectReason(.{ .arch_hint = "qwen3_tts" }).?, "/v1/audio/speech") != null);
-    try std.testing.expect(std.mem.indexOf(u8, textGenRejectReason(.{ .arch_hint = "acestep" }).?, "music-generations") != null);
-    try std.testing.expect(std.mem.indexOf(u8, textGenRejectReason(.{ .arch_hint = "AudioVideo" }).?, "/v1/video/generations") != null);
-    try std.testing.expect(std.mem.indexOf(u8, textGenRejectReason(.{ .has_mesh_engine = true }).?, "/v1/3d/generations") != null);
-
-    // Encoder-only keeps its dedicated message (pre-existing guard, now
-    // routed through the same decision).
     try std.testing.expect(std.mem.indexOf(u8, textGenRejectReason(.{ .is_encoder_only = true }).?, "/v1/embeddings") != null);
-
-    // Catch-all: a READY entry with no LM and no engines (future modality)
-    // still rejects instead of crashing.
+    // A READY entry with no LM resident rejects instead of crashing.
     try std.testing.expect(textGenRejectReason(.{ .has_text_lm = false }) != null);
 }
-
 test "isTextGenRoute covers exactly the guarded surfaces" {
     try std.testing.expect(isTextGenRoute("POST", "/v1/chat/completions"));
     try std.testing.expect(isTextGenRoute("POST", "/v1/completions"));
     try std.testing.expect(isTextGenRoute("POST", "/v1/messages"));
     try std.testing.expect(isTextGenRoute("POST", "/v1/responses"));
     try std.testing.expect(isTextGenRoute("GET", "/v1/responses")); // WS upgrade
-    // Media + embedding routes must NOT be gated — they serve these models.
-    try std.testing.expect(!isTextGenRoute("POST", "/v1/images/generations"));
-    try std.testing.expect(!isTextGenRoute("POST", "/v1/audio/speech"));
+    // Embedding routes must NOT be gated — they serve encoders.
     try std.testing.expect(!isTextGenRoute("POST", "/v1/embeddings"));
     try std.testing.expect(!isTextGenRoute("GET", "/v1/models"));
 }
@@ -21079,40 +20777,6 @@ test "readyCapsJson: embeddings capability — encoders alone, decoders beside c
     defer both.deinit(a);
     try std.testing.expect(std.mem.indexOf(u8, both.items, "\"chat\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, both.items, "\"embeddings\"") != null);
-}
-
-test "readyCapsJson: every resident media engine surfaces its capability (mesh -> 3d)" {
-    const a = std.testing.allocator;
-
-    // A ready 3D shape model (no chat template, no encoder) must advertise
-    // "3d" — the stub path already did; the READY path shipped without the
-    // mesh arm and rendered [] (live 2026-07-04, test_3d_gen.sh check 1).
-    var mesh = try readyCapsJson(a, .{ .has_mesh_engine = true });
-    defer mesh.deinit(a);
-    try std.testing.expectEqualStrings("[\"3d\"]", mesh.items);
-
-    // The other three engine slots keep their existing capability names.
-    var img = try readyCapsJson(a, .{ .has_image_engine = true });
-    defer img.deinit(a);
-    try std.testing.expectEqualStrings("[\"image\"]", img.items);
-    var aud = try readyCapsJson(a, .{ .has_audio_engine = true });
-    defer aud.deinit(a);
-    try std.testing.expectEqualStrings("[\"audio\"]", aud.items);
-    // A music-backend audio engine advertises "music" ADDITIVELY beside "audio".
-    var mus = try readyCapsJson(a, .{ .has_audio_engine = true, .has_music_backend = true });
-    defer mus.deinit(a);
-    try std.testing.expectEqualStrings("[\"audio\",\"music\"]", mus.items);
-    var vid = try readyCapsJson(a, .{ .has_video_engine = true });
-    defer vid.deinit(a);
-    try std.testing.expectEqualStrings("[\"video\"]", vid.items);
-
-    // Chat-class flags are unaffected by the media arms.
-    var chat = try readyCapsJson(a, .{ .has_chat = true, .has_reasoning = true });
-    defer chat.deinit(a);
-    try std.testing.expectEqualStrings(
-        "[\"chat\",\"tool_use\",\"streaming\",\"reasoning\",\"json_schema\"]",
-        chat.items,
-    );
 }
 
 test "readyHasChat: embedded-engine GGUF without a chat template still advertises chat" {
@@ -22408,22 +22072,6 @@ test "contentTokenRange: logprobs cover the CONTENT, not the reasoning we stripp
     // A token straddling the boundary belongs to content — it put bytes there.
     const mid = contentTokenRange(allocator, &tok, &token_ids, full, full[("<think>\nBecause.\n</thi").len..]);
     try std.testing.expectEqual(@as(usize, 2), mid.start);
-}
-
-test "request body cap is per route: media bodies are base64 frame payloads" {
-    // Issue #151: ONE ref2va reference video is ~100 MB of base64 JPEG frames,
-    // three of them plus full-res ref images can approach 500 MB — while no
-    // JSON chat body has any business near 64 MB.
-    for ([_][]const u8{
-        "/v1/images/generations",
-        "/v1/images/edits",
-        "/v1/video/generations",
-        "/v1/audio/speech",
-        "/v1/audio/music-generations",
-        "/v1/3d/generations",
-    }) |p| try std.testing.expectEqual(max_media_request_bytes, maxRequestBytesFor(p));
-    for ([_][]const u8{ "/v1/chat/completions", "/v1/messages", "/", "" }) |p|
-        try std.testing.expectEqual(max_request_bytes, maxRequestBytesFor(p));
 }
 
 test "the 413 names both counts it compared" {

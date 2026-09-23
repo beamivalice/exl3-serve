@@ -30,7 +30,6 @@ const rp_mod = @import("reasoning_protocol.zig");
 const model_discovery = @import("model_discovery.zig");
 const io_util = @import("io_util.zig");
 const arch_ds4 = if (@import("build_options").ios) @import("arch/ds4_stub.zig") else @import("arch/ds4.zig");
-const gen_mod = @import("gen.zig");
 const generate_mod = @import("generate.zig");
 const log = @import("log.zig");
 
@@ -223,21 +222,6 @@ pub const LoadedModel = struct {
     /// with the engine.
     ds4_session: ?*arch_ds4.Ds4Session = null,
 
-    /// Native media-generation engines, named by MODALITY (not by the FLUX/
-    /// Qwen3-TTS/LTX implementations, which are swappable internals). When one
-    /// is non-null the entry is a media model: the MLX/ds4 fields stay
-    /// null and the server routes the matching gen endpoint through this slot.
-    /// Mutually exclusive with each other and with the LM engine fields. Freed
-    /// FIRST in deinit/unloadResident (they own the bulk of the GPU memory).
-    image_engine: ?*gen_mod.ImageEngine = null,
-    audio_engine: ?*gen_mod.AudioEngine = null,
-    video_engine: ?*gen_mod.VideoEngine = null,
-    mesh_engine: ?*gen_mod.MeshEngine = null,
-    /// Model-wide serialization gate for media generation — mirrors
-    /// `session_busy`. A gen runs to completion on the inference thread
-    /// (the sole mlx caller), so gen-vs-gen is already serial; this flag makes
-    /// the in-flight state visible (set around the gen job).
-    gen_busy: bool = false,
 
     /// Model-wide claim on `ds4_session`: one request drives it at a time,
     /// taken in `Scheduler.submit`, released in `complete`.
@@ -335,23 +319,6 @@ pub const LoadedModel = struct {
             engine.close();
             self.ds4_engine = null;
         }
-        if (self.image_engine) |e| {
-            e.deinit();
-            self.image_engine = null;
-        }
-        if (self.audio_engine) |e| {
-            e.deinit();
-            self.audio_engine = null;
-        }
-        if (self.video_engine) |e| {
-            e.deinit();
-            self.video_engine = null;
-        }
-        if (self.mesh_engine) |e| {
-            e.deinit();
-            self.mesh_engine = null;
-        }
-        self.gen_busy = false;
         if (self.mtp) |h| {
             // Only the Qwen sidecar is a separately allocated object; an
             // in-trunk head would be owned by the Transformer and freed with
@@ -495,23 +462,6 @@ pub const LoadedModel = struct {
             engine.close();
             self.ds4_engine = null;
         }
-        if (self.image_engine) |e| {
-            e.deinit();
-            self.image_engine = null;
-        }
-        if (self.audio_engine) |e| {
-            e.deinit();
-            self.audio_engine = null;
-        }
-        if (self.video_engine) |e| {
-            e.deinit();
-            self.video_engine = null;
-        }
-        if (self.mesh_engine) |e| {
-            e.deinit();
-            self.mesh_engine = null;
-        }
-        self.gen_busy = false;
         if (self.mtp) |h| {
             // Only the Qwen sidecar is a separately allocated object; an
             // in-trunk head would be owned by the Transformer and freed with
@@ -1161,7 +1111,7 @@ pub const ModelRegistry = struct {
         // user loads a chat model via /v1/load-model — the live gen-first→
         // chat-later hole (2026-07-05). The LATEST chat-capable load is the
         // default, so a model-less request never swaps back to an older model;
-        // media engines and embedding encoders never qualify, and an explicit
+        // embedding encoders never qualify, and an explicit
         // default (`--model`, `setDefault`) is never stolen.
         if ((self.default_id.len == 0 or self.default_promoted) and chatCapable(entry) and
             !std.mem.eql(u8, self.default_id, entry.id))
@@ -1173,14 +1123,10 @@ pub const ModelRegistry = struct {
         self.state_cond.broadcast(self.io);
     }
 
-    /// Can this READY entry serve chat/completions? Media models (image/
-    /// audio/video/mesh — identified by model_type, so no engine pointers
-    /// are needed) and embedding encoders cannot.
+    /// Can this READY entry serve chat/completions? Embedding encoders cannot.
     fn chatCapable(entry: *const LoadedModel) bool {
         const cfg = entry.config orelse return false;
-        if (cfg.is_encoder_only) return false;
-        if (model_discovery.isMediaModelType(cfg.model_type)) return false;
-        return true;
+        return !cfg.is_encoder_only;
     }
 
     /// Reserve `estimated` bytes against `reserved_bytes` for an entry that has
@@ -2044,21 +1990,10 @@ test "ModelRegistry: first chat-capable ready load becomes the default on a head
     // gen-first→chat-later hole (live 2026-07-05): a server started headless
     // (no --model) has no default, so requests addressing the "mlx-serve"
     // alias 503 with no_model even after the user loads a chat model via
-    // /v1/load-model. The FIRST chat-capable load is promoted; media engines
-    // and embedding encoders never qualify; an existing default is never
-    // stolen.
+    // /v1/load-model. The FIRST chat-capable load is promoted; embedding
+    // encoders never qualify; an existing default is never stolen.
     var reg = try ModelRegistry.init(testing.allocator, std.Io.Threaded.global_single_threaded.io(), null, 8, 0, null);
     defer reg.deinit();
-
-    // A ready MEDIA model must not become the default.
-    const mesh = try reg.registerStub("hy3d", "/m/hy3d", 64);
-    var mesh_cfg = model_mod.ModelConfig{};
-    mesh_cfg.model_type = "hunyuan3d_2_1";
-    mesh.config = &mesh_cfg;
-    reg.mutex.lockUncancelable(reg.io);
-    reg.markReadyLocked(mesh, 64);
-    reg.mutex.unlock(reg.io);
-    try testing.expectEqualStrings("", reg.default_id);
 
     // A ready embedding ENCODER must not become the default.
     const bge = try reg.registerStub("bge", "/m/bge", 64);
@@ -2105,7 +2040,6 @@ test "ModelRegistry: first chat-capable ready load becomes the default on a head
 
     // The configs are STACK-allocated test doubles — detach them before
     // registry deinit tries to free entry-owned configs.
-    mesh.config = null;
     bge.config = null;
     chat.config = null;
     chat2.config = null;
@@ -2131,12 +2065,12 @@ test "ModelRegistry: rescan absorbs newly downloaded dirs as stubs (add-only, id
 
     // A second model lands on disk AFTER boot (the Model Browser download).
     try tmp.dir.createDirPath(io, "org/second");
-    try tmp.dir.writeFile(io, .{ .sub_path = "org/second/config.json", .data = "{\"model_type\":\"minimax_h3\"}" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "org/second/transformer.safetensors", .data = "0123" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "org/second/config.json", .data = "{\"model_type\":\"mimo_v2\"}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "org/second/model.safetensors", .data = "0123" });
 
     try testing.expectEqual(@as(u32, 1), try reg.rescan());
     const stub = reg.peek("org/second") orelse return error.TestExpectedResult;
-    try testing.expectEqualStrings("minimax_h3", stub.arch_hint);
+    try testing.expectEqualStrings("mimo_v2", stub.arch_hint);
     try testing.expectEqual(LoadState.unloaded, stub.state);
     // Idempotent: nothing new on disk, nothing added, the boot entry untouched.
     try testing.expectEqual(@as(u32, 0), try reg.rescan());

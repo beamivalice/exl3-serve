@@ -27,7 +27,6 @@ body:
       options:
         - Server / API (chat, completions, messages, responses, embeddings)
         - Tool calling / agent harness (Claude Code, pi, opencode, ...)
-        - Media generation (image / video / audio / 3D / TTS)
         - CLI / launch
         - Crash (SIGSEGV / process died)
         - Other

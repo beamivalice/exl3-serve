@@ -37,7 +37,6 @@ const transformer_mod = @import("transformer.zig");
 const tokenizer_mod = @import("tokenizer.zig");
 const generate_mod = @import("generate.zig");
 const rp_mod = @import("reasoning_protocol.zig");
-const gen_mod = @import("gen.zig");
 const drafter_mod = @import("drafter.zig");
 const mtp_mod = @import("mtp.zig");
 const ane_mod = @import("ane.zig");
@@ -1188,25 +1187,6 @@ pub const LoadRequest = struct {
     ds4_path: []const u8 = "",
 };
 
-/// Media-generation work item. Posted by `runGeneration` from a connection
-/// thread; the inference thread invokes `run(ctx)` between ticks so all mlx
-/// ops AND the SSE writes to the (parked) connection happen on the GPU-stream-
-/// owning thread. Decoupled via an opaque ctx + runner so this module needs
-/// no dependency on `server.zig`/`gen.zig` — `server.zig` owns the job body.
-pub const GenRequest = struct {
-    /// Opaque job payload (a `*GenJob` in server.zig).
-    ctx: *anyopaque,
-    /// Runs the job body on the inference thread. Must not return an error
-    /// (it writes any failure into its own response/SSE).
-    run: *const fn (ctx: *anyopaque) void,
-    /// The media model. `gen_busy` is set/cleared around the run for
-    /// visibility; the conn thread's refcount already pins it against eviction.
-    model: *model_registry_mod.LoadedModel,
-    done: bool = false,
-    done_mu: std.Io.Mutex = .init,
-    done_cond: std.Io.Condition = .init,
-};
-
 /// Model-unload work item. Posted by `unloadModel` after the conn thread
 /// marked the entry `.evicting` and drained its refcount. The inference thread
 /// frees the entry's resident mlx state (stream-bound) and finalizes the
@@ -1353,13 +1333,6 @@ pub const Scheduler = struct {
     /// `.loading` state on the entry — `ensureLoaded` only posts when it
     /// successfully flips the entry from `.unloaded` → `.loading`.
     load_queue: std.ArrayList(*LoadRequest),
-    /// Pending media-generation jobs (image/audio/video). Conn threads post
-    /// here via `runGeneration`; the inference thread runs each to completion
-    /// between ticks (it owns the GPU stream — the sole mlx caller — so gen
-    /// MLX ops + SSE writes to the parked connection are single-threaded).
-    /// A long gen stalls chat decode for its duration; accepted tradeoff
-    /// (single GPU, gen is the user's foreground action).
-    gen_queue: std.ArrayList(*GenRequest),
     /// Pending model-unload jobs. Conn threads post here via `unloadModel`
     /// after marking the entry `.evicting` + draining its refcount; the
     /// inference thread frees the mlx state (stream-bound, like cleanup).
@@ -1496,7 +1469,6 @@ pub const Scheduler = struct {
             .vision_queue = std.ArrayList(*VisionEncodeRequest).empty,
             .embed_queue = std.ArrayList(*EmbedRequest).empty,
             .load_queue = std.ArrayList(*LoadRequest).empty,
-            .gen_queue = std.ArrayList(*GenRequest).empty,
             .unload_queue = std.ArrayList(*UnloadRequest).empty,
             .cleanup_queue = std.ArrayList(*Slot).empty,
             .metrics = params.metrics,
@@ -1595,16 +1567,7 @@ pub const Scheduler = struct {
             req.done_mu.unlock(self.io);
         }
         self.load_queue.deinit(self.allocator);
-        // Wake any conn threads blocked in runGeneration / unloadModel. The
-        // jobs never ran (so the gen body wrote no response — the conn thread
-        // surfaces a 503), but we must release them so they don't hang.
-        for (self.gen_queue.items) |req| {
-            req.done_mu.lockUncancelable(self.io);
-            req.done = true;
-            req.done_cond.broadcast(self.io);
-            req.done_mu.unlock(self.io);
-        }
-        self.gen_queue.deinit(self.allocator);
+        // Wake any conn threads blocked in unloadModel so they don't hang.
         for (self.unload_queue.items) |req| {
             req.done_mu.lockUncancelable(self.io);
             req.done = true;
@@ -1782,24 +1745,6 @@ pub const Scheduler = struct {
         for (self.decoding.items) |slot| slot.cancel();
     }
 
-    /// The media residency bill for an entry, or 0 when it is not a media
-    /// model. The backend type must come from the DIRECTORY, never from the
-    /// entry's stub config, whose `model_type` is the MODALITY static
-    /// ("AudioVideo" for every video backend) and would bill the sum.
-    /// `arch_hint` is discovery's own read of config.json — the same authority
-    /// `gen.peekModelType` is — so it is used when present and the peek is the
-    /// fallback for an entry registered without one.
-    fn mediaPeakFor(self: *Scheduler, entry: *LoadedModel) u64 {
-        if (entry.arch_hint.len > 0) {
-            if (gen_mod.modalityFromType(entry.arch_hint) == null) return 0;
-            return gen_mod.estimatePeakResidentBytes(self.io, entry.path, entry.arch_hint);
-        }
-        const peeked = gen_mod.peekModelType(self.io, self.allocator, entry.path) orelse return 0;
-        defer self.allocator.free(peeked);
-        if (gen_mod.modalityFromType(peeked) == null) return 0;
-        return gen_mod.estimatePeakResidentBytes(self.io, entry.path, peeked);
-    }
-
     /// Plan 05 Phase D: resolve `id_or_empty` ("" / "mlx-serve" → default)
     /// to a refcounted, ready `*LoadedModel`. Cold-loads on demand: if the
     /// entry is `.unloaded`, parses CPU state, picks an LRU victim if
@@ -1861,9 +1806,6 @@ pub const Scheduler = struct {
         var victims_buf: [16]*LoadedModel = undefined;
         var n_victims: usize = 0;
 
-        // Peeked OUTSIDE the registry mutex — it stats the model dir, and no
-        // other load should block on our filesystem.
-        const media_peak = self.mediaPeakFor(entry);
         const settings_budget = resolveSsdBudget(self.ssd_budget_bytes, owned.config.ssd_budget_gb_override, owned.config.supportsExpertStreaming()).bytes;
         const streaming_gate_bytes: ?u64 = if (expert_stream_mod.expertStreamingEngaged(
             owned.config.supportsExpertStreaming(),
@@ -1922,9 +1864,8 @@ pub const Scheduler = struct {
             // Claim the slot.
             std.debug.assert(self.registry.tryBeginLoadLocked(entry));
 
-            // Estimate post-load bytes (see `gateEstimateBytes` for why a media
-            // entry cannot be billed by its directory's size).
-            const estimated: u64 = streaming_gate_bytes orelse gateEstimateBytes(media_peak, entry.bytes_on_disk, owned.config.num_hidden_layers, owned.config.hidden_size);
+            // Estimate post-load bytes (`gateEstimateBytes`).
+            const estimated: u64 = streaming_gate_bytes orelse gateEstimateBytes(entry.bytes_on_disk, owned.config.num_hidden_layers, owned.config.hidden_size);
 
             // Reserve this load's estimate BEFORE planning eviction, so a
             // concurrent loader sees the pending allocation in its own gate.
@@ -2068,23 +2009,6 @@ pub const Scheduler = struct {
     /// message (#144). Caller frees.
     pub fn loadErrorName(self: *Scheduler, alloc: std.mem.Allocator, id_or_empty: []const u8) ?[]u8 {
         return self.registry.loadErrorNameDupe(alloc, id_or_empty);
-    }
-
-    /// Run a media-generation job on the inference thread. Posts `req` to the
-    /// gen queue and blocks the calling (connection) thread until the
-    /// inference thread has run the job body to completion. The job writes its
-    /// own HTTP/SSE response to the connection; this just synchronizes.
-    pub fn runGeneration(self: *Scheduler, req: *GenRequest) !void {
-        {
-            self.queue_mu.lockUncancelable(self.io);
-            defer self.queue_mu.unlock(self.io);
-            if (self.shutdown.load(.acquire)) return error.Shutdown;
-            try self.gen_queue.append(self.allocator, req);
-            self.queue_cond.broadcast(self.io);
-        }
-        req.done_mu.lockUncancelable(self.io);
-        while (!req.done) req.done_cond.waitUncancelable(self.io, &req.done_mu);
-        req.done_mu.unlock(self.io);
     }
 
     /// Free a model's resident GPU state, returning its registry stub to
@@ -2558,7 +2482,7 @@ pub fn resolveSsdBudget(flag_bytes: u64, setting_gb: u32, streaming: bool) SsdBu
 /// Ownership transfers to the entry on successful load; on failure the
 /// conn thread frees via `freeCpuState`. `gguf` (when set) stays owned by
 /// the conn thread either way.
-const CpuState = struct {
+pub const CpuState = struct {
     config: *ModelConfig,
     tok: *Tokenizer,
     chat_config: *ChatConfig,
@@ -2579,25 +2503,9 @@ fn preloadCpuState(allocator: std.mem.Allocator, io: std.Io, model_dir: []const 
     // GGUF first — mirrors `--model` routing in main.zig, where isGgufPath
     // is checked before any config.json read ("GGUF files bypass the MLX
     // dispatch entirely"). The embedded engine owns the real tokenizer +
-    // chat template, so the CPU state is a stub, like the media path below.
+    // chat template, so the CPU state is a stub.
     if (model_discovery.isGgufModelPath(io, model_dir)) {
         return preloadGgufCpuState(allocator, io, model_dir, gguf_ctx_size);
-    }
-
-    // Media model (image/audio/video): the engine owns the real tokenizer +
-    // forward path, so we hand the inference thread a minimal stub instead of
-    // parsing a transformer-shaped config (which would fail on a flux2/
-    // qwen3_tts/AudioVideo config.json). The gen load arm dispatches off the
-    // stub's `model_type`.
-    if (gen_mod.detectModality(io, allocator, model_dir)) |modality| {
-        const stub = try gen_mod.buildStubCpuState(allocator, modality);
-        return .{ .config = stub.config, .tok = stub.tok, .chat_config = stub.chat_config };
-    }
-    // A media-typed dir that FAILED its marker check must not fall through to
-    // the text path below: it would glob whatever safetensors are present and
-    // die on the first missing weight. Refuse by name instead (#144 flow).
-    if (gen_mod.incompleteMediaDir(io, allocator, model_dir)) {
-        return error.IncompleteMediaPack;
     }
 
     const config = try allocator.create(ModelConfig);
@@ -2702,7 +2610,7 @@ test "mimo_v2 expert cache budget excludes the dense prefix" {
 /// freed by ensureLoaded's own defer on both success and failure paths
 /// (on success the three pointers transfer to the entry, so this function
 /// is skipped, but the path must still be released).
-fn freeCpuState(allocator: std.mem.Allocator, s: *CpuState) void {
+pub fn freeCpuState(allocator: std.mem.Allocator, s: *CpuState) void {
     s.config.deinit(allocator);
     allocator.destroy(s.config);
     s.tok.deinit();
@@ -2752,9 +2660,7 @@ fn preloadGgufCpuState(allocator: std.mem.Allocator, io: std.Io, model_dir: []co
 /// build cannot serve is turned into a load error the client sees.
 fn buildGgufStubCpuState(allocator: std.mem.Allocator, engine: gguf_meta.Engine, ctx_size: u32) !CpuState {
     if (engine == .unsupported) return error.GgufEngineUnsupported;
-    const config = try allocator.create(ModelConfig);
-    errdefer allocator.destroy(config);
-    config.* = switch (engine) {
+    return stubCpuState(allocator, switch (engine) {
         .unsupported => unreachable,
         .ds4 => ModelConfig{
             .model_type = "deepseek_v4",
@@ -2767,7 +2673,32 @@ fn buildGgufStubCpuState(allocator: std.mem.Allocator, engine: gguf_meta.Engine,
             .max_position_embeddings = arch_ds4.clampSessionCtx(ctx_size),
             .is_encoder_only = false,
         },
-    };
+    });
+}
+
+/// The scheduler's borrowed-view seed for a headless boot (`no_initial_load`):
+/// never installed on an entry and never loaded.
+pub fn headlessStubCpuState(allocator: std.mem.Allocator) !CpuState {
+    return stubCpuState(allocator, .{
+        .model_type = "headless",
+        .weight_prefix = "model",
+        .num_hidden_layers = 1,
+        .hidden_size = 1,
+        .head_dim = 1,
+        .num_attention_heads = 1,
+        .num_key_value_heads = 1,
+        .max_position_embeddings = 4096,
+        .is_encoder_only = false,
+    });
+}
+
+/// Heap CPU state around `config` with an empty byte-level tokenizer and an
+/// empty chat template: a caller that owns the real ones elsewhere (an
+/// embedded engine) or never tokenizes (headless) only needs the shapes.
+fn stubCpuState(allocator: std.mem.Allocator, config_value: ModelConfig) !CpuState {
+    const config = try allocator.create(ModelConfig);
+    errdefer allocator.destroy(config);
+    config.* = config_value;
 
     const tok = try allocator.create(Tokenizer);
     errdefer allocator.destroy(tok);
@@ -2910,29 +2841,9 @@ fn doLoadDs4OnInferenceThread(sch: *Scheduler, params: anytype) !void {
     if (hot_cache_budget_invalidate) |f| f();
 }
 
-/// The post-load residency bill the eviction gate reserves, in bytes.
-///
-/// A media entry is billed by its BACKEND: a staged-residency model
-/// (`minimax_h3` runs its text encoder and FREES it before the DiT loads) never
-/// holds the sum of every safetensors in its directory. The gate runs BEFORE
-/// the media preflight that already knows this, so a disagreement here is a
-/// refusal the preflight never gets to overturn — H3's 37.55 GiB sum against a
-/// 48 GB Mac's 30.0 GiB auto cap made the model permanently unloadable while
-/// its real 22.83 GiB peak fit with 7 GB to spare (#126).
-///
-/// `media_peak == 0` means "not a media model, or a directory we could not
-/// read" and keeps the original ladder byte-for-byte: a text bill is weights
-/// only, so it takes 10% headroom for KV / vision / drafter overhead.
-///
-/// A media peak takes NONE. Those are text-model concepts — a media engine has
-/// no KV cache and no drafter — and `gen.estimatePeakResidentBytes` already
-/// carries an explicit transient term for the stage that generates. Stacking a
-/// second blanket margin on it billed H3's 8-bit pack ~27% over its measured
-/// peak, which is the difference between loading and not on a 48 GB Mac. It
-/// also makes the gate agree with `genLoadResidentBytes`, which has always
-/// committed the bare peak.
-pub fn gateEstimateBytes(media_peak: u64, bytes_on_disk: ?u64, num_hidden_layers: u32, hidden_size: u32) u64 {
-    if (media_peak > 0) return media_peak;
+/// The post-load residency bill the eviction gate reserves, in bytes: the
+/// weights plus 10% headroom for KV / vision / drafter overhead.
+pub fn gateEstimateBytes(bytes_on_disk: ?u64, num_hidden_layers: u32, hidden_size: u32) u64 {
     const base: u64 = if (bytes_on_disk) |b|
         b
     else
@@ -2942,116 +2853,6 @@ pub fn gateEstimateBytes(media_peak: u64, bytes_on_disk: ?u64, num_hidden_layers
 
 pub fn expertStreamingGateBytes(resident_bytes: u64, cache_bytes: u64, fill_peak_bytes: u64, bounce_bytes: u64) u64 {
     return resident_bytes +| cache_bytes +| fill_peak_bytes +| bounce_bytes;
-}
-
-/// What a media load COMMITS to the residency budget once ready. Same estimator
-/// the gate reserved against, so reserve and commit can only differ by the
-/// gate's headroom: committing the dir sum instead parked H3 in the budget at
-/// 14.7 GB more than it can ever hold, evicting live LLMs for bytes nobody was
-/// using (#126, secondary 1).
-pub fn genLoadResidentBytes(media_peak: u64, bytes_on_disk: u64) u64 {
-    if (media_peak > 0) return media_peak;
-    return bytes_on_disk;
-}
-
-/// Media-gen load on the inference thread. Mirrors `doLoadDs4OnInferenceThread`:
-/// build the modality engine (its mlx ops bind to this thread's GPU stream from
-/// t0), install it on the entry, move the stub config/tok/chat_config over, and
-/// mark ready. The MLX/ds4 fields stay null; request handlers route
-/// through the matching `image_engine`/`audio_engine`/`video_engine` slot.
-fn doLoadGenOnInferenceThread(sch: *Scheduler, params: anytype, modality: gen_mod.Modality) !void {
-    log.info("[gen] loading {s} engine: {s}\n", .{ @tagName(modality), params.model_dir });
-    const entry = params.entry;
-
-    // Media preflight, mirroring the MLX path's — a Metal OOM during engine
-    // build or the first generation is uncatchable, so refuse up front. The
-    // bill is per-BACKEND: a staged-residency model (minimax_h3 frees its text
-    // encoder before the DiT loads) is billed its true peak, not the sum of
-    // every safetensors in the dir, which refused loads that would have worked.
-    if (!skip_mem_preflight) {
-        // The stub config's model_type is a MODALITY static ("AudioVideo" for
-        // every video backend — the per-modality-vs-per-backend class), so the
-        // per-BACKEND residency estimate must re-peek the dir's actual type,
-        // the same authority the engine dispatch itself uses. Caught live:
-        // the H3 boot billed the 64.5 GB sum while claiming "staged".
-        const peeked = gen_mod.peekModelType(sch.io, sch.allocator, params.model_dir);
-        defer if (peeked) |p| sch.allocator.free(p);
-        const backend_type = peeked orelse params.config.model_type;
-        const peak = gen_mod.estimatePeakResidentBytes(sch.io, params.model_dir, backend_type);
-        const avail = effectiveAvailableBytes(status.getAvailableMemBytes(), status.getProcAvailableMemBytes());
-        const gb = 1024.0 * 1024.0 * 1024.0;
-        log.info("[preflight] media peak ~{d:.2} GB (staged residency), available {d:.2} GB\n", .{
-            @as(f64, @floatFromInt(peak)) / gb,
-            @as(f64, @floatFromInt(avail)) / gb,
-        });
-        if (memInsufficientForLoad(peak, avail)) {
-            log.err("Insufficient memory for this media model: needs ~{d:.1} GB free ({d:.1} GB for the model plus headroom for warmup buffers) but only {d:.1} GB is available. Unload the chat model or close other apps and retry; pass --skip-mem-preflight to override.\n", .{
-                @as(f64, @floatFromInt(loadRequirementBytes(peak))) / gb,
-                @as(f64, @floatFromInt(peak)) / gb,
-                @as(f64, @floatFromInt(avail)) / gb,
-            });
-            return error.InsufficientMemory;
-        }
-    }
-
-    // Build the engine FIRST. On failure the engine's own errdefer cleans up
-    // its partial state, the slot stays null, and the stub config (still owned
-    // by the caller, not yet installed below) is freed by the caller's
-    // error path — so we must not touch `entry.config` before this succeeds.
-    switch (modality) {
-        .image => entry.image_engine = try gen_mod.ImageEngine.load(sch.io, sch.allocator, params.model_dir),
-        .audio => entry.audio_engine = try gen_mod.AudioEngine.load(sch.io, sch.allocator, params.model_dir),
-        .video => entry.video_engine = try gen_mod.VideoEngine.load(sch.io, sch.allocator, params.model_dir),
-        .mesh => entry.mesh_engine = try gen_mod.MeshEngine.load(sch.io, sch.allocator, params.model_dir),
-    }
-
-    // Install stub CPU state (infallible from here, mirroring the ds4 path).
-    entry.releaseRetainedCpuState();
-    entry.config = params.config;
-    entry.tokenizer = params.tok;
-    entry.chat_config = params.chat_config;
-    entry.weights = null;
-    entry.transformer = null;
-    entry.vision_encoder = null;
-    entry.drafter = null;
-    entry.dflash = null;
-    entry.drafter_block_size = 0;
-    entry.drafter_path = "";
-    entry.prefix_cache = null;
-
-    // The SAME per-backend estimator the eviction gate reserved against — see
-    // `genLoadResidentBytes`. Peeked here rather than reused from the preflight
-    // block above because `--skip-mem-preflight` skips that block entirely, and
-    // the residency budget is not a preflight.
-    const bytes_resident: u64 = blk: {
-        const peeked = gen_mod.peekModelType(sch.io, sch.allocator, params.model_dir);
-        defer if (peeked) |p| sch.allocator.free(p);
-        const media_peak: u64 = if (peeked) |p|
-            gen_mod.estimatePeakResidentBytes(sch.io, params.model_dir, p)
-        else
-            0;
-        const on_disk: u64 = on_disk_blk: {
-            if (entry.bytes_on_disk) |b| {
-                if (b > 0) break :on_disk_blk b;
-            }
-            break :on_disk_blk gen_mod.estimateResidentBytes(sch.io, params.model_dir);
-        };
-        break :blk genLoadResidentBytes(media_peak, on_disk);
-    };
-
-    sch.registry.mutex.lockUncancelable(sch.io);
-    sch.registry.markReadyLocked(entry, bytes_resident);
-    sch.registry.mutex.unlock(sch.io);
-
-    sch.current_model = entry;
-    sch.xfm = null;
-    sch.weights = null;
-    sch.vision_encoder = null;
-    sch.drafter = null;
-    sch.dflash = null;
-    sch.hot_prefix_cache = null;
-    publishHotCacheResidency(sch);
-    if (hot_cache_budget_invalidate) |f| f();
 }
 
 /// Sum of `*.safetensors` bytes in `model_dir` — the MLX weight footprint used
@@ -3407,9 +3208,9 @@ fn memInsufficientForLoad(weights_bytes: u64, avail_bytes: u64) bool {
 /// Total free memory a load demands: the model's own peak plus the headroom the
 /// guard wants for warmup buffers and a baseline KV cache.
 ///
-/// It exists so a REFUSAL can quote the number it actually compared. The media
-/// preflight used to say "generation peaks at ~4.3 GB but only 5.4 GB is free"
-/// — two figures that, read together, say the load should have worked. It was
+/// It exists so a REFUSAL can quote the number it actually compared. A
+/// preflight that said "peaks at ~4.3 GB but only 5.4 GB is free" gave
+/// two figures that, read together, say the load should have worked. It was
 /// refused for the headroom, which the sentence never mentioned, so the user
 /// went hunting for a problem that wasn't there (live 2026-08-08). Same class as
 /// the context-overflow 400: a rejection has to state the bar it set.
@@ -3441,9 +3242,8 @@ test "a refusal quotes the number it actually compared" {
     try std.testing.expect(!memInsufficientForLoad(42 * GB, loadRequirementBytes(42 * GB)));
 }
 
-test "BOTH preflight refusals quote the number they compared, not the weights" {
-    // The media arm was fixed for #144's class (2026-08-08) and the TEXT arm was
-    // not: it printed "weights ~8.4 GB but only 10.1 GB free", which reads as
+test "the preflight refusal quotes the number it compared, not the weights" {
+    // The refusal once printed "weights ~8.4 GB but only 10.1 GB free", which reads as
     // "this should have worked" — the load was refused for the 2.05 GB of
     // headroom the sentence never named (live 2026-08-17, a gemma-4-12B QAT pack
     // on a 16 GB M4, where the bar is 10.45 GB). `insufficient_free_memory_message`
@@ -3451,10 +3251,8 @@ test "BOTH preflight refusals quote the number they compared, not the weights" {
     // the bar makes the client message a dead end too. Needles are ++-split so
     // this test's own source cannot satisfy the scan.
     const src = @embedFile("scheduler.zig");
-    // Each refusal formats the REQUIREMENT as its first figure, from the one
+    // The refusal formats the REQUIREMENT as its first figure, from the one
     // helper the comparison itself uses — never a second formula that can drift.
-    const media_arg = "loadRequirement" ++ "Bytes(peak))) / gb";
-    try testing.expect(std.mem.indexOf(u8, src, media_arg) != null);
     const text_arg = "loadRequirement" ++ "Bytes(weights_bytes))) / gb";
     try testing.expect(std.mem.indexOf(u8, src, text_arg) != null);
     // The weights-first shape that could not state its own bar must be GONE.
@@ -3462,75 +3260,12 @@ test "BOTH preflight refusals quote the number they compared, not the weights" {
     try testing.expect(std.mem.indexOf(u8, src, old) == null);
 }
 
-test "the eviction gate bills a media entry its BACKEND peak, never the dir's safetensors sum" {
-    // #126. MiniMax-H3's four safetensors sum to 37.55 GiB, but the text
-    // encoder RUNS AND IS FREED before the DiT loads, so the real staged peak
-    // is 22.83 GiB. `doLoadGenOnInferenceThread`'s preflight already bills it
-    // correctly — and never gets the chance, because this gate runs first and
-    // billed the sum. On a 48 GB Mac (auto cap = 80% of a 38338 MB wired limit
-    // = 30.0 GiB) that refused every load, permanently, on an idle server with
-    // nothing to evict and nothing to wait for.
-    const disk_sum: u64 = 40_316_668_515; // te + dit + video_vae + audio_vae
-    const staged_peak: u64 = 24_511_876_594; // max(te, dit) + both vaes
-    const cap: u64 = 30 * 1024 * 1024 * 1024;
-
-    try testing.expect(gateEstimateBytes(0, disk_sum, 0, 0) > cap); // the bug
-    try testing.expect(gateEstimateBytes(staged_peak, disk_sum, 0, 0) <= cap); // the fix
-
-    // A media peak OUTRANKS bytes_on_disk — the whole point is that the two
-    // disagree. It must not be averaged, summed or maxed with it, and it takes
-    // no headroom: the KV/vision/drafter margin is a TEXT concept, the media
-    // estimator carries its own transient term, and the commit
-    // (`genLoadResidentBytes`) has always parked the bare peak.
-    try testing.expectEqual(staged_peak, gateEstimateBytes(staged_peak, disk_sum, 0, 0));
-    try testing.expectEqual(gateEstimateBytes(staged_peak, disk_sum, 0, 0), genLoadResidentBytes(staged_peak, disk_sum));
-
-    // Non-media entries are BYTE-UNCHANGED: a zero peak means "not a media
-    // model" (or a dir we could not read), and the old ladder stands.
-    try testing.expectEqual(@as(u64, 1100), gateEstimateBytes(0, 1000, 0, 0));
-    try testing.expectEqual(@as(u64, 0), gateEstimateBytes(0, 0, 0, 0));
-    // No bytes_on_disk → the layers × hidden × 16 fallback, unchanged.
+test "the eviction gate bills weights plus 10% headroom" {
+    try testing.expectEqual(@as(u64, 1100), gateEstimateBytes(1000, 0, 0));
+    try testing.expectEqual(@as(u64, 0), gateEstimateBytes(0, 0, 0));
+    // No bytes_on_disk → the layers × hidden × 16 fallback.
     const fallback: u64 = 32 * 4096 * 16;
-    try testing.expectEqual(fallback + fallback / 10, gateEstimateBytes(0, null, 32, 4096));
-}
-
-test "the gate and the media preflight read ONE estimator" {
-    // The class bug in #126 is not the formula, it is that two sites computed
-    // the same bill differently and the stricter one ran first. Both call
-    // `gen.estimatePeakResidentBytes`; the gate reaches it through
-    // `mediaPeakFor`, which is the only place allowed to decide "is this a
-    // media entry, and what backend is it". Needles are ++-split so this
-    // test's own source cannot satisfy the scan.
-    const src = @embedFile("scheduler.zig");
-    const peek = "const media_peak = self.mediaPeak" ++ "For(entry);";
-    try testing.expect(std.mem.indexOf(u8, src, peek) != null);
-    const gate = "gateEstimateBytes(media_peak, entry.bytes_on" ++ "_disk,";
-    try testing.expect(std.mem.indexOf(u8, src, gate) != null);
-    // The raw-bytes_on_disk shape the gate used to have must be GONE.
-    const old = "const base: u64 = if (entry.bytes_on" ++ "_disk) |b|";
-    try testing.expect(std.mem.indexOf(u8, src, old) == null);
-    // Both the preflight and the committed residency go through the estimator.
-    var n: usize = 0;
-    var i: usize = 0;
-    const needle = "gen_mod.estimatePeakResident" ++ "Bytes(";
-    while (std.mem.indexOfPos(u8, src, i, needle)) |p| : (i = p + needle.len) n += 1;
-    try testing.expect(n >= 2);
-}
-
-test "a media model commits the residency the gate reserved" {
-    // Secondary #1 of the issue: the gate reserved the staged peak and then
-    // `markReadyLocked` committed the DIR SUM, so H3 sat in the budget at
-    // 37.55 GB — 14.7 GB more than it can ever hold — and would evict a
-    // genuinely-resident LLM to make room for bytes nobody was using.
-    // Reserve-then-commit must read the same estimator, so the only difference
-    // between them is the gate's 10% headroom.
-    const staged_peak: u64 = 24_511_876_594;
-    const disk_sum: u64 = 40_316_668_515;
-    try testing.expectEqual(staged_peak, genLoadResidentBytes(staged_peak, disk_sum));
-    // A backend with no staged plan keeps the sum (peak == sum there anyway).
-    try testing.expectEqual(disk_sum, genLoadResidentBytes(0, disk_sum));
-    // Neither known → 0, as before.
-    try testing.expectEqual(@as(u64, 0), genLoadResidentBytes(0, 0));
+    try testing.expectEqual(fallback + fallback / 10, gateEstimateBytes(null, 32, 4096));
 }
 
 test "memInsufficientForLoad: headroom + unknown-query guards" {
@@ -3600,16 +3335,6 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         try doLoadDs4OnInferenceThread(sch, params);
         return;
     }
-    // ── media-gen fast path: the (stub) config's model_type marks an image/
-    //    audio/video model (FLUX / Qwen3-TTS / LTX). Build the modality engine
-    //    instead of the MLX safetensors path. Works for BOTH the startup
-    //    gen-primary path (main builds the stub config) and the cold-load path
-    //    (preloadCpuState builds it), since both dispatch off model_type.
-    if (gen_mod.modalityFromType(params.config.model_type)) |modality| {
-        try doLoadGenOnInferenceThread(sch, params, modality);
-        return;
-    }
-
     var streaming_resident_bytes: ?u64 = null;
     var expert_source_assigned = false;
     errdefer if (expert_source_assigned) {
@@ -4499,7 +4224,6 @@ fn hasWorkPendingLocked(sch: *const Scheduler) bool {
         sch.embed_queue.items.len > 0 or
         sch.cleanup_queue.items.len > 0 or
         sch.load_queue.items.len > 0 or
-        sch.gen_queue.items.len > 0 or
         sch.unload_queue.items.len > 0;
 }
 
@@ -4567,10 +4291,8 @@ fn inferenceLoop(ctx: ThreadCtx) void {
         // and we want the rest of the inference loop to stay responsive.
         // Other pending loads wait in queue and get picked up next tick.
         var load_req: ?*LoadRequest = null;
-        // Media-gen + unload work items (one per tick, like load — both are
-        // heavy and we re-check the loop between them). Gen runs to completion
-        // synchronously, blocking decode for its duration.
-        var gen_req: ?*GenRequest = null;
+        // Unload work item (one per tick, like load — heavy, and we re-check
+        // the loop between them).
         var unload_req: ?*UnloadRequest = null;
         {
             sch.queue_mu.lockUncancelable(sch.io);
@@ -4592,9 +4314,6 @@ fn inferenceLoop(ctx: ThreadCtx) void {
             }
             if (sch.unload_queue.items.len > 0) {
                 unload_req = sch.unload_queue.orderedRemove(0);
-            }
-            if (sch.gen_queue.items.len > 0) {
-                gen_req = sch.gen_queue.orderedRemove(0);
             }
         }
         for (cleanup_batch[0..cleanup_n]) |s| {
@@ -4629,7 +4348,6 @@ fn inferenceLoop(ctx: ThreadCtx) void {
         if (unload_req) |req| runUnloadRequest(sch, req);
         if (load_req != null or unload_req != null) reviseHotCacheBudgets(sch);
         if (unload_req != null) sch.budget_revise_sw = io_util.Stopwatch.init(sch.io);
-        if (gen_req) |req| runGenRequest(sch, req);
 
         // 1. Wait for work. Drain pending slots into a local list under lock,
         //    run prefills outside the lock.
@@ -5082,49 +4800,6 @@ fn finishLoadRequest(sch: *Scheduler, req: *LoadRequest, err_name: ?[]const u8) 
     }
     req.done = true;
     req.done_cond.broadcast(sch.io);
-}
-
-/// Run one media-generation job on the inference thread. The job body
-/// (`req.run`) does all mlx work + writes the HTTP/SSE response to the parked
-/// connection. We bracket it with the model's `gen_busy` flag for visibility
-/// and signal `done` so the conn thread in `runGeneration` wakes.
-fn runGenRequest(sch: *Scheduler, req: *GenRequest) void {
-    req.model.gen_busy = true;
-    // On small-RAM machines (≤16 GB — mini class; also the phone), bound
-    // MLX's buffer-cache growth DURING the generation: the post-request
-    // clear below can't help mid-loop, and a diffusion denoise + VAE decode
-    // otherwise accumulates GBs of one-off transients against a ~12 GB Metal
-    // working-set ceiling. 1 GB still covers step-to-step buffer reuse.
-    // Never RAISE a tighter existing cap (the iOS boot cap is 384 MB).
-    const small_ram = blk: {
-        const total = status.getTotalMemBytes();
-        break :blk total > 0 and total <= 17 * 1024 * 1024 * 1024;
-    };
-    var prev_cache_limit: usize = 0;
-    if (small_ram) {
-        const cap: usize = 1024 * 1024 * 1024;
-        _ = mlx.mlx_set_cache_limit(&prev_cache_limit, cap);
-        if (prev_cache_limit < cap) {
-            var tmp: usize = 0;
-            _ = mlx.mlx_set_cache_limit(&tmp, prev_cache_limit);
-        }
-    }
-    req.run(req.ctx);
-    if (small_ram) {
-        var tmp: usize = 0;
-        _ = mlx.mlx_set_cache_limit(&tmp, prev_cache_limit);
-    }
-    req.model.gen_busy = false;
-    // Return the generation's transients to the OS. MLX parks freed buffers
-    // in its allocator cache (RSS stays), and unlike chat decode (which
-    // clears every 256 steps in generate.zig) a media gen frees tens of GB
-    // of denoise/VAE/encoder buffers in one burst — without this, each
-    // generation ratchets process RSS upward (observed ~100 GB by gen 2).
-    _ = mlx.mlx_clear_cache();
-    req.done_mu.lockUncancelable(sch.io);
-    req.done = true;
-    req.done_cond.broadcast(sch.io);
-    req.done_mu.unlock(sch.io);
 }
 
 /// Free a model's resident mlx state on the inference thread (stream-bound,

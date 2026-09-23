@@ -144,15 +144,15 @@ post_code() {
 }
 unknown_code=$(post_code /v1/__no_such_endpoint__)
 known_code=$(post_code /v1/chat/completions)
-edits_code=$(post_code /v1/images/edits)
+media_code=$(post_code /v1/images/generations)
 kill "$HPID" 2>/dev/null
 wait "$HPID" 2>/dev/null
 check "unknown endpoint is 404, not no-model (got $unknown_code)" \
     "$([ "$unknown_code" = "404" ] && echo 1 || echo 0)"
 check "a served endpoint still reports 503 no-model (got $known_code)" \
     "$([ "$known_code" = "503" ] && echo 1 || echo 0)"
-check "a served media endpoint is not mistaken for absent (got $edits_code)" \
-    "$([ "$edits_code" = "503" ] && echo 1 || echo 0)"
+check "a removed media-generation endpoint is 404 (got $media_code)" \
+    "$([ "$media_code" = "404" ] && echo 1 || echo 0)"
 
 echo
 echo "  passed: $PASS   failed: $FAIL"

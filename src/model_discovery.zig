@@ -60,46 +60,8 @@ const supported_model_types = [_][]const u8{
     "mimo_v2", // Experimental text-only MXFP4 streaming packs.
 };
 
-/// Native media-generation archs (image / audio / video / 3D), served by the
-/// unified engines in `gen.zig`. Recognized here so `--model-dir` discovery
-/// and `/v1/load-model` by-path accept them; the modality engine (not the MLX
-/// transformer) handles the load. Kept as inline string checks so this module
-/// stays filesystem-only (no mlx/gen import). Mirrors `gen.modalityFromType`.
-/// A file that must exist beside config.json for `model_type` to count as a
-/// COMPLETE media pack. Every H3/LTX download holds a valid config.json for
-/// the tens of minutes its big weights are still `.partial` (and a turbo-lora
-/// fragment forever) — registering such a dir shadows complete copies in
-/// later roots, and loading it falls through to the text loader, which dies
-/// on the first missing weight. The ONE table: `gen.requiredMarkerFor`
-/// delegates here, so discovery, register-by-path and the load guard agree.
-pub fn requiredMediaMarker(model_type: []const u8) ?[]const u8 {
-    // LTX: distinguishes the real bundle from any other "AudioVideo" config
-    // and proves the text path can load.
-    if (std.mem.eql(u8, model_type, "AudioVideo")) return "connector.safetensors";
-    // MiniMax-H3: our converted layout always writes this next to config.json.
-    if (std.mem.eql(u8, model_type, "minimax_h3")) return "transformer.safetensors";
-    // MiniMax Music 3: the converter writes the vocoder LAST of the five files.
-    if (std.mem.eql(u8, model_type, "minimax_music3")) return "vocoder.safetensors";
-    return null;
-}
-
-pub fn isMediaModelType(model_type: []const u8) bool {
-    return std.mem.startsWith(u8, model_type, "flux2") or
-        std.mem.startsWith(u8, model_type, "krea") or
-        std.mem.startsWith(u8, model_type, "mage_flow") or
-        std.mem.eql(u8, model_type, "mageflow") or
-        std.mem.eql(u8, model_type, "qwen3_tts") or
-        std.mem.eql(u8, model_type, "acestep") or
-        std.mem.eql(u8, model_type, "kokoro") or
-        std.mem.eql(u8, model_type, "AudioVideo") or
-        std.mem.eql(u8, model_type, "minimax_h3") or
-        std.mem.eql(u8, model_type, "minimax_music3") or
-        std.mem.startsWith(u8, model_type, "hunyuan3d");
-}
-
 fn isSupportedModelType(model_type: []const u8) bool {
     if (std.mem.startsWith(u8, model_type, "lfm2")) return true;
-    if (isMediaModelType(model_type)) return true;
     for (supported_model_types) |t| {
         if (std.mem.eql(u8, model_type, t)) return true;
     }
@@ -142,20 +104,7 @@ const ConfigPeek = union(enum) {
 fn peekConfig(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, entry_name: []const u8) ConfigPeek {
     var sub = dir.openDir(io, entry_name, .{}) catch return .missing_or_unparseable;
     defer sub.close(io);
-    var file = sub.openFile(io, "config.json", .{}) catch {
-        // No root config.json: a MageFlow diffusers repo carries only
-        // model_index.json (`_class_name`=="MageFlowPipeline"). Classify it so
-        // `list` + the registry treat it like any other image model. Mirrors
-        // gen.peekModelType's fallback (kept in sync — the routing side must agree).
-        if (peekMageFlowIndex(io, allocator, sub))
-            return .{ .supported = allocator.dupe(u8, "mage_flow") catch return .missing_or_unparseable };
-        // …and an mflux FLUX.2 conversion may carry nothing at all (the only
-        // MLX build of klein 9B ships no config.json). Same fallback, keyed on
-        // the DiT's own weight names.
-        if (peekMfluxFlux2(io, allocator, sub))
-            return .{ .supported = allocator.dupe(u8, "flux2-klein") catch return .missing_or_unparseable };
-        return .missing_or_unparseable;
-    };
+    var file = sub.openFile(io, "config.json", .{}) catch return .missing_or_unparseable;
     defer file.close(io);
     var rbuf: [4096]u8 = undefined;
     var rs = file.reader(io, &rbuf);
@@ -175,12 +124,6 @@ fn peekConfig(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, entry_n
         const dup = allocator.dupe(u8, mt_val.string) catch return .missing_or_unparseable;
         return .{ .unsupported_arch = dup };
     }
-    // Media models manage their own per-component quantization (the top-level
-    // config may declare a mode the MLX loader doesn't, e.g. a DiT scheme), so
-    // they bypass the LM quant gate below.
-    if (isMediaModelType(mt_val.string)) {
-        return .{ .supported = allocator.dupe(u8, mt_val.string) catch return .missing_or_unparseable };
-    }
     // Quantization gate: if a model declares a `quantization.mode`, accept
     // only the schemes the loader supports. Models without a quantization
     // block (bf16 / unquantized) pass through.
@@ -195,62 +138,6 @@ fn peekConfig(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, entry_n
         }
     }
     return .{ .supported = allocator.dupe(u8, mt_val.string) catch return .missing_or_unparseable };
-}
-
-/// True when `sub/model_index.json` marks a MageFlow pipeline (`_class_name` ==
-/// "MageFlowPipeline", or a `_mage_flow_version` tag). Same signature as
-/// gen.isMageFlowRepo, over an already-open Dir.
-pub fn peekMageFlowIndex(io: std.Io, allocator: std.mem.Allocator, sub: std.Io.Dir) bool {
-    var file = sub.openFile(io, "model_index.json", .{}) catch return false;
-    defer file.close(io);
-    var rbuf: [4096]u8 = undefined;
-    var rs = file.reader(io, &rbuf);
-    const bytes = rs.interface.allocRemaining(allocator, .limited(1 * 1024 * 1024)) catch return false;
-    defer allocator.free(bytes);
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return false;
-    defer parsed.deinit();
-    if (parsed.value != .object) return false;
-    if (parsed.value.object.get("_mage_flow_version") != null) return true;
-    const cn = parsed.value.object.get("_class_name") orelse return false;
-    return cn == .string and std.mem.eql(u8, cn.string, "MageFlowPipeline");
-}
-
-/// The FLUX.2 DiT's shared-modulation tensor. Unique to this architecture —
-/// no other diffusers-shaped repo names a weight this — so it identifies an
-/// mflux FLUX.2 conversion without a config.json to read.
-const flux2_dit_marker = "double_stream_modulation_img";
-
-/// True when `sub/transformer/` holds FLUX.2 DiT weights. The 4B mirror ships
-/// a root config.json and never reaches here; `mlx-community/flux2-klein-9b-4bit`
-/// ships none, and a repo the server can load but cannot SEE is the MageFlow
-/// class all over again.
-///
-/// Keyed on the architecture, never on the directory shape: transformer + vae +
-/// text_encoder describes most of diffusers. Reads the shard index when there
-/// is one, else the first shard's safetensors header (a single-file conversion
-/// has no index) — in both cases a bounded prefix, never the weights.
-/// Same signature as gen.isMfluxFlux2Repo, over an already-open Dir.
-pub fn peekMfluxFlux2(io: std.Io, allocator: std.mem.Allocator, sub: std.Io.Dir) bool {
-    var tdir = sub.openDir(io, "transformer", .{ .iterate = true }) catch return false;
-    defer tdir.close(io);
-    const cap = 1024 * 1024;
-    const buf = allocator.alloc(u8, cap) catch return false;
-    defer allocator.free(buf);
-
-    if (readPrefix(io, tdir, "model.safetensors.index.json", buf)) |idx| {
-        return std.mem.indexOf(u8, idx, flux2_dit_marker) != null;
-    }
-    // No index → a single-file conversion. The safetensors header is a JSON
-    // blob of tensor names prefixed by its own u64 length; that is enough.
-    var it = tdir.iterate();
-    while (it.next(io) catch null) |entry| {
-        if (entry.kind != .file and entry.kind != .sym_link) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".safetensors")) continue;
-        const head = readPrefix(io, tdir, entry.name, buf) orelse continue;
-        if (head.len <= 8) continue;
-        return std.mem.indexOf(u8, head[8..], flux2_dit_marker) != null;
-    }
-    return false;
 }
 
 /// The set of shard basenames in `model.safetensors.index.json`'s `weight_map`,
@@ -402,18 +289,6 @@ pub fn qwen4StreamingIndexComplete(io: std.Io, allocator: std.mem.Allocator, mod
     return layout;
 }
 
-/// Read at most `buf.len` bytes of `dir/name` into `buf`; null when it can't be
-/// opened or read. Short by design — the callers want a header, not a file, and
-/// the file may be gigabytes.
-fn readPrefix(io: std.Io, dir: std.Io.Dir, name: []const u8, buf: []u8) ?[]u8 {
-    var file = dir.openFile(io, name, .{}) catch return null;
-    defer file.close(io);
-    var rbuf: [4096]u8 = undefined;
-    var rs = file.reader(io, &rbuf);
-    const n = rs.interface.readSliceShort(buf) catch return null;
-    return buf[0..n];
-}
-
 /// Result of scanning a directory for LLM `.gguf` files (mmproj sidecars
 /// excluded). `pick` is the alphabetically-smallest LLM gguf basename — the
 /// same deterministic file `resolveGgufFile` loads — so callers can report
@@ -530,14 +405,10 @@ pub fn logResolveGgufError(path: []const u8, err: anyerror) void {
 
 /// Coarse classification of a model for UX surfaces — the `mlx-serve list`
 /// TYPE column and the `run` chat-REPL preflight. Mirrors how serving
-/// actually routes the directory (media engines, embedded GGUF engines,
-/// encoder-only, drafter sidecars).
+/// actually routes the directory (embedded GGUF engines, encoder-only,
+/// drafter sidecars).
 pub const ModelKind = enum {
     chat,
-    image,
-    audio,
-    video,
-    mesh,
     embed,
     drafter,
     unsupported,
@@ -546,10 +417,6 @@ pub const ModelKind = enum {
     pub fn label(self: ModelKind) []const u8 {
         return switch (self) {
             .chat => "chat",
-            .image => "image",
-            .audio => "audio",
-            .video => "video",
-            .mesh => "3d",
             .embed => "embed",
             .drafter => "drafter",
             .unsupported => "unsupported",
@@ -560,26 +427,12 @@ pub const ModelKind = enum {
     pub fn describe(self: ModelKind) []const u8 {
         return switch (self) {
             .chat => "a chat model",
-            .image => "an image generation model",
-            .audio => "an audio generation model",
-            .video => "a video generation model",
-            .mesh => "a 3D generation model",
             .embed => "an embedding encoder (use /v1/embeddings)",
             .drafter => "a speculative-decoding drafter sidecar, not a standalone model (load it via --drafter beside a Gemma 4 target)",
             .unsupported => "an architecture mlx-serve does not support",
         };
     }
 
-    /// The generation endpoint that DOES serve this kind, when one exists.
-    pub fn genEndpoint(self: ModelKind) ?[]const u8 {
-        return switch (self) {
-            .image => "/v1/images/generations",
-            .audio => "/v1/audio/speech (TTS) or /v1/audio/music-generations (music)",
-            .video => "/v1/video/generations",
-            .mesh => "/v1/3d/generations",
-            else => null,
-        };
-    }
 };
 
 /// Map a config.json `model_type` to its ModelKind. "gguf" is the synthetic
@@ -587,15 +440,6 @@ pub const ModelKind = enum {
 pub fn modelKindFromType(model_type: []const u8) ModelKind {
     if (std.mem.eql(u8, model_type, "bert")) return .embed;
     if (std.mem.endsWith(u8, model_type, "_assistant")) return .drafter;
-    if (std.mem.startsWith(u8, model_type, "flux2") or
-        std.mem.startsWith(u8, model_type, "krea") or
-        std.mem.startsWith(u8, model_type, "mage_flow") or
-        std.mem.eql(u8, model_type, "mageflow")) return .image;
-    if (std.mem.eql(u8, model_type, "qwen3_tts") or
-        std.mem.eql(u8, model_type, "acestep") or
-        std.mem.eql(u8, model_type, "minimax_music3")) return .audio;
-    if (std.mem.eql(u8, model_type, "AudioVideo")) return .video;
-    if (std.mem.startsWith(u8, model_type, "hunyuan3d")) return .mesh;
     if (std.mem.eql(u8, model_type, "gguf")) return .chat;
     if (isSupportedModelType(model_type)) return .chat;
     return .unsupported;
@@ -940,17 +784,8 @@ fn tryAddModel(
             break :blk try allocator.dupe(u8, "gguf");
         }
 
-        // No root config.json is not automatically "not a model": a MageFlow
-        // diffusers repo keeps every config in a component subdir and carries
-        // only `model_index.json`. `peekConfig` knows that, so hand the dir to
-        // it instead of bailing here — bailing made its fallback unreachable
-        // and left every downloaded MageFlow checkpoint invisible to `list`,
-        // `/v1/models` and the app picker. Anything with neither file still
-        // returns false below, via `.missing_or_unparseable`.
         const has_config = if (sub.statFile(io, "config.json", .{})) |st| st.kind == .file else |_| false;
-        if (!has_config and
-            !peekMageFlowIndex(io, allocator, sub) and
-            !peekMfluxFlux2(io, allocator, sub)) return false;
+        if (!has_config) return false;
 
         // Filter by supported model_type AND quantization scheme. Catches:
         //   - partially-downloaded checkpoints (missing/garbage config)
@@ -981,17 +816,6 @@ fn tryAddModel(
     };
     errdefer if (model_type.len > 0) allocator.free(model_type);
 
-    // An incomplete media pack stays invisible, like any half-pulled
-    // download (see `requiredMediaMarker`).
-    if (requiredMediaMarker(model_type)) |marker| {
-        const present = if (sub.statFile(io, marker, .{})) |st| st.kind == .file else |_| false;
-        if (!present) {
-            log.info("[discovery] skip {s}: {s} without {s} (incomplete media pack)", .{ name, model_type, marker });
-            allocator.free(model_type);
-            return true;
-        }
-    }
-
     // Compute weight bytes (sum of *.safetensors sizes) — best-effort.
     // GGUF entries already carry the picked file's size instead.
     if (!bytes_ok) {
@@ -1011,11 +835,6 @@ fn tryAddModel(
                 bytes_ok = true;
             }
         }
-        // A diffusers-shaped repo (MageFlow) holds NO weights at its root —
-        // they live one level down in transformer/, text_encoder/, vae/. Only
-        // descend when the flat scan came up empty, so the common MLX layout
-        // pays nothing.
-        if (!bytes_ok) bytes_ok = sumComponentWeights(io, parent, name, &bytes);
     }
 
     const id = if (id_prefix.len > 0)
@@ -1037,32 +856,6 @@ fn tryAddModel(
         .streaming_index_complete = streaming_index_complete,
     });
     return true;
-}
-
-/// Sum `*.safetensors` one level below `parent/name` (the component subdirs of
-/// a diffusers repo). Returns true when anything was found. Best-effort: any
-/// unreadable dir is skipped, exactly like the flat scan above.
-fn sumComponentWeights(io: std.Io, parent: std.Io.Dir, name: []const u8, bytes: *u64) bool {
-    var top = parent.openDir(io, name, .{ .iterate = true }) catch return false;
-    defer top.close(io);
-    var found_any = false;
-    var it = top.iterate();
-    while (it.next(io) catch null) |entry| {
-        if (entry.kind != .directory) continue;
-        if (entry.name.len == 0 or entry.name[0] == '.') continue;
-        var comp = top.openDir(io, entry.name, .{ .iterate = true }) catch continue;
-        defer comp.close(io);
-        var cit = comp.iterate();
-        while (cit.next(io) catch null) |f| {
-            if (f.kind != .file and f.kind != .sym_link) continue;
-            if (!std.mem.endsWith(u8, f.name, ".safetensors")) continue;
-            const st = comp.statFile(io, f.name, .{}) catch continue;
-            if (st.kind != .file) continue;
-            bytes.* += @intCast(st.size);
-            found_any = true;
-        }
-    }
-    return found_any;
 }
 
 fn trimTrailingSlash(s: []const u8) []const u8 {
@@ -1121,15 +914,6 @@ pub fn probeModelDir(io: std.Io, allocator: std.mem.Allocator, abs_path: []const
         .supported => |mt| mt,
     };
     errdefer allocator.free(model_type);
-
-    // Same completeness rule as tryAddModel: registering an incomplete media
-    // pack by path would hand it straight to the text loader.
-    if (requiredMediaMarker(model_type)) |marker| {
-        var msub = dir.openDir(io, base, .{}) catch return error.ModelDirNotFound;
-        defer msub.close(io);
-        const present = if (msub.statFile(io, marker, .{})) |st| st.kind == .file else |_| false;
-        if (!present) return error.IncompleteMediaPack;
-    }
 
     var bytes: u64 = 0;
     var bytes_ok = false;
@@ -1368,21 +1152,6 @@ fn lessThanById(_: void, a: DiscoveredModel, b: DiscoveredModel) bool {
 // ── Tests ──
 
 const testing = std.testing;
-
-test "mage_flow classifies as image media (modelKind + isMediaModelType)" {
-    try testing.expect(isMediaModelType("mage_flow"));
-    try testing.expect(isMediaModelType("mageflow"));
-    try testing.expectEqual(ModelKind.image, modelKindFromType("mage_flow"));
-    try testing.expectEqual(ModelKind.image, modelKindFromType("mageflow"));
-    // Guardrail: a regular LM must not be swept up by the prefix match.
-    try testing.expect(!isMediaModelType("gemma4"));
-}
-
-test "minimax_music3 classifies as audio media with the vocoder marker" {
-    try testing.expect(isMediaModelType("minimax_music3"));
-    try testing.expectEqual(ModelKind.audio, modelKindFromType("minimax_music3"));
-    try testing.expectEqualStrings("vocoder.safetensors", requiredMediaMarker("minimax_music3").?);
-}
 
 test "discoverModels finds flat and org/repo model dirs" {
     const io = std.testing.io;
@@ -1700,85 +1469,6 @@ test "discoverModels finds GGUF dirs without config.json (issue #59)" {
     try testing.expectEqualStrings("gguf", result.models[1].model_type);
 }
 
-test "discoverModels finds a MageFlow repo (model_index.json, no root config.json)" {
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-
-    // A MageFlow repo carries NO root config.json — every config lives in a
-    // component subdir, and `model_index.json` is the only classification
-    // signal (both released repos AND our 8-bit mirrors). `peekConfig` has the
-    // fallback, but `tryAddModel` used to bail on the missing config.json
-    // before ever reaching it, so a downloaded MageFlow model was invisible to
-    // `list`, `/v1/models` and the app's model picker.
-    try tmp.dir.createDirPath(io, "microsoft/Mage-Flow-Turbo/transformer");
-    try tmp.dir.createDirPath(io, "microsoft/Mage-Flow-Turbo/vae");
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "microsoft/Mage-Flow-Turbo/model_index.json",
-        .data =
-        \\{"_class_name":"MageFlowPipeline","_mage_flow_version":"0.1.0"}
-        ,
-    });
-    try tmp.dir.writeFile(io, .{ .sub_path = "microsoft/Mage-Flow-Turbo/transformer/diffusion_pytorch_model.safetensors", .data = "0123456789" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "microsoft/Mage-Flow-Turbo/vae/diffusion_pytorch_model.safetensors", .data = "0123" });
-    // A configless, index-less dir stays invisible (an interrupted download).
-    try tmp.dir.createDirPath(io, "microsoft/half-pulled");
-    try tmp.dir.writeFile(io, .{ .sub_path = "microsoft/half-pulled/README.md", .data = "x" });
-
-    var result = try discoverModelsInDir(io, allocator, tmp.dir, "/root");
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 1), result.models.len);
-    try testing.expectEqualStrings("microsoft/Mage-Flow-Turbo", result.models[0].id);
-    try testing.expectEqualStrings("mage_flow", result.models[0].model_type);
-    // Size is the whole tree — the weights live in component subdirs.
-    try testing.expectEqual(@as(?u64, 14), result.models[0].bytes_on_disk);
-}
-
-test "discoverModels finds an mflux FLUX.2 repo (no root config.json)" {
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-
-    // The 4B mflux mirror ships a root config.json; `mlx-community/flux2-klein-9b-4bit`
-    // — the only MLX build of the 9B — ships NONE. Same class as MageFlow: the
-    // repo is a real, loadable model, so `list` / `/v1/models` / the app picker
-    // must see it. The signal is the DiT's own weight names, not a directory
-    // shape (transformer+vae+text_encoder describes half of HuggingFace).
-    try tmp.dir.createDirPath(io, "mlx-community/flux2-klein-9b-4bit/transformer");
-    try tmp.dir.createDirPath(io, "mlx-community/flux2-klein-9b-4bit/text_encoder");
-    try tmp.dir.createDirPath(io, "mlx-community/flux2-klein-9b-4bit/vae");
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "mlx-community/flux2-klein-9b-4bit/transformer/model.safetensors.index.json",
-        .data =
-        \\{"weight_map":{"double_stream_modulation_img.linear.weight":"0.safetensors",
-        \\"single_stream_modulation.linear.weight":"0.safetensors"}}
-        ,
-    });
-    try tmp.dir.writeFile(io, .{ .sub_path = "mlx-community/flux2-klein-9b-4bit/transformer/0.safetensors", .data = "0123456789" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "mlx-community/flux2-klein-9b-4bit/text_encoder/0.safetensors", .data = "0123" });
-    // A diffusers repo of some OTHER architecture must stay invisible — the
-    // fingerprint is what separates them, and a shape test would take both.
-    try tmp.dir.createDirPath(io, "mlx-community/some-other-dit/transformer");
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "mlx-community/some-other-dit/transformer/model.safetensors.index.json",
-        .data = "{\"weight_map\":{\"blocks.0.attn.qkv.weight\":\"0.safetensors\"}}",
-    });
-    try tmp.dir.writeFile(io, .{ .sub_path = "mlx-community/some-other-dit/transformer/0.safetensors", .data = "0123" });
-
-    var result = try discoverModelsInDir(io, allocator, tmp.dir, "/root");
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 1), result.models.len);
-    try testing.expectEqualStrings("mlx-community/flux2-klein-9b-4bit", result.models[0].id);
-    try testing.expectEqualStrings("flux2-klein", result.models[0].model_type);
-    try testing.expectEqual(ModelKind.image, modelKindFromType(result.models[0].model_type));
-    // Weights live one level down, like every other diffusers-shaped repo.
-    try testing.expectEqual(@as(?u64, 14), result.models[0].bytes_on_disk);
-}
-
 test "discoverModels: a .gguf beside config.json wins (mirrors --model routing)" {
     // `--model <dir>` checks isGgufPath BEFORE parsing config.json, so a dir
     // holding both routes to the embedded engine. Discovery must classify it
@@ -1902,14 +1592,9 @@ test "modelKindFromType labels every family (list TYPE column + run preflight)" 
     try testing.expectEqual(ModelKind.chat, modelKindFromType("gguf"));
     try testing.expectEqual(ModelKind.chat, modelKindFromType("diffusion_gemma"));
     try testing.expect(isSupportedModelType("diffusion_gemma"));
-    // Media modalities.
-    try testing.expectEqual(ModelKind.image, modelKindFromType("flux2-klein-4b"));
-    try testing.expectEqual(ModelKind.image, modelKindFromType("krea2_turbo"));
-    try testing.expectEqual(ModelKind.audio, modelKindFromType("qwen3_tts"));
-    try testing.expectEqual(ModelKind.audio, modelKindFromType("acestep"));
-    try testing.expectEqual(ModelKind.video, modelKindFromType("AudioVideo"));
-    try testing.expectEqual(ModelKind.mesh, modelKindFromType("hunyuan3d_2_1"));
-    // Encoders, drafter sidecars, and genuinely unsupported archs.
+    // Encoders, drafter sidecars, and genuinely unsupported archs (media
+    // generation included: it is no longer served).
+    try testing.expectEqual(ModelKind.unsupported, modelKindFromType("flux2-klein-4b"));
     try testing.expectEqual(ModelKind.embed, modelKindFromType("bert"));
     try testing.expectEqual(ModelKind.drafter, modelKindFromType("gemma4_assistant"));
     try testing.expectEqual(ModelKind.drafter, modelKindFromType("gemma4_unified_assistant"));
@@ -1918,11 +1603,10 @@ test "modelKindFromType labels every family (list TYPE column + run preflight)" 
     try testing.expectEqual(ModelKind.drafter, modelKindFromType("muse_glimmer_assistant"));
     try testing.expectEqual(ModelKind.unsupported, modelKindFromType("vit"));
     // Labels stay column-friendly.
-    try testing.expectEqualStrings("3d", ModelKind.mesh.label());
     try testing.expectEqualStrings("chat", ModelKind.chat.label());
 }
 
-test "classifyModelPath: gguf/media/drafter dirs classify; junk is null" {
+test "classifyModelPath: gguf/drafter dirs classify; junk is null" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -1930,13 +1614,8 @@ test "classifyModelPath: gguf/media/drafter dirs classify; junk is null" {
 
     try tmp.dir.createDirPath(io, "g");
     try tmp.dir.writeFile(io, .{ .sub_path = "g/model-Q4_K_M.gguf", .data = "x" });
-    try tmp.dir.createDirPath(io, "img");
-    try tmp.dir.writeFile(io, .{ .sub_path = "img/config.json", .data = "{\"model_type\":\"flux2-klein-4b\"}" });
     try tmp.dir.createDirPath(io, "drafter");
     try tmp.dir.writeFile(io, .{ .sub_path = "drafter/config.json", .data = "{\"model_type\":\"gemma4_assistant\"}" });
-    // MageFlow diffusers repo: NO root config.json, only model_index.json.
-    try tmp.dir.createDirPath(io, "mage");
-    try tmp.dir.writeFile(io, .{ .sub_path = "mage/model_index.json", .data = "{\"_class_name\":\"MageFlowPipeline\"}" });
     try tmp.dir.createDirPath(io, "junk");
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1945,9 +1624,7 @@ test "classifyModelPath: gguf/media/drafter dirs classify; junk is null" {
 
     const cases = .{
         .{ "g", ModelKind.chat },
-        .{ "img", ModelKind.image },
         .{ "drafter", ModelKind.drafter },
-        .{ "mage", ModelKind.image },
     };
     inline for (cases) |c| {
         const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, c[0] });
@@ -2100,23 +1777,6 @@ test "isSupportedModelType accepts qwen3_moe (Qwen3-30B-A3B)" {
     try testing.expect(isSupportedModelType("qwen3"));
     // A genuinely unknown arch is still rejected.
     try testing.expect(!isSupportedModelType("totally_made_up_arch"));
-}
-
-test "isSupportedModelType accepts native media archs (image/audio/video)" {
-    // Unified media-gen: FLUX (flux2*), Qwen3-TTS, LTX-Video (AudioVideo) load
-    // through the registry now, so discovery + by-path must accept them.
-    try testing.expect(isSupportedModelType("flux2-klein-4b"));
-    try testing.expect(isSupportedModelType("flux2"));
-    try testing.expect(isSupportedModelType("qwen3_tts"));
-    try testing.expect(isSupportedModelType("AudioVideo"));
-    try testing.expect(isMediaModelType("flux2-klein-9b"));
-    try testing.expect(isMediaModelType("krea2_turbo"));
-    try testing.expect(isSupportedModelType("krea2_turbo"));
-    try testing.expect(isMediaModelType("hunyuan3d_2_1"));
-    try testing.expect(isSupportedModelType("hunyuan3d_2_1"));
-    try testing.expect(isMediaModelType("acestep"));
-    try testing.expect(isSupportedModelType("acestep"));
-    try testing.expect(!isMediaModelType("gemma4"));
 }
 
 test "isSupportedModelType accepts gemma3_text (text-only Gemma3ForCausalLM)" {
@@ -2332,53 +1992,6 @@ test "parseStubMeta extracts dims/ctx/quant/MoE + chat/vision capabilities" {
         const m = parseStubMeta(a, "not json", true);
         try testing.expect(!m.found);
     }
-}
-
-test "discovery skips an incomplete media pack (media model_type without its marker)" {
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-
-    // The live 2026-08-08 shape: a turbo-lora fragment (and equally, any
-    // in-flight H3 pack) holds a valid minimax_h3 config.json and SOME
-    // safetensors, but not transformer.safetensors. Registering it shadows
-    // complete copies in later roots and the text loader dies on it.
-    try tmp.dir.createDirPath(io, "ddalcu/h3-fragment");
-    try tmp.dir.writeFile(io, .{ .sub_path = "ddalcu/h3-fragment/config.json", .data = "{\"model_type\":\"minimax_h3\"}" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "ddalcu/h3-fragment/turbo_lora.safetensors", .data = "0123" });
-    // A COMPLETE pack (marker present) stays discovered.
-    try tmp.dir.createDirPath(io, "ddalcu/h3-complete");
-    try tmp.dir.writeFile(io, .{ .sub_path = "ddalcu/h3-complete/config.json", .data = "{\"model_type\":\"minimax_h3\"}" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "ddalcu/h3-complete/transformer.safetensors", .data = "0123" });
-    // LTX has its own marker (connector.safetensors).
-    try tmp.dir.createDirPath(io, "x/ltx-partial");
-    try tmp.dir.writeFile(io, .{ .sub_path = "x/ltx-partial/config.json", .data = "{\"model_type\":\"AudioVideo\"}" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "x/ltx-partial/vae_decoder.safetensors", .data = "0123" });
-
-    var result = try discoverModelsInDir(io, allocator, tmp.dir, "/root");
-    defer result.deinit();
-
-    try testing.expectEqual(@as(usize, 1), result.models.len);
-    try testing.expectEqualStrings("ddalcu/h3-complete", result.models[0].id);
-}
-
-test "probeModelDir refuses an incomplete media pack by name" {
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(io, &root_buf);
-    const root = root_buf[0..root_len];
-
-    try tmp.dir.createDirPath(io, "h3-fragment");
-    try tmp.dir.writeFile(io, .{ .sub_path = "h3-fragment/config.json", .data = "{\"model_type\":\"minimax_h3\"}" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "h3-fragment/turbo_lora.safetensors", .data = "0123" });
-    const dir = try std.fs.path.join(allocator, &.{ root, "h3-fragment" });
-    defer allocator.free(dir);
-
-    try testing.expectError(error.IncompleteMediaPack, probeModelDir(io, allocator, dir));
 }
 
 test "readStubMeta: has_mtp follows the checkpoint's MTP head" {
