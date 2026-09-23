@@ -1973,8 +1973,13 @@ fn writeTinyShard(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, tensors: []
 /// (layer 0 dense) beside RESIDENT affine routed banks (layer 1). `expert_seed`
 /// is the only thing that differs between two arms.
 fn writeTinyMimoResidentPack(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expert_seed: u64) !void {
+    return writeTinyMimoPackWith(io, a, dir, expert_seed, "");
+}
+
+/// `extra_config` is spliced into config.json as further top-level fields.
+fn writeTinyMimoPackWith(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expert_seed: u64, extra_config: []const u8) !void {
     const H = TinyMimo.hidden;
-    try dir.writeFile(io, .{ .sub_path = "config.json", .data =
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data = try std.mem.concat(a, u8, &.{
         \\{"model_type":"mimo_v2","vocab_size":8,"hidden_size":128,
         \\ "num_hidden_layers":2,"intermediate_size":128,
         \\ "moe_intermediate_size":128,"n_routed_experts":4,
@@ -1985,8 +1990,11 @@ fn writeTinyMimoResidentPack(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, 
         \\ "hybrid_layer_pattern":[0,0],"moe_layer_freq":[0,1],
         \\ "attention_projection_layout":"fused_qkv",
         \\ "add_swa_attention_sink_bias":false,
-        \\ "add_full_attention_sink_bias":false}
-    });
+        \\ "add_full_attention_sink_bias":false
+        ,
+        extra_config,
+        "}",
+    }) });
     try dir.writeFile(io, .{ .sub_path = "tokenizer_config.json", .data = "{}" });
     try dir.writeFile(io, .{ .sub_path = "tokenizer.json", .data =
         \\{"pre_tokenizer":{"type":"ByteLevel"},"model":{"type":"BPE",
@@ -2066,4 +2074,46 @@ test "kld: a resident mimo_v2 load takes the source trunk and its logits follow 
         for (rows[arm]) |v| try testing.expect(std.math.isFinite(v));
     }
     try testing.expect(!std.mem.eql(f32, &rows[0], &rows[1]));
+}
+
+test "kld: a pack declaring trunk_quant serves an affine o_proj; its source-shaped twin keeps bf16" {
+    const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var metal: bool = false;
+    mlx.check(mlx.mlx_metal_is_available(&metal)) catch return error.SkipZigTest;
+    if (!metal) return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const ids = [_]u32{ 1, 3, 5, 2, 7, 0 };
+    var rows: [2][TinyMimo.vocab]f32 = undefined;
+    const arms = [_][]const u8{ "", ",\"trunk_quant\":{\"o_proj\":{\"mode\":\"affine\",\"bits\":8,\"group_size\":64}}" };
+    for (arms, 0..) |extra, arm| {
+        const sub = if (arm == 0) "source" else "pack";
+        try tmp.dir.createDirPath(io, sub);
+        var dir = try tmp.dir.openDir(io, sub, .{});
+        defer dir.close(io);
+        try writeTinyMimoPackWith(io, arena, dir, 1, extra);
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_len = try dir.realPath(io, &path_buf);
+
+        const loaded = try loadModel(io, allocator, .{ .model_dir = path_buf[0..path_len] });
+        defer loaded.deinit();
+        const o = loaded.weights.get("model.layers.1.self_attn.o_proj.weight") orelse return error.MissingWeight;
+        try testing.expectEqual(if (arm == 0) mlx.mlx_dtype.bfloat16 else mlx.mlx_dtype.uint32, mlx.mlx_array_dtype(o));
+        try testing.expectEqual(arm == 1, loaded.weights.get("model.layers.1.self_attn.o_proj.biases") != null);
+
+        var ctx = loaded.xfm.defaultCtx();
+        const logits = try forwardPrompt(allocator, loaded, &ctx, &ids);
+        defer _ = mlx.mlx_array_free(logits);
+        try readLastRow(&loaded.xfm, logits, &rows[arm]);
+        for (rows[arm]) |v| try testing.expect(std.math.isFinite(v));
+    }
+    // 8-bit o_proj moves the logits, but only by its own rounding.
+    try testing.expect(!std.mem.eql(f32, &rows[0], &rows[1]));
+    for (rows[0], rows[1]) |a, b| try testing.expect(@abs(a - b) <= 0.05 * (@abs(a) + 1));
 }

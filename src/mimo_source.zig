@@ -12,6 +12,7 @@ const model = @import("model.zig");
 const expert_exl3 = @import("expert_exl3.zig");
 const expert_quant = @import("expert_quant.zig");
 const fp8_block = @import("fp8_block.zig");
+const log = @import("log.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -90,6 +91,8 @@ pub fn loadWeights(
     const scratch = arena.allocator();
     var source = try loadSourceIndex(io, scratch, model_dir);
     try validatePlan(&source, scratch, config);
+    if (config.trunk_quant_o_proj) |q|
+        log.info("[mimo-source] trunk_quant: o_proj packed affine {d}-bit g{d} at load\n", .{ q.bits, q.group_size });
 
     var weights = model.Weights.init(allocator);
     errdefer weights.deinit();
@@ -106,10 +109,14 @@ pub fn loadWeights(
             .resident, .routed_expert => {
                 const raw = try readTensor(allocator, model_dir, meta);
                 defer allocator.free(raw);
-                var arr = try uploadDense(raw, meta, stream);
-                errdefer _ = mlx.mlx_array_free(arr);
-                try putWeight(&weights, allocator, key, arr);
-                arr = .{};
+                const arr = try uploadDense(raw, meta, stream);
+                if (trunkQuantFor(key, config)) |q| {
+                    defer _ = mlx.mlx_array_free(arr);
+                    try putAffine(&weights, allocator, key, arr, q);
+                } else {
+                    errdefer _ = mlx.mlx_array_free(arr);
+                    try putWeight(&weights, allocator, key, arr);
+                }
             },
             .fp8_weight => try loadFp8Weight(&weights, allocator, model_dir, key, meta, &source),
         }
@@ -800,7 +807,10 @@ fn validatePlan(source: *const SourceIndex, allocator: Allocator, config: *const
         const meta = entry.value_ptr.*;
         switch (try classifyKey(key, config)) {
             .skipped => {},
-            .resident => try validateDense(key, meta, config),
+            .resident => {
+                try validateDense(key, meta, config);
+                if (trunkQuantFor(key, config)) |q| _ = try affineBytes(meta, q);
+            },
             .routed_expert => try validateRoutedExpert(key, meta, config),
             .fp8_weight => try validateFp8Pair(source, allocator, config, key, meta),
             .fp8_scale => {
@@ -829,7 +839,8 @@ fn countResidentBytes(
         switch (try classifyKey(key, config)) {
             .skipped, .fp8_scale => {},
             .resident, .routed_expert => {
-                total = std.math.add(u64, total, try payloadBytes(meta, null)) catch
+                const bytes = if (trunkQuantFor(key, config)) |q| try affineBytes(meta, q) else try payloadBytes(meta, null);
+                total = std.math.add(u64, total, bytes) catch
                     return error.ResidentBytesOverflow;
             },
             .fp8_weight => {
@@ -901,6 +912,41 @@ fn validateFp8Payload(codes: []const u8, scales: []const u8) !void {
     for (0..scales.len / 4) |i| {
         const scale: f32 = @bitCast(std.mem.readInt(u32, scales[i * 4 ..][0..4], .little));
         if (!std.math.isFinite(scale) or @abs(scale) * 448.0 > bf16_max) return error.InvalidFp8Scale;
+    }
+}
+
+/// The pack's `trunk_quant` for a resident tensor, when it names one.
+fn trunkQuantFor(key: []const u8, config: *const model.ModelConfig) ?model.TrunkQuant {
+    const q = config.trunk_quant_o_proj orelse return null;
+    const ref = layerKey(key) orelse return null;
+    return if (std.mem.eql(u8, ref.rest, "self_attn.o_proj.weight")) q else null;
+}
+
+/// Packed codes plus bf16 scales and biases, one pair per group.
+fn affineBytes(meta: TensorMeta, q: model.TrunkQuant) !u64 {
+    if (meta.shape.len != 2 or meta.shape[1] % q.group_size != 0 or meta.shape[1] * q.bits % 32 != 0)
+        return error.UnsupportedTrunkQuant;
+    const rows = meta.shape[0];
+    const cols = meta.shape[1];
+    return rows * cols * q.bits / 8 + 2 * rows * (cols / q.group_size) * 2;
+}
+
+/// MLX's own affine packer over the stored bf16 (deterministic), kept as the
+/// `.weight/.scales/.biases` triple the quantized binder reads.
+fn putAffine(weights: *model.Weights, allocator: Allocator, key: []const u8, dense: mlx.mlx_array, q: model.TrunkQuant) !void {
+    const s = mlx.gpuStream();
+    defer _ = mlx.mlx_stream_free(s);
+    var parts = mlx.mlx_vector_array_new();
+    defer _ = mlx.mlx_vector_array_free(parts);
+    try mlx.check(mlx.mlx_quantize(&parts, dense, mlx.mlx_optional_int.some(@intCast(q.group_size)), mlx.mlx_optional_int.some(q.bits), "affine", .{ .ctx = null }, s));
+    for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, i| {
+        var arr = mlx.mlx_array_new();
+        errdefer _ = mlx.mlx_array_free(arr);
+        try mlx.check(mlx.mlx_vector_array_get(&arr, parts, i));
+        try mlx.check(mlx.mlx_array_eval(arr));
+        const name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ fp8Base(key), suffix });
+        defer allocator.free(name);
+        try putWeight(weights, allocator, name, arr);
     }
 }
 
@@ -1638,6 +1684,48 @@ test "mimo source refuses NaN codes and scales whose products leave bf16" {
             try t.expectError(want, validateFp8Payload(&codes, &scales));
         } else try validateFp8Payload(&codes, &scales);
     }
+}
+
+test "mimo source requantizes o_proj only when the pack declares trunk_quant" {
+    const t = std.testing;
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try makeTinySourceFixture(io, t.allocator, &tmp);
+    defer fixture.deinit();
+    const key = "model.layers.0.self_attn.o_proj.weight";
+
+    var plain = try loadWeights(io, t.allocator, fixture.path, &fixture.config);
+    defer plain.deinit();
+    try t.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(plain.get(key).?));
+    try t.expect(plain.get("model.layers.0.self_attn.o_proj.scales") == null);
+    const plain_bytes = try residentBytesWithConfig(io, t.allocator, fixture.path, &fixture.config);
+
+    var config = fixture.config;
+    config.trunk_quant_o_proj = .{ .bits = 8, .group_size = 64 };
+    var packed_weights = try loadWeights(io, t.allocator, fixture.path, &config);
+    defer packed_weights.deinit();
+    const w = packed_weights.get(key).?;
+    const sc = packed_weights.get("model.layers.0.self_attn.o_proj.scales").?;
+    const bi = packed_weights.get("model.layers.0.self_attn.o_proj.biases").?;
+    try t.expectEqual(mlx.mlx_dtype.uint32, mlx.mlx_array_dtype(w));
+    try t.expectEqualSlices(c_int, &[_]c_int{ 128, 32 }, mlx.getShape(w));
+    try t.expectEqualSlices(c_int, &[_]c_int{ 128, 2 }, mlx.getShape(sc));
+    try t.expectEqualSlices(c_int, &[_]c_int{ 128, 2 }, mlx.getShape(bi));
+    // The fixture's o_proj is all ones, which affine packs exactly.
+    const s = mlx.gpuStream();
+    defer _ = mlx.mlx_stream_free(s);
+    var back = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(back);
+    try mlx.check(mlx.mlx_dequantize(&back, w, sc, bi, mlx.mlx_optional_int.some(64), mlx.mlx_optional_int.some(8), "affine", .{ .ctx = null }, .{ .value = .bfloat16, .has_value = true }, s));
+    var back32 = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(back32);
+    try mlx.check(mlx.mlx_astype(&back32, back, .float32, s));
+    try mlx.check(mlx.mlx_array_eval(back32));
+    const vals = mlx.mlx_array_data_float32(back32) orelse return error.TestUnexpectedNullData;
+    for (vals[0 .. 128 * 128]) |v| try t.expectEqual(@as(f32, 1), v);
+    // Billed at the packed bytes: [128,32] u32 codes + two [128,2] bf16 grids.
+    try t.expectEqual(plain_bytes - 128 * 128 * 2 + 128 * 32 * 4 + 2 * 128 * 2 * 2, try residentBytesWithConfig(io, t.allocator, fixture.path, &config));
 }
 
 test "mimo source keeps the FP8 trunk in its source bytes and bills them" {

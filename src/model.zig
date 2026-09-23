@@ -22,6 +22,9 @@ pub const MAX_VISION_LAYERS = 64;
 /// `MuseGlimmerImageProcessor.max_image_tokens` — MERGED tokens, not pixels.
 pub const MUSE_MAX_IMAGE_TOKENS = 4096;
 
+/// An affine width MLX's `quantize` packs, applied to a bf16 trunk linear at load.
+pub const TrunkQuant = struct { bits: u8, group_size: u32 };
+
 pub const QuantMode = enum {
     affine,
     nvfp4,
@@ -172,6 +175,8 @@ pub const ModelConfig = struct {
     expert_quant_rate: expert_exl3.Rate = .{ .n = 64 },
     expert_quant_codebook: expert_exl3.Codebook = .mul1,
     expert_quant_window: expert_exl3.Window = .w16,
+    /// `trunk_quant.o_proj` (a pack field): MiMo's bf16 o_proj requantized at load.
+    trunk_quant_o_proj: ?TrunkQuant = null,
     expert_source_dir: ?[]u8 = null,
     /// `MLX_SERVE_NGRAM_BF16_DIR`: serve the PLE n-gram table from the ORIGINAL bf16
     /// shards in this HF checkpoint dir instead of the pack's quantized `ngram_table.bin`
@@ -3837,6 +3842,29 @@ fn parseMimoConfig(c: *ModelConfig, obj: std.json.ObjectMap) !void {
         return error.UnsupportedMimoV2Config;
     const freq = obj.get("moe_layer_freq") orelse return error.UnsupportedMimoV2Config;
     c.first_k_dense_replace = try model_discovery.denseMoePrefix(freq, c.num_hidden_layers);
+    if (obj.get("trunk_quant")) |v| c.trunk_quant_o_proj = try parseTrunkQuant(v);
+}
+
+/// `trunk_quant` is a PACK field (docs/pack-format.md): the source checkpoint the
+/// KLD teacher reads never carries it. Only `o_proj` at an MLX affine width admits.
+fn parseTrunkQuant(v: std.json.Value) !TrunkQuant {
+    if (v != .object or v.object.count() != 1) return error.UnsupportedTrunkQuant;
+    const spec = v.object.get("o_proj") orelse return error.UnsupportedTrunkQuant;
+    if (spec != .object) return error.UnsupportedTrunkQuant;
+    const mode = spec.object.get("mode") orelse return error.UnsupportedTrunkQuant;
+    const bits = spec.object.get("bits") orelse return error.UnsupportedTrunkQuant;
+    const gs = spec.object.get("group_size") orelse return error.UnsupportedTrunkQuant;
+    if (mode != .string or !std.mem.eql(u8, mode.string, "affine")) return error.UnsupportedTrunkQuant;
+    if (bits != .integer or gs != .integer) return error.UnsupportedTrunkQuant;
+    switch (bits.integer) {
+        2, 3, 4, 5, 6, 8 => {},
+        else => return error.UnsupportedTrunkQuant,
+    }
+    switch (gs.integer) {
+        32, 64, 128 => {},
+        else => return error.UnsupportedTrunkQuant,
+    }
+    return .{ .bits = @intCast(bits.integer), .group_size = @intCast(gs.integer) };
 }
 
 fn jsonFloat(v: std.json.Value) f32 {
@@ -8273,6 +8301,42 @@ test "mimo_v2 config rejects unsupported routing and malformed layer geometry" {
     try testing.expect(fused.attn_fused_qkv and !fused.moe_route_norm);
     try testing.expectEqual(@as(f32, 2.5), fused.router_scaling_factor);
     try testing.expect(fused.layerHasAttnSinks(0) and !fused.layerHasAttnSinks(1));
+}
+
+test "mimo_v2 trunk_quant names an affine o_proj and refuses anything else by name" {
+    const base =
+        \\{"model_type":"mimo_v2", "num_hidden_layers":2, "hidden_size":384,
+        \\ "num_attention_heads":4, "num_key_value_heads":2, "head_dim":192,
+        \\ "v_head_dim":128, "partial_rotary_factor":0.334,
+        \\ "hybrid_layer_pattern":[0,1], "moe_layer_freq":[0,1],
+        \\ "n_routed_experts":16, "num_experts_per_tok":4, "moe_intermediate_size":192}
+    ;
+    const plain = try parseConfigFromJson(testing.allocator, base);
+    try testing.expect(plain.trunk_quant_o_proj == null);
+    const json = try mergeConfigJson(testing.allocator, base,
+        \\{"trunk_quant":{"o_proj":{"mode":"affine","bits":8,"group_size":64}}}
+    );
+    defer testing.allocator.free(json);
+    const c = try parseConfigFromJson(testing.allocator, json);
+    try testing.expectEqual(TrunkQuant{ .bits = 8, .group_size = 64 }, c.trunk_quant_o_proj.?);
+    for ([_][]const u8{
+        \\{"trunk_quant":{"qkv_proj":{"mode":"affine","bits":8,"group_size":64}}}
+        ,
+        \\{"trunk_quant":{"o_proj":{"mode":"mxfp8","bits":8,"group_size":32}}}
+        ,
+        \\{"trunk_quant":{"o_proj":{"mode":"affine","bits":7,"group_size":64}}}
+        ,
+        \\{"trunk_quant":{"o_proj":{"mode":"affine","bits":8,"group_size":48}}}
+        ,
+        \\{"trunk_quant":{"o_proj":{"mode":"affine","bits":8}}}
+        ,
+        \\{"trunk_quant":"o_proj"}
+        ,
+    }) |override| {
+        const bad = try mergeConfigJson(testing.allocator, base, override);
+        defer testing.allocator.free(bad);
+        try testing.expectError(error.UnsupportedTrunkQuant, parseConfigFromJson(testing.allocator, bad));
+    }
 }
 
 test "layer value width and sink placement preserve existing defaults" {

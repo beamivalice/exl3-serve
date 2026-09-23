@@ -73,6 +73,23 @@ search and one converted with it differ only in these `suh` values.
 `num_experts_per_tok` must be ≤ 32 (the decode reduce bank,
 `Exl3TopKExceedsReduceBank`).
 
+### `trunk_quant` (`mimo_v2`)
+
+```json
+"trunk_quant": { "o_proj": { "mode": "affine", "bits": 8, "group_size": 64 } }
+```
+
+A pack field, never the source checkpoint's. At load the engine requantizes
+every layer's bf16 `self_attn.o_proj.weight` with MLX's own affine packer
+(deterministic) and serves it through `quantized_matmul`, billed at the packed
+bytes. The original checkpoint `kld capture` reads never carries the field, so
+the teacher keeps o_proj as stored.
+
+- The only key is `o_proj`; `mode` must be `affine`, `bits` one of 2, 3, 4, 5,
+  6, 8 and `group_size` one of 32, 64, 128. Anything else is
+  `UnsupportedTrunkQuant`, never a silent bf16 fallback.
+- The pack's o_proj bytes stay the source's bf16; only the served copy is packed.
+
 ## The shard stamp
 
 Each written shard carries a safetensors `__metadata__` map — every value a
