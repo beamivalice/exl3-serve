@@ -16,8 +16,6 @@ cd "$ROOT"
 bash scripts/fetch-zig.sh
 ZIG="$ROOT/.zig-toolchain/zig"
 
-# libllama (llama.cpp GGUF engine) must be staged before the Zig build links it.
-bash scripts/fetch-llama.sh
 
 # Guest kernel + prebaked rootfs — the MAS bundle ships them in Resources/guest.
 if [ ! -f lib/guest/kernel ] || [ ! -f lib/guest/rootfs.tar.gz ]; then

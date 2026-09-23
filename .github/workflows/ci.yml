@@ -65,8 +65,6 @@ jobs:
             || sudo xcodebuild -downloadComponent MetalToolchain
           bash scripts/build-mlx.sh
 
-      - name: Fetch libllama (llama.cpp GGUF engine)
-        run: bash scripts/fetch-llama.sh
 
       # Bounded: the key is written once per toolchain/build/submodule set, so
       # later runs restore it and never re-save a growing cache. Xcode is in the

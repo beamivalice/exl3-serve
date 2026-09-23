@@ -70,7 +70,7 @@ targets:
         DEVELOPMENT_TEAM: "${APPLE_TEAM_ID}"
         # MAS uses the App Sandbox, not hardened runtime (that's the DMG path).
         ENABLE_HARDENED_RUNTIME: "NO"
-        # The embed phase drops libllama/libmlx* into Contents/Frameworks.
+        # The embed phase drops libmlx* into Contents/Frameworks.
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
       configs:
         debug:

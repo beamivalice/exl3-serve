@@ -53,10 +53,8 @@ MODELS=(
     "gemma4-e4b|Gemma 4 E4B (standard gemma4)|$HOME/.lmstudio/models/mlx-community/gemma-4-e4b-it-4bit|mlx|no"
     "qwen3-coder|Qwen3-Coder 30B-A3B (qwen3_moe flat-brace quirks)|$HOME/.mlx-serve/models/mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit|mlx|no"
     "gemma3-12b|Gemma 3 12B (fallback chat format)|$HOME/.mlx-serve/models/mlx-community/gemma-3-12b-it-qat-4bit|mlx|no"
-    "e4b-gguf|Gemma 4 E4B GGUF (embedded llama.cpp engine)|$HOME/.lmstudio/models/lmstudio-community/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf|gguf|no"
     "ds4-flash|DeepSeek-V4-Flash GGUF (embedded ds4 engine)|$HOME/.mlx-serve/models/antirez/deepseek-v4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2.gguf|gguf|no"
     "qwen38-27b|Qwen 3.8 27B dense (think tags + XML tools)|$HOME/.mlx-serve/models/ddalcu/Qwen3.8-27B-MLX-Serve-4bit|mlx|yes"
-    "gemma4-26b-gguf|Gemma 4 26B-A4B GGUF (embedded llama.cpp engine)|/Volumes/G Drive SSD/gguf/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_K_M.gguf|gguf|no"
     "flashnext-gguf|Qwen 3.8 Flash Next GGUF (embedded ds4 engine)|/Volumes/G Drive SSD/models-dl/antirez/qwen3.8-flash-next-gguf/Qwen3.8-Flash-Next-Q2.gguf|gguf|yes"
 )
 

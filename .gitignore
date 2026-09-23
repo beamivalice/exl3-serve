@@ -13,14 +13,6 @@ zig-out/
 # test that silently skips because its fixture is untracked protects nothing.
 !src/fixtures/*.safetensors
 
-# llama.cpp libllama, staged at build time by scripts/fetch-llama.sh (not vendored)
-/lib/llama/
-# ...and the same path as a SYMLINK. A trailing slash matches a directory
-# but NOT a symlink, which is how an agent worktree's build-output links got
-# committed onto a branch (7f89301), replacing the lib/ds4 submodule and
-# leaving lib/mlx pointing at itself. Ignore both spellings.
-/lib/llama
-
 # mlx + mlx-c, built from the pinned submodules by scripts/build-mlx.sh
 # (lib/mlx-src + lib/mlxc-src are the vendored sources; these are outputs)
 /lib/mlx/

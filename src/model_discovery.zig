@@ -672,10 +672,10 @@ pub const DiscoveryResult = struct {
 };
 
 /// True if a `.gguf` basename is the DeepSeek-V4-Flash model served by the ds4
-/// engine (case-insensitive `deepseek-v4-flash` prefix). Every other GGUF routes
-/// to the generic llama.cpp engine — libllama can't load the DSV4-Flash
-/// architecture, which is why ds4 exists. Mirrors the Swift app's
-/// `isSupportedDsv4Gguf` so client and server agree on which GGUFs are ds4.
+/// engine (case-insensitive `deepseek-v4-flash` prefix). ds4 is the only GGUF
+/// engine in this build, so every other GGUF is refused at load. Mirrors the
+/// Swift app's `isSupportedDsv4Gguf` so client and server agree on which GGUFs
+/// are ds4.
 pub fn isDs4GgufBasename(name: []const u8) bool {
     const prefix = "deepseek-v4-flash";
     if (name.len < prefix.len) return false;
@@ -688,11 +688,10 @@ pub fn isDs4GgufBasename(name: []const u8) bool {
 /// True if a `.gguf` basename is a multimodal-projection sidecar (CLIP
 /// vision / audio encoder packaged separately so the language model can
 /// reference it at runtime). llama.cpp tooling, ollama, and LM Studio all
-/// use the `mmproj-*` prefix for this; `llama_model_load_from_file` refuses
-/// them with `unsupported model architecture: 'clip'`. Filtering them out
-/// at directory-pick time lets a user point at a model folder (which
-/// commonly ships both the LLM and the mmproj sidecar — Gemma 4 VL, Qwen
-/// 3.6 VL, etc.) and have the right file get loaded.
+/// use the `mmproj-*` prefix for this; no LM loader accepts one as a model.
+/// Filtering them out at directory-pick time lets a user point at a model
+/// folder (which commonly ships both the LLM and the mmproj sidecar —
+/// Gemma 4 VL, Qwen 3.6 VL, etc.) and have the right file get loaded.
 ///
 /// Match is a case-insensitive `mmproj` prefix + `.gguf` suffix. `mmproj.gguf`
 /// itself matches; `model-mmproj.gguf` (suffix, not prefix) does NOT —
@@ -719,8 +718,8 @@ pub fn isMmprojGgufBasename(basename: []const u8) bool {
 /// the Swift `DownloadManager.isGgufSidecar` — the macOS app lists every quant
 /// in a folder as a separately selectable model, so the two must agree on which
 /// files are models or the app offers one the server can't load.
-/// True for an MTP draft-head GGUF — the llama.cpp / ds4 speculative-decode
-/// sidecar (e.g. `DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf`). NOT loadable as a
+/// True for an MTP draft-head GGUF — the ds4 speculative-decode sidecar
+/// (e.g. `DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf`). NOT loadable as a
 /// chat model: it's a dependency of the main quant, loaded beside it by the ds4
 /// engine for a faster decode. Matched as a delimited `-MTP-` token so a real
 /// model that merely contains the letters "mtp" isn't caught.
@@ -2012,11 +2011,11 @@ test "lessThanById sorts ascending" {
     try testing.expect(!lessThanById({}, a, a));
 }
 
-test "isDs4GgufBasename routes DSV4 to ds4 and everything else to llama" {
+test "isDs4GgufBasename routes DSV4 to ds4 and nothing else" {
     // DeepSeek-V4-Flash → ds4 (case-insensitive).
     try testing.expect(isDs4GgufBasename("DeepSeek-V4-Flash-Q4_K_M.gguf"));
     try testing.expect(isDs4GgufBasename("deepseek-v4-flash-bf16.gguf"));
-    // Any other GGUF → llama.cpp engine.
+    // Any other GGUF has no engine in this build.
     try testing.expect(!isDs4GgufBasename("qwen2.5-0.5b-instruct-q4_k_m.gguf"));
     try testing.expect(!isDs4GgufBasename("Meta-Llama-3.1-8B-Instruct.Q4_K_M.gguf"));
     try testing.expect(!isDs4GgufBasename("deepseek-v3-chat.gguf")); // V3, not V4-Flash

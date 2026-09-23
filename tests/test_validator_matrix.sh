@@ -1,6 +1,6 @@
 #!/bin/bash
 # test_validator_matrix.sh — API-compliance + agentic matrix across every
-# locally-available Zig MLX architecture plus one llama-engine GGUF and one
+# locally-available Zig MLX architecture plus one
 # ds4-engine GGUF.
 #
 # Per model, two layers:
@@ -48,7 +48,6 @@ MODELS=(
     "qwen36|Qwen3.6 27B dense 4-bit (qwen3_5)|$HOME/.lmstudio/models/mlx-community/Qwen3.6-27B-4bit|html-qwen36|150"
     "qwen36-moe|Qwen3.6 35B-A3B 6-bit (qwen3_5_moe)|$HOME/.mlx-serve/models/mlx-community/Qwen3.6-35B-A3B-6bit|html-qwen-think|150"
     "qwen3-coder|Qwen3-Coder 30B-A3B 8-bit (qwen3_moe)|$HOME/.mlx-serve/models/mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit|html-coder|150"
-    "e4b-gguf|Gemma 4 E4B GGUF (llama engine)|$HOME/.lmstudio/models/lmstudio-community/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf|html-e4b-gguf|150"
     "ds4|DeepSeek-V4-Flash GGUF (ds4 engine)|$HOME/.mlx-serve/models/antirez/deepseek-v4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2.gguf|html-ds4|240"
 )
 

@@ -69,7 +69,6 @@ for wlib in libwebp.dylib libsharpyuv.dylib; do
     [ -f "$WEBP_LIB/$wlib" ] && cp "$WEBP_LIB/$wlib" "$CONTENTS/Frameworks/"
 done
 
-[ -f "$ROOT/lib/llama/lib/libllama.dylib" ] && cp "$ROOT/lib/llama/lib/libllama.dylib" "$CONTENTS/Frameworks/"
 
 # ── Install-name surgery (byte-for-byte the build.sh rules) ──
 chmod -R u+w "$CONTENTS/MacOS/mlx-serve" "$CONTENTS/Frameworks"
@@ -96,13 +95,6 @@ if [ -f "$CONTENTS/Frameworks/libwebp.dylib" ]; then
         "$(otool -L "$CONTENTS/Frameworks/libwebp.dylib" | grep libsharpyuv | awk '{print $1}')" \
         "@loader_path/libsharpyuv.dylib" \
         "$CONTENTS/Frameworks/libwebp.dylib" 2>/dev/null || true
-fi
-
-if [ -f "$CONTENTS/Frameworks/libllama.dylib" ]; then
-    install_name_tool -change \
-        "@rpath/libllama.dylib" \
-        "@executable_path/../Frameworks/libllama.dylib" \
-        "$CONTENTS/MacOS/mlx-serve" 2>/dev/null || true
 fi
 
 # ── Sign nested code (skipped when Xcode builds unsigned) ──

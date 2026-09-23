@@ -55,7 +55,6 @@ const model_settings = @import("model_settings.zig");
 const model_discovery = @import("model_discovery.zig");
 const gguf_meta = @import("gguf_meta.zig");
 const arch_ds4 = if (@import("build_options").ios) @import("arch/ds4_stub.zig") else @import("arch/ds4.zig");
-const arch_llama = if (@import("build_options").ios) @import("arch/llama_stub.zig") else @import("arch/llama.zig");
 const log = @import("log.zig");
 const io_util = @import("io_util.zig");
 const status = @import("status.zig");
@@ -185,19 +184,6 @@ pub const LoadParams = struct {
     /// handful of repeated prompts, and full chat conversations bump
     /// this counter anyway via LRU as new turns arrive.
     tokenize_cache_entries: u32 = 4,
-    /// Iteration 3-5 (perf-plan Phase 5 #1): maximum resident llama.cpp
-    /// sessions per model. 1 = legacy single-session behavior (every
-    /// llama prefill fights one KV slot). > 1 keeps the N
-    /// most-recently-used prompts hot in independent contexts so
-    /// alternating multi-doc agent loads don't cold-prefill every flip.
-    llama_cache_entries: u32 = 4,
-    /// Phase 5 #2: ggml types for the embedded llama.cpp KV cache.
-    /// 0 = libllama default (F16); other values match `ggml_type` enum
-    /// (Q8_0=8, Q4_0=2). Wired through `Scheduler.doLoadOnInferenceThread`
-    /// to the LoadedModel; consumed at first request when the session is
-    /// created in `runPrefillLlama`.
-    llama_kv_type_k: i32 = 0,
-    llama_kv_type_v: i32 = 0,
     /// When non-empty, the load routes through the embedded ds4 engine
     /// instead of the MLX safetensors path. `model_dir` is expected to point
     /// at a `.gguf` file (or a directory containing one); the inference
@@ -220,11 +206,6 @@ pub const LoadParams = struct {
     /// stages but keeps target-only decode. Requires `ds4_mtp` (the sidecar
     /// is the support model).
     ds4_dspark: bool = false,
-    /// Like `ds4_path` but for the generic llama.cpp engine (any GGUF except
-    /// DeepSeek-V4-Flash). The inference thread opens a `LlamaEngine` and
-    /// installs it on the entry's `llama_engine` field. Mutually exclusive with
-    /// `ds4_path` and the MLX safetensors path.
-    llama_path: []const u8 = "",
     /// Headless boot: skip the startup load entirely and run the inference
     /// loop idle. The registry holds discovery stubs (or nothing); the first
     /// model — chat or media — loads on demand via `/v1/load-model`. `entry`/
@@ -236,9 +217,9 @@ pub const LoadParams = struct {
     metrics: ?*metrics_mod.Metrics = null,
     /// The --ctx-size launch flag (0 = unset). Cold-loaded GGUF entries have
     /// no config.json to size their context from, so `preloadCpuState` sizes
-    /// the stub config with this — same rule as the startup GGUF paths
-    /// (llama: ctx or 8192; ds4: clampSessionCtx). MLX cold loads read their
-    /// own config.json and ignore it.
+    /// the stub config with this — same rule as the startup GGUF path (ds4:
+    /// clampSessionCtx). MLX cold loads read their own config.json and
+    /// ignore it.
     ctx_size: u32 = 0,
 };
 
@@ -463,11 +444,6 @@ pub const Slot = struct {
     /// by pointer so we keep it on the slot.
     ds4_rng: u64 = 0,
 
-    /// llama.cpp session for this slot. BORROWED from the slot's
-    /// `model.llama_session` (a persistent per-model context reused across
-    /// requests for prompt-prefix KV reuse) — NOT owned, so `Slot.deinit` must
-    /// not free it. Mutually exclusive with `legacy_gen` and `ds4_session`.
-    llama_session: ?*arch_llama.LlamaSession = null,
     /// DiffusionGemma canvas-denoising runner. Created in
     /// `runPrefillDiffusion` for `config.isDiffusion()` models; owns the
     /// dequantized embedding table; freed in `Slot.deinit`. Mutually
@@ -477,8 +453,6 @@ pub const Slot = struct {
     /// single persistent context serves one request at a time; the claim is
     /// released in `complete()`. Tracked per-slot so only the holder releases.
     holds_session: bool = false,
-    /// Per-request RNG state for llama.cpp sampling (passed by pointer, like ds4).
-    llama_rng: u64 = 0,
 
     // ── Submission data. Owned by the slot, freed in deinit. ──
     prompt_ids: []u32,
@@ -598,11 +572,11 @@ pub const Slot = struct {
         const slot = try allocator.create(Slot);
         errdefer allocator.destroy(slot);
 
-        // Embedded-GGUF model (ds4 or llama.cpp): skip all MLX per-slot
-        // allocations — the engine owns its own KV cache, vision is not
-        // supported, and the forward path bypasses `ForwardCtx`. Build
-        // sentinel-empty fields so `Slot.deinit` is well-defined on both paths.
-        const is_embedded = params.model.ds4_engine != null or params.model.llama_engine != null;
+        // Embedded-GGUF model (ds4): skip all MLX per-slot allocations — the
+        // engine owns its own KV cache, vision is not supported, and the
+        // forward path bypasses `ForwardCtx`. Build sentinel-empty fields so
+        // `Slot.deinit` is well-defined on both paths.
+        const is_embedded = params.model.ds4_engine != null;
 
         // Per-slot KVCache, honoring the process-level kv-quant setting. For
         // embedded slots the engine owns its own cache — we initialize a
@@ -678,8 +652,6 @@ pub const Slot = struct {
             .ds4_session = null,
             .diffusion = null,
             .ds4_rng = @intCast(std.Io.Timestamp.now(io, .real).toMilliseconds()),
-            .llama_session = null,
-            .llama_rng = @intCast(std.Io.Timestamp.now(io, .real).toMilliseconds()),
             .prompt_ids = prompt_owned,
             .full_prompt = full_prompt_owned,
             .sampling = params.sampling,
@@ -764,14 +736,10 @@ pub const Slot = struct {
     /// finished/errored it AND the connection thread has consumed the final
     /// `done`/`err` from `waitNext`).
     pub fn deinit(self: *Slot) void {
-        // ds4_session / llama_session are borrowed from the model (persistent
-        // across requests) — never freed here. The claim on them is released
-        // in Scheduler.complete; the sessions die with the model.
+        // ds4_session is borrowed from the model (persistent across requests)
+        // — never freed here. The claim on it is released in
+        // Scheduler.complete; the session dies with the model.
         self.ds4_session = null;
-        // llama_session is borrowed from model.llama_session (persistent across
-        // requests) — do NOT free it here. The claim on it is released in
-        // Scheduler.complete; the session itself is freed with the model.
-        self.llama_session = null;
         if (self.diffusion) |runner| {
             runner.deinit();
             self.allocator.destroy(runner);
@@ -1187,14 +1155,6 @@ pub const LoadRequest = struct {
     /// `LoadParams.tokenize_cache_entries`; both paths feed
     /// `doLoadOnInferenceThread`.
     tokenize_cache_entries: u32 = 4,
-    /// Iteration 3-5: llama.cpp multi-session cap. Mirrors
-    /// `LoadParams.llama_cache_entries`.
-    llama_cache_entries: u32 = 4,
-    /// Phase 5 #2: ggml types for the embedded llama.cpp KV cache. 0 keeps
-    /// libllama default (F16); Q8_0=8, Q4_0=2. Threaded onto the LoadedModel
-    /// at load time.
-    llama_kv_type_k: i32 = 0,
-    llama_kv_type_v: i32 = 0,
 
     /// Victims to evict before the load (LRU-selected by the planner). Each is
     /// already marked `.evicting` with refcount == 0 by the conn thread under
@@ -1214,13 +1174,12 @@ pub const LoadRequest = struct {
     done_mu: std.Io.Mutex = .init,
     done_cond: std.Io.Condition = .init,
 
-    /// Mirror `LoadParams.ds4_path` / `LoadParams.llama_path`. Set by
-    /// `ensureLoaded` when the entry's path resolves to a GGUF (issue #59):
-    /// the resolved .gguf file routes the load through the matching
-    /// embedded-engine arm in `doLoadOnInferenceThread` instead of the MLX
-    /// safetensors path. Borrowed from the conn thread until `done`.
+    /// Mirror `LoadParams.ds4_path`. Set by `ensureLoaded` when the entry's
+    /// path resolves to a ds4-loadable GGUF (issue #59): the resolved .gguf
+    /// file routes the load through the embedded-engine arm in
+    /// `doLoadOnInferenceThread` instead of the MLX safetensors path.
+    /// Borrowed from the conn thread until `done`.
     ds4_path: []const u8 = "",
-    llama_path: []const u8 = "",
 };
 
 /// Media-generation work item. Posted by `runGeneration` from a connection
@@ -1300,19 +1259,15 @@ pub const Scheduler = struct {
     expert_cache_fit_resolver: ?*const fn (*const model_mod.ModelConfig, u64) anyerror!void,
     ssm_checkpoint_stride: u32,
     ssm_checkpoint_max: u32,
-    /// Launch-flag MTP + embedded-llama.cpp settings, retained (same rationale
-    /// as the prefix-cache fields above) so COLD-LOADED models — on-demand
-    /// `/v1/load-model`, model switches — honor `--no-mtp` / `--mtp-depth` /
-    /// `--llama-cache-entries` / `--llama-kv-quant` like the `--model` primary.
+    /// Launch-flag MTP settings, retained (same rationale as the prefix-cache
+    /// fields above) so COLD-LOADED models — on-demand `/v1/load-model`, model
+    /// switches — honor `--no-mtp` / `--mtp-depth` like the `--model` primary.
     /// Pre-plumbing, the cold-load `LoadRequest` used its struct defaults
-    /// (mtp on, default depth, 4 llama sessions, F16 KV), silently ignoring
-    /// these flags on every on-demand load and model switch.
+    /// (mtp on, default depth), silently ignoring these flags on every
+    /// on-demand load and model switch.
     mtp_enabled: bool,
     mtp_head_kv_quant: bool,
     mtp_depth: u32,
-    llama_cache_entries: u32,
-    llama_kv_type_k: i32,
-    llama_kv_type_v: i32,
     /// Launch-flag ds4 speculative settings, retained for cold loads (same
     /// class as `mtp_enabled` above — `--no-ds4-mtp` / `--dspark` must
     /// survive an on-demand GGUF load, not just the `--model` primary).
@@ -1430,7 +1385,7 @@ pub const Scheduler = struct {
     /// Number of slots currently inside `runPrefill`. Set on entry, cleared on
     /// every exit — so the panel can say "prefilling" IMMEDIATELY, rather than
     /// waiting for the first 8192-token chunk to land (~40 s on a 27B). Also
-    /// covers the ds4/llama engines, whose prefill never reaches the MLX chunk
+    /// covers the ds4 engine, whose prefill never reaches the MLX chunk
     /// loop and therefore never moves `inflight_prefill_tokens`.
     requests_prefilling: std.atomic.Value(u64),
     /// Counts `pending.len + decoding.len` for back-pressure.
@@ -1440,7 +1395,7 @@ pub const Scheduler = struct {
     /// (matches the legacy `max_queue_size`).
     queue_cap: u32,
     submit_cond: std.Io.Condition,
-    /// Signaled when a persistent engine session (llama) is released in
+    /// Signaled when a persistent engine session (ds4) is released in
     /// `complete()`, waking a `submit()` blocked waiting to claim it. Guarded by
     /// `queue_mu` together with `LoadedModel.session_busy`.
     session_cond: std.Io.Condition,
@@ -1509,9 +1464,6 @@ pub const Scheduler = struct {
             .mtp_enabled = params.mtp_enabled,
             .mtp_head_kv_quant = params.mtp_head_kv_quant,
             .mtp_depth = params.mtp_depth,
-            .llama_cache_entries = params.llama_cache_entries,
-            .llama_kv_type_k = params.llama_kv_type_k,
-            .llama_kv_type_v = params.llama_kv_type_v,
             .ds4_mtp = params.ds4_mtp,
             .ds4_dspark = params.ds4_dspark,
             .ds4_ssd_streaming = params.ds4_ssd_streaming,
@@ -1713,13 +1665,13 @@ pub const Scheduler = struct {
         }
         if (self.shutdown.load(.acquire)) return error.Shutdown;
 
-        // Persistent-session engines (llama, ds4) reuse one KV context across
+        // The persistent-session engine (ds4) reuses one KV context across
         // requests, so only one request may drive it at a time. Block here until
         // the model's session is free, then claim it (released in `complete`).
         // This serializes concurrent embedded-engine requests without spinning
         // the inference thread, and lets the next request reuse the previous
         // one's prompt KV.
-        if (params.model.llama_engine != null or params.model.ds4_engine != null) {
+        if (params.model.ds4_engine != null) {
             while (params.model.session_busy and !self.shutdown.load(.acquire)) {
                 self.session_cond.waitUncancelable(self.io, &self.queue_mu);
             }
@@ -1780,8 +1732,8 @@ pub const Scheduler = struct {
             }
         }
 
-        // Release the persistent llama session claim (if this slot held it) so
-        // the next queued llama request can claim it AND reuse the KV prefix the
+        // Release the persistent engine session claim (if this slot held it) so
+        // the next queued request can claim it AND reuse the KV prefix the
         // session now holds. Done before enqueueing cleanup so a waiting
         // submitter can proceed immediately.
         if (slot.holds_session) {
@@ -2024,17 +1976,13 @@ pub const Scheduler = struct {
             .expert_cache_fit_resolver = self.expert_cache_fit_resolver,
             .ssm_checkpoint_stride = self.ssm_checkpoint_stride,
             .ssm_checkpoint_max = self.ssm_checkpoint_max,
-            // Cold loads honor the launch-flag MTP + embedded-llama.cpp
-            // settings too (same reason as prefix-cache above) — pre-plumbing
-            // these were LoadRequest defaults, so --no-mtp / --mtp-depth /
-            // --llama-cache-entries / --llama-kv-quant were silently dropped
-            // on every on-demand load and model switch.
+            // Cold loads honor the launch-flag MTP settings too (same reason
+            // as prefix-cache above) — pre-plumbing these were LoadRequest
+            // defaults, so --no-mtp / --mtp-depth were silently dropped on
+            // every on-demand load and model switch.
             .mtp_enabled = self.mtp_enabled,
             .mtp_head_kv_quant = self.mtp_head_kv_quant,
             .mtp_depth = self.mtp_depth,
-            .llama_cache_entries = self.llama_cache_entries,
-            .llama_kv_type_k = self.llama_kv_type_k,
-            .llama_kv_type_v = self.llama_kv_type_v,
             .ds4_mtp = self.ds4_mtp,
             .ds4_dspark = self.ds4_dspark,
             .ds4_ssd_streaming = self.ds4_ssd_streaming,
@@ -2049,7 +1997,9 @@ pub const Scheduler = struct {
         // cold-load on demand like MLX ones).
         if (owned.gguf) |g| switch (g.engine) {
             .ds4 => req.ds4_path = g.path,
-            .llama => req.llama_path = g.path,
+            // `buildGgufStubCpuState` refuses before a CpuState exists, so this
+            // is unreachable in practice — an error, never `unreachable`.
+            .unsupported => return error.LoadFailed,
         };
 
         {
@@ -2303,10 +2253,10 @@ pub const Scheduler = struct {
         if (slotReleasePending(slot)) return .head_release_pending;
         if (slot.sampling.constraint != null) return .grammar;
         if (slot.logprobs_n > 0) return .logprobs;
-        // Embedded-GGUF slots (ds4 / llama.cpp) have no `ForwardCtx` — they
+        // Embedded-GGUF slots (ds4) have no `ForwardCtx` — they
         // always fall through to the per-slot decode path (which dispatches
         // into the engine).
-        if (slot.model.ds4_engine != null or slot.model.llama_engine != null) return .embedded_engine;
+        if (slot.model.ds4_engine != null) return .embedded_engine;
         const cfg = slot.model.config orelse return .arch;
         if (modelBatchable(cfg)) return .ok;
         // A GatedDeltaNet trunk is rejected by the pure-config predicate (it is
@@ -2743,9 +2693,9 @@ fn freeCpuState(allocator: std.mem.Allocator, s: *CpuState) void {
 }
 
 /// GGUF cold-load preload: resolve the actual .gguf file, pick the embedded
-/// engine from its header metadata (the issue #15 rule in gguf_meta.zig;
-/// unreadable metadata defaults to llama with a log line, mirroring
-/// main.zig's chooseGgufEngine), and build the stub CPU state.
+/// engine from its header metadata (the issue #15 rule in gguf_meta.zig),
+/// and build the stub CPU state. ds4 is the only GGUF engine in this build,
+/// so unreadable metadata is a refusal, not a guess.
 fn preloadGgufCpuState(allocator: std.mem.Allocator, io: std.Io, model_dir: []const u8, ctx_size: u32) !CpuState {
     const gguf_path = model_discovery.resolveGgufFile(io, allocator, model_dir) catch |err| {
         model_discovery.logResolveGgufError(model_dir, err);
@@ -2755,8 +2705,8 @@ fn preloadGgufCpuState(allocator: std.mem.Allocator, io: std.Io, model_dir: []co
 
     const engine: gguf_meta.Engine = blk: {
         var info = gguf_meta.readFromFile(io, allocator, gguf_path) catch |err| {
-            log.warn("[gguf] route: metadata read failed ({s}); defaulting to llama\n", .{@errorName(err)});
-            break :blk .llama;
+            log.warn("[gguf] route: metadata read failed ({s})\n", .{@errorName(err)});
+            break :blk gguf_meta.Engine.unsupported;
         };
         defer info.deinit(allocator);
         const e = gguf_meta.preferredEngine(info);
@@ -2773,27 +2723,20 @@ fn preloadGgufCpuState(allocator: std.mem.Allocator, io: std.Io, model_dir: []co
     return state;
 }
 
-/// Stub CPU state for a GGUF cold load. Mirrors the stubs main.zig's
-/// `runLlamaServe`/`runDs4Serve` build for the startup path: the embedded
-/// engine owns the real tokenizer + chat template (the llama arm adopts the
-/// GGUF's embedded template at load), so only `model_type` (echoed in
-/// /v1/models + engine-arm dispatch guards) and `max_position_embeddings`
-/// (session sizing in runPrefillLlama/runPrefillDs4 + the server's context
-/// guard) matter. `ctx_size` is the --ctx-size launch flag; 0 → the same
-/// defaults the startup paths use (8192 for llama — the GGUF's trained
-/// context isn't readable until the engine opens; ds4's own default via
-/// clampSessionCtx).
+/// Stub CPU state for a GGUF cold load. Mirrors the stub main.zig's
+/// `runDs4Serve` builds for the startup path: the embedded engine owns the
+/// real tokenizer + chat template, so only `model_type` (echoed in /v1/models
+/// + engine-arm dispatch guards) and `max_position_embeddings` (session sizing
+/// in runPrefillDs4 + the server's context guard) matter. `ctx_size` is the
+/// --ctx-size launch flag; 0 → ds4's own default via clampSessionCtx.
+/// `.unsupported` is refused by name here, which is the one place a GGUF this
+/// build cannot serve is turned into a load error the client sees.
 fn buildGgufStubCpuState(allocator: std.mem.Allocator, engine: gguf_meta.Engine, ctx_size: u32) !CpuState {
+    if (engine == .unsupported) return error.GgufEngineUnsupported;
     const config = try allocator.create(ModelConfig);
     errdefer allocator.destroy(config);
     config.* = switch (engine) {
-        .llama => ModelConfig{
-            .model_type = "gguf",
-            .weight_prefix = "model",
-            .head_dim = 128,
-            .max_position_embeddings = if (ctx_size > 0) ctx_size else 8192,
-            .is_encoder_only = false,
-        },
+        .unsupported => unreachable,
         .ds4 => ModelConfig{
             .model_type = "deepseek_v4",
             .weight_prefix = "model",
@@ -2948,85 +2891,6 @@ fn doLoadDs4OnInferenceThread(sch: *Scheduler, params: anytype) !void {
     if (hot_cache_budget_invalidate) |f| f();
 }
 
-/// llama.cpp load on the inference thread. Mirrors `doLoadDs4OnInferenceThread`:
-/// open the embedded engine (its Metal kernels bind to this thread's GPU stream
-/// from t0), install it on the entry, move the stub config/tok/chat_config over,
-/// and mark ready. The stub config carries the effective context length so the
-/// server's memory estimate and `runPrefillLlama` size the session correctly.
-fn doLoadLlamaOnInferenceThread(sch: *Scheduler, params: anytype) !void {
-    log.info("[llama] opening engine: {s}\n", .{params.llama_path});
-    const engine = try arch_llama.LlamaEngine.open(sch.allocator, params.llama_path, .{});
-    errdefer engine.close();
-    log.info("[llama] engine ready (EOS={d}, n_vocab={d})\n", .{ engine.eosToken(), engine.nVocab() });
-
-    // Make sure the stub config's EOS set includes the engine's EOS so the
-    // streaming/non-streaming stop checks fire.
-    const eos_id: u32 = @intCast(engine.eosToken());
-    params.config.addEosToken(eos_id);
-
-    // Adopt the GGUF's embedded chat template into the stub ChatConfig so
-    // `chat.encodeChatViaLlama` can render it through mlx-serve's Jinja engine
-    // (which also supplies the tool-synthesis fallback). The stub starts with an
-    // empty allocator-owned template; swap it for the model's, freed by deinit.
-    if (engine.chatTemplate()) |tmpl| {
-        if (params.chat_config.allocator.dupe(u8, tmpl)) |dup| {
-            params.chat_config.allocator.free(params.chat_config.chat_template);
-            params.chat_config.chat_template = dup;
-        } else |_| {}
-    }
-
-    const entry = params.entry;
-    entry.llama_engine = engine;
-    entry.releaseRetainedCpuState();
-    entry.config = params.config;
-    entry.tokenizer = params.tok;
-    entry.chat_config = params.chat_config;
-    entry.weights = null;
-    entry.transformer = null;
-    entry.vision_encoder = null;
-    entry.drafter = null;
-    entry.dflash = null;
-    entry.drafter_block_size = 0;
-    entry.drafter_path = "";
-    entry.prefix_cache = null;
-    // Iteration 2: tokenize cache also applies on the llama path — same
-    // chat-template render + tokenize round-trip per request. Wire it
-    // here too so `--tokenize-cache-entries N` works for GGUFs.
-    if (params.tokenize_cache_entries > 0) {
-        entry.tokenize_cache = tokenize_cache_mod.TokenizeCache.init(
-            sch.allocator,
-            params.tokenize_cache_entries,
-        );
-    }
-    // Iteration 3-5: cap for the llama.cpp multi-session LRU. The MLX
-    // load path sets this further down; for llama we exit early at the
-    // top of doLoadOnInferenceThread, so it has to land here.
-    entry.llama_cache_max_entries = if (params.llama_cache_entries > 0)
-        params.llama_cache_entries
-    else
-        1;
-    // Phase 5 #2: ggml KV-quant types — same reason as above; the
-    // MLX path's assignment is never reached on the llama branch.
-    entry.llama_kv_type_k = params.llama_kv_type_k;
-    entry.llama_kv_type_v = params.llama_kv_type_v;
-
-    const bytes_resident: u64 = if (entry.bytes_on_disk) |b| b else 0;
-
-    sch.registry.mutex.lockUncancelable(sch.io);
-    sch.registry.markReadyLocked(entry, bytes_resident);
-    sch.registry.mutex.unlock(sch.io);
-
-    sch.current_model = entry;
-    sch.xfm = null;
-    sch.weights = null;
-    sch.vision_encoder = null;
-    sch.drafter = null;
-    sch.dflash = null;
-    sch.hot_prefix_cache = null;
-    publishHotCacheResidency(sch);
-    if (hot_cache_budget_invalidate) |f| f();
-}
-
 /// The post-load residency bill the eviction gate reserves, in bytes.
 ///
 /// A media entry is billed by its BACKEND: a staged-residency model
@@ -3074,7 +2938,7 @@ pub fn genLoadResidentBytes(media_peak: u64, bytes_on_disk: u64) u64 {
 /// Media-gen load on the inference thread. Mirrors `doLoadDs4OnInferenceThread`:
 /// build the modality engine (its mlx ops bind to this thread's GPU stream from
 /// t0), install it on the entry, move the stub config/tok/chat_config over, and
-/// mark ready. The MLX/ds4/llama fields stay null; request handlers route
+/// mark ready. The MLX/ds4 fields stay null; request handlers route
 /// through the matching `image_engine`/`audio_engine`/`video_engine` slot.
 fn doLoadGenOnInferenceThread(sch: *Scheduler, params: anytype, modality: gen_mod.Modality) !void {
     log.info("[gen] loading {s} engine: {s}\n", .{ @tagName(modality), params.model_dir });
@@ -3418,8 +3282,8 @@ test "a non-qwen4 checkpoint never engages streaming: the flag is dropped, the p
 }
 
 test "the cold-load LoadRequest re-applies EVERY retained launch setting" {
-    // Three separate rounds of this bug shipped: prefix-cache, then MTP +
-    // llama, then the drafter/ssd group — each time a launch flag reached
+    // Three separate rounds of this bug shipped: prefix-cache, then MTP,
+    // then the drafter/ssd group — each time a launch flag reached
     // only `--model` and the cold path (hot switch, /v1/load-model, first
     // request naming an unloaded model) quietly used a struct default. The
     // scan is the class guard: a field retained on the Scheduler for this
@@ -3430,7 +3294,6 @@ test "the cold-load LoadRequest re-applies EVERY retained launch setting" {
         "kv_quant_config",           "prefix_cache_capacity", "prefix_cache_mem_bytes",
         "prefix_cache_disk_bytes",   "ssm_checkpoint_stride", "ssm_checkpoint_max",
         "mtp_enabled",               "mtp_head_kv_quant",     "mtp_depth",
-        "llama_cache_entries",       "llama_kv_type_k",       "llama_kv_type_v",
         "ds4_mtp",                   "ds4_dspark",            "ds4_ssd_streaming",
         "no_drafter",                "draft_block_size",      "draft_block_size_explicit",
         "ane_prefill",               "ane_chunk_resolver",    "ane_headroom_resolver",
@@ -3708,20 +3571,14 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     //    (eos slices, context length, model name) keep working.
     //
     //    `params` is anytype — either `LoadParams` (startup) or `*LoadRequest`
-    //    (on-demand cold-load; `ensureLoaded` sets `ds4_path`/`llama_path`
-    //    when the entry resolves to a GGUF). Read from the value type's
-    //    fields after a deref-when-pointer.
+    //    (on-demand cold-load; `ensureLoaded` sets `ds4_path` when the entry
+    //    resolves to a GGUF). Read from the value type's fields after a
+    //    deref-when-pointer.
     const Ty = @TypeOf(params);
     const TyInfo = @typeInfo(Ty);
     const Inner = if (TyInfo == .pointer) TyInfo.pointer.child else Ty;
     if (@hasField(Inner, "ds4_path") and params.ds4_path.len > 0) {
         try doLoadDs4OnInferenceThread(sch, params);
-        return;
-    }
-    // ── llama.cpp fast path: same shape as ds4, for any other GGUF. Fires on
-    //    startup LoadParams AND cold-load LoadRequests carrying `llama_path`.
-    if (@hasField(Inner, "llama_path") and params.llama_path.len > 0) {
-        try doLoadLlamaOnInferenceThread(sch, params);
         return;
     }
     // ── media-gen fast path: the (stub) config's model_type marks an image/
@@ -4481,9 +4338,9 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         entry.prefix_cache.?.ssm_checkpoint_max = params.ssm_checkpoint_max;
     }
     // Iteration 2 (perf-plan Phase 4 #3): tokenize cache for warm-path
-    // chat-template renders. Applies to MLX, ds4, and llama engines —
-    // they all funnel through `chat_mod.formatChat` /
-    // `encodeChatViaDs4` / `encodeChatViaLlama` at the handler boundary.
+    // chat-template renders. Applies to both MLX and ds4 — they funnel
+    // through `chat_mod.formatChat` / `encodeChatViaDs4` at the handler
+    // boundary.
     // Default capacity is small (4 entries) because chat conversations
     // mutate the messages list every turn; the goal is to catch warm
     // reuse benches and repeated agent-loop probes, not to memoize a
@@ -4494,17 +4351,6 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
             params.tokenize_cache_entries,
         );
     }
-    // Iteration 3-5: cap for the llama.cpp multi-session LRU. Always
-    // clamp to ≥1 so `runPrefillLlama` can grow the cache even if a
-    // bug or a 0-default leaks through.
-    entry.llama_cache_max_entries = if (params.llama_cache_entries > 0)
-        params.llama_cache_entries
-    else
-        1;
-    // Phase 5 #2: thread KV-quant types onto the LoadedModel so
-    // runPrefillLlama uses them when creating the persistent session.
-    entry.llama_kv_type_k = params.llama_kv_type_k;
-    entry.llama_kv_type_v = params.llama_kv_type_v;
 
     // Best-effort bytes_resident estimate: prefer the disk size hint when
     // available (it's close to actual GPU resident bytes after Metal page-
@@ -5731,112 +5577,6 @@ fn runPrefillDs4(sch: *Scheduler, slot: *Slot, engine: *arch_ds4.Ds4Engine) !voi
     slot.state = .decoding;
 }
 
-/// llama.cpp prefill: drive a persistent per-model session, reusing the KV from
-/// the previous request's shared prompt prefix (LM-Studio-style prompt caching).
-/// `submit` guarantees a single slot owns the session at a time, so the resident
-/// KV is exactly the prior request's prompt+generation. `sync` diffs the new
-/// prompt against it, trims the divergent tail, and decodes only the suffix.
-/// `cached_tokens` reports the reused prefix length; `prompt_tokens` stays the
-/// full prompt so prefill tok/s reflects only the uncached suffix.
-fn runPrefillLlama(sch: *Scheduler, slot: *Slot, engine: *arch_llama.LlamaEngine) !void {
-    const i32_prompt = try slot.allocator.alloc(i32, slot.full_prompt.len);
-    defer slot.allocator.free(i32_prompt);
-    for (slot.full_prompt, 0..) |t, i| i32_prompt[i] = @intCast(t);
-
-    // Size to the stub config's context length (main.zig sets it from the user's
-    // --ctx-size or the GGUF's trained context). 0 → libllama uses the model
-    // default (its trained context).
-    const ctx_size: i32 = if (slot.model.config) |c| @intCast(c.max_position_embeddings) else 0;
-
-    // Phase 5 #1 (Iteration 3-5): pick the best matching entry out of the
-    // LRU. The "best" = longest common prefix between the incoming prompt
-    // and the entry's resident KV mirror; ties (including the all-zero
-    // case) go to the least-recently-used entry so a brand-new prompt
-    // doesn't keep clobbering the same slot.
-    const max_entries = if (slot.model.llama_cache_max_entries > 0)
-        slot.model.llama_cache_max_entries
-    else
-        1;
-
-    // Chat templates produce a fixed leading prefix (system header, BOS,
-    // role markers) that's identical across requests — for Qwen3-style
-    // it's ~3-10 tokens. Treating that as a "hit" would let request B
-    // claim request A's slot just to save a handful of tokens, evicting
-    // A's content-bearing KV. Require a higher floor before we count a
-    // resident entry as a meaningful match. The value 16 sits above
-    // every chat template's pure prologue in this codebase (Gemma=12,
-    // Qwen=8, Llama=4) and below any real user-message overlap.
-    const min_prefix_to_claim: usize = 16;
-
-    var best_idx: ?usize = null;
-    var best_shared: usize = 0;
-    var lru_idx: ?usize = null;
-    var lru_used: i64 = std.math.maxInt(i64);
-    for (slot.model.llama_sessions.items, 0..) |entry, i| {
-        const shared = arch_llama.commonPrefixLen(entry.session.resident.items, i32_prompt);
-        // Strict >: ties leave the lower-indexed entry in `best_idx`, which
-        // is fine — we still need the prefix-match candidate. The
-        // separately tracked `lru_idx` handles the cold-miss path.
-        if (shared > best_shared) {
-            best_shared = shared;
-            best_idx = i;
-        }
-        if (entry.last_used_ns < lru_used) {
-            lru_used = entry.last_used_ns;
-            lru_idx = i;
-        }
-    }
-
-    // Promote the best match only when it crosses the chat-template floor;
-    // otherwise fall through to growth / LRU eviction.
-    if (best_shared < min_prefix_to_claim) best_idx = null;
-
-    var pick_idx: usize = undefined;
-    if (best_idx) |i| {
-        pick_idx = i;
-    } else if (slot.model.llama_sessions.items.len < max_entries) {
-        // Grow the cache — every prefill so far missed; allocate a new
-        // session and append it.
-        const type_k = slot.model.llama_kv_type_k;
-        const type_v = slot.model.llama_kv_type_v;
-        const created = if (type_k != 0 or type_v != 0)
-            try engine.createSessionWithKvQuant(ctx_size, type_k, type_v)
-        else
-            try engine.createSession(ctx_size);
-        errdefer created.free();
-        try slot.model.llama_sessions.append(slot.allocator, .{ .session = created, .last_used_ns = 0 });
-        pick_idx = slot.model.llama_sessions.items.len - 1;
-        log.info("[llama-cache] created session #{d} (cap={d})\n", .{ pick_idx, max_entries });
-    } else {
-        // Full + no prefix match — evict the LRU entry by resetting its KV
-        // in place. Keeps the libllama context alive (re-allocating per
-        // miss would be expensive) but drops the resident-token mirror so
-        // the next sync starts from zero.
-        pick_idx = lru_idx.?;
-        slot.model.llama_sessions.items[pick_idx].session.reset();
-        log.info("[llama-cache] evicted LRU session #{d}\n", .{pick_idx});
-    }
-
-    const entry_ptr = &slot.model.llama_sessions.items[pick_idx];
-    entry_ptr.last_used_ns = @intCast(std.Io.Timestamp.now(sch.io, .boot).nanoseconds);
-    const sess = entry_ptr.session;
-
-    // `syncWithFallback` does the prefix-trim + suffix decode and, on any
-    // libllama transient (the "failed to find a memory slot" class — see
-    // `LlamaSession.syncWithFallback`), resets the session and retries once
-    // cold. Either we serve the request with a clean response or we surface
-    // the error after leaving the session in a known-good state.
-    const cached = sess.syncWithFallback(i32_prompt) catch |err| {
-        sess.reset();
-        return err;
-    };
-
-    slot.llama_session = sess;
-    slot.prompt_tokens = @intCast(slot.full_prompt.len);
-    slot.cached_tokens = @intCast(cached);
-    slot.state = .decoding;
-}
-
 /// ds4 decode tick: argmax (temp ≤ 0) or sample, check EOS, push token,
 /// `eval(token)` to extend the session, and stop on max_tokens. Each call
 /// emits exactly one token (unlike PLD/drafter which can emit several).
@@ -5940,47 +5680,6 @@ test "ds4MtpShouldEngage: >1 draft tokens + greedy (legacy MTP and DSpark)" {
     // The in-checkpoint head (Qwen3.8 Flash Next, GLM 5.x) drafts under sampling too.
     try std.testing.expect(ds4MtpShouldEngage(2, 0.7, true));
     try std.testing.expect(!ds4MtpShouldEngage(0, 0.7, true));
-}
-
-/// llama.cpp decode tick: argmax (temp < 0.01, matching the MLX greedy
-/// threshold) or sample, check EOS, push token, `eval(token)` to extend the
-/// session, and stop on max_tokens. One token per call.
-fn runLlamaDecodeTick(sch: *Scheduler, slot: *Slot, session: *arch_llama.LlamaSession) !void {
-    const engine = slot.model.llama_engine.?;
-    const next_id: i32 = if (slot.sampling.temperature < 0.01)
-        session.argmax()
-    else
-        session.sample(
-            slot.sampling.temperature,
-            @intCast(slot.sampling.top_k),
-            slot.sampling.top_p,
-            0.0, // min_p disabled — matches the MLX sampler (top_k + top_p only)
-            &slot.llama_rng,
-        );
-
-    if (next_id < 0) {
-        slot.markError("llama_sample_failed");
-        return;
-    }
-    const tok_u32: u32 = @intCast(next_id);
-
-    // EOS / end-of-generation — like the MLX path, do NOT emit the stop token.
-    if (engine.isEog(next_id) or generate_mod.isEosId(tok_u32, slot.eos_token_ids)) {
-        finishSlot(sch, slot, "stop");
-        return;
-    }
-
-    slot.pushToken(tok_u32);
-    if (tok_u32 != 0) slot.was_pad_only = false;
-    slot.completion_tokens += 1;
-
-    // Advance the KV by feeding the freshly-sampled token.
-    try session.eval(next_id);
-
-    if (slot.completion_tokens >= slot.max_tokens) {
-        finishSlot(sch, slot, "length");
-        return;
-    }
 }
 
 /// DiffusionGemma prefill: refresh the slot ctx, build the per-slot
@@ -6294,9 +5993,6 @@ fn runPrefill(sch: *Scheduler, slot: *Slot) !void {
     // its live cache internally), and mark the slot decoding.
     if (slot.model.ds4_engine) |engine| {
         return runPrefillDs4(sch, slot, engine);
-    }
-    if (slot.model.llama_engine) |engine| {
-        return runPrefillLlama(sch, slot, engine);
     }
     // DiffusionGemma: generation is a canvas-denoising loop, not
     // autoregressive decode — no Generator. The encoder prefill fills the
@@ -7198,9 +6894,6 @@ fn runSingleDecodeTickInner(sch: *Scheduler, slot: *Slot) !void {
     if (slot.ds4_session) |session| {
         return runDs4DecodeTick(sch, slot, session);
     }
-    if (slot.llama_session) |session| {
-        return runLlamaDecodeTick(sch, slot, session);
-    }
     if (slot.diffusion) |runner| {
         return runDiffusionDecodeTick(sch, slot, runner);
     }
@@ -7644,7 +7337,7 @@ fn slotMtpGroupable(slot: *const Slot) bool {
     if (gen.spec_disabled_runtime or gen.mtp_serial_left > 0 or gen.mtp_serial_exit != .none) return false;
     if (gen.ctx.ssm_entries == null) return false;
     if (slot.sampling.constraint != null or slot.logprobs_n > 0) return false;
-    if (slot.model.ds4_engine != null or slot.model.llama_engine != null) return false;
+    if (slot.model.ds4_engine != null) return false;
     const t = slot.model.transformer orelse return false;
     if (!t.supportsBatchedGdnDecode()) return false;
     return specTickMode(slot.enable_mtp, true, slot.enable_drafter, gen.drafter != null, gen.dflash != null, slot.enable_pld, gen.pld_enabled, gen.dspark_enabled) == .mtp;
@@ -9371,21 +9064,14 @@ test "modelExclusiveDecode asks the transformer, never one hardcoded arch" {
     try testing.expect(std.mem.indexOf(u8, src, hardcoded) == null);
 }
 
-test "buildGgufStubCpuState: llama stub carries gguf model_type + ctx sizing" {
-    const a = std.testing.allocator;
-    // No --ctx-size → the same 8192 default runLlamaServe uses (the GGUF's
-    // trained context isn't readable until the engine opens).
-    var s = try buildGgufStubCpuState(a, .llama, 0);
-    defer freeCpuState(a, &s);
-    try testing.expectEqualStrings("gguf", s.config.model_type);
-    try testing.expectEqual(@as(u32, 8192), s.config.max_position_embeddings);
-    try testing.expect(s.gguf == null); // route is attached by preloadGgufCpuState
-    try testing.expectEqual(@as(usize, 0), s.chat_config.chat_template.len);
-
-    // Explicit --ctx-size flows through to session sizing + context guard.
-    var s2 = try buildGgufStubCpuState(a, .llama, 4096);
-    defer freeCpuState(a, &s2);
-    try testing.expectEqual(@as(u32, 4096), s2.config.max_position_embeddings);
+test "buildGgufStubCpuState: a GGUF no engine here can load is refused by name" {
+    // The generic llama.cpp engine is not part of this build, so the routing
+    // verdict for every non-ds4 GGUF is a NAMED load error the client sees as
+    // a 503 — never a stub config that later panics in a missing engine arm.
+    try testing.expectError(
+        error.GgufEngineUnsupported,
+        buildGgufStubCpuState(std.testing.allocator, .unsupported, 0),
+    );
 }
 
 test "buildGgufStubCpuState: ds4 stub carries deepseek_v4 + clamped ctx" {
@@ -9938,7 +9624,6 @@ test "single MTP slot reaches the round entry through runDecodeTick" {
     slot.allocator = testing.allocator;
     slot.model = &model;
     slot.ds4_session = null;
-    slot.llama_session = null;
     slot.diffusion = null;
     slot.legacy_gen = gen;
     slot.enable_mtp = true;

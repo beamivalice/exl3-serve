@@ -63,7 +63,7 @@ test("isProbeable takes MLX chat models only — no gguf, ds4, encoders or media
 
   assert.ok(isProbeable(model("ling", "bailing_hybrid")));
 
-  // Engine-served GGUF (llama.cpp / ds4) — out of scope by request.
+  // Engine-served GGUF (ds4) — out of scope by request.
   assert.ok(!isProbeable(model("g", "gguf")));
   assert.ok(!isProbeable(model("d", "deepseek_v4")));
   // Encoder-only: no chat surface at all.

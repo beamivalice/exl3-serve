@@ -26,6 +26,10 @@ value-scaling and sigmoid-routing contracts. It is implemented in Zig against
 mlx-c with SSD-streamed expert banks. tests/dump_mimo_v2_fixtures.py loads the
 unmodified reference externally to generate independent numerical fixtures.
 
+The TP-aware FP8 QKV reconstruction in `tests/convert_mimo_v2.py` and
+`src/mimo_source.zig` follows `conversion/mimo.py`, reimplemented with NumPy
+and Zig respectively before affine quantization.
+
 --------------------------------------------------------------------------------
 MTPLX
 https://github.com/youssofal/mtplx
@@ -267,18 +271,6 @@ Copyright (c) 2023 ml-explore
 Pinned submodule at `lib/mlxc-src`, built by `scripts/build-mlx.sh` and linked
 into the mlx-serve binary. Pinned to an upstream commit chosen for
 compatibility with the pinned MLX version. Unmodified.
-
---------------------------------------------------------------------------------
-llama.cpp
-https://github.com/ggml-org/llama.cpp
-Copyright (c) 2023-2026 The ggml authors
-
-Prebuilt release staged into `lib/llama` by `scripts/fetch-llama.sh` and linked
-into the mlx-serve binary as the generic GGUF engine. Unmodified.
-
-The TP-aware FP8 QKV reconstruction in `tests/convert_mimo_v2.py` and
-`src/mimo_source.zig` follows `conversion/mimo.py`, reimplemented with NumPy
-and Zig respectively before affine quantization.
 
 --------------------------------------------------------------------------------
 ds4.c

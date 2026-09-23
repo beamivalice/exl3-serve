@@ -28,7 +28,6 @@ const ds4_ffi = if (@import("build_options").ios) @import("ds4_ffi_stub.zig") el
 const model_registry_mod = @import("model_registry.zig");
 const model_discovery = @import("model_discovery.zig");
 const model_settings = @import("model_settings.zig");
-const arch_llama = if (@import("build_options").ios) @import("arch/llama_stub.zig") else @import("arch/llama.zig");
 const media_mod = @import("gen.zig");
 const stb = @import("stb");
 const webp = @import("webp");
@@ -972,7 +971,7 @@ test "effectiveSsmCheckpointStride: disabled prefix cache disables checkpoint ca
 /// the same role for LoadParams.
 ///
 /// Serve paths whose decode never routes through the PLD-capable generator
-/// (media gen, ds4, llama.cpp) take `.off`: the field is dead weight there,
+/// (media gen, ds4) take `.off`: the field is dead weight there,
 /// and saying so once beats five hand-written `false`s that read like a
 /// decision but drift like a typo.
 pub const PldDefaults = struct {
@@ -1031,24 +1030,6 @@ test "PldDefaults: ServerConfig built from it reports the CLI values" {
 /// the cache catches warm-reuse benches + repeated agent probes without
 /// hoarding token buffers across a long session.
 pub var tokenize_cache_entries: u32 = 4;
-
-/// Iteration 3-5 (perf-plan Phase 5 #1): cap on resident llama.cpp KV
-/// sessions per loaded GGUF model. 1 is the legacy single-session
-/// behavior (a flip between two long-doc prompts evicts the other on
-/// every turn — and even sequential shared-prefix requests reported
-/// cached_tokens=0). N > 1 enables the best-prefix-match LRU so
-/// alternating multi-doc / agent workloads stay warm. Sessions are
-/// created lazily, so unused slots cost nothing.
-pub var llama_cache_entries: u32 = 4;
-
-/// Phase 5 (performance-plan) #2: KV-cache quantization for the embedded
-/// llama.cpp engine. `off` = F16 (libllama default); `q8` halves the KV
-/// bytes (Q8_0, near-lossless); `q4` quarters them (Q4_0, some quality
-/// impact). Non-default settings automatically enable flash attention in
-/// the shim because llama.cpp's plain SDPA only supports F16/F32 KV.
-/// Set via `--llama-kv-quant {off,q8,q4}`. Applies to every llama.cpp
-/// session created after this is set (i.e., from the next model load).
-pub var llama_kv_quant: arch_llama.LlamaKvQuant = .off;
 
 /// Plan 01 — continuous batching: maximum concurrent in-flight requests sharing
 /// the inference thread's batched-decode pass. Set via `--max-concurrent N`.
@@ -1111,9 +1092,6 @@ fn decodeTokens(
 ) ![]u8 {
     if (lm.ds4_engine) |engine| {
         return chat_mod.decodeViaDs4(allocator, engine, ids);
-    }
-    if (lm.llama_engine) |engine| {
-        return chat_mod.decodeViaLlama(allocator, engine, ids);
     }
     return tok.decode(allocator, ids, strip_leading_space);
 }
@@ -1778,7 +1756,7 @@ pub fn serve(
     defer server.deinit(io);
 
     // ── LAN sharing/discovery (src/lan.zig): started HERE — the one chokepoint
-    //    every serve path (model/headless/gen/ds4/llama) flows through — so the
+    //    every serve path (model/headless/gen/ds4) flows through — so the
     //    advertised port is always the bound port. Bonjour being unavailable
     //    degrades to a warning; it must never kill the server.
     if (g_lan_share_spec != null or g_lan_discover) {
@@ -2680,11 +2658,10 @@ fn ollamaQuantOf(id: []const u8) []const u8 {
 /// so the app's engine-aware Settings UI never has to INFER it from
 /// `architecture`: a NATIVE deepseek_v4 safetensors dir and a DeepSeek GGUF
 /// on the embedded ds4 engine report the SAME model_type. "gguf" = an
-/// unloaded GGUF stub whose engine (llama vs ds4) is only known once the
-/// header is read at load time.
-fn modelEngineName(has_ds4: bool, has_llama: bool, path: []const u8, arch_hint: []const u8) []const u8 {
+/// unloaded GGUF stub whose engine is only known once the header is read at
+/// load time.
+fn modelEngineName(has_ds4: bool, path: []const u8, arch_hint: []const u8) []const u8 {
     if (has_ds4) return "ds4";
-    if (has_llama) return "llama";
     if (std.mem.endsWith(u8, path, ".gguf") or std.mem.eql(u8, arch_hint, "gguf")) return "gguf";
     return "mlx";
 }
@@ -2698,7 +2675,7 @@ fn ollamaTagEntryOf(io: std.Io, e: *LoadedModel) ollama_mod.TagEntry {
     const family: []const u8 = if (ready and e.config != null) e.config.?.model_type else (if (e.arch_hint.len > 0) e.arch_hint else "unknown");
     // arch_hint "gguf" covers unloaded discovery stubs whose PATH is a
     // directory of .gguf files (issue #59) — no engine yet, no .gguf suffix.
-    const is_gguf = e.ds4_engine != null or e.llama_engine != null or
+    const is_gguf = e.ds4_engine != null or
         std.mem.endsWith(u8, e.path, ".gguf") or std.mem.eql(u8, e.arch_hint, "gguf");
     var modified_ms: i64 = 0;
     // config.json mtime; .gguf entries fall back to 0 (epoch) rather than
@@ -3138,9 +3115,8 @@ fn getGpuWorkingSetLimit() u64 {
 /// stack (firecrawl/rabbitmq/postgres/playwright) holding tens of GB. The guard
 /// budgeted against the static 115 GB max, admitted a 90 K-token MoE prefill,
 /// and Metal threw `Insufficient Memory` from the command-buffer completion
-/// handler — an UNCATCHABLE async C++ throw that terminates the process (the
-/// libllama frames in the backtrace are just its global std::terminate handler;
-/// the throw is MLX's). Capping by real free RAM makes the two prefill guards
+/// handler — an UNCATCHABLE async C++ throw that terminates the process.
+/// Capping by real free RAM makes the two prefill guards
 /// reject/clamp before that allocation is ever submitted.
 fn physicalMemoryCeiling(working_set_limit: u64, mlx_footprint: u64, free_system: u64) u64 {
     return @min(working_set_limit, mlx_footprint +| free_system);
@@ -5558,16 +5534,16 @@ fn prefillFfnWidth(config: *const model_mod.ModelConfig) u64 {
 /// Whether the MLX-prefill attention-memory preflight applies to a request.
 /// The guard (`checkAttentionMemory`/`prefillMemoryNeeded`) models the MLX
 /// transformer's per-token working set. The embedded ds4 (DeepSeek-V4-Flash)
-/// and llama.cpp engines NEVER take that path — they own their KV *outside*
-/// MLX — so the estimate is pure fiction for them. Their stub `ModelConfig`
+/// engine NEVER takes that path — it owns its KV *outside* MLX — so the
+/// estimate is pure fiction for it. Its stub `ModelConfig`
 /// still advertises head/layer counts (ds4: 56 heads, 61 layers, hidden 7168),
 /// so without this early-out the guard projected ~25 GB for an 8.6K-token ds4
 /// prompt and 400-rejected it — a prompt the SAME server had just served on the
 /// MLX qwen35 engine one model-switch earlier (live 2026-07-15, pi + ds4). Skip
 /// the memory guard whenever an embedded engine will serve; the context-length
 /// guard still bounds the prompt against ds4's own session ctx.
-fn mlxMemoryGuardApplies(uses_ds4: bool, uses_llama: bool) bool {
-    return !(uses_ds4 or uses_llama);
+fn mlxMemoryGuardApplies(uses_ds4: bool) bool {
+    return !uses_ds4;
 }
 
 /// Estimate peak GPU memory for prefill and reject if it would exceed the Metal
@@ -6346,7 +6322,7 @@ pub fn logPrefillRefusal(config: *const model_mod.ModelConfig, prompt_len: usize
 
 fn checkAttentionMemory(allocator: std.mem.Allocator, stream: *Conn, prompt_ids: []const u32, max_tokens: u32, config: *const model_mod.ModelConfig, is_anthropic: bool, kv_override: ?transformer_mod.KVQuantConfig, lm: *const LoadedModel, unchunked_prefill: bool, enable_mtp: bool) !bool {
     const prompt_len: usize = prompt_ids.len;
-    if (!mlxMemoryGuardApplies(lm.ds4_engine != null, lm.llama_engine != null)) return true;
+    if (!mlxMemoryGuardApplies(lm.ds4_engine != null)) return true;
     if (config.num_attention_heads == 0) return true; // unknown architecture, skip check
     // The connection thread has no slot and no cache: it bills cold and defers a warm prompt.
     const bill = prefillAdmissionBill(config, prompt_len, max_tokens, kv_override, unchunked_prefill, prompt_ids, .{ .mtp_on = enable_mtp });
@@ -6472,7 +6448,7 @@ const ReadyCaps = struct {
 };
 
 /// Chat capability for a READY entry. Template presence is NOT the gate for
-/// embedded-engine (ds4/llama) models: a GGUF without a chat_template in its
+/// embedded-engine (ds4) models: a GGUF without a chat_template in its
 /// header still serves chat via fallback formatting, and gating on the
 /// template made a loaded DSV4-Flash advertise capabilities:[] — LAN clients
 /// hid the peer's model as "no chat models" while chatting on it (live
@@ -6528,7 +6504,7 @@ const TextGenTarget = struct {
     has_audio_engine: bool = false,
     has_video_engine: bool = false,
     has_mesh_engine: bool = false,
-    /// A text-capable LM is resident (transformer / ds4 / llama engine) —
+    /// A text-capable LM is resident (transformer / ds4 engine) —
     /// or the entry isn't loaded yet, in which case stubs default to
     /// "assume text until the arch hint or a load says otherwise".
     has_text_lm: bool = true,
@@ -6597,7 +6573,7 @@ fn textGenTargetOf(lm: *LoadedModel) TextGenTarget {
         .has_video_engine = lm.video_engine != null,
         .has_mesh_engine = lm.mesh_engine != null,
         .has_text_lm = lm.state != .ready or lm.transformer != null or
-            lm.ds4_engine != null or lm.llama_engine != null,
+            lm.ds4_engine != null,
     };
 }
 
@@ -6651,7 +6627,7 @@ fn renderModelEntry(
         const has_chat = readyHasChat(
             config.is_encoder_only,
             chat_config.chat_template.len,
-            entry.ds4_engine != null or entry.llama_engine != null,
+            entry.ds4_engine != null,
         );
         const has_vision = entry.vision_encoder != null;
         const has_audio = if (entry.vision_encoder) |ve| ve.supportsAudio() else false;
@@ -6740,7 +6716,7 @@ fn renderModelEntry(
             caps.items,
             mods.items,
             config.model_type,
-            modelEngineName(entry.ds4_engine != null, entry.llama_engine != null, entry.path, entry.arch_hint),
+            modelEngineName(entry.ds4_engine != null, entry.path, entry.arch_hint),
             config.vocab_size,
             config.hidden_size,
             config.num_hidden_layers,
@@ -6824,7 +6800,7 @@ fn renderModelEntry(
     const stub_has_embedding = (sm.found and sm.has_embedding) or
         model_mod.poolingFromDirName(std.fs.path.basename(entry.path), entry.arch_hint) != null;
     // GGUF discovery stub (issue #59): no config.json to read StubMeta from,
-    // but the embedded llama/ds4 engines always serve chat (the GGUF's own
+    // but the embedded ds4 engine always serves chat (the GGUF's own
     // template is adopted at load), so advertise the chat capability set the
     // ready path would.
     const is_gguf_stub = std.mem.eql(u8, entry.arch_hint, "gguf");
@@ -6887,9 +6863,9 @@ fn renderModelEntry(
     defer if (arch_part.len > 0) allocator.free(arch_part);
 
     // Unloaded entries have no engine attached yet — "gguf" (undetermined
-    // llama-vs-ds4) for GGUF paths/stubs, "mlx" for everything else.
+    // ds4) for GGUF paths/stubs, "mlx" for everything else.
     const engine_part = try std.fmt.allocPrint(allocator, "\"engine\":\"{s}\",", .{
-        modelEngineName(false, false, entry.path, entry.arch_hint),
+        modelEngineName(false, entry.path, entry.arch_hint),
     });
     defer allocator.free(engine_part);
 
@@ -7395,7 +7371,7 @@ fn renderPropsBody(
 /// The model-level half of `Scheduler.batchVerdict`: does this loaded model
 /// batch decode at all? Per-slot arms (spec, grammar, logprobs) come later.
 fn batchVerdictFor(entry: *const LoadedModel) scheduler_mod.BatchVerdict {
-    if (entry.ds4_engine != null or entry.llama_engine != null) return .embedded_engine;
+    if (entry.ds4_engine != null) return .embedded_engine;
     const cfg = entry.config orelse return .arch;
     return if (scheduler_mod.configBatchesDecode(cfg)) .ok else .arch;
 }
@@ -7438,9 +7414,9 @@ const PropsSettings = struct {
     prefix_cache_disk_bytes: u64,
 };
 
-const PropsEngine = enum { mlx, llama, ds4 };
+const PropsEngine = enum { mlx, ds4 };
 
-/// ds4 and llama.cpp bypass generate.zig: MLX decode levers, PLD and the MLX drafters never run there.
+/// ds4 bypasses generate.zig: MLX decode levers, PLD and the MLX drafters never run there.
 fn embeddedEngineSettings(st: PropsSettings, engine: PropsEngine, engine_mtp: bool) PropsSettings {
     if (engine == .mlx) return st;
     var out = st;
@@ -7457,7 +7433,7 @@ fn embeddedEngineSettings(st: PropsSettings, engine: PropsEngine, engine_mtp: bo
 }
 
 fn propsSettingsFor(lm: *LoadedModel) PropsSettings {
-    const engine: PropsEngine = if (lm.ds4_engine != null) .ds4 else if (lm.llama_engine != null) .llama else .mlx;
+    const engine: PropsEngine = if (lm.ds4_engine != null) .ds4 else .mlx;
     const engine_mtp = if (lm.ds4_engine) |e| e.mtpDraftTokens() > 1 else false;
     return embeddedEngineSettings(mlxPropsSettings(lm), engine, engine_mtp);
 }
@@ -7467,7 +7443,7 @@ fn mlxPropsSettings(lm: *LoadedModel) PropsSettings {
     const kv = configuredKvQuantFor(config);
     return .{
         .engine = "mlx",
-        .kv_quant = if (lm.llama_engine != null) @tagName(llama_kv_quant) else if (kv.isQuant()) (if (kv.bits == 4) "4" else "8") else "off",
+        .kv_quant = if (kv.isQuant()) (if (kv.bits == 4) "4" else "8") else "off",
         .kv_attn_mode = server_config.kv_attn_mode,
         .decode_attn_quant = transformer_mod.decodeAttnQuantEnabled() and (if (lm.transformer) |x| x.dense_attn_proj else false),
         .prefill_chunk = generate_mod.prefill_chunk_override,
@@ -7552,7 +7528,7 @@ fn handleProps(allocator: std.mem.Allocator, stream: *Conn, lm: *LoadedModel) !v
     var active_mem: usize = 0;
     var peak_mem: usize = 0;
     // MLX's reclaimable buffer pool. Always read from MLX — the embedded
-    // engines don't feed it, so it correctly reads ~0 on a ds4/llama session
+    // engine doesn't feed it, so it correctly reads ~0 on a ds4 session
     // rather than needing a per-engine branch.
     var cache_mem: usize = 0;
     _ = mlx.mlx_get_cache_memory(&cache_mem);
@@ -7566,13 +7542,6 @@ fn handleProps(allocator: std.mem.Allocator, stream: *Conn, lm: *LoadedModel) !v
         const ctx_mem = ds4_ffi.ds4_context_memory_estimate(.metal, ctx_for_estimate);
         const total: u64 = gguf_bytes + ctx_mem.total_bytes;
         active_mem = @intCast(total);
-        peak_mem = active_mem;
-    } else if (lm.llama_engine != null) {
-        // llama.cpp owns its own (Metal) allocations outside MLX's counters.
-        // Use the GGUF on-disk size as the headline figure so the app's GPU
-        // memory bar isn't stuck at 0/0; KV/scratch isn't separately exposed.
-        const gguf_bytes: u64 = lm.bytes_on_disk orelse 0;
-        active_mem = @intCast(gguf_bytes);
         peak_mem = active_mem;
     } else {
         _ = mlx.mlx_get_active_memory(&active_mem);
@@ -7973,14 +7942,11 @@ fn truncateEmbeddingDims(embedding: []f32, dims: usize) []f32 {
     return out;
 }
 
-/// Text -> ids through the model's own vocabulary: an embedded engine's GGUF
-/// vocab, else the loaded BPE tokenizer (an engine model's `tok` is an empty stub).
-/// `add_special` reaches llama.cpp only.
-fn encodeText(allocator: std.mem.Allocator, lm: *const LoadedModel, tok: *const Tokenizer, text: []const u8, add_special: bool) ![]u32 {
+/// Text -> ids through the model's own vocabulary: ds4's GGUF vocab, else the
+/// loaded BPE tokenizer (a ds4 model's `tok` is an empty stub).
+fn encodeText(allocator: std.mem.Allocator, lm: *const LoadedModel, tok: *const Tokenizer, text: []const u8) ![]u32 {
     const i32_ids = if (lm.ds4_engine) |engine|
         try engine.tokenizeText(allocator, text)
-    else if (lm.llama_engine) |engine|
-        try engine.tokenizeText(allocator, text, add_special)
     else
         return tok.encode(allocator, text);
     defer allocator.free(i32_ids);
@@ -8013,7 +7979,7 @@ fn handleTokenize(
         return;
     }
 
-    const ids = try encodeText(allocator, lm, tok, content.?, true);
+    const ids = try encodeText(allocator, lm, tok, content.?);
     defer allocator.free(ids);
 
     var result = std.ArrayList(u8).empty;
@@ -8367,7 +8333,7 @@ fn handleChatCompletions(
     lm: *LoadedModel,
 ) !void {
     // NOTE: no `lm.transformer.?` here — this handler also serves engine-backed
-    // models (GGUF/llama, ds4) whose `transformer` is null. The only MLX-specific
+    // models (GGUF/ds4) whose `transformer` is null. The only MLX-specific
     // gate below reads `config.has_hybrid_layers` (valid for every model incl. the
     // GGUF stub), so the transformer is never needed at this level.
     const tok = lm.tokenizer.?;
@@ -8925,7 +8891,7 @@ fn handleChatCompletions(
     //
     // Phase 4 instrumentation + Iteration 2 cache: time the render+tokenize
     // step. The cache is engine-agnostic — same hit even when the
-    // underlying call is ds4 / llama / MLX formatChat.
+    // underlying call is ds4 / MLX formatChat.
     // Continuation is EXPLICIT on this surface (`continue_final_message`, the
     // spelling vLLM uses). It cannot be implied by a trailing assistant
     // message the way /v1/messages implies it: agent frameworks legitimately
@@ -9265,7 +9231,7 @@ fn handleCompletions(
     // Spec-decode flags (mirror chat-completions). FIM / code-completion
     // prompts are echo-heavy, so the old hardcoded enable_pld/enable_drafter
     // = false at submit left real speedups unused on this endpoint
-    // (tests/test_completions_spec.sh). Embedded engines (ds4/llama) ignore
+    // (tests/test_completions_spec.sh). The embedded ds4 engine ignores
     // these flags at dispatch.
     const pld_explicit_in_json: bool = root.get("enable_pld") != null;
     var enable_pld: bool = if (root.get("enable_pld")) |v|
@@ -9300,7 +9266,7 @@ fn handleCompletions(
     // Tokenize prompt directly (no chat template). ds4-backed models
     // tokenize through the engine's GGUF vocab; MLX models go through
     // the loaded BPE tokenizer.
-    const prompt_ids = try encodeText(allocator, lm, tok, prompt_text.?, true);
+    const prompt_ids = try encodeText(allocator, lm, tok, prompt_text.?);
     defer allocator.free(prompt_ids);
     enable_mtp = admitMtpForCtx(enable_mtp, prompt_ids.len);
 
@@ -10211,7 +10177,7 @@ fn handleNonStreamingGeneration(
             reasoning_allocated = true;
             // usage.completion_tokens_details.reasoning_tokens (OpenAI/LM Studio
             // parity) so clients can budget visible content separately.
-            if (encodeText(allocator, lm, tok, reasoning, false)) |rids| {
+            if (encodeText(allocator, lm, tok, reasoning)) |rids| {
                 defer allocator.free(rids);
                 usage_details_json = try std.fmt.allocPrint(allocator, ",\"completion_tokens_details\":{{\"reasoning_tokens\":{d}}}", .{rids.len});
                 usage_details_allocated = true;
@@ -12891,6 +12857,7 @@ test "every load refusal the registry preserves answers under its own name" {
     const names = [_][]const u8{
         "InsufficientMemory",
         "OutOfMemory",
+        "GgufEngineUnsupported",
         "ExpertCacheDoesNotFit",
         "ExpertStreamingRequired",
         "SsdBudgetBelowResident",
@@ -12937,6 +12904,7 @@ pub fn loadRefusalFor(err: anyerror) ?LoadRefusal {
     return switch (err) {
         error.NotEnoughMemory => .{ .type = "out_of_memory", .message = not_enough_memory_message },
         error.InsufficientMemory => .{ .type = "out_of_memory", .message = insufficient_free_memory_message },
+        error.GgufEngineUnsupported => .{ .type = "gguf_engine_unsupported", .message = "This .gguf is not a ds4-loadable checkpoint, and the generic llama.cpp engine is not part of this build. Serve an MLX safetensors checkpoint, or a DeepSeek-V4/V4.1/Qwen3.8-Flash-Next/GLM-5 GGUF from the ds4 converters." },
         error.ExpertCacheDoesNotFit => .{ .type = "expert_cache_does_not_fit", .message = "The requested expert cache, full-union workspace, bounce buffers, resident trunk, and serving state do not fit under the GPU memory ceiling. Lower --expert-cache-gb or free memory." },
         error.ExpertStreamingMtpUnsupported => .{ .type = "expert_streaming_mtp_unsupported", .message = expert_stream_mod.MTP_UNSUPPORTED },
         error.ExpertStreamingRequired => .{ .type = "expert_streaming_required", .message = "This checkpoint streams its experts from SSD and needs a resident budget: set this model's \"ssd_budget_gb\" in model-settings.json, or launch with --ssd-budget-gb <n> (or --expert-cache-gb <n>)." },
@@ -13072,8 +13040,6 @@ fn cachedFormatChat(
     if (continue_final and lm.ds4_engine != null) return error.ContinuationUnsupported;
     const ids = if (lm.ds4_engine) |engine|
         try chat_mod.encodeChatViaDs4(allocator, engine, messages, tools_json, tool_choice_instruction, enable_thinking)
-    else if (lm.llama_engine) |engine|
-        try chat_mod.encodeChatViaLlama(allocator, engine, chat_config, messages, tools_json, tool_choice_instruction, enable_thinking, reasoning_effort, continue_final)
     else
         try chat_mod.formatChat(allocator, tok, messages, chat_config, tools_json, tool_choice_instruction, enable_thinking, reasoning_effort, continue_final);
     if (cache_ptr) |cache| if (key_opt) |key| {
@@ -18331,7 +18297,7 @@ fn handleResponsesInner(
     // split reasoning text — exact modulo merge boundaries).
     const reasoning_tok_count: u32 = blk: {
         const rt = reasoning_text orelse break :blk 0;
-        const rids = encodeText(allocator, lm, tok, rt, false) catch break :blk 0;
+        const rids = encodeText(allocator, lm, tok, rt) catch break :blk 0;
         defer allocator.free(rids);
         break :blk @intCast(rids.len);
     };
@@ -21045,11 +21011,6 @@ test "embeddedEngineSettings: an engine-backed model reports only the levers its
     try testing.expectEqualStrings("none", ds4.drafter);
     try testing.expectEqual(@as(usize, 0), ds4.prefill_chunk);
 
-    const llama = embeddedEngineSettings(base, .llama, false);
-    try testing.expectEqualStrings("llama", llama.engine);
-    try testing.expectEqualStrings("8", llama.kv_quant);
-    try testing.expect(!llama.decode_attn_quant and !llama.pld.enable and !llama.mtp_default_on);
-
     try testing.expect(embeddedEngineSettings(base, .mlx, false).decode_attn_quant);
 }
 
@@ -21145,16 +21106,6 @@ test "mlxCacheLimitFromEnv: explicit bytes win, 0 disables, garbage falls throug
     try testing.expectEqual(8 * GB, mlxCacheLimitFromEnv(null, 128 * GB));
     try testing.expectEqual(8 * GB, mlxCacheLimitFromEnv("lots", 128 * GB));
     try testing.expectEqual(8 * GB, mlxCacheLimitFromEnv("", 128 * GB));
-}
-
-test "llama cache default keeps shared prefixes warm" {
-    // With the legacy default of 1, every llama.cpp request evicted the
-    // single KV session — even two SEQUENTIAL requests sharing an 8 KB
-    // prefix reported cached_tokens=0 (caught live by llmprobe
-    // cache-hit-reported on the E4B GGUF, 2026-06-10). 4 sessions keep
-    // interleaved agent roots warm; sessions are created lazily so idle
-    // slots cost nothing.
-    try testing.expect(llama_cache_entries >= 4);
 }
 
 test "prefix cache default capacity covers interleaved agent flows" {
@@ -22040,18 +21991,16 @@ test "readyHasChat: embedded-engine GGUF without a chat template still advertise
     try t.expect(!readyHasChat(false, 0, false));
 }
 
-test "mlxMemoryGuardApplies: embedded engines (ds4/llama) skip the MLX-prefill memory guard" {
+test "mlxMemoryGuardApplies: the embedded ds4 engine skips the MLX-prefill memory guard" {
     const t = std.testing;
     // MLX model — no embedded engine — the guard applies (real per-token working set).
-    try t.expect(mlxMemoryGuardApplies(false, false));
+    try t.expect(mlxMemoryGuardApplies(false));
     // ds4 (DeepSeek-V4-Flash): its stub config advertises 56 heads / 61 layers,
     // so the guard would project ~25 GB for an 8.6K-token prompt and 400-reject
     // a request ds4 serves fine (live 2026-07-15: the SAME prompt had succeeded
     // on the MLX qwen35 engine one model-switch earlier). ds4 owns its KV
     // outside MLX, so the guard is skipped.
-    try t.expect(!mlxMemoryGuardApplies(true, false));
-    // llama.cpp GGUF engine: same reasoning — no MLX prefill path.
-    try t.expect(!mlxMemoryGuardApplies(false, true));
+    try t.expect(!mlxMemoryGuardApplies(true));
 }
 
 test "kvBytesPerToken bills only the CACHING layers, at the arch's own K and V widths" {
@@ -23096,17 +23045,16 @@ test "messageReasoningFromObj: reasoning_content round-trip, reasoning fallback,
     }
 }
 
-test "modelEngineName: native dsv4 reports mlx, embedded engines report themselves" {
+test "modelEngineName: native dsv4 reports mlx, the embedded engine reports itself" {
     // Loaded entries: the attached engine pointer decides.
-    try testing.expectEqualStrings("ds4", modelEngineName(true, false, "/m/DeepSeek-V4-Flash.gguf", ""));
-    try testing.expectEqualStrings("llama", modelEngineName(false, true, "/m/qwen.gguf", ""));
+    try testing.expectEqualStrings("ds4", modelEngineName(true, "/m/DeepSeek-V4-Flash.gguf", ""));
     // NATIVE deepseek_v4 (safetensors dir): architecture alone can't
     // distinguish it from the ds4 GGUF — meta.engine must.
-    try testing.expectEqualStrings("mlx", modelEngineName(false, false, "/m/ddalcu/DeepSeek-V4-Flash-MLX-Serve", "deepseek_v4"));
+    try testing.expectEqualStrings("mlx", modelEngineName(false, "/m/ddalcu/DeepSeek-V4-Flash-MLX-Serve", "deepseek_v4"));
     // Unloaded GGUF stubs: engine undetermined until the header is read.
-    try testing.expectEqualStrings("gguf", modelEngineName(false, false, "/m/x.gguf", ""));
-    try testing.expectEqualStrings("gguf", modelEngineName(false, false, "/m/dir", "gguf"));
-    try testing.expectEqualStrings("mlx", modelEngineName(false, false, "/m/gemma-4-12b", "gemma4"));
+    try testing.expectEqualStrings("gguf", modelEngineName(false, "/m/x.gguf", ""));
+    try testing.expectEqualStrings("gguf", modelEngineName(false, "/m/dir", "gguf"));
+    try testing.expectEqualStrings("mlx", modelEngineName(false, "/m/gemma-4-12b", "gemma4"));
 }
 
 test "formatCompletionsLogprobs: legacy shape, byte-aligned offsets, escaped tokens" {

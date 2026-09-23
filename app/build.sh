@@ -166,9 +166,6 @@ echo "  Swift binary: $(du -h "$SWIFT_BIN" | cut -f1)"
 # ── Phase 2: Build mlx-serve (Zig) ──
 echo "→ Building mlx-serve (Zig)..."
 cd "$PROJECT_ROOT"
-# Stage libllama (llama.cpp GGUF engine) before the Zig build links against it.
-echo "→ Fetching libllama..."
-bash "$PROJECT_ROOT/scripts/fetch-llama.sh"
 # Build the pinned mlx + mlx-c submodules into lib/mlx (NAX kernels enabled —
 # the brew bottle ships without them). Idempotent: no-op when the stage
 # matches the pinned SHAs. Needs full Xcode (Metal Toolchain), so it runs
@@ -186,10 +183,9 @@ ZIG_DEVELOPER_DIR=/Library/Developer/CommandLineTools
 [ -d "$ZIG_DEVELOPER_DIR" ] || ZIG_DEVELOPER_DIR="$(xcode-select -p)"
 # Engine-version pins surfaced by `mlx-serve --version` (parsed by the app so
 # Settings can show engine versions without booting the server — src/version.zig).
-# MLX + ggml self-report at runtime; these three have no runtime API:
+# MLX self-reports at runtime; these two have no runtime API:
 MLXC_VERSION="$(git -C "$PROJECT_ROOT/lib/mlxc-src" describe --tags --always 2>/dev/null)"
 DS4_COMMIT="$(git -C "$PROJECT_ROOT/lib/ds4" rev-parse --short HEAD 2>/dev/null)"
-LLAMA_TAG="$(cat "$PROJECT_ROOT/lib/llama/.version" 2>/dev/null)"
 # ReleaseFast unless ZIG_DEBUG asked otherwise (see the lever's comment at the
 # top). Even under FAST_DEV the default stays ReleaseFast: Zig's cache already
 # makes an unchanged rebuild a few seconds, so the Swift phase above is the
@@ -200,7 +196,7 @@ if [ "$ZIG_DEBUG" = "1" ]; then
     echo "  (ZIG_DEBUG=1 — mlx-serve built Debug: 2-4x slower decode, never read a latency off it)"
 fi
 DEVELOPER_DIR="$ZIG_DEVELOPER_DIR" "$ZIG" build "${ZIG_OPT[@]}" -Dversion="$MLX_SERVE_VERSION" \
-  -Dmlx-c-version="${MLXC_VERSION:-unknown}" -Dds4-commit="${DS4_COMMIT:-unknown}" -Dllama-tag="${LLAMA_TAG:-unknown}" \
+  -Dmlx-c-version="${MLXC_VERSION:-unknown}" -Dds4-commit="${DS4_COMMIT:-unknown}" \
   ${ZIG_MODE_FLAGS[@]+"${ZIG_MODE_FLAGS[@]}"} 2>&1 | tail -3
 # The bundled guest agent (static aarch64-linux ELF) rides inside the app.
 DEVELOPER_DIR="$ZIG_DEVELOPER_DIR" "$ZIG" build vz-agent 2>&1 | tail -1
@@ -336,14 +332,13 @@ MLX_STAGE_LIB="$PROJECT_ROOT/lib/mlx/lib"
 # already staged — these come out of lib/mlx and move only when the submodule
 # pins do, which an mtime compare against the staged source detects. `cp` does
 # not preserve mtimes, so the bundled copy is always newer until build-mlx.sh
-# rewrites the source. webp (brew) and libllama (fetch-llama.sh) ride the same
-# gate; both change rarely, and a build without FAST_DEV restages everything.
+# rewrites the source. webp (brew) rides the same gate; it changes rarely, and
+# a build without FAST_DEV restages everything.
 STAGE_FRAMEWORKS=1
 if [ "$FAST_DEV" = "1" ] \
    && [ -f "$CONTENTS/Frameworks/libmlxc.dylib" ] \
    && [ -f "$CONTENTS/Frameworks/mlx.metallib" ] \
-   && [ ! "$MLX_STAGE_LIB/libmlxc.dylib" -nt "$CONTENTS/Frameworks/libmlxc.dylib" ] \
-   && [ ! "$PROJECT_ROOT/lib/llama/lib/libllama.dylib" -nt "$CONTENTS/Frameworks/libllama.dylib" ]; then
+   && [ ! "$MLX_STAGE_LIB/libmlxc.dylib" -nt "$CONTENTS/Frameworks/libmlxc.dylib" ]; then
     STAGE_FRAMEWORKS=0
     echo "→ Reusing bundled frameworks (FAST_DEV)"
 fi
@@ -365,10 +360,6 @@ if [ "$STAGE_FRAMEWORKS" = "1" ]; then
     for wlib in libwebp.dylib libsharpyuv.dylib; do
         [ -f "$WEBP_LIB/$wlib" ] && cp "$WEBP_LIB/$wlib" "$CONTENTS/Frameworks/"
     done
-
-    # libllama (llama.cpp GGUF engine) — single self-contained dylib staged by
-    # scripts/fetch-llama.sh. Bundled + signed exactly like the others.
-    [ -f "$PROJECT_ROOT/lib/llama/lib/libllama.dylib" ] && cp "$PROJECT_ROOT/lib/llama/lib/libllama.dylib" "$CONTENTS/Frameworks/"
 
     # SwiftOGG's binary deps: YbridOpus + YbridOgg dynamic frameworks (libopus +
     # libogg). VoicePreprocessor uses them to decode Telegram Ogg/Opus voice notes,
@@ -419,14 +410,6 @@ if [ -f "$CONTENTS/Frameworks/libwebp.dylib" ]; then
             "@loader_path/libsharpyuv.dylib" \
             "$CONTENTS/Frameworks/libwebp.dylib" 2>/dev/null || true
     fi
-fi
-
-# Fix mlx-serve -> libllama dependency (@rpath/libllama.dylib -> bundled Frameworks)
-if [ -f "$CONTENTS/Frameworks/libllama.dylib" ]; then
-    install_name_tool -change \
-        "@rpath/libllama.dylib" \
-        "@executable_path/../Frameworks/libllama.dylib" \
-        "$CONTENTS/MacOS/mlx-serve" 2>/dev/null || true
 fi
 
 # MLXCore (the Swift app) loads YbridOpus/YbridOgg via @rpath/Ybrid*.framework.

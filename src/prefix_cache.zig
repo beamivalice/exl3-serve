@@ -42,7 +42,7 @@ const ssmCheckpointBytes = transformer_mod.ssmCheckpointBytes;
 /// (client disconnect mid-prefill). Below this an entry is LRU pollution —
 /// chat-template prologues (Gemma=12, Qwen=8, Llama=4 tokens) are identical
 /// across every request and "reusable" only in a worthless sense. Same
-/// rationale as the llama session pool's `min_prefix_to_claim`, applied at
+/// rationale as an engine session pool's `min_prefix_to_claim`, applied at
 /// commit time instead of claim time.
 pub const MIN_CANCELLED_COMMIT_TOKENS: usize = 256;
 

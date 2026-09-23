@@ -81,28 +81,23 @@ pub fn build(b: *std.Build) void {
 
     // Engine-version pins surfaced by `mlx-serve --version` (the macOS app spawns
     // it and parses the output — see src/version.zig). These are the versions
-    // that have NO runtime query API (MLX + ggml report themselves at runtime):
+    // that have NO runtime query API (MLX reports itself at runtime):
     //   --mlx-c-version  pinned mlx-c submodule version; defaults from the
     //                    lib/mlx/.version stamp (written by scripts/build-mlx.sh)
     //   --ds4-commit     pinned ds4 submodule short commit (build.sh: `git rev-parse`)
-    //   --llama-tag      llama.cpp release tag; defaults from lib/llama/.version
-    //                    (written by scripts/fetch-llama.sh) so a plain dev build
-    //                    still reports it. app/build.sh passes all three.
     const mlx_c_version = b.option([]const u8, "mlx-c-version", "Pinned mlx-c version") orelse readMlxcPin(b) orelse "unknown";
     const ds4_commit = b.option([]const u8, "ds4-commit", "Pinned ds4 submodule short commit") orelse "unknown";
-    const llama_tag = b.option([]const u8, "llama-tag", "llama.cpp release tag (bNNNN)") orelse readLlamaTag(b) orelse "unknown";
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version);
     build_options.addOption(bool, "mas", mas);
     build_options.addOption([]const u8, "mlx_c_version", mlx_c_version);
     build_options.addOption([]const u8, "ds4_commit", ds4_commit);
-    build_options.addOption([]const u8, "llama_tag", llama_tag);
     const git_sha = b.option([]const u8, "git-sha", "Engine build id for the round-cost table: a release sha stands for the executable bytes, which are then not hashed; the MLX dylib and metallib fingerprints are always mixed in") orelse "";
     build_options.addOption([]const u8, "git_sha", git_sha);
     // false for the macOS exe/tests; the iOS static-lib step (`zig build ios-lib`)
     // builds its own options with ios=true so the engine swaps the macOS-only
-    // ds4 + llama.cpp engines for no-op stubs (iOS serves MLX safetensors only).
+    // ds4 engine for a no-op stub (iOS serves MLX safetensors only).
     build_options.addOption(bool, "ios", false);
 
     // ds4 Metal kernel sources embedded via @embedFile and exposed as a
@@ -134,7 +129,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Jinja2 template engine (from llama.cpp's common/jinja + nlohmann/json).
+    // Jinja2 template engine (wangzhaode/jinja.cpp + nlohmann/json; see NOTICE).
     // Pre-compiled as a static library with system clang++ (C++17 requires system libc++).
     // Rebuild with: cd lib/jinja_cpp && for f in jinja_wrapper caps lexer parser runtime jinja_string value; do clang++ -std=c++17 -O2 -DNDEBUG -I . -c $f.cpp -o obj/$f.o; done && ar rcs libjinja.a obj/*.o
     mod.addObjectFile(b.path("lib/jinja_cpp/libjinja.a"));
@@ -164,11 +159,6 @@ pub fn build(b: *std.Build) void {
     // returns unavailable on machines/OSes without it) + the per-layer MLP
     // MIL program builder. See lib/ane/ + src/ane.zig; provenance in NOTICE.
     addAneSources(b, mod);
-
-    // llama.cpp libllama for generic GGUF models (Metal backend, macOS only).
-    // Staged by `scripts/fetch-llama.sh` into lib/llama/ (a single self-contained
-    // dylib + headers extracted from the pinned XCFramework). See src/arch/llama.zig.
-    addLlamaLib(b, mod);
 
     // mlx + mlx-c: self-built from the pinned submodules (lib/mlx-src,
     // lib/mlxc-src) into lib/mlx by scripts/build-mlx.sh, with NAX kernels
@@ -233,7 +223,6 @@ pub fn build(b: *std.Build) void {
     addDs4Sources(b, test_mod);
     test_mod.addIncludePath(b.path("lib/ds4"));
     addAneSources(b, test_mod);
-    addLlamaLib(b, test_mod);
     test_mod.linkSystemLibrary("c++", .{});
     addMlxLib(b, test_mod);
     test_mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
@@ -287,8 +276,8 @@ pub fn build(b: *std.Build) void {
     addVzAgent(b, target, optimize, test_step);
 
     // ── iOS on-device engine: a static library (libmlxserve.a) linking the
-    //    MLX-only decode path. ds4 + llama.cpp are stubbed (build_options.ios =
-    //    true). Two slices: `zig build ios-lib` (device, arm64-iphoneos) and
+    //    MLX-only decode path. ds4 is stubbed (build_options.ios = true). Two
+    //    slices: `zig build ios-lib` (device, arm64-iphoneos) and
     //    `zig build ios-lib-sim` (arm64 iphonesimulator). Driven by the iPhone
     //    app project's build scripts (../mlx-iphone/scripts/build-zig-ios.sh),
     //    which supply the matching --sysroot and copy the artifact out of
@@ -399,13 +388,11 @@ fn addIosLib(b: *std.Build, version: []const u8, ios_include: []const u8, slice:
     ios_options.addOption(bool, "ios", true);
     // Mirror the build options the shared engine sources read (server.zig,
     // scheduler.zig). iOS is sandboxed (no curl/model-pull subprocess), so
-    // mas=true; ds4 + llama.cpp are stubbed here, so their version pins are
-    // unreported. Without these the iOS lib fails to compile ("options has no
-    // member named 'mas'/...").
+    // mas=true; ds4 is stubbed here, so its version pin is unreported. Without
+    // these the iOS lib fails to compile ("options has no member named 'mas'").
     ios_options.addOption(bool, "mas", true);
     ios_options.addOption([]const u8, "mlx_c_version", "unknown");
     ios_options.addOption([]const u8, "ds4_commit", "unknown");
-    ios_options.addOption([]const u8, "llama_tag", "unknown");
     ios_options.addOption([]const u8, "git_sha", "");
 
     const mod = b.createModule(.{
@@ -565,64 +552,6 @@ fn buildRootHandle(b: *std.Build) std.Io.Dir {
     return b.root.root_dir.handle;
 }
 
-/// The llama.cpp tag staged by scripts/fetch-llama.sh (it writes LLAMA_TAG to
-/// `lib/llama/.version`). Read at configure time so a plain `zig build` reports
-/// the real tag without app/build.sh having to pass `--llama-tag`. Returns null
-/// (→ "unknown") when llama hasn't been fetched yet.
-fn readLlamaTag(b: *std.Build) ?[]const u8 {
-    const bytes = buildRootHandle(b).readFileAlloc(
-        b.graph.io,
-        "lib/llama/.version",
-        b.allocator,
-        .limited(256),
-    ) catch return null;
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    return if (trimmed.len == 0) null else b.dupe(trimmed);
-}
-
-fn addLlamaLib(b: *std.Build, module: *std.Build.Module) void {
-    // Link the prebuilt libllama staged by scripts/fetch-llama.sh. The dylib's
-    // install-name is @rpath/libllama.dylib; we add an rpath to its build-tree
-    // location so `zig build run` / unit tests resolve it in dev. The app bundle
-    // and CLI tarball rewrite that reference to @executable_path/... and re-sign
-    // with the Developer ID (see release.yml / app/build.sh).
-    module.addIncludePath(b.path("lib/llama/include"));
-    module.addLibraryPath(b.path("lib/llama/lib"));
-    // use_pkg_config = .no: a Homebrew `llama.cpp` install ships a llama.pc that
-    // would otherwise hijack this link (pulling in /opt/homebrew's version + its
-    // separate libggml). We want exactly the pinned dylib staged in lib/llama/lib.
-    module.linkSystemLibrary("llama", .{ .use_pkg_config = .no });
-    // @loader_path resolves against the BINARY's own location at launch,
-    // not the launching process's cwd. A bare relative string here (e.g.
-    // "lib/llama/lib") gets baked verbatim into LC_RPATH when `zig build`
-    // runs with cwd == build root (b.build_root.path is null in that case,
-    // so b.path() can't make it absolute) and dyld then resolves that
-    // relative string against argv[0]'s cwd, breaking any launch from
-    // outside the repo root. An absolute path avoids that but bakes in a
-    // machine-specific location, so the build isn't relocatable. This is
-    // relative to the binary itself, so it stays correct from any launch
-    // cwd and survives copying the whole zig-out + lib tree elsewhere.
-    //
-    // This module backs two different binaries at two different depths
-    // under the build root, so one entry can't serve both: the installed
-    // exe lands at zig-out/bin/mlx-serve (@loader_path = zig-out/bin/, 2
-    // levels up to root), while `zig build test` runs straight out of
-    // .zig-cache/o/<hash>/test (@loader_path = that dir, 3 levels up to
-    // root). dyld tries every LC_RPATH entry in order and silently skips
-    // ones that don't resolve, so listing both depths here is safe — each
-    // binary finds its own and ignores the other.
-    module.addRPath(.{ .cwd_relative = "@loader_path/../../lib/llama/lib" });
-    module.addRPath(.{ .cwd_relative = "@loader_path/../../../lib/llama/lib" });
-
-    // Our clean C shim over llama.h (src/llama_ffi.zig mirrors lib/llama_shim/llama_shim.h).
-    // C11 for pthread_once-based one-time backend init.
-    module.addIncludePath(b.path("lib/llama_shim"));
-    module.addCSourceFile(.{
-        .file = b.path("lib/llama_shim/llama_shim.c"),
-        .flags = &.{ "-O2", "-std=c11", "-Wno-unused-parameter" },
-    });
-}
-
 /// Link the self-built mlx + mlx-c staged in lib/mlx by scripts/build-mlx.sh
 /// (pinned submodules lib/mlx-src + lib/mlxc-src, deployment target 26.2 so
 /// MLX's NAX kernels are compiled in — the Homebrew bottle ships without them
@@ -633,15 +562,16 @@ fn addLlamaLib(b: *std.Build, module: *std.Build.Module) void {
 fn addMlxLib(b: *std.Build, module: *std.Build.Module) void {
     module.addIncludePath(b.path("lib/mlx/include"));
     module.addLibraryPath(b.path("lib/mlx/lib"));
-    // use_pkg_config = .no: a leftover Homebrew mlx-c must never hijack this
-    // link — we want exactly the staged NAX-enabled pair (same class as the
-    // llama.pc hijack above).
+    // use_pkg_config = .no: a leftover Homebrew mlx-c ships an mlx-c.pc that
+    // would otherwise hijack this link — we want exactly the staged
+    // NAX-enabled pair.
     module.linkSystemLibrary("mlxc", .{ .use_pkg_config = .no });
-    // See addLlamaLib above: @loader_path is relative to the binary itself,
-    // so this stays correct regardless of the launching process's cwd and
-    // stays relocatable across machines. Two entries for the same reason —
-    // the installed exe and the `zig build test` binary sit at different
-    // depths under the build root.
+    // @loader_path resolves against the BINARY's own location at launch, not
+    // the launching process's cwd, so this stays correct from any launch cwd
+    // and survives copying the whole zig-out + lib tree elsewhere. Two entries
+    // because the installed exe (zig-out/bin/) and the `zig build test` binary
+    // (.zig-cache/o/<hash>/) sit at different depths under the build root; dyld
+    // tries every LC_RPATH in order and skips the one that does not resolve.
     module.addRPath(.{ .cwd_relative = "@loader_path/../../lib/mlx/lib" });
     module.addRPath(.{ .cwd_relative = "@loader_path/../../../lib/mlx/lib" });
 }

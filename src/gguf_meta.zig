@@ -11,23 +11,24 @@
 //! Routing rule (`preferredEngine`):
 //!   `general.architecture == "deepseek4"` AND lora-rank key present → ds4
 //!   a ds4-only arch (`deepseek41`, `qwen4exp`, `glm-dsa`, `glm5-next`) → ds4
-//!   otherwise → llama.cpp
+//!   otherwise → unsupported (this fork cut the generic GGUF engine; only ds4
+//!   remains, so anything it cannot load is refused by name rather than
+//!   handed to a backend that no longer exists)
 //!
 //! This replaces the basename-only heuristic in `model_discovery.zig`, which
 //! mis-routed both real-world cases reported in issue #15 (a vanilla
 //! deepseek4 GGUF whose name started with `deepseek-v4-flash` went to ds4
 //! and crashed on missing metadata; a true ds4 GGUF whose name started with
-//! `Huihui-` went to llama.cpp and crashed on unknown arch).
+//! `Huihui-` was routed away from ds4 and crashed on unknown arch).
 //!
-//! Why we don't reuse libllama's metadata API: `llama_model_load_from_file`
-//! rejects unknown architectures BEFORE metadata becomes readable, which is
-//! the exact path we're trying to avoid taking by mistake. ds4's C API also
-//! offers no metadata-peek. A purpose-built reader keeps the routing
-//! decision cheap and side-effect free.
+//! ds4's C API offers no metadata-peek, so a purpose-built reader keeps the
+//! routing decision cheap and side-effect free.
 
 const std = @import("std");
 
-pub const Engine = enum { ds4, llama };
+/// Which embedded engine serves a `.gguf`. `unsupported` = no engine in this
+/// build can load it (the generic llama.cpp engine was removed).
+pub const Engine = enum { ds4, unsupported };
 
 pub const Info = struct {
     /// Owned dupe of `general.architecture` value; null if the key was
@@ -44,7 +45,7 @@ pub const Info = struct {
     }
 };
 
-// Arch names only the ds4 converters write; llama.cpp has no loader for them.
+// Arch names only the ds4 converters write.
 const ds4_only_archs = [_][]const u8{ "deepseek41", "qwen4exp", "glm-dsa", "glm5-next" };
 
 pub fn preferredEngine(info: Info) Engine {
@@ -52,7 +53,7 @@ pub fn preferredEngine(info: Info) Engine {
         if (std.mem.eql(u8, a, "deepseek4") and info.has_ds4_lora_rank) return .ds4;
         for (ds4_only_archs) |d| if (std.mem.eql(u8, a, d)) return .ds4;
     }
-    return .llama;
+    return .unsupported;
 }
 
 pub const Error = error{
@@ -304,7 +305,7 @@ fn parseBytes(allocator: std.mem.Allocator, bytes: []const u8) Error!Info {
     return parseInfo(allocator, &r);
 }
 
-test "preferredEngine: llama arch → llama" {
+test "preferredEngine: a non-ds4 arch is unsupported" {
     const bytes = try buildHeader(testing.allocator, &.{
         .{ .key = "general.architecture", .value = .{ .str = "llama" } },
     });
@@ -313,7 +314,7 @@ test "preferredEngine: llama arch → llama" {
     defer info.deinit(testing.allocator);
     try testing.expectEqualStrings("llama", info.architecture.?);
     try testing.expect(!info.has_ds4_lora_rank);
-    try testing.expectEqual(Engine.llama, preferredEngine(info));
+    try testing.expectEqual(Engine.unsupported, preferredEngine(info));
 }
 
 test "embedded MTP is read from <arch>.nextn_predict_layers" {
@@ -337,7 +338,7 @@ test "embedded MTP is read from <arch>.nextn_predict_layers" {
 }
 
 test "preferredEngine: ds4-only archs → ds4 without the lora key" {
-    // The ds4 converters write these arch names; llama.cpp cannot load them.
+    // The ds4 converters write these arch names.
     for ([_][]const u8{ "qwen4exp", "deepseek41", "glm-dsa", "glm5-next" }) |arch| {
         const bytes = try buildHeader(testing.allocator, &.{
             .{ .key = "general.architecture", .value = .{ .str = arch } },
@@ -362,7 +363,7 @@ test "preferredEngine: deepseek4 + lora_rank → ds4" {
     try testing.expectEqual(Engine.ds4, preferredEngine(info));
 }
 
-test "preferredEngine: deepseek4 without lora_rank → llama" {
+test "preferredEngine: deepseek4 without lora_rank is unsupported" {
     // Models like Preyazz/DeepSeek-V4-Flash-GGUF (vanilla llama.cpp quant)
     // declare arch=deepseek4 but lack the antirez/ds4 MLA metadata — these
     // must NOT route to ds4 (would crash on missing key at engine open).
@@ -375,10 +376,10 @@ test "preferredEngine: deepseek4 without lora_rank → llama" {
     defer info.deinit(testing.allocator);
     try testing.expectEqualStrings("deepseek4", info.architecture.?);
     try testing.expect(!info.has_ds4_lora_rank);
-    try testing.expectEqual(Engine.llama, preferredEngine(info));
+    try testing.expectEqual(Engine.unsupported, preferredEngine(info));
 }
 
-test "preferredEngine: lora_rank present but wrong arch → llama" {
+test "preferredEngine: lora_rank present but wrong arch is unsupported" {
     const bytes = try buildHeader(testing.allocator, &.{
         .{ .key = "general.architecture", .value = .{ .str = "qwen2" } },
         .{ .key = "deepseek4.attention.output_lora_rank", .value = .{ .u32_v = 1024 } },
@@ -386,7 +387,7 @@ test "preferredEngine: lora_rank present but wrong arch → llama" {
     defer testing.allocator.free(bytes);
     var info = try parseBytes(testing.allocator, bytes);
     defer info.deinit(testing.allocator);
-    try testing.expectEqual(Engine.llama, preferredEngine(info));
+    try testing.expectEqual(Engine.unsupported, preferredEngine(info));
 }
 
 test "parseInfo: skips string arrays between probe keys" {

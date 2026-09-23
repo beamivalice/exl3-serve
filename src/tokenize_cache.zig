@@ -1,5 +1,5 @@
 //! Per-LoadedModel LRU cache for `chat_mod.formatChat` /
-//! `encodeChatViaDs4` / `encodeChatViaLlama` results.
+//! `encodeChatViaDs4` results.
 //!
 //! Phase 4 #3 win: the long-prompt warm-reuse case spends ~240 ms re-
 //! rendering and re-tokenizing a 1813-token prompt on every turn, only to

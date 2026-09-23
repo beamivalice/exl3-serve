@@ -15,7 +15,7 @@
 //! same flow the macOS app uses — and lets a chat LM and a TTS model be
 //! resident together (voice clone), bounded by `max_resident`.
 //!
-//! ds4 / llama.cpp GGUF engines are macOS-only and stubbed out for iOS via
+//! The ds4 GGUF engine is macOS-only and stubbed out for iOS via
 //! `build_options.ios`; iOS serves MLX safetensors models only.
 //!
 //! `mlxserve_start` blocks for the lifetime of the server (it runs the accept
@@ -29,7 +29,7 @@ const build_options = @import("build_options");
 // `_dyld_get_image_header_containing_address`, which is a macOS-only libSystem
 // symbol absent from the iOS SDK (link failure). Use the simple panic handler —
 // it prints the message and traps without the dyld-based symbolizer. The stub
-// engine panics (ds4/llama unavailable on iOS) are never reached at runtime
+// engine panics (ds4 unavailable on iOS) are never reached at runtime
 // anyway; this only governs how an unexpected panic terminates.
 pub const panic = std.debug.simple_panic;
 const mlx = @import("mlx.zig");

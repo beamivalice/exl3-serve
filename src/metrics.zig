@@ -643,7 +643,7 @@ test "prefill progress is exposed live, not only at request completion" {
 
     // The phase flag is separate from the token count: it flips at prefill
     // START, so the panel isn't blind for the ~40 s a 27B takes to finish its
-    // first 8192-token chunk (and it also covers ds4/llama, whose prefill never
+    // first 8192-token chunk (and it also covers ds4, whose prefill never
     // reaches the MLX chunk loop and so never moves the token gauge).
     m.requests_prefilling.set(1);
     var b2: [16384]u8 = undefined;

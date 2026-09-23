@@ -165,9 +165,6 @@ jobs:
           git tag v${{ steps.version.outputs.version }}
           git push origin v${{ steps.version.outputs.version }}
 
-      - name: Fetch libllama (llama.cpp GGUF engine)
-        run: bash scripts/fetch-llama.sh
-
       - name: Build mlx-serve (Zig)
         run: zig build -Doptimize=ReleaseFast -Dversion=${{ steps.version.outputs.version }} -Dgit-sha=${{ github.sha }}
 
@@ -245,19 +242,10 @@ jobs:
           [ -f "$WEBP_LIB/libwebp.dylib" ] && cp "$WEBP_LIB/libwebp.dylib" "$STAGING/lib/"
           [ -f "$WEBP_LIB/libsharpyuv.dylib" ] && cp "$WEBP_LIB/libsharpyuv.dylib" "$STAGING/lib/"
 
-          # libllama (llama.cpp GGUF engine) — single self-contained dylib staged
-          # by scripts/fetch-llama.sh, install-name @rpath/libllama.dylib.
-          [ -f "lib/llama/lib/libllama.dylib" ] && cp "lib/llama/lib/libllama.dylib" "$STAGING/lib/"
-
           install_name_tool -change \
             @rpath/libmlxc.dylib \
             @executable_path/lib/libmlxc.dylib \
             "$STAGING/mlx-serve"
-
-          install_name_tool -change \
-            @rpath/libllama.dylib \
-            @executable_path/lib/libllama.dylib \
-            "$STAGING/mlx-serve" 2>/dev/null || true
 
           install_name_tool -change \
             @rpath/libmlx.dylib \
@@ -373,10 +361,6 @@ jobs:
           [ -f "$WEBP_LIB/libwebp.dylib" ] && cp "$WEBP_LIB/libwebp.dylib" "$CONTENTS/Frameworks/"
           [ -f "$WEBP_LIB/libsharpyuv.dylib" ] && cp "$WEBP_LIB/libsharpyuv.dylib" "$CONTENTS/Frameworks/"
 
-          # libllama (llama.cpp GGUF engine) — single self-contained dylib staged
-          # by scripts/fetch-llama.sh, install-name @rpath/libllama.dylib.
-          [ -f "lib/llama/lib/libllama.dylib" ] && cp "lib/llama/lib/libllama.dylib" "$CONTENTS/Frameworks/"
-
           # YbridOpus + YbridOgg dynamic frameworks (libopus/libogg) pulled by the
           # SwiftOGG SPM dep — VoicePreprocessor uses them to decode Telegram
           # Ogg/Opus voice notes. SwiftPM fetched them into app/.build/artifacts;
@@ -400,11 +384,6 @@ jobs:
           install_name_tool -change \
             "$(otool -L "$CONTENTS/MacOS/mlx-serve" | grep libmlxc | awk '{print $1}')" \
             "@executable_path/../Frameworks/libmlxc.dylib" \
-            "$CONTENTS/MacOS/mlx-serve" 2>/dev/null || true
-
-          install_name_tool -change \
-            @rpath/libllama.dylib \
-            "@executable_path/../Frameworks/libllama.dylib" \
             "$CONTENTS/MacOS/mlx-serve" 2>/dev/null || true
 
           install_name_tool -change \

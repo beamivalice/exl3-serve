@@ -259,7 +259,7 @@ if (typeof document !== 'undefined') (function () {
     // Sub-line doubles as the phase indicator AND carries the stable average, so
     // "0 tok/s while decoding" never means "I don't know how fast prefill is".
     // The phase flag flips at prefill START; the token count appears once the
-    // first chunk lands (and never for ds4/llama, which prefill elsewhere).
+    // first chunk lands (and never for ds4, which prefills elsewhere).
     $('m-prefill-ms').textContent = prefilling
       ? ('prefilling' + (r.livePre > 0 ? ' · ' + fmt(r.livePre, 0) + ' tok' : ''))
       : (avgPrefillTps !== null

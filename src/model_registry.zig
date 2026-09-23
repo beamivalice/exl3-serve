@@ -30,7 +30,6 @@ const rp_mod = @import("reasoning_protocol.zig");
 const model_discovery = @import("model_discovery.zig");
 const io_util = @import("io_util.zig");
 const arch_ds4 = if (@import("build_options").ios) @import("arch/ds4_stub.zig") else @import("arch/ds4.zig");
-const arch_llama = if (@import("build_options").ios) @import("arch/llama_stub.zig") else @import("arch/llama.zig");
 const gen_mod = @import("gen.zig");
 const generate_mod = @import("generate.zig");
 const log = @import("log.zig");
@@ -51,18 +50,6 @@ const mtp_mod = @import("mtp.zig");
 const MtpModel = mtp_mod.MtpModel;
 const HotPrefixCache = prefix_cache_mod.HotPrefixCache;
 const TokenizeCache = tokenize_cache_mod.TokenizeCache;
-
-/// One slot in `LoadedModel.llama_sessions` (Iteration 3-5 of the perf
-/// plan / Phase 5 #1). Each entry wraps a libllama context. The KV
-/// state and the resident-token mirror live inside the session; we add
-/// `last_used_ns` for LRU eviction.
-pub const LlamaSessionEntry = struct {
-    session: *arch_llama.LlamaSession,
-    /// Bumped on every successful pick. Lowest = LRU. Monotonic — the
-    /// scheduler bumps it under the same lock that guards
-    /// `llama_sessions`, so reads/writes never race.
-    last_used_ns: i64 = 0,
-};
 
 /// Lifecycle of an entry. State transitions are guarded by `ModelRegistry.mutex`;
 /// the inference thread writes, connection threads read under the same lock and
@@ -236,15 +223,9 @@ pub const LoadedModel = struct {
     /// with the engine.
     ds4_session: ?*arch_ds4.Ds4Session = null,
 
-    /// Embedded llama.cpp engine (generic GGUF via libllama). Like `ds4_engine`,
-    /// when non-null the MLX fields stay null and request handlers route through
-    /// `LlamaEngine` / `LlamaSession`. Mutually exclusive with the safetensors
-    /// fields and `ds4_engine` (set for every `.gguf` except DeepSeek-V4-Flash).
-    llama_engine: ?*arch_llama.LlamaEngine = null,
-
     /// Native media-generation engines, named by MODALITY (not by the FLUX/
     /// Qwen3-TTS/LTX implementations, which are swappable internals). When one
-    /// is non-null the entry is a media model: the MLX/ds4/llama fields stay
+    /// is non-null the entry is a media model: the MLX/ds4 fields stay
     /// null and the server routes the matching gen endpoint through this slot.
     /// Mutually exclusive with each other and with the LM engine fields. Freed
     /// FIRST in deinit/unloadResident (they own the bulk of the GPU memory).
@@ -258,39 +239,9 @@ pub const LoadedModel = struct {
     /// the in-flight state visible (set around the gen job).
     gen_busy: bool = false,
 
-    /// Persistent llama.cpp sessions (Iteration 3-5 / Phase 5 #1): one or
-    /// more KV contexts, picked by best prompt-prefix match in
-    /// `runPrefillLlama`. With `--llama-cache-entries 1` (default for
-    /// backwards compat) this degenerates to the old single-session
-    /// behavior — one entry, every request fights for it. With N > 1 the
-    /// scheduler keeps the N most-recently-used sessions alive and
-    /// dispatches each incoming prompt to the entry whose resident KV
-    /// shares the longest prefix.
-    ///
-    /// `session_busy` remains a model-wide gate — `max_concurrent=1`
-    /// today means only one llama request runs at a time anyway, and
-    /// adding per-entry concurrency would require an inference-thread
-    /// refactor we intentionally don't ship tonight.
-    ///
-    /// Sessions are freed BEFORE `llama_engine` in `deinit` because each
-    /// holds a context bound to the engine's model.
-    llama_sessions: std.ArrayListUnmanaged(LlamaSessionEntry) = .empty,
-    /// Cap on resident llama sessions. Mirrored from
-    /// `LoadParams.llama_cache_entries` at load time. 0 falls back to 1
-    /// for safety — every llama prefill needs at least one session.
-    llama_cache_max_entries: u32 = 1,
-    /// Model-wide claim on the persistent engine session (llama pool or
-    /// `ds4_session`): one request drives it at a time, taken in
-    /// `Scheduler.submit`, released in `complete`.
+    /// Model-wide claim on `ds4_session`: one request drives it at a time,
+    /// taken in `Scheduler.submit`, released in `complete`.
     session_busy: bool = false,
-    /// Phase 5 #2: ggml types for the K and V halves of the llama.cpp KV
-    /// cache. 0 = libllama default (F16). Non-zero values are pulled from
-    /// `LoadParams.llama_kv_type_{k,v}` at load time and read by
-    /// `runPrefillLlama` when creating the persistent session. Mutating
-    /// these after a session has been created has no effect — the values
-    /// are baked into the libllama context at create-time.
-    llama_kv_type_k: i32 = 0,
-    llama_kv_type_v: i32 = 0,
 
     // ── Bookkeeping. Updated under `ModelRegistry.mutex`. ──
 
@@ -375,8 +326,6 @@ pub const LoadedModel = struct {
     /// stream); the caller arranges this via `unloadResident` invoked
     /// from the inference thread before registry teardown.
     pub fn deinit(self: *LoadedModel) void {
-        for (self.llama_sessions.items) |entry| entry.session.free();
-        self.llama_sessions.deinit(self.allocator);
         self.session_busy = false;
         if (self.ds4_session) |session| {
             session.free();
@@ -385,10 +334,6 @@ pub const LoadedModel = struct {
         if (self.ds4_engine) |engine| {
             engine.close();
             self.ds4_engine = null;
-        }
-        if (self.llama_engine) |engine| {
-            engine.close();
-            self.llama_engine = null;
         }
         if (self.image_engine) |e| {
             e.deinit();
@@ -541,8 +486,6 @@ pub const LoadedModel = struct {
     /// `.unloaded` for later listing/reload, AND by `Scheduler.deinit` so
     /// mlx frees happen on the inference thread.
     pub fn unloadResident(self: *LoadedModel) void {
-        for (self.llama_sessions.items) |entry| entry.session.free();
-        self.llama_sessions.clearRetainingCapacity();
         self.session_busy = false;
         if (self.ds4_session) |session| {
             session.free();
@@ -551,10 +494,6 @@ pub const LoadedModel = struct {
         if (self.ds4_engine) |engine| {
             engine.close();
             self.ds4_engine = null;
-        }
-        if (self.llama_engine) |engine| {
-            engine.close();
-            self.llama_engine = null;
         }
         if (self.image_engine) |e| {
             e.deinit();
@@ -1324,9 +1263,10 @@ pub const ModelRegistry = struct {
     /// (2026-08-08). Merge note: this arm came from the branch's
     /// `scheduler.loadErrorFor`, which this function replaced — the name-based
     /// half survived the refactor, the second name did not.
-    pub fn loadErrorFromName(name: ?[]const u8) error{ LoadFailed, InsufficientMemory, ExpertCacheDoesNotFit, ExpertStreamingRequired, SsdBudgetBelowResident, SsdBudgetExceedsWiredLimit, ExpertStreamingMtpUnsupported, ExpertStreamingUnsupportedLayout, ExpertSlabImportCopied, ExpertLayoutUnsupported, Exl3TopKExceedsReduceBank, Exl3TrellisGeometry, Exl3WindowUnsupported, Exl3ShardStampMismatch } {
+    pub fn loadErrorFromName(name: ?[]const u8) error{ LoadFailed, InsufficientMemory, GgufEngineUnsupported, ExpertCacheDoesNotFit, ExpertStreamingRequired, SsdBudgetBelowResident, SsdBudgetExceedsWiredLimit, ExpertStreamingMtpUnsupported, ExpertStreamingUnsupportedLayout, ExpertSlabImportCopied, ExpertLayoutUnsupported, Exl3TopKExceedsReduceBank, Exl3TrellisGeometry, Exl3WindowUnsupported, Exl3ShardStampMismatch } {
         if (name) |n| {
             if (std.mem.eql(u8, n, "InsufficientMemory")) return error.InsufficientMemory;
+            if (std.mem.eql(u8, n, "GgufEngineUnsupported")) return error.GgufEngineUnsupported;
             if (std.mem.eql(u8, n, "OutOfMemory")) return error.InsufficientMemory;
             if (std.mem.eql(u8, n, "ExpertCacheDoesNotFit")) return error.ExpertCacheDoesNotFit;
             if (std.mem.eql(u8, n, "ExpertStreamingRequired")) return error.ExpertStreamingRequired;
@@ -1351,6 +1291,7 @@ pub const ModelRegistry = struct {
         // unactionable. Both spellings of "out of memory" have to survive.
         try std.testing.expectEqual(error.InsufficientMemory, loadErrorFromName("InsufficientMemory"));
         try std.testing.expectEqual(error.InsufficientMemory, loadErrorFromName("OutOfMemory"));
+        try std.testing.expectEqual(error.GgufEngineUnsupported, loadErrorFromName("GgufEngineUnsupported"));
         try std.testing.expectEqual(error.ExpertCacheDoesNotFit, loadErrorFromName("ExpertCacheDoesNotFit"));
         try std.testing.expectEqual(error.ExpertStreamingRequired, loadErrorFromName("ExpertStreamingRequired"));
         try std.testing.expectEqual(error.SsdBudgetBelowResident, loadErrorFromName("SsdBudgetBelowResident"));

@@ -2,7 +2,7 @@
 
 Fork of ddalcu's mlx-serve, serving Qwen3.8-Flash-Next (`qwen4_exp`) on Apple Silicon with EXL3 routed experts, resident or SSD-streamed. MiMo-V2.6-Flash (`mimo_v2`) is an experimental text-only bring-up using native MXFP4 expert streaming. Native Zig, OpenAI/Anthropic-compatible HTTP, no Python at serve time.
 
-Everything else in `src/` (media generation, the other architectures, the Swift app, LAN sharing, providers, ANE, embedded GGUF engines) is INHERITED upstream code: it builds, it is not supported here, and this file does not document it. Upstream's detail docs (`docs/reference.md`, `docs/gotchas/*.md`) are archived in git history: `git show ff1380d:docs/reference.md`.
+Everything else in `src/` (media generation, the other architectures, the Swift app, LAN sharing, providers, ANE, the ds4 GGUF engine) is INHERITED upstream code: it builds, it is not supported here, and this file does not document it. The GENERIC GGUF engine (llama.cpp's `libllama`) is CUT: ds4 is the only GGUF engine left, any other `.gguf` is refused by name, and `--engine llama` / `--llama-kv-quant` / `--llama-cache-entries` exit with a message. Upstream's detail docs (`docs/reference.md`, `docs/gotchas/*.md`) are archived in git history: `git show ff1380d:docs/reference.md`.
 
 - `tests/CLAUDE.md` — integration-test matrix (auto-loads in `tests/`). `app/CLAUDE.md` — upstream Swift app notes (inherited).
 - Skills: `/release` (CalVer, CHANGELOG), `/bench` (llmprobe methodology, comparison traps).
@@ -10,7 +10,7 @@ Everything else in `src/` (media generation, the other architectures, the Swift 
 
 ## Stack
 
-Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds); mlx + mlx-c PINNED SUBMODULES (`lib/mlx-src` v0.32.2, `lib/mlxc-src` 56b2d39) self-built NAX-enabled by `scripts/build-mlx.sh` into `lib/mlx/` (FFI `src/mlx.zig`); jinja.cpp (wangzhaode, Apache-2.0) as `lib/jinja_cpp/libjinja.a`; safetensors; BPE. Min macOS 26.2; NAX kernels need the 26.2 deployment target (asserted by `tests/test_mlx_staged_nax.sh`).
+Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds); mlx + mlx-c PINNED SUBMODULES (`lib/mlx-src` v0.32.2, `lib/mlxc-src` 56b2d39) self-built NAX-enabled by `scripts/build-mlx.sh` into `lib/mlx/` (FFI `src/mlx.zig`); jinja.cpp (wangzhaode, Apache-2.0) as `lib/jinja_cpp/libjinja.a`; safetensors; BPE. Min macOS 26.2; NAX kernels need the 26.2 deployment target (asserted by `tests/test_mlx_staged_nax.sh`). The served binary's only non-system dylibs are `libmlxc` and Homebrew's `libwebp` — no `libllama` (`tests/test_serving_deps.sh`).
 
 ## Layout (`src/`, served path only)
 

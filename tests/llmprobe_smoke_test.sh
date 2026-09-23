@@ -5,7 +5,7 @@
 # What it does
 #   1. Boots ONE headless server over --model-dir, reads /v1/models, and groups
 #      what it finds into families (gemma4, gemma4-moe, qwen3_5, qwen3_5-moe,
-#      gemma3, ...). Picks one representative per family. GGUF (llama.cpp /
+#      gemma3, ...). Picks one representative per family. GGUF (ds4 /
 #      ds4), encoders and media models are out of scope — Zig MLX only.
 #   2. For each representative, boots a server per CELL and runs `npx llmprobe`:
 #        none      --no-pld --no-mtp       (PLD is default-ON: a real baseline

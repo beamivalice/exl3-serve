@@ -3743,7 +3743,7 @@ pub const StubCpuState = struct {
 
 /// Build heap-allocated stub config/tokenizer/chat_config for `modality`.
 /// Ownership transfers to the LoadedModel on a successful load (mirrors the
-/// ds4/llama stubs). `freeStubCpuState` frees them on the failure path.
+/// ds4 stubs). `freeStubCpuState` frees them on the failure path.
 pub fn buildStubCpuState(allocator: std.mem.Allocator, modality: Modality) !StubCpuState {
     const config = try allocator.create(model_mod.ModelConfig);
     errdefer allocator.destroy(config);

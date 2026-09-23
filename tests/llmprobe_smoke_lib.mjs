@@ -14,7 +14,7 @@ import { join } from "node:path";
 // ── families ───────────────────────────────────────────────────────────────
 
 /** Architectures the Zig MLX path serves (`model_discovery.supported_model_types`
- *  minus the engine-served and non-chat ones). GGUF routes to llama.cpp/ds4 and
+ *  minus the engine-served and non-chat ones). GGUF routes to ds4 and
  *  is deliberately out of scope. */
 const MLX_CHAT_ARCHS = new Set([
   "gemma3", "gemma4", "gemma4_unified", "diffusion_gemma",

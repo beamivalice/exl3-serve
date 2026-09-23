@@ -3,15 +3,14 @@
 //! `mlx-serve --version` as a one-shot subprocess and parses this so Settings
 //! can show engine versions without a running server (Swift side:
 //! `EngineVersions.parse`). Keep this a pure formatter — main.zig gathers the
-//! runtime values (`mlx_version()`, `ggml_version()`/`ggml_commit()`) and the
-//! build-time pins (`build_options`) and calls `writeReport`.
+//! runtime value (`mlx_version()`) and the build-time pins (`build_options`)
+//! and calls `writeReport`.
 
 const std = @import("std");
 
-/// Every version string surfaced by `--version`. Runtime-queryable ones
-/// (`mlx`, `ggml`, `ggml_commit`) come from the linked libraries; the rest are
-/// build-time pins (Homebrew mlx-c, the pinned ds4 submodule commit, the
-/// fetch-llama.sh `LLAMA_TAG`, the compiled GGUF file-format version).
+/// Every version string surfaced by `--version`. `mlx` comes from the linked
+/// library at runtime; the rest are build-time pins (the pinned mlx-c and ds4
+/// submodule revisions, the GGUF file-format version we parse).
 pub const Info = struct {
     /// mlx-serve app version (`build_options.version`).
     app: []const u8,
@@ -23,13 +22,7 @@ pub const Info = struct {
     /// from `transformer.naxStatus()` (GPU gen + macOS floor; the bundled
     /// MLX always ships the NAX kernels — asserted at build time).
     nax: []const u8,
-    /// ggml library version, from `ggml_version()` at runtime.
-    ggml: []const u8,
-    /// ggml short commit, from `ggml_commit()`. May be empty.
-    ggml_commit: []const u8,
-    /// llama.cpp release tag (`bNNNN`), the fetch-llama.sh pin.
-    llama_tag: []const u8,
-    /// GGUF file-format version (compiled `GGUF_VERSION`).
+    /// Highest GGUF file-format version `gguf_meta.zig` parses.
     gguf_format: []const u8,
     /// Pinned ds4 submodule short commit (no runtime API).
     ds4_commit: []const u8,
@@ -38,19 +31,13 @@ pub const Info = struct {
 /// Render one `name value` line per component in a stable order. Machine-
 /// parseable: the first whitespace-delimited token is the component name, the
 /// remainder is its version (which may itself contain spaces, e.g.
-/// `ggml 0.16.0 (47c786924)`). A pin with no value collapses to `unknown` so
-/// every line always has a value token.
+/// `nax on (M5 neural accelerators)`). A pin with no value collapses to
+/// `unknown` so every line always has a value token.
 pub fn writeReport(w: *std.Io.Writer, info: Info) !void {
     try w.print("mlx-serve {s}\n", .{val(info.app)});
     try w.print("mlx {s}\n", .{val(info.mlx)});
     try w.print("mlx-c {s}\n", .{val(info.mlx_c)});
     try w.print("nax {s}\n", .{val(info.nax)});
-    if (info.ggml_commit.len > 0) {
-        try w.print("ggml {s} ({s})\n", .{ val(info.ggml), info.ggml_commit });
-    } else {
-        try w.print("ggml {s}\n", .{val(info.ggml)});
-    }
-    try w.print("llama.cpp {s}\n", .{val(info.llama_tag)});
     try w.print("gguf {s}\n", .{val(info.gguf_format)});
     try w.print("ds4 {s}\n", .{val(info.ds4_commit)});
 }
@@ -75,9 +62,6 @@ test "version: report renders one name-value line per component" {
         .mlx = "0.32.0",
         .mlx_c = "0.6.0",
         .nax = "on (M5 neural accelerators)",
-        .ggml = "0.16.0",
-        .ggml_commit = "47c786924",
-        .llama_tag = "b9999",
         .gguf_format = "3",
         .ds4_commit = "80ebbc3",
     });
@@ -87,23 +71,18 @@ test "version: report renders one name-value line per component" {
         \\mlx 0.32.0
         \\mlx-c 0.6.0
         \\nax on (M5 neural accelerators)
-        \\ggml 0.16.0 (47c786924)
-        \\llama.cpp b9999
         \\gguf 3
         \\ds4 80ebbc3
         \\
     , s);
 }
 
-test "version: empty ggml commit drops the parenthetical; blank pins read as unknown" {
+test "version: blank pins read as unknown" {
     const s = try report(std.testing.allocator, .{
         .app = "26.7.9",
         .mlx = "0.32.0",
         .mlx_c = "", // build.sh couldn't resolve it (dev build)
         .nax = "",
-        .ggml = "0.16.0",
-        .ggml_commit = "",
-        .llama_tag = "b9999",
         .gguf_format = "3",
         .ds4_commit = "",
     });
@@ -113,8 +92,6 @@ test "version: empty ggml commit drops the parenthetical; blank pins read as unk
         \\mlx 0.32.0
         \\mlx-c unknown
         \\nax unknown
-        \\ggml 0.16.0
-        \\llama.cpp b9999
         \\gguf 3
         \\ds4 unknown
         \\

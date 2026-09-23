@@ -3,7 +3,7 @@
 # /v1/load-model, first request naming an unloaded model).
 #
 # Three rounds of the same bug have shipped — prefix-cache settings, then MTP +
-# llama settings, then the drafter group — each time a flag reached only the
+# MTP settings, then the drafter group — each time a flag reached only the
 # `--model` primary while `ensureLoaded`'s LoadRequest used a struct default.
 # `--no-drafter` became load-bearing on this path when `resolveInDirDrafter`
 # started probing `<model_dir>/drafter` at load: a server launched with
