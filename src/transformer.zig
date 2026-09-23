@@ -32258,6 +32258,14 @@ fn initMoeLayers(allocator: std.mem.Allocator, config: ModelConfig, weights: *co
             {
                 const mw = &lw.mlp.moe;
                 try maybeTransposeForBf16(&mw.router_w, mw.router_s, &owned_bf16, allocator, s);
+                // Routing is f32 (`mimoRouterLogits`): widen once here rather than per
+                // forward. Billed by `mimo_source.countResidentBytes`.
+                if (config.usesMimoSourceTrunk() and mw.router_s.ctx == null and mlx.mlx_array_dtype(mw.router_w) != .float32) {
+                    var w32 = mlx.mlx_array_new();
+                    try mlx.check(mlx.mlx_astype(&w32, mw.router_w, .float32, s));
+                    try owned_bf16.append(allocator, w32);
+                    mw.router_w = w32;
+                }
                 if (!exl3) {
                     try maybeTransposeForBf16(&mw.switch_gate_w, mw.switch_gate_s, &owned_bf16, allocator, s);
                     try maybeTransposeForBf16(&mw.switch_up_w, mw.switch_up_s, &owned_bf16, allocator, s);

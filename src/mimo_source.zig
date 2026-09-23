@@ -842,7 +842,11 @@ fn countResidentBytes(
         switch (try classifyKey(key, config)) {
             .skipped, .fp8_scale => {},
             .resident, .routed_expert => {
-                const bytes = if (trunkQuantFor(key, config)) |q| try affineBytes(meta, q) else try payloadBytes(meta, null);
+                var bytes = if (trunkQuantFor(key, config)) |q| try affineBytes(meta, q) else try payloadBytes(meta, null);
+                // The transformer loader keeps an f32 copy of each router for f32 routing.
+                if (layerKey(key)) |ref| if (std.mem.eql(u8, ref.rest, "mlp.gate.weight")) {
+                    bytes += try shapeProduct(meta.shape) * 4;
+                };
                 total = std.math.add(u64, total, bytes) catch
                     return error.ResidentBytesOverflow;
             },
@@ -1489,6 +1493,12 @@ test "mimo source loads and bills EXL3 routed banks beside the prepared trunk" {
 
     var weights = try loadWeights(io, t.allocator, path, &config);
     defer weights.deinit();
+    // The bill is what the loader emits plus the f32 copy of the [2,128] router
+    // the transformer keeps for f32 routing.
+    var emitted: u64 = 0;
+    var it = weights.map.iterator();
+    while (it.next()) |e| emitted += mlx.mlx_array_size(e.value_ptr.*) * mlx.mlx_array_itemsize(e.value_ptr.*);
+    try t.expectEqual(emitted + 2 * 128 * 4, with_banks);
     const trellis = weights.get("model.layers.1.mlp.switch_mlp.gate_proj.trellis") orelse
         return error.MissingWeight;
     try t.expectEqualSlices(c_int, &[_]c_int{ 2, 8, 8, 40 }, mlx.getShape(trellis));

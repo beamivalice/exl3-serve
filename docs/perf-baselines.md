@@ -130,7 +130,20 @@ the matmul2d packed decode, `mode=dense` = the rebuild):
 The 128k rung reads below the 256k rung in this run; recorded as measured, unexplained (re-measure before quoting it).
 
 Prefill chunk sweep (`/Users/beam/claude-tmp/mimo-roofline/sweep/sweep.out`): width 2048 is best (852 tok/s at 4k,
-477 at 64k) against 512 (737-817, 418) and 4096/8192 (~725, ~437).
+477 at 64k) against 512 (737-817, 418) and 4096/8192 (~725, ~437). That was before the fused sliding prefill, whose
+composed band sheet grew with the chunk. After it (binary 7c9a5af, ctx 131072, kv8, `SUSHI_PREFILL_CHUNK`, one
+boot per cell, 2048 4096 4096 2048, QoS restored, lock `dispatch-chunk`, 2026-09-24): 2048 → 4096 is 926-1173 vs
+1006-1175 tok/s at 4k, 879/889 vs 814/950 at 16k, 501/543 vs 539/562 at 64k; 4096 is never slower on the mean, so
+the per-request chooser keeps the 4096 cap. Head ffdfc38 choosing per request (4096 admitted every time): 4k
+1106-1122, 16k 888-922, 64k 500 (ctx 528384) / 559 (ctx 131072). Raw: `scratchpad/dispatch/runs/cw*`, `pfG_*`.
+
+Decode dispatch diet (ffdfc38 family; fwd-ubench, 4096 KV, one boot per arm, A D D A twice, lock `dispatch-chunk`,
+QoS restored; raw `scratchpad/dispatch/runs/ub*`): one decode forward's primitives 1399 → 1113 non-view
+(`SUSHI_DECODE_FWD_GRAPH`); 24.37/24.32/24.23/24.22 → 23.73/23.94/23.83/24.00 ms per forward (-0.41 ms, -1.7%; GPU
+eval 23.56 → 23.04 ms, CPU build +0.11 ms). Greedy text and top-3 logprobs identical to the base over 2x160 tokens.
+llmprobe `--bench-only` on 7c9a5af (ctx 32768, kv8, no MTP): decode 40.8 tok/s (39.7-45, contended; sustained
+40.8 → 44.8), predictable 44.7, novel 44.6 (recorded 43.5, predictable 42.3, on f72f989 without lm_head/embed
+affine-8). 16x512 KLD to EOS 0.07700, top-1 92.06%, resident 101.48 GB (+0.2 GB: the f32 router copy).
 
 The bf16 trunk (b2670b6, the lossless-teacher ruling, which the served pack shares) cost the MCG/TINY pack ~15% of
 decode against the affine-8 trunk it replaced (31.1 → ~26 tok/s; +2.7 GiB read per token). Hence the FP8 work:

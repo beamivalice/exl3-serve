@@ -127,12 +127,31 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   at chunk 512, 2.28 GB at 2048), so 500k at chunk 2048 billed ~14.3 GB against ~12.4 GB of headroom. That term is
   now zero wherever the fused arm serves. Global-layer decode no longer rebuilds on M4-class GPUs (split-K, above).
 
+## Decode dispatches
+
+- QKV is ONE FP8 GEMV per layer with three outputs (`fp8_block` `gemv3`); V leaves it already multiplied by
+  `attention_value_scale` (`RowSplit.v_scale`, rounded to the output dtype first, as the composed multiply did).
+- Every residual add runs in one kernel with the norm that reads its sum (`fusedAddRmsNormUngated`): the
+  post-attention norm (`fusedAddRmsNormRouted` also emits the f32 router input), the next layer's input norm and the
+  final norm. The router is widened to f32 once at load (source-trunk packs), not per forward.
+- All bit-identical to the ops they replaced: greedy text and top-3 logprobs match over 2x160 tokens.
+- Count one decode forward's primitives with `SUSHI_DECODE_FWD_GRAPH=<path>` beside `SUSHI_DECODE_FWD_UBENCH`.
+  What is left, per token: the kv8 append (2 quantize + 6 slice updates per layer, 384) and the sliding ring's
+  dequant (78) are ~40%; a partial rotary copies its input before rotating (96 hidden copies).
+- A joined `[Q | K]` GEMV output with one rope over both passed its unit tests but moved live logits by ~0.05
+  nats at the first token, cause unfound; parked on branch `joint-rope-parked`.
+
 ## Bills (the bill follows the storage in the SAME commit)
 
 - `kvBytesPerToken` counts the 9 global layers per token (spread over `kvPerTokenLayerCount`, never every caching
   layer), `swaRingBytes` the ring once per slot (`server.slotRingBytes`, at `kv_bits`), `swaStreamBytesPerToken` the
   chunk a prefill stages before compaction, for the layers one eval-cadence window lets coexist.
   `server.kvDequantScratchBytes` bills the kv-quant dense rebuild as ONE layer at the rows that layer stores.
+- `mimo_source.countResidentBytes` bills each MoE router twice: as stored (bf16) and as the f32 copy the
+  transformer loader keeps (~0.2 GB on the Flash pack).
+- **The prefill chunk is chosen per request** (`perRequestPrefillChunk` covers a ringed arch): the widest rung up
+  to 4096 whose admission bill fits live memory. The ungated load-time pin subtracts the hot-cache ask first and
+  pinned 2048 (512 before the fused sliding prefill) at every context.
 - **A ringed arch RESERVES its cache capacity up front** (`ModelConfig.reservesKvCapacity`, narrower than
   `longCtxGated`) and bills the reservation headroom and the ring: growing +25% at a time duplicated a global layer
   mid-prefill.
