@@ -839,10 +839,10 @@ pub const ModelConfig = struct {
     /// memory estimate that sizes a KV cache reads this one helper so the
     /// auto-context sizer and the prefill admission guard cannot disagree.
     /// Whether the prefill chunk is resolved per request (by the admission bill) instead of
-    /// once at load. qwen4_exp only: a 1M session's load-time reserve pins every ordinary
-    /// prompt to a narrow rung.
+    /// once at load: a long session's load-time reserve (and, ungated, the hot-cache ask) pins
+    /// every ordinary prompt to a narrow rung.
     pub fn perRequestPrefillChunk(self: *const ModelConfig) bool {
-        return self.longCtxGated();
+        return self.longCtxGated() or self.swaRingTokens() > 0;
     }
 
     /// Dense bf16 bytes ONE token of layer `li`'s K and V occupy. Only correct

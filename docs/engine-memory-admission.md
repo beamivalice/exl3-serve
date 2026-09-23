@@ -33,6 +33,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
   `getEffectiveContextLength`. It bills KV at the CONFIGURED width and activations ONCE.
 - The prefill CHUNK is a machine decision (`resolvePrefillChunk`, ladder 8192→512 at ≤ a quarter of the serving
   budget; `--prefill-chunk` wins). `prefillMemoryNeeded` takes STORED and SCORED widths as two parameters.
+- A per-request arch (`perRequestPrefillChunk`: qwen4_exp and the ringed mimo_v2) re-picks the width for every
+  request: the widest rung whose admission bill fits live memory (`chooseRequestPrefillChunk`), stepping down per
+  chunk under pressure; the load-time pin is only the fallback. `boundedPrefillChunk` still caps the rung per arch
+  (4096 at qk 192).
 - An explicit `--ctx-size` outranks auto-context and `model-settings.json` `ctx_size`.
 
 ## Admission

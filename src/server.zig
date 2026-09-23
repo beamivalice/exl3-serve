@@ -5353,8 +5353,9 @@ pub var adaptive_chunk_override: ?bool = null;
 /// The per-chunk adaptive width: subordinate to the per-request gate, plus
 /// `SUSHI_PREFILL_CHUNK_ADAPTIVE=0`, plus "no operator pinned a width".
 pub fn adaptivePrefillChunkEnabled(config: *const model_mod.ModelConfig) bool {
-    // Arch first: the cheapest and most selective, and this runs once per chunk boundary.
-    if (!config.perRequestPrefillChunk()) return false;
+    // Arch first: the cheapest and most selective, and this runs once per chunk boundary. The
+    // per-chunk cost estimator is calibrated on qwen4_exp; a ringed arch runs its admitted width.
+    if (!config.longCtxGated()) return false;
     if (explicitPrefillChunk() > 0) return false;
     if (generate_mod.envPrefillChunk() > 0) return false;
     if (!perRequestPrefillChunkEnabled(config)) return false;
@@ -23433,10 +23434,9 @@ test "mimo_v2 prefill bill carries the FP8 trunk's dequant scratch past the GEMV
     try t.expectEqual(scratch, prefillTransientReserveAtKv(&cfg, 8, 512, 4096) - prefillTransientReserveAtKv(&dense, 8, 512, 4096));
 }
 
-test "mimo_v2 at 500k, kv8, chunk 2048: the fused sliding arm drops exactly the band sheet" {
-    const t = std.testing;
+/// The Flash geometry the band sheet scales with: 64 query heads, 39 of 48 layers sliding.
+fn mimoV2FlashBillConfig() model_mod.ModelConfig {
     var cfg = mimoV2BillConfig();
-    // The Flash geometry the band sheet scales with: 64 query heads, 39 of 48 layers sliding.
     cfg.num_hidden_layers = 48;
     cfg.hidden_size = 4096;
     cfg.num_attention_heads = 64;
@@ -23444,6 +23444,38 @@ test "mimo_v2 at 500k, kv8, chunk 2048: the fused sliding arm drops exactly the 
     cfg.num_global_key_value_heads = 4;
     cfg.layer_is_global[3] = false;
     for ([_]u32{ 0, 5, 11, 17, 23, 29, 35, 41, 47 }) |li| cfg.layer_is_global[li] = true;
+    return cfg;
+}
+
+test "mimo_v2 prefills at the widest width its request bill admits, not at the load-time pin" {
+    const t = std.testing;
+    transformer_mod.fused256_override = true;
+    defer transformer_mod.fused256_override = null;
+    const cfg = mimoV2FlashBillConfig();
+    const kv_bits: u64 = 8;
+    const seq: u64 = 500_000;
+    // What load-time sizing pins beside the default hot-cache ask.
+    const pin: u32 = 512;
+    const roomy: u64 = 200 << 30;
+
+    try t.expect(cfg.perRequestPrefillChunk());
+    try t.expectEqual(@as(u32, 4096), chooseRequestPrefillChunk(&cfg, 4096, 256, kv_bits, roomy, pin, 0, .{}));
+    try t.expectEqual(@as(u32, 4096), chooseRequestPrefillChunk(&cfg, seq, 2048, kv_bits, roomy, pin, 0, .{}));
+
+    // Admitted at its exact bill; a byte under steps down the ladder, not back to the pin.
+    const need = prefillNeededAtChunk(&cfg, seq, 2048, kv_bits, 2048, .{});
+    try t.expectEqual(@as(u32, 2048), chooseRequestPrefillChunk(&cfg, seq, 2048, kv_bits, need, pin, 0, .{}));
+    try t.expectEqual(@as(u32, 1024), chooseRequestPrefillChunk(&cfg, seq, 2048, kv_bits, need - 1, pin, 0, .{}));
+
+    // The forward never runs wider than the chooser prices, and runs the admitted width to the end:
+    // the per-chunk estimator is calibrated on qwen4_exp and stepped a 64k MiMo prompt down to 512.
+    try t.expectEqual(@as(usize, 4096), generate_mod.effectivePrefillChunk(cfg.prefillScoreHeadDim(), cfg.num_attention_heads, seq, cfg.has_sliding_window, cfg.isMoe(), cfg.longCtxGated(), 0));
+    try t.expect(!adaptivePrefillChunkEnabled(&cfg));
+}
+
+test "mimo_v2 at 500k, kv8, chunk 2048: the fused sliding arm drops exactly the band sheet" {
+    const t = std.testing;
+    const cfg = mimoV2FlashBillConfig();
     const seq: u64 = 500_000;
     const chunk: u64 = 2048;
     transformer_mod.fused256_override = true;
