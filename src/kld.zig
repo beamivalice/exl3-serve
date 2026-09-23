@@ -2117,3 +2117,62 @@ test "kld: a pack declaring trunk_quant serves an affine o_proj; its source-shap
     try testing.expect(!std.mem.eql(f32, &rows[0], &rows[1]));
     for (rows[0], rows[1]) |a, b| try testing.expect(@abs(a - b) <= 0.05 * (@abs(a) + 1));
 }
+
+test "kld: a pack declaring lm_head and embed_tokens trunk_quant serves both packed" {
+    const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var metal: bool = false;
+    mlx.check(mlx.mlx_metal_is_available(&metal)) catch return error.SkipZigTest;
+    if (!metal) return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const ids = [_]u32{ 1, 3, 5, 2, 7, 0 };
+    var rows: [3][TinyMimo.vocab]f32 = undefined;
+    const q8 = "{\"mode\":\"affine\",\"bits\":8,\"group_size\":64}";
+    const arms = [_][]const u8{
+        "",
+        ",\"trunk_quant\":{\"lm_head\":" ++ q8 ++ ",\"embed_tokens\":" ++ q8 ++ "}",
+        ",\"trunk_quant\":{\"embed_tokens\":" ++ q8 ++ "}",
+    };
+    for (arms, 0..) |extra, arm| {
+        const sub = ([_][]const u8{ "source", "both", "embed" })[arm];
+        try tmp.dir.createDirPath(io, sub);
+        var dir = try tmp.dir.openDir(io, sub, .{});
+        defer dir.close(io);
+        try writeTinyMimoPackWith(io, arena, dir, 1, extra);
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_len = try dir.realPath(io, &path_buf);
+
+        const loaded = try loadModel(io, allocator, .{ .model_dir = path_buf[0..path_len] });
+        defer loaded.deinit();
+        const head = loaded.weights.get("lm_head.weight") orelse return error.MissingWeight;
+        const emb = loaded.weights.get("model.embed_tokens.weight") orelse return error.MissingWeight;
+        try testing.expectEqual(if (arm == 1) mlx.mlx_dtype.uint32 else mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(head));
+        try testing.expectEqual(if (arm == 0) mlx.mlx_dtype.bfloat16 else mlx.mlx_dtype.uint32, mlx.mlx_array_dtype(emb));
+
+        var ctx = loaded.xfm.defaultCtx();
+        const logits = try forwardPrompt(allocator, loaded, &ctx, &ids);
+        defer _ = mlx.mlx_array_free(logits);
+        try readLastRow(&loaded.xfm, logits, &rows[arm]);
+        for (rows[arm]) |v| try testing.expect(std.math.isFinite(v));
+    }
+    // 8-bit tables move the logits only by their own rounding; a bf16 head
+    // beside a packed embedding keeps its own (absent) scales.
+    for (1..3) |arm| {
+        try testing.expect(!std.mem.eql(f32, &rows[0], &rows[arm]));
+        var dot: f64 = 0;
+        var na: f64 = 0;
+        var nb: f64 = 0;
+        for (rows[0], rows[arm]) |a, b| {
+            dot += a * b;
+            na += a * a;
+            nb += b * b;
+        }
+        try testing.expect(dot / @sqrt(na * nb) > 0.98);
+    }
+}

@@ -25,6 +25,14 @@ pub const MUSE_MAX_IMAGE_TOKENS = 4096;
 /// An affine width MLX's `quantize` packs, applied to a bf16 trunk linear at load.
 pub const TrunkQuant = struct { bits: u8, group_size: u32 };
 
+/// `trunk_quant` (docs/pack-format.md): the bf16 source tensors a pack has
+/// served packed. Every slot null = serve them as stored.
+pub const TrunkQuantSpec = struct {
+    o_proj: ?TrunkQuant = null,
+    lm_head: ?TrunkQuant = null,
+    embed_tokens: ?TrunkQuant = null,
+};
+
 pub const QuantMode = enum {
     affine,
     nvfp4,
@@ -175,8 +183,8 @@ pub const ModelConfig = struct {
     expert_quant_rate: expert_exl3.Rate = .{ .n = 64 },
     expert_quant_codebook: expert_exl3.Codebook = .mul1,
     expert_quant_window: expert_exl3.Window = .w16,
-    /// `trunk_quant.o_proj` (a pack field): MiMo's bf16 o_proj requantized at load.
-    trunk_quant_o_proj: ?TrunkQuant = null,
+    /// `trunk_quant` (a pack field): MiMo's bf16 tensors requantized at load.
+    trunk_quant: TrunkQuantSpec = .{},
     expert_source_dir: ?[]u8 = null,
     /// `MLX_SERVE_NGRAM_BF16_DIR`: serve the PLE n-gram table from the ORIGINAL bf16
     /// shards in this HF checkpoint dir instead of the pack's quantized `ngram_table.bin`
@@ -3842,14 +3850,27 @@ fn parseMimoConfig(c: *ModelConfig, obj: std.json.ObjectMap) !void {
         return error.UnsupportedMimoV2Config;
     const freq = obj.get("moe_layer_freq") orelse return error.UnsupportedMimoV2Config;
     c.first_k_dense_replace = try model_discovery.denseMoePrefix(freq, c.num_hidden_layers);
-    if (obj.get("trunk_quant")) |v| c.trunk_quant_o_proj = try parseTrunkQuant(v);
+    if (obj.get("trunk_quant")) |v| c.trunk_quant = try parseTrunkQuant(v);
 }
 
 /// `trunk_quant` is a PACK field (docs/pack-format.md): the source checkpoint the
-/// KLD teacher reads never carries it. Only `o_proj` at an MLX affine width admits.
-fn parseTrunkQuant(v: std.json.Value) !TrunkQuant {
-    if (v != .object or v.object.count() != 1) return error.UnsupportedTrunkQuant;
-    const spec = v.object.get("o_proj") orelse return error.UnsupportedTrunkQuant;
+/// KLD teacher reads never carries it. Named slots at MLX affine widths only.
+fn parseTrunkQuant(v: std.json.Value) !TrunkQuantSpec {
+    if (v != .object or v.object.count() == 0) return error.UnsupportedTrunkQuant;
+    var out: TrunkQuantSpec = .{};
+    var it = v.object.iterator();
+    while (it.next()) |e| {
+        inline for (@typeInfo(TrunkQuantSpec).@"struct".field_names) |name| {
+            if (std.mem.eql(u8, e.key_ptr.*, name)) {
+                @field(out, name) = try parseAffineSpec(e.value_ptr.*);
+                break;
+            }
+        } else return error.UnsupportedTrunkQuant;
+    }
+    return out;
+}
+
+fn parseAffineSpec(spec: std.json.Value) !TrunkQuant {
     if (spec != .object) return error.UnsupportedTrunkQuant;
     const mode = spec.object.get("mode") orelse return error.UnsupportedTrunkQuant;
     const bits = spec.object.get("bits") orelse return error.UnsupportedTrunkQuant;
@@ -8312,13 +8333,24 @@ test "mimo_v2 trunk_quant names an affine o_proj and refuses anything else by na
         \\ "n_routed_experts":16, "num_experts_per_tok":4, "moe_intermediate_size":192}
     ;
     const plain = try parseConfigFromJson(testing.allocator, base);
-    try testing.expect(plain.trunk_quant_o_proj == null);
+    try testing.expectEqual(TrunkQuantSpec{}, plain.trunk_quant);
     const json = try mergeConfigJson(testing.allocator, base,
-        \\{"trunk_quant":{"o_proj":{"mode":"affine","bits":8,"group_size":64}}}
+        \\{"trunk_quant":{"o_proj":{"mode":"affine","bits":8,"group_size":64},
+        \\ "lm_head":{"mode":"affine","bits":8,"group_size":64},
+        \\ "embed_tokens":{"mode":"affine","bits":4,"group_size":32}}}
     );
     defer testing.allocator.free(json);
     const c = try parseConfigFromJson(testing.allocator, json);
-    try testing.expectEqual(TrunkQuant{ .bits = 8, .group_size = 64 }, c.trunk_quant_o_proj.?);
+    try testing.expectEqual(TrunkQuantSpec{
+        .o_proj = .{ .bits = 8, .group_size = 64 },
+        .lm_head = .{ .bits = 8, .group_size = 64 },
+        .embed_tokens = .{ .bits = 4, .group_size = 32 },
+    }, c.trunk_quant);
+    const head_only = try mergeConfigJson(testing.allocator, base,
+        \\{"trunk_quant":{"lm_head":{"mode":"affine","bits":8,"group_size":64}}}
+    );
+    defer testing.allocator.free(head_only);
+    try testing.expectEqual(TrunkQuantSpec{ .lm_head = .{ .bits = 8, .group_size = 64 } }, (try parseConfigFromJson(testing.allocator, head_only)).trunk_quant);
     for ([_][]const u8{
         \\{"trunk_quant":{"qkv_proj":{"mode":"affine","bits":8,"group_size":64}}}
         ,
@@ -8331,6 +8363,8 @@ test "mimo_v2 trunk_quant names an affine o_proj and refuses anything else by na
         \\{"trunk_quant":{"o_proj":{"mode":"affine","bits":8}}}
         ,
         \\{"trunk_quant":"o_proj"}
+        ,
+        \\{"trunk_quant":{"lm_head":{"mode":"affine","bits":8,"group_size":64},"norm":{"mode":"affine","bits":8,"group_size":64}}}
         ,
     }) |override| {
         const bad = try mergeConfigJson(testing.allocator, base, override);

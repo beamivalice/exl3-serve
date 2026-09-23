@@ -76,19 +76,25 @@ search and one converted with it differ only in these `suh` values.
 ### `trunk_quant` (`mimo_v2`)
 
 ```json
-"trunk_quant": { "o_proj": { "mode": "affine", "bits": 8, "group_size": 64 } }
+"trunk_quant": {
+  "o_proj":       { "mode": "affine", "bits": 8, "group_size": 64 },
+  "lm_head":      { "mode": "affine", "bits": 8, "group_size": 64 },
+  "embed_tokens": { "mode": "affine", "bits": 8, "group_size": 64 }
+}
 ```
 
 A pack field, never the source checkpoint's. At load the engine requantizes
-every layer's bf16 `self_attn.o_proj.weight` with MLX's own affine packer
-(deterministic) and serves it through `quantized_matmul`, billed at the packed
-bytes. The original checkpoint `kld capture` reads never carries the field, so
-the teacher keeps o_proj as stored.
+each named bf16 tensor with MLX's own affine packer (deterministic) and bills
+it at the packed bytes: `o_proj` = every layer's `self_attn.o_proj.weight` and
+`lm_head` = `lm_head.weight`, both served through `quantized_matmul`;
+`embed_tokens` = `model.embed_tokens.weight`, served by the quantized row
+gather. The original checkpoint `kld capture` reads never carries the field,
+so the teacher keeps all three as stored.
 
-- The only key is `o_proj`; `mode` must be `affine`, `bits` one of 2, 3, 4, 5,
-  6, 8 and `group_size` one of 32, 64, 128. Anything else is
-  `UnsupportedTrunkQuant`, never a silent bf16 fallback.
-- The pack's o_proj bytes stay the source's bf16; only the served copy is packed.
+- Keys are `o_proj`, `lm_head` and `embed_tokens`, each optional; `mode` must
+  be `affine`, `bits` one of 2, 3, 4, 5, 6, 8 and `group_size` one of 32, 64,
+  128. Anything else is `UnsupportedTrunkQuant`, never a silent bf16 fallback.
+- The pack's bytes stay the source's bf16; only the served copy is packed.
 
 ## The shard stamp
 

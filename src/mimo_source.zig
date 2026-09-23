@@ -91,8 +91,10 @@ pub fn loadWeights(
     const scratch = arena.allocator();
     var source = try loadSourceIndex(io, scratch, model_dir);
     try validatePlan(&source, scratch, config);
-    if (config.trunk_quant_o_proj) |q|
-        log.info("[mimo-source] trunk_quant: o_proj packed affine {d}-bit g{d} at load\n", .{ q.bits, q.group_size });
+    inline for (@typeInfo(model.TrunkQuantSpec).@"struct".field_names) |name| {
+        if (@field(config.trunk_quant, name)) |q|
+            log.info("[mimo-source] trunk_quant: " ++ name ++ " packed affine {d}-bit g{d} at load\n", .{ q.bits, q.group_size });
+    }
 
     var weights = model.Weights.init(allocator);
     errdefer weights.deinit();
@@ -917,9 +919,10 @@ fn validateFp8Payload(codes: []const u8, scales: []const u8) !void {
 
 /// The pack's `trunk_quant` for a resident tensor, when it names one.
 fn trunkQuantFor(key: []const u8, config: *const model.ModelConfig) ?model.TrunkQuant {
-    const q = config.trunk_quant_o_proj orelse return null;
+    if (std.mem.eql(u8, key, "lm_head.weight")) return config.trunk_quant.lm_head;
+    if (std.mem.eql(u8, key, "model.embed_tokens.weight")) return config.trunk_quant.embed_tokens;
     const ref = layerKey(key) orelse return null;
-    return if (std.mem.eql(u8, ref.rest, "self_attn.o_proj.weight")) q else null;
+    return if (std.mem.eql(u8, ref.rest, "self_attn.o_proj.weight")) config.trunk_quant.o_proj else null;
 }
 
 /// Packed codes plus bf16 scales and biases, one pair per group.
@@ -1702,7 +1705,7 @@ test "mimo source requantizes o_proj only when the pack declares trunk_quant" {
     const plain_bytes = try residentBytesWithConfig(io, t.allocator, fixture.path, &fixture.config);
 
     var config = fixture.config;
-    config.trunk_quant_o_proj = .{ .bits = 8, .group_size = 64 };
+    config.trunk_quant.o_proj = .{ .bits = 8, .group_size = 64 };
     var packed_weights = try loadWeights(io, t.allocator, fixture.path, &config);
     defer packed_weights.deinit();
     const w = packed_weights.get(key).?;
@@ -1726,6 +1729,32 @@ test "mimo source requantizes o_proj only when the pack declares trunk_quant" {
     for (vals[0 .. 128 * 128]) |v| try t.expectEqual(@as(f32, 1), v);
     // Billed at the packed bytes: [128,32] u32 codes + two [128,2] bf16 grids.
     try t.expectEqual(plain_bytes - 128 * 128 * 2 + 128 * 32 * 4 + 2 * 128 * 2 * 2, try residentBytesWithConfig(io, t.allocator, fixture.path, &config));
+}
+
+test "mimo source packs lm_head and embed_tokens only when the pack declares them" {
+    const t = std.testing;
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try makeTinySourceFixture(io, t.allocator, &tmp);
+    defer fixture.deinit();
+    const plain_bytes = try residentBytesWithConfig(io, t.allocator, fixture.path, &fixture.config);
+
+    var config = fixture.config;
+    config.trunk_quant = .{ .lm_head = .{ .bits = 8, .group_size = 64 }, .embed_tokens = .{ .bits = 8, .group_size = 64 } };
+    var weights = try loadWeights(io, t.allocator, fixture.path, &config);
+    defer weights.deinit();
+    for ([_][]const u8{ "lm_head", "model.embed_tokens" }) |base| {
+        var name_buf: [64]u8 = undefined;
+        const w = weights.get(try std.fmt.bufPrint(&name_buf, "{s}.weight", .{base})).?;
+        try t.expectEqual(mlx.mlx_dtype.uint32, mlx.mlx_array_dtype(w));
+        try t.expectEqualSlices(c_int, &[_]c_int{ 2, 32 }, mlx.getShape(w));
+        try t.expect(weights.get(try std.fmt.bufPrint(&name_buf, "{s}.biases", .{base})) != null);
+    }
+    try t.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(weights.get("model.layers.0.self_attn.o_proj.weight").?));
+    // Each [2,128] bf16 table becomes [2,32] u32 codes + two [2,2] bf16 grids.
+    const per_table: u64 = 2 * 128 * 2 - (2 * 32 * 4 + 2 * 2 * 2 * 2);
+    try t.expectEqual(plain_bytes - 2 * per_table, try residentBytesWithConfig(io, t.allocator, fixture.path, &config));
 }
 
 test "mimo source keeps the FP8 trunk in its source bytes and bills them" {

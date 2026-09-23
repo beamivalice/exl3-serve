@@ -15635,14 +15635,14 @@ pub const Transformer = struct {
         // its scales still crashes honestly.
         const bias_mandatory = config.quant_bits > 0 and config.quant_mode.hasBiases();
         const emb_dense = floatDtypeTable(mlx.mlx_array_dtype(emb_w));
-        const emb_s_arr = if (config.quant_bits == 0 or emb_dense)
+        const emb_s_arr = if (emb_dense)
             mlx.mlx_array_new()
         else
             getNamedWeight(weights, &name_buf, prefix, emb_base, "scales") orelse {
                 log.err("MISSING WEIGHT: {s}.{s}.scales\n", .{ prefix, emb_base });
                 return error.MissingWeight;
             };
-        const emb_b_arr = if (config.quant_bits == 0 or emb_dense)
+        const emb_b_arr = if (emb_dense)
             mlx.mlx_array_new()
         else
             getNamedWeight(weights, &name_buf, prefix, emb_base, "biases") orelse blk: {
@@ -15723,8 +15723,10 @@ pub const Transformer = struct {
                 owns_lm_head = !config.tie_word_embeddings;
             } else if (weights.get("lm_head.weight")) |w| {
                 lm_head_w = w;
-                lm_head_s = weights.get("lm_head.scales") orelse emb_s_arr;
-                lm_head_b = weights.get("lm_head.biases") orelse emb_b_arr;
+                // A float head is dense even beside a packed embedding.
+                const head_dense = floatDtypeTable(mlx.mlx_array_dtype(w));
+                lm_head_s = if (head_dense) mlx.mlx_array_new() else weights.get("lm_head.scales") orelse emb_s_arr;
+                lm_head_b = if (head_dense) mlx.mlx_array_new() else weights.get("lm_head.biases") orelse emb_b_arr;
                 owns_lm_head = !config.tie_word_embeddings;
             } else if (config.tie_word_embeddings) {
                 lm_head_w = emb_w;
