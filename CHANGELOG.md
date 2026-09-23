@@ -14,6 +14,7 @@
 - **An explicit launch flag now outranks `model-settings.json`**: `--mtp`/`--no-mtp`, `--kv-quant`, `--ctx-size` and `--mtp-typical`/`--mtp-tokenv3` win over the model's `mtp`, `kv_quant`, `ctx_size` and `mtp_acceptance`; each load logs `[mtp] <on|off> (<source>)` and `/props` reports `settings.mtp.source`.
 - **The TINY EXL3 codebook is retired**: a pack that names `tiny` in `expert_quant` or a shard stamp is refused by name at load; re-convert it with `mcg`.
 - **`sushi kld` scores a resident MiMo pack through the model the server serves.** It loads the source FP8 trunk like every other path, so two packs that differ only in their routed experts no longer compare identical.
+- **MiMo-V2.6-Flash prefills long prompts faster on M5-class Macs**: its global and sliding attention run on the GPU's matrix units (`SUSHI_ATTN_PD_NAX=0` restores the previous kernel), and the previous kernel itself is faster on every Mac.
 - **Qwen3.8 Flash Next attends 16 or more query rows on an 8-bit KV cache without rebuilding the whole cache where that is slower**: a prompt's final span, short follow-up turns and wide verify blocks read the packed cache directly, and prefill chunks below 8k keys gather instead of taking the dense-mask path.
 
 ## Exl3-serve - v26.9.5

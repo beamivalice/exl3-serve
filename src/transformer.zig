@@ -2476,10 +2476,16 @@ const ATTN_PD_KERNEL_SOURCE =
     \\}
 ;
 
-var attn_pd_kernel_cached: ?mlx.mlx_fast_metal_kernel = null;
+/// Which kernel a `sushi_attn_pd` dispatch runs: the SIMD-matrix kernel above, or
+/// `sushi_attn_pd_nax` (src/kernels/attn_pd_nax.metal) on the M5 matrix units.
+pub const AttnPdArm = enum { simd, nax };
 
-fn getAttnPdKernel() !mlx.mlx_fast_metal_kernel {
-    if (attn_pd_kernel_cached) |kk| return kk;
+/// [simd, nax]
+var attn_pd_kernels: [2]?mlx.mlx_fast_metal_kernel = .{ null, null };
+
+fn getAttnPdKernel(arm: AttnPdArm) !mlx.mlx_fast_metal_kernel {
+    const slot = &attn_pd_kernels[@intFromEnum(arm)];
+    if (slot.*) |kk| return kk;
     const input_names = [_][*:0]const u8{ "q", "k", "v", "scl", "win", "kr", "phase", "m_in", "l_in", "o_in", "mask", "skip", "sinks" };
     const output_names = [_][*:0]const u8{ "out", "m_out", "l_out", "o_out" };
     const in_vec = mlx.mlx_vector_string_new_data(&input_names, input_names.len);
@@ -2487,23 +2493,136 @@ fn getAttnPdKernel() !mlx.mlx_fast_metal_kernel {
     const out_vec = mlx.mlx_vector_string_new_data(&output_names, output_names.len);
     defer _ = mlx.mlx_vector_string_free(out_vec);
     const kernel = mlx.mlx_fast_metal_kernel_new(
-        "sushi_attn_pd",
+        if (arm == .nax) "sushi_attn_pd_nax" else "sushi_attn_pd",
         in_vec,
         out_vec,
-        ATTN_PD_KERNEL_SOURCE,
-        ATTN_PD_KERNEL_HEADER,
+        if (arm == .nax) @embedFile("kernels/attn_pd_nax.metal") else ATTN_PD_KERNEL_SOURCE,
+        if (arm == .nax) @embedFile("kernels/attn_pd_nax_header.metal") else ATTN_PD_KERNEL_HEADER,
         false, // ensure_row_contiguous=false — K/V are cache VIEWS; a forced
         // contiguous copy of the full cache per layer would erase the win.
         false,
     );
     if (kernel.ctx == null) return error.MetalKernelCompileFailed;
-    attn_pd_kernel_cached = kernel;
+    slot.* = kernel;
     return kernel;
+}
+
+/// Test seam: the arm the LAST fusedSdpaPrefill call ran.
+pub var attn_pd_last_arm: AttnPdArm = .simd;
+
+/// SUSHI_ATTN_PD_NAX=0 keeps the SIMD kernel on NAX silicon (A/B lever).
+pub fn attnPdNaxEnabledFrom(raw: ?[]const u8) bool {
+    const v = raw orelse return true;
+    return !std.mem.eql(u8, v, "0");
+}
+
+var attn_pd_nax_env: ?bool = null;
+/// null = not probed yet; the verdict holds for the process.
+var attn_pd_nax_probe_ok: ?bool = null;
+/// Test seam: perturb the probe's NAX output so the numeric check must fail.
+pub var attn_pd_nax_probe_corrupt_override: bool = false;
+
+pub fn attnPdNaxProbeReset() void {
+    attn_pd_nax_probe_ok = null;
+}
+
+/// The NAX arm serves the MiMo global and sliding widths (192/128) without a QSA mask, on
+/// matrix-unit silicon with cooperative input tensors (macOS 26.3, `qsaNaxOsOk`) whose
+/// one-tile probe passed.
+fn attnPdNaxServes(qk_dim: c_int, v_dim: c_int, masked: bool) bool {
+    if (masked or qk_dim != 192 or v_dim != 128) return false;
+    const want = attn_pd_nax_override orelse blk: {
+        if (attn_pd_nax_env == null) {
+            const raw = std.c.getenv("SUSHI_ATTN_PD_NAX");
+            attn_pd_nax_env = attnPdNaxEnabledFrom(if (raw) |r| std.mem.sliceTo(r, 0) else null);
+        }
+        break :blk attn_pd_nax_env.?;
+    };
+    if (!want or !verifyQmmNaxAvailable() or !qsaNaxOsOk()) return false;
+    if (attn_pd_nax_probe_ok == null) attn_pd_nax_probe_ok = attnPdNaxRunProbe();
+    return attn_pd_nax_probe_ok.?;
+}
+
+const ATTN_PD_NAX_PROBE_FLOOR: f32 = 4.9e-4;
+
+/// Metal JIT-compiles at first EVAL, so both instantiations the engine dispatches (causal, and
+/// band + sinks) run one ragged tile against an f32 composed reference before any prefill
+/// trusts them: no worse than 1.5x the SIMD kernel's error. The latch a failure raised is dropped.
+pub fn attnPdNaxRunProbe() bool {
+    if (mlx.noGpuBackend()) return false;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return false;
+    const had_error = mlx.errorPending();
+    defer mlx.dropLatchedErrorUnless(had_error);
+    for ([_]bool{ false, true }) |banded| {
+        if (!attnPdNaxProbeCase(s, banded, had_error)) {
+            log.info("[attn-pd] sushi_attn_pd_nax declined: probe failed ({s}); sushi_attn_pd serves\n", .{if (banded) "band + sinks" else "causal"});
+            return false;
+        }
+    }
+    return true;
+}
+
+fn attnPdNaxProbeCase(s: mlx.mlx_stream, banded: bool, had_error: bool) bool {
+    // A ragged simdgroup (40 rows) and a partial key block (72 keys), gqa 2.
+    const ql: c_int = 40;
+    const kl: c_int = 72;
+    const window: c_int = if (banded) 24 else 0;
+    const scale: f32 = 1.0 / @sqrt(192.0);
+    const q = qsaProbeLcgBf16(s, &[_]c_int{ 1, 2, ql, 192 }, 0xA77D01) orelse return false;
+    defer _ = mlx.mlx_array_free(q);
+    const k = qsaProbeLcgBf16(s, &[_]c_int{ 1, 1, kl, 192 }, 0xA77D02) orelse return false;
+    defer _ = mlx.mlx_array_free(k);
+    const v = qsaProbeLcgBf16(s, &[_]c_int{ 1, 1, kl, 128 }, 0xA77D03) orelse return false;
+    defer _ = mlx.mlx_array_free(v);
+    const sink_data = [_]f32{ 0.25, -0.5 };
+    const sinks: mlx.mlx_array = if (banded) mlx.mlx_array_new_data(&sink_data, &[_]c_int{2}, 1, .float32) else .{ .ctx = null };
+    defer if (sinks.ctx != null) {
+        _ = mlx.mlx_array_free(sinks);
+    };
+
+    var dispatches: u32 = 0;
+    const simd = (attnPdDispatch(s, .simd, q, k, v, scale, window, null, null, sinks, &dispatches) catch return false) orelse return false;
+    defer _ = mlx.mlx_array_free(simd);
+    var nax = (attnPdDispatch(s, .nax, q, k, v, scale, window, null, null, sinks, &dispatches) catch return false) orelse return false;
+    defer _ = mlx.mlx_array_free(nax);
+    if (mlx.mlx_array_eval(simd) != 0 or mlx.mlx_array_eval(nax) != 0) return false;
+    if (!had_error and mlx.errorPending()) return false;
+    if (attn_pd_nax_probe_corrupt_override) {
+        const bad = qsaProbeCorruptFirst(s, nax) orelse return false;
+        _ = mlx.mlx_array_free(nax);
+        nax = bad;
+    }
+
+    var mask_buf: [ql * kl]bool = undefined;
+    for (0..ql) |r| for (0..kl) |c| {
+        const row: c_int = kl - ql + @as(c_int, @intCast(r));
+        const col: c_int = @intCast(c);
+        mask_buf[r * kl + c] = col <= row and (window == 0 or row - col < window);
+    };
+    const mask = mlx.mlx_array_new_data(&mask_buf, &[_]c_int{ 1, 1, ql, kl }, 4, .bool_);
+    defer _ = mlx.mlx_array_free(mask);
+    var wide: [3]mlx.mlx_array = .{ mlx.mlx_array_new(), mlx.mlx_array_new(), mlx.mlx_array_new() };
+    defer for (wide) |a| {
+        _ = mlx.mlx_array_free(a);
+    };
+    for ([_]mlx.mlx_array{ q, k, v }, &wide) |src, *dst| {
+        if (mlx.mlx_astype(dst, src, .float32, s) != 0) return false;
+    }
+    var ref = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(ref);
+    if (mlx.mlx_fast_scaled_dot_product_attention(&ref, wide[0], wide[1], wide[2], scale, "array", mask, sinks, false, s) != 0) return false;
+    if (!qsaProbeAllFinite(s, nax) or !qsaProbeAllFinite(s, simd) or !qsaProbeAllFinite(s, ref)) return false;
+    const err_simd = qsaProbeMaxAbsDiff(s, simd, ref) orelse return false;
+    const err_nax = qsaProbeMaxAbsDiff(s, nax, ref) orelse return false;
+    return err_nax <= @max(1.5 * err_simd, ATTN_PD_NAX_PROBE_FLOOR);
 }
 
 /// Kill switch (SUSHI_FUSED_256=0 disables the kernel entirely). Test
 /// seam: `fused256_override` forces BOTH arms on/off without the environment.
 pub var fused256_override: ?bool = null;
+/// Test seam: true = the NAX arm wherever the hardware and its probe allow it, false = SIMD.
+pub var attn_pd_nax_override: ?bool = null;
 var fused256_env_cached: ?bool = null;
 var fused256_causal_env_cached: ?Fused256CausalMode = null;
 
@@ -2731,7 +2850,7 @@ pub fn slidingPrefillAttn(
     const out = try fusedSdpaPrefillKv(s, q, view, scale, @intCast(cfg.sliding_window), sinks);
     if (out != null and !sliding_prefill_engaged_logged) {
         sliding_prefill_engaged_logged = true;
-        log.info("[attn-pd] sliding band engaged: sushi_attn_pd window={d} sinks={} qL={d} kL={d} (SUSHI_FUSED_256=0 restores composed)\n", .{ cfg.sliding_window, sinks.ctx != null, q_len, mlx.getShape(view.k)[2] });
+        log.info("[attn-pd] sliding band engaged: {s} window={d} sinks={} qL={d} kL={d} (SUSHI_FUSED_256=0 restores composed)\n", .{ attnPdKernelName(attn_pd_last_arm), cfg.sliding_window, sinks.ctx != null, q_len, mlx.getShape(view.k)[2] });
     }
     return out;
 }
@@ -2739,13 +2858,17 @@ pub fn slidingPrefillAttn(
 /// One line per (qk, value) width the kernel actually serves in this process:
 /// an A/B arm is proven by an engagement line in its own log, not by the flag
 /// it was launched with.
-var attn_pd_engaged_logged: [2]bool = .{ false, false };
+var attn_pd_engaged_logged: [2][2]bool = .{ .{ false, false }, .{ false, false } };
 
-fn logAttnPdEngaged(qk_dim: c_int, v_dim: c_int, q_len: c_int, kv_len: c_int, dispatches: u32) void {
-    const slot: usize = if (qk_dim == 256) 0 else 1;
-    if (attn_pd_engaged_logged[slot]) return;
-    attn_pd_engaged_logged[slot] = true;
-    log.info("[attn-pd] engaged: sushi_attn_pd qk={d} v={d} qL={d} kL={d} dispatches={d} (SUSHI_FUSED_256=0 restores composed)\n", .{ qk_dim, v_dim, q_len, kv_len, dispatches });
+fn attnPdKernelName(arm: AttnPdArm) []const u8 {
+    return if (arm == .nax) "sushi_attn_pd_nax (SUSHI_ATTN_PD_NAX=0 restores sushi_attn_pd)" else "sushi_attn_pd";
+}
+
+fn logAttnPdEngaged(arm: AttnPdArm, qk_dim: c_int, v_dim: c_int, q_len: c_int, kv_len: c_int, dispatches: u32) void {
+    const slot = &attn_pd_engaged_logged[@intFromEnum(arm)][if (qk_dim == 256) 0 else 1];
+    if (slot.*) return;
+    slot.* = true;
+    log.info("[attn-pd] engaged: {s} qk={d} v={d} qL={d} kL={d} dispatches={d} (SUSHI_FUSED_256=0 restores composed)\n", .{ attnPdKernelName(arm), qk_dim, v_dim, q_len, kv_len, dispatches });
 }
 
 var qsa_fused_env_cached: ?bool = null;
@@ -7111,7 +7234,35 @@ fn fusedSdpaPrefillImpl(
     if (ks[2] < qs[2] or ks[2] != vs[2] or ks[1] != vs[1] or ks[0] != qs[0] or vs[0] != qs[0]) return null;
     if (mlx.mlx_array_dtype(q) != .bfloat16 or mlx.mlx_array_dtype(k) != .bfloat16 or mlx.mlx_array_dtype(v) != .bfloat16) return null;
 
-    const kernel = getAttnPdKernel() catch return null;
+    const arm: AttnPdArm = if (attnPdNaxServes(qs[3], vs[3], mask != null)) .nax else .simd;
+    var dispatches: u32 = 0;
+    const out = (try attnPdDispatch(s, arm, q, k, v, scale, window, mask, packed_kv, sinks, &dispatches)) orelse return null;
+    fused256_last_dispatch_count = dispatches;
+    attn_pd_last_arm = arm;
+    logAttnPdEngaged(arm, qs[3], vs[3], qs[2], ks[2], dispatches);
+    return out;
+}
+
+/// The dispatch chain of one validated `fusedSdpaPrefillImpl` call on the given arm. Null = the
+/// kernel could not be built.
+fn attnPdDispatch(
+    s: mlx.mlx_stream,
+    arm: AttnPdArm,
+    q: mlx.mlx_array,
+    k: mlx.mlx_array,
+    v: mlx.mlx_array,
+    scale: f32,
+    window: c_int,
+    mask: ?mlx.mlx_array,
+    packed_kv: ?PackedKv,
+    sinks: mlx.mlx_array,
+    dispatches: *u32,
+) !?mlx.mlx_array {
+    const qs = mlx.getShape(q);
+    const ks = mlx.getShape(k);
+    const vs = mlx.getShape(v);
+    const has_sinks = sinks.ctx != null;
+    const kernel = getAttnPdKernel(arm) catch return null;
 
     const one = [_]c_int{1};
     const scl_data = [_]f32{scale};
@@ -7168,7 +7319,7 @@ fn fusedSdpaPrefillImpl(
 
     var out = mlx.mlx_array_new();
     errdefer _ = mlx.mlx_array_free(out);
-    var dispatches: u32 = 0;
+    dispatches.* = 0;
     var k0: c_int = 0;
     while (k0 < kL) : (k0 += chunk_len) {
         const k1: c_int = @min(k0 + chunk_len, kL);
@@ -7220,16 +7371,25 @@ fn fusedSdpaPrefillImpl(
             try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(config, &ml_shape, 3, .float32));
             try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(config, &oc_shape, 4, .float32));
         }
-        // One threadgroup (32,8,1) per 64-row q tile per head per batch; grid
-        // is in THREADS (dispatch_threads), padded to whole tiles so every
-        // threadgroup is full (the cooperative staging loops assume NT=256).
+        // One threadgroup per 64-row q tile per head per batch; grid is in
+        // THREADS (dispatch_threads), padded to whole tiles so every
+        // threadgroup is full (the SIMD kernel's staging loops assume NT=256).
+        // SIMD: (32,8,1), 8 rows per simdgroup; NAX: (128,1,1), 16 rows per simdgroup.
         const nq_tiles: c_int = @divTrunc(qs[2] + 63, 64);
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(config, nq_tiles * 32, qs[1] * 8, qs[0]));
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(config, 32, 8, 1));
+        switch (arm) {
+            .simd => {
+                try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(config, nq_tiles * 32, qs[1] * 8, qs[0]));
+                try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(config, 32, 8, 1));
+            },
+            .nax => {
+                try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(config, nq_tiles * 128, qs[1], qs[0]));
+                try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(config, 128, 1, 1));
+            },
+        }
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_dtype(config, "T", .bfloat16));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "BDK", qs[3]));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "BDV", vs[3]));
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "QSA", if (mask != null) 1 else 0));
+        if (arm == .simd) try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "QSA", if (mask != null) 1 else 0));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "SINK", if (has_sinks) 1 else 0));
 
         const inputs_arr = [_]mlx.mlx_array{
@@ -7248,7 +7408,7 @@ fn fusedSdpaPrefillImpl(
         defer _ = mlx.mlx_vector_array_free(outputs_vec);
         try mlx.check(mlx.mlx_fast_metal_kernel_apply(&outputs_vec, kernel, inputs_vec, config, s));
         if (mlx.mlx_vector_array_size(outputs_vec) != 4) return error.MetalKernelBadOutputCount;
-        dispatches += 1;
+        dispatches.* += 1;
 
         if (final) {
             try mlx.check(mlx.mlx_vector_array_get(&out, outputs_vec, 0));
@@ -7275,8 +7435,6 @@ fn fusedSdpaPrefillImpl(
             o_new = .{ .ctx = null };
         }
     }
-    fused256_last_dispatch_count = dispatches;
-    logAttnPdEngaged(qs[3], vs[3], qs[2], kL, dispatches);
     return out;
 }
 
@@ -54246,6 +54404,35 @@ fn sliceSeq(s: mlx.mlx_stream, a: mlx.mlx_array, start: c_int, end: c_int) !mlx.
     return out;
 }
 
+/// Sum-of-squares slack (RMS within 0.5%): bf16 store rounding flips land either way between the arms.
+const ATTN_PD_NAX_RMS_SLACK: f64 = 1.01;
+
+/// The kernel arms this machine can run, SIMD first: every parity case covers each of them.
+fn attnPdTestArms() []const AttnPdArm {
+    const all = [_]AttnPdArm{ .simd, .nax };
+    return if (verifyQmmNaxAvailable() and qsaNaxOsOk()) &all else all[0..1];
+}
+
+/// The NAX arm against fp64 truth, element by element, may exceed the SIMD kernel's error only by
+/// the bf16 store's own rounding flip, and its RMS error by rounding noise.
+fn expectAttnPdNoWorse(nax: []const f32, simd: []const f32, truth: []const f64) !void {
+    var scale_of: f64 = 0;
+    for (truth) |t| scale_of = @max(scale_of, @abs(t));
+    var sq_nax: f64 = 0;
+    var sq_simd: f64 = 0;
+    for (nax, simd, truth) |a, b, t| {
+        const ea = @abs(@as(f64, a) - t);
+        const eb = @abs(@as(f64, b) - t);
+        try std.testing.expect(std.math.isFinite(ea) and std.math.isFinite(eb));
+        // One bf16 ulp of the element, floored at one ulp of a value 2^-8 below the tensor's scale
+        // (near zero the fp32 accumulation, not the store, sets the error).
+        try std.testing.expect(ea <= eb + (@abs(t) + scale_of * 0.00390625) * 0.00390625);
+        sq_nax += ea * ea;
+        sq_simd += eb * eb;
+    }
+    try std.testing.expect(sq_nax <= sq_simd * ATTN_PD_NAX_RMS_SLACK);
+}
+
 /// Walk a ringed sliding cache through `schedule` and hold every chunk's fused
 /// band + sink attention to fp64 truth, no worse than the composed arm it replaces.
 fn swaSinkParityWalk(kv_cfg: KVQuantConfig, seed: u64, schedule: []const c_int) !void {
@@ -54320,8 +54507,6 @@ fn swaSinkParityWalk(kv_cfg: KVQuantConfig, seed: u64, schedule: []const c_int) 
         var view = try cache.update(0, k_c, v_c, s, slidingViewFor(&cfg, pos + ql, ql).span);
         defer view.deinit();
 
-        const fused = (try slidingPrefillAttn(s, &cfg, q_c, &view, scale, sinks)) orelse return error.FusedDeclined;
-        defer _ = mlx.mlx_array_free(fused);
         const mask = try swaBandMask(ql, mlx.getShape(view.k)[2]);
         defer _ = mlx.mlx_array_free(mask);
         var composed = mlx.mlx_array_new();
@@ -54332,19 +54517,34 @@ fn swaSinkParityWalk(kv_cfg: KVQuantConfig, seed: u64, schedule: []const c_int) 
         defer alloc.free(q_ch);
         const truth = try swaSinkTruth(alloc, g, q_ch, k_h, v_h, sink_h, @intCast(pos), @intCast(ql), scale);
         defer alloc.free(truth);
-        const fused_h = try swaHostF32(alloc, fused, s);
-        defer alloc.free(fused_h);
         const composed_h = try swaHostF32(alloc, composed, s);
         defer alloc.free(composed_h);
 
         var scale_of: f64 = 0;
         for (truth) |x| scale_of = @max(scale_of, @abs(x));
         try std.testing.expect(std.math.isFinite(scale_of) and scale_of > 0);
-        const fused_err = swaMaxErr(fused_h, truth);
         const composed_err = swaMaxErr(composed_h, truth);
-        try std.testing.expect(std.math.isFinite(fused_err) and std.math.isFinite(composed_err));
-        // One bf16 ulp of slack at the truth's own scale: the arms round in different places.
-        try std.testing.expect(fused_err <= composed_err + scale_of * 0.00390625);
+        try std.testing.expect(std.math.isFinite(composed_err));
+        var simd_h: ?[]f32 = null;
+        defer if (simd_h) |h| alloc.free(h);
+        for (attnPdTestArms()) |arm| {
+            attn_pd_nax_override = arm == .nax;
+            defer attn_pd_nax_override = null;
+            const fused = (try slidingPrefillAttn(s, &cfg, q_c, &view, scale, sinks)) orelse return error.FusedDeclined;
+            defer _ = mlx.mlx_array_free(fused);
+            try std.testing.expectEqual(arm, attn_pd_last_arm);
+            const fused_h = try swaHostF32(alloc, fused, s);
+            var kept = false;
+            defer if (!kept) alloc.free(fused_h);
+            const fused_err = swaMaxErr(fused_h, truth);
+            try std.testing.expect(std.math.isFinite(fused_err));
+            // One bf16 ulp of slack at the truth's own scale: the arms round in different places.
+            try std.testing.expect(fused_err <= composed_err + scale_of * 0.00390625);
+            if (simd_h) |simd| try expectAttnPdNoWorse(fused_h, simd, truth) else {
+                simd_h = fused_h;
+                kept = true;
+            }
+        }
         pos += ql;
     }
     // The walk really wrapped: the ring holds a window, not the history.
@@ -54368,6 +54568,195 @@ test "sliding band + sink prefill matches fp64 truth over a ringed kv8 cache" {
     fused256_override = true;
     defer fused256_override = null;
     for (0..ATTN_PD_PARITY_SEEDS) |i| try swaSinkParityWalk(KVQuantConfig.affine(8), 0x5a2c + i, &SWA_SINK_SCHEDULE);
+}
+
+/// fp64 truth for a global layer's causal attention over `g.t` keys, bottom-right aligned.
+/// `q` is `[hq, ql, qk]`, `k`/`v` are `[hk, t, *]`.
+fn attnPdCausalTruth(alloc: std.mem.Allocator, g: SwaGeom, q: []const f32, k: []const f32, v: []const f32, ql: usize, scale: f64) ![]f64 {
+    const out = try alloc.alloc(f64, g.hq * ql * g.vd);
+    @memset(out, 0);
+    const logits = try alloc.alloc(f64, g.t);
+    defer alloc.free(logits);
+    for (0..g.hq) |h| {
+        const kh = h / (g.hq / g.hk);
+        for (0..ql) |r| {
+            const p = g.t - ql + r;
+            const qrow = q[(h * ql + r) * g.qk ..][0..g.qk];
+            var m: f64 = -std.math.inf(f64);
+            for (0..p + 1) |j| {
+                const krow = k[(kh * g.t + j) * g.qk ..][0..g.qk];
+                var dot: f64 = 0;
+                for (qrow, krow) |a, b| dot += @as(f64, a) * b;
+                logits[j] = dot * scale;
+                m = @max(m, logits[j]);
+            }
+            var denom: f64 = 0;
+            for (logits[0 .. p + 1]) |l| denom += @exp(l - m);
+            const orow = out[(h * ql + r) * g.vd ..][0..g.vd];
+            for (0..p + 1) |j| {
+                const w = @exp(logits[j] - m) / denom;
+                const vrow = v[(kh * g.t + j) * g.vd ..][0..g.vd];
+                for (orow, vrow) |*o, x| o.* += w * x;
+            }
+        }
+    }
+    return out;
+}
+
+/// One global-layer case (qk 192 / v 128) on every arm: `budget` > 0 forces fp32 carries across
+/// dispatches, `kv8` reads a packed cache one dequantized slice per dispatch. Each arm lands no
+/// further from fp64 truth than the composed bf16 path, and NAX no worse than the SIMD kernel.
+fn attnPdGlobalCase(seed: u64, hq: c_int, hkv: c_int, q_len: c_int, kv_len: c_int, q_scale: f32, budget: i64, kv8: bool) !void {
+    const alloc = std.testing.allocator;
+    const s = mlx.gpuStream();
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rnd = prng.random();
+    const q = try attn256RandBf16Scaled(rnd, &[_]c_int{ 1, hq, q_len, 192 }, q_scale, s);
+    defer _ = mlx.mlx_array_free(q);
+    const k = try attn256RandBf16(rnd, &[_]c_int{ 1, hkv, kv_len, 192 }, s);
+    defer _ = mlx.mlx_array_free(k);
+    const v = try attn256RandBf16(rnd, &[_]c_int{ 1, hkv, kv_len, 128 }, s);
+    defer _ = mlx.mlx_array_free(v);
+    const scale: f32 = 1.0 / @sqrt(192.0);
+    var qv: ?TestQuantView = if (kv8) try TestQuantView.init(s, k, v, 8, 64) else null;
+    defer if (qv) |*x| x.deinit();
+    const dense = DenseKVView{ .k = k, .v = v, .owned = false };
+    const view: *const DenseKVView = if (qv) |*x| &x.view else &dense;
+
+    const g = SwaGeom{ .hq = @intCast(hq), .hk = @intCast(hkv), .qk = 192, .vd = 128, .t = @intCast(kv_len) };
+    const q_h = try swaHostF32(alloc, q, s);
+    defer alloc.free(q_h);
+    const k_h = try swaHostF32(alloc, view.k, s);
+    defer alloc.free(k_h);
+    const v_h = try swaHostF32(alloc, view.v, s);
+    defer alloc.free(v_h);
+    const truth = try attnPdCausalTruth(alloc, g, q_h, k_h, v_h, @intCast(q_len), scale);
+    defer alloc.free(truth);
+    var scale_of: f64 = 0;
+    for (truth) |x| scale_of = @max(scale_of, @abs(x));
+    try std.testing.expect(std.math.isFinite(scale_of) and scale_of > 0);
+
+    const composed = try attn256Reference(q, view.k, view.v, scale, "causal", .{ .ctx = null }, s);
+    defer _ = mlx.mlx_array_free(composed);
+    const composed_h = try swaHostF32(alloc, composed, s);
+    defer alloc.free(composed_h);
+    const composed_err = swaMaxErr(composed_h, truth);
+    try std.testing.expect(std.math.isFinite(composed_err));
+
+    fused256_budget_override = budget;
+    defer fused256_budget_override = null;
+    var simd_h: ?[]f32 = null;
+    defer if (simd_h) |h| alloc.free(h);
+    for (attnPdTestArms()) |arm| {
+        attn_pd_nax_override = arm == .nax;
+        defer attn_pd_nax_override = null;
+        const out = (try fusedSdpaPrefillKv(s, q, view, scale, 0, .{ .ctx = null })) orelse return error.FusedDeclined;
+        defer _ = mlx.mlx_array_free(out);
+        try std.testing.expectEqual(arm, attn_pd_last_arm);
+        if (budget > 0) try std.testing.expect(fused256_last_dispatch_count > 1);
+        const out_h = try swaHostF32(alloc, out, s);
+        var kept = false;
+        defer if (!kept) alloc.free(out_h);
+        const err = swaMaxErr(out_h, truth);
+        try std.testing.expect(std.math.isFinite(err));
+        try std.testing.expect(err <= composed_err + scale_of * 0.00390625);
+        if (simd_h) |simd| try expectAttnPdNoWorse(out_h, simd, truth) else {
+            simd_h = out_h;
+            kept = true;
+        }
+    }
+}
+
+test "sushi_attn_pd every arm: qk 192 / v 128 causal vs fp64 truth (ragged, carries, peaked, kv8)" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    fused256_override = true;
+    defer fused256_override = null;
+    for (0..ATTN_PD_PARITY_SEEDS) |i| {
+        const seed: u64 = 0x192f + 8 * i;
+        // Ragged 16-row simdgroup, 64-row tile and 32-key block at a chunk offset.
+        try attnPdGlobalCase(seed, 32, 2, 70, 193, 1.0, 0, false);
+        // The shortest q, a partial last key block.
+        try attnPdGlobalCase(seed + 1, 8, 1, 16, 48, 1.0, 0, false);
+        // Peaked scores across fp32 carries: 96-key dispatches.
+        try attnPdGlobalCase(seed + 2, 16, 1, 130, 1111, 8.0, 16 * 130 * 96, false);
+        try attnPdGlobalCase(seed + 3, 4, 1, 300, 2300, 20.0, 4 * 300 * 256, false);
+        // A packed kv8 cache, dequantized one slice per dispatch.
+        try attnPdGlobalCase(seed + 4, 16, 1, 70, 1993, 8.0, 16 * 70 * 256, true);
+    }
+}
+
+test "sushi_attn_pd every arm: a chunked dispatch chain is bit-identical to one dispatch" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    fused256_override = true;
+    defer fused256_override = null;
+    var prng = std.Random.DefaultPrng.init(0x19299);
+    const rnd = prng.random();
+    const q = try attn256RandBf16Scaled(rnd, &[_]c_int{ 1, 16, 70, 192 }, 8.0, s);
+    defer _ = mlx.mlx_array_free(q);
+    const k = try attn256RandBf16(rnd, &[_]c_int{ 1, 2, 1993, 192 }, s);
+    defer _ = mlx.mlx_array_free(k);
+    const v = try attn256RandBf16(rnd, &[_]c_int{ 1, 2, 1993, 128 }, s);
+    defer _ = mlx.mlx_array_free(v);
+    var qv = try TestQuantView.init(s, k, v, 8, 64);
+    defer qv.deinit();
+    const scale: f32 = 1.0 / @sqrt(192.0);
+    defer fused256_budget_override = null;
+    for (attnPdTestArms()) |arm| {
+        attn_pd_nax_override = arm == .nax;
+        defer attn_pd_nax_override = null;
+        fused256_budget_override = 0;
+        const whole = (try fusedSdpaPrefill(s, q, qv.view.k, qv.view.v, scale, 0)) orelse return error.FusedDeclined;
+        defer _ = mlx.mlx_array_free(whole);
+        try std.testing.expectEqual(@as(u32, 1), fused256_last_dispatch_count);
+        fused256_budget_override = 16 * 70 * 256;
+        const chunked = (try fusedSdpaPrefill(s, q, qv.view.k, qv.view.v, scale, 0)) orelse return error.FusedDeclined;
+        defer _ = mlx.mlx_array_free(chunked);
+        try std.testing.expect(fused256_last_dispatch_count > 1);
+        const sliced = (try fusedSdpaPrefillKv(s, q, &qv.view, scale, 0, .{ .ctx = null })) orelse return error.FusedDeclined;
+        defer _ = mlx.mlx_array_free(sliced);
+        try std.testing.expectEqual(arm, attn_pd_last_arm);
+        try std.testing.expectEqual(@as(f32, 0), try attn256MaxDiff(whole, chunked, s));
+        try std.testing.expectEqual(@as(f32, 0), try attn256MaxDiff(whole, sliced, s));
+    }
+}
+
+test "attnPdNaxEnabledFrom: absent or anything but 0 keeps the NAX arm" {
+    try std.testing.expect(attnPdNaxEnabledFrom(null));
+    try std.testing.expect(attnPdNaxEnabledFrom("1"));
+    try std.testing.expect(!attnPdNaxEnabledFrom("0"));
+}
+
+test "sushi_attn_pd_nax: a failed probe declines to the SIMD kernel by name" {
+    if (mlx.noGpuBackend() or !verifyQmmNaxAvailable() or !qsaNaxOsOk()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    fused256_override = true;
+    defer fused256_override = null;
+    attn_pd_nax_override = true;
+    defer attn_pd_nax_override = null;
+    var prng = std.Random.DefaultPrng.init(0x19277);
+    const rnd = prng.random();
+    const q = try attn256RandBf16(rnd, &[_]c_int{ 1, 4, 32, 192 }, s);
+    defer _ = mlx.mlx_array_free(q);
+    const k = try attn256RandBf16(rnd, &[_]c_int{ 1, 1, 80, 192 }, s);
+    defer _ = mlx.mlx_array_free(k);
+    const v = try attn256RandBf16(rnd, &[_]c_int{ 1, 1, 80, 128 }, s);
+    defer _ = mlx.mlx_array_free(v);
+    defer attnPdNaxProbeReset();
+
+    // The real probe passes on this machine, a corrupted NAX tile fails it.
+    attnPdNaxProbeReset();
+    try std.testing.expect(attnPdNaxRunProbe());
+    attn_pd_nax_probe_corrupt_override = true;
+    defer attn_pd_nax_probe_corrupt_override = false;
+    try std.testing.expect(!attnPdNaxRunProbe());
+
+    // A failed probe latches the SIMD arm for the process.
+    attnPdNaxProbeReset();
+    const out = (try fusedSdpaPrefill(s, q, k, v, 1.0 / @sqrt(192.0), 0)) orelse return error.FusedDeclined;
+    defer _ = mlx.mlx_array_free(out);
+    try std.testing.expectEqual(AttnPdArm.simd, attn_pd_last_arm);
+    try std.testing.expect(!mlx.errorPending());
 }
 
 test "the sliding arm engages exactly where slidingPrefillFused says it does" {

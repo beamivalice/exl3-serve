@@ -165,6 +165,20 @@ is chosen from the cache's CURRENT key count each step (switch logged at `Tk=409
 tokens); 16k decode 41.2 tok/s with auto = dense, 64k 36.8 with auto = dense (bf16-trunk ladder: dense 15.4-17.3 vs
 packed 26.0); prefill 660 tok/s at 16k, 465 at 64k (chunk auto). Raw: session scratchpad `live/out.jsonl`, `server.log`.
 
+Prefill attention on the matrix units (`sushi_attn_pd_nax`, 2026-09-24, binary b33ec32 built 01:30, taskpolicy -a,
+lock attnpd-nax; raw files `scratchpad/naxpd/`, baselines `scratchpad/attnpd/results/` + `attnpd/live/` on 7ed9795).
+One global layer, H 64 / Hk 4, qL 2048, kv8, ms: kL 2048 8.04 -> 2.90, 4096 22.1 -> 7.18, 16384 113.0 -> 33.0,
+65536 448 -> 159, 262144 2012 -> 601 (34-39 TFLOPS; the SIMD kernel 11-12). 39 sliding layers' band call, per call:
+qL 512 1.96 -> 0.78, 2048 1.66 -> 0.95-0.97, 4096 2.98 -> 0.89. Live MiMo MCG K2.5 w12, kv8, no MTP, chunk 2048, one
+run per cell: 4k 1150 / 1138 -> 1193 / 1170 tok/s, 64k (53882 tokens) 597 -> 786 tok/s. The SIMD kernel's K^T
+staging fix on M5: 2048x16384 106.9 -> 99.4 ms, 2048x65536 448-458 -> 415 ms.
+16x512 KLD (first EOS) moves ~1% on bf16 store-rounding flips alone. Same binary, deterministic runs: b33ec32 NAX 0.07801
+/ SIMD 0.07700; rebased 3b15b2f (current pack layout) NAX 0.07787 / SIMD 0.07793, and the SIMD kernel with its output
+scaled by 1 +- 2^-18 / 2^-17 before the store (0.066% / 0.13% of outputs flip one ulp; NAX vs SIMD flips 0.03-0.14%)
+reads 0.07772 / 0.07754 / 0.07771 / 0.07836. Per call on real prefills (4 chunks to 6k keys, carries, kv8 slices, band +
+sinks) the two arms' error against an f32 reference agrees to 1e-4 relative RMS; a NAX-vs-SIMD KLD delta under ~1% is
+noise.
+
 MiMo EXL3 kernel history (n=40 readers, codebook-generic): the n=40 prefill reader took the synthetic MoE layer from
 12.45 to 8.48 ms at 512 rows; the prefill scatter fused into the finish reduce added +5-9%; the n=40 decode lane
 funnel cut the decode chain 20% at one row and 36% at seven; the prepared-mid dispatch took rows-1 from 0.524 to

@@ -118,6 +118,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   Landed 2026-09-23 (668278c): 39-layer band attention 39.5 -> 20.3 ms at chunk 512, 603 -> 95.5 at 2048, 2439 -> 181
   at 4096; live prefill (back-to-back pair) 886 -> 1059 tok/s at 4k and 526 -> 603 at 64k, chunk 2048; a 500k prompt
   admits at chunk 2048 (`needed=10262 MB available=17538 MB`); 16x512 KLD 0.07747 vs 0.07761.
+- **On M5 both layer kinds prefill on the matrix units** (`sushi_attn_pd_nax`, same carries, bill and slices;
+  `SUSHI_ATTN_PD_NAX=0` = the SIMD kernel): global attention ~3x faster per layer, live 64k 597 -> 786 tok/s
+  ([engine-kernels](engine-kernels.md#prefill-kernels), [perf-baselines](perf-baselines.md#mimo-decode)).
 - **A packed-cache global-layer DECODE reads in place** (`mimoGlobalDecodeArm`): with matrix units (M5) the matmul2d
   `sushi_qkv_mpp` (`qkvMppDecodeServes`, from `QKV_MPP_DECODE_MIN_TK` = 4096 keys); without them (M4) the QSA split-K
   body over the whole causal range (`qkvAttnSplitKKernel`, from `QKV_SPLITK_DECODE_MIN_TK` = 4096 keys; 512 keys per

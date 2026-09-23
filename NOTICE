@@ -231,6 +231,15 @@ Inc., MIT License, the same license as this project's LICENSE), and
 algorithm to per-query sparse block selection with a two-term bf16 PV.
 Contributed by Nikolai V.
 
+`src/kernels/attn_pd_nax_header.metal` adapts the same cooperative fragment
+layout and MMA wrapper from `steel/attn/nax.h`, and `src/kernels/attn_pd_nax.metal`
+follows the structure of MLX's NAX steel attention (Copyright (c) 2025 Apple
+Inc., MIT License): 16 query rows per simdgroup, 16x32x16 matmul2d tiles, K/V
+fragments read from device memory. Modifications: asymmetric query/key and
+value widths, the SIMD kernel's key-axis chunked dispatch with fp32 carries,
+cache-coordinate causal and sliding-band masks, per-head sinks, and a two-term
+bf16 PV.
+
 --------------------------------------------------------------------------------
 mlx-lm
 https://github.com/ml-explore/mlx-lm

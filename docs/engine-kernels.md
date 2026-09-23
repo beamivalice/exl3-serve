@@ -35,6 +35,17 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 
 - `sushi_attn_pd` at (qk,v) 256/256 and 192/128 — the widths MLX's steel kernel lacks (band always fused; q_len < 16
   declined); a width `prefillHeadDimFused` lists owes a dispatch at EVERY prefill site scoring at it.
+- On NAX the 192/128 widths (MiMo global + sliding layers) run `sushi_attn_pd_nax` (`src/kernels/attn_pd_nax.metal`):
+  16 query rows per simdgroup, 16x32x16 matmul2d, K/V fragments read from device, each simdgroup stops at its own
+  diagonal. Same inputs, fp32 carries, dispatch budget and slices as the SIMD kernel; a chunked chain is bit-identical
+  to one dispatch on either arm. Gate `attnPdNaxServes`: NAX + macOS 26.3 + a one-tile probe of both instantiations
+  (causal, band + sinks) against an f32 reference; a failed probe declines by name. `SUSHI_ATTN_PD_NAX=0` = SIMD.
+- Its PV feeds P as TWO bf16 terms (hi + lo). A float P operand into the relaxed matmul is truncated (~1e-3 before
+  the store) and fails the bar: per element vs fp64 no worse than the SIMD kernel beyond a store rounding flip.
+- The SIMD kernel stages K^T with consecutive lanes on consecutive KEY rows: lanes spread over head-dim chunks
+  stride 8*LDK halves, one bank. Bit-identical output.
+- hd 256 stays off the NAX attn_pd arm: the same kernel at 256/256 (O in 128 registers per lane) ran 3.2x slower
+  than MLX's stock NAX sdpa (2048x16384: 150.9 vs 45.9 ms), which already serves hd-256 causal prefill.
 - On NAX the stock sdpa is the hd-256 kernel (`naxSdpaPreferred`, `SUSHI_NAX_SDPA=0|1`).
 - MLX sdpa has a WIDTH WALL at hd 256 (dense causal q 6..9 ride `splitCausalSdpa`); `use_fallback` has NO fused arm
   for an hd-256 ARRAY mask (`splitMaskedSdpa256`).
