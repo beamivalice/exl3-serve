@@ -46,6 +46,11 @@ scripts/gpu-lock.sh release <owner>
   faster cannot jump the queue. A ticket whose waiter process is gone is skipped and pruned. `scripts/gpu-lock.sh
   status` prints the holder (or `free`), then the queue in order.
 - In a script: `trap "scripts/gpu-lock.sh release <owner>" EXIT` right after the acquire.
+- A dead holder (its run is gone but `status` still names it) blocks every waiter: `acquire` exits once it holds the
+  lock, so no live PID is recorded and no script can tell a dead holder from a slow one. A worker that suspects one
+  reports it to the coordinator and keeps waiting. The coordinator checks that the holder's run is gone (its PID, END
+  marker, log), then runs `scripts/gpu-lock.sh break <holder>`, which frees the lock only if it names the current
+  holder, so it cannot break a newer one. The next ticket then takes the lock. Only the coordinator breaks a lock.
 
 ## 4. Restore QoS for agent-launched timing
 

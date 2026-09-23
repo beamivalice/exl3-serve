@@ -8,6 +8,7 @@
 #
 #   gpu-lock.sh acquire <owner>   take a ticket, wait for it to come up, then hold the lock as <owner>
 #   gpu-lock.sh release <owner>   release a lock <owner> holds (refused otherwise)
+#   gpu-lock.sh break <holder>    COORDINATOR ONLY: free a lock whose holder died (refused unless it names the holder)
 #   gpu-lock.sh status            print "<owner> <time>" or "free", then the live queue in order
 #
 # Waiters are served first-come-first-served: only the lowest live ticket may take
@@ -50,13 +51,14 @@ case "${1:-}" in
     echo "$owner $(date '+%Y-%m-%d %H:%M:%S')" > "$L/owner"
     ln -s done "$Q/.done.$$" && mv -f "$Q/.done.$$" "$Q/$n"
     ;;
-  release)
-    owner="${2:?usage: gpu-lock.sh release <owner>}"
+  release|break)
+    owner="${2:?usage: gpu-lock.sh $1 <owner>}"
     holder=$(cut -d' ' -f1 "$L/owner" 2>/dev/null)
     if [ "$holder" != "$owner" ]; then
       echo "gpu-lock: $owner does not hold the lock (holder: ${holder:-none})" >&2
       exit 1
     fi
+    [ "$1" = break ] && echo "gpu-lock: broke the lock held by $(cat "$L/owner")" >&2
     rm -rf "$L"
     ;;
   status)
@@ -70,7 +72,7 @@ case "${1:-}" in
     done
     ;;
   *)
-    echo "usage: gpu-lock.sh acquire|release <owner> | status" >&2
+    echo "usage: gpu-lock.sh acquire|release|break <owner> | status" >&2
     exit 2
     ;;
 esac

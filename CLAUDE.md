@@ -187,6 +187,8 @@ timing, traces (`zig build test` is not heavy).
   waiters are served FIFO by ticket, `status` shows holder + queue (`${GPU_LOCK_DIR:-/tmp/sushi-gpu.lock.d}`).
 - Never hold it across a batch or queue, or while analysing, editing, building or waiting. An A B B A re-acquires per
   arm. Every brief that runs on the GPU names the lock.
+- A holder that looks dead (its run gone, lock still held): a worker never breaks it; it tells the coordinator, who
+  verifies the run is gone, clears it with `gpu-lock.sh break <holder>`, and the queue proceeds.
 
 **Baselines.**
 - Never rerun an old-binary/old-code baseline that is already recorded: run only the new arm and compare it with the

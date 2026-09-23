@@ -10,6 +10,7 @@
 #   6. waiters are served first-come-first-served, even when a later one polls faster
 #   7. a waiter that died leaves the queue: status drops it and the next waiter is served
 #   8. status lists the holder, then the queue in ticket order
+#   9. break (coordinator only, for a dead holder) frees the lock only when it names the holder
 #
 # No GPU, no model, seconds.
 #
@@ -95,6 +96,17 @@ $LOCK release alpha
 wait_exit $NEXT 5; check $? "the waiter behind a dead ticket is served"
 $LOCK status | grep -q '^next '; check $? "status names the waiter served past the dead ticket"
 $LOCK release next
+
+# A dead holder is cleared by the coordinator naming it; the queue then proceeds.
+$LOCK acquire dead
+GPU_LOCK_POLL_S=0.1 $LOCK acquire after & AFTER=$!; BG="$BG $AFTER"
+wait_queued after; check $? "a waiter queues behind the dead holder"
+$LOCK break after 2>/dev/null; [ $? != 0 ]; check $? "break naming a non-holder is refused"
+$LOCK status | grep -q '^dead '; check $? "a refused break keeps the holder"
+$LOCK break dead; check $? "break naming the holder succeeds"
+wait_exit $AFTER 5; check $? "the waiter behind a broken lock is served"
+$LOCK status | grep -q '^after '; check $? "status names the waiter served after the break"
+$LOCK release after
 
 echo "gpu-lock: $PASS passed, $FAIL failed"
 [ $FAIL = 0 ]
