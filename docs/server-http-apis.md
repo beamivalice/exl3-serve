@@ -10,8 +10,12 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-tool-calling](serv
 ## Surfaces
 
 - **OpenAI chat/completions + Responses**: usage ALWAYS carries `prompt_tokens_details.cached_tokens`; thinking
-  opt-ins = `reasoning_effort` OR `enable_thinking` (`reasoning_budget_tokens` outranks; Qwen3.8 = the
-  `xhigh|medium|low` effort vocabulary); `n>1` 400s. `/v1/responses`: `sequence_number` on every event, stateful via
+  opt-ins = `reasoning_effort` OR `enable_thinking` (`reasoning_budget_tokens` outranks); `n>1` 400s.
+- **Effort vocabulary** `off low medium high xhigh max` (`none` = off; `minimal` keeps the legacy 1024 budget):
+  each served arch accepts a subset (`model.effortArms`), listed as `reasoning_efforts` on its `/v1/models` row; any
+  other word 400s on chat, Responses and Anthropic with the accepted list, never rounded. qwen4_exp: off, low (2048),
+  medium (8192), xhigh (uncapped); the template reads the word. mimo_v2: off, low (2048), medium (8192), high, xhigh,
+  max (uncapped); the template has only on/off, the budget is the whole effect. Uncapped = `--reasoning-budget`. `/v1/responses`: `sequence_number` on every event, stateful via
   `ResponseStore`, WS via Upgrade. Continuing a partial reply: `continue_final_message` explicit on chat, INFERRED on
   `/v1/messages`.
 - **Anthropic `/v1/messages`** (Claude Code): typed blocks, `input_schema`→`parameters`, stop-reason map incl.
@@ -54,7 +58,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-tool-calling](serv
 Enforced at DECODE (`server.armThinkBound` → `SamplingParams.think_bound`, `scheduler.thinkBoundTick`): at the budget
 the early-stop line + the atomic closer commit as ONE multi-token forward (`commitForcedTokens`); the whole closed
 thought is delivered. Guard: `tests/test_reasoning_budget_stream.sh`. Effort budgets = pi's ladder
-(`responses.effortBudget`).
+(`model.effortArms` for served arches, `responses.effortBudget` for the rest).
 
 ## Constrained JSON
 

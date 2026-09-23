@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **One thinking-effort vocabulary, `off low medium high xhigh max`**: each model lists the words it accepts as `reasoning_efforts` in `/v1/models` and answers any other with a 400 naming them (Qwen3.8 Flash Next: off, low, medium, xhigh). MiMo-V2.6-Flash now thinks by default, and `sushi run <model> --think [effort]` plus the chat's `/think <effort>` set it, with the thought shown dimmed before the answer.
 - **The engine is renamed sushi**: the binary is `sushi`, environment variables take the `SUSHI_` prefix, settings, logs and caches live under `~/.sushi`, and `/v1/models` reports `owned_by: sushi`.
 - **The original bf16 Qwen3.8 Flash Next serves from a 128 GB Mac by streaming experts from SSD.** Point `--model` at the HF checkpoint and set `--ssd-budget-gb <GiB>` (the total resident target), `--expert-cache-gb`, or the per-model `ssd_budget_gb` in Model Settings; the app shows an `SSD` badge and an SSD budget row for such a checkpoint. Speculative decoding is refused by name on a streamed model.
 - **A load the server refuses by name no longer restarts it from the tray**; the selection reverts to the model still being served and the refusal shows as an error card.

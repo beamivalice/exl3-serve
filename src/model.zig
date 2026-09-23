@@ -1331,6 +1331,9 @@ pub const ModelConfig = struct {
         // k2_horizon: the template opens a think marker on every assistant
         // turn; thinking-off is the prompt-committed closer (chat.contentChannelTail).
         if (std.mem.eql(u8, self.model_type, "k2_horizon")) return true;
+        // mimo_v2: the vendor template's own default is on (only an explicit
+        // `enable_thinking is false` closes the think block).
+        if (std.mem.eql(u8, self.model_type, "mimo_v2")) return true;
 
         return false;
     }
@@ -4042,6 +4045,51 @@ pub fn mimoMtpResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir:
 /// by name at the loader, so the inherited forwards behind it are unreachable.
 pub const served_model_types = [_][]const u8{ "qwen4_exp", "mimo_v2" };
 
+/// The engine's thinking-effort vocabulary. Each served arch accepts a subset
+/// (`effortArms`); a word outside it is refused, never rounded.
+pub const Effort = enum { off, low, medium, high, xhigh, max };
+
+/// One accepted effort word on one arch. `budget` is the decode-time thinking
+/// cap in tokens; null = `--reasoning-budget` (unlimited by default). The word
+/// itself reaches a template that reads it (qwen4_exp: low|medium|xhigh).
+pub const EffortArm = struct { effort: Effort, budget: ?i32 = null };
+
+const qwen4_exp_efforts = [_]EffortArm{
+    .{ .effort = .off },
+    .{ .effort = .low, .budget = 2048 },
+    .{ .effort = .medium, .budget = 8192 },
+    .{ .effort = .xhigh },
+};
+
+// MiMo's template has only on/off; effort is our thinking budget alone.
+const mimo_v2_efforts = [_]EffortArm{
+    .{ .effort = .off },
+    .{ .effort = .low, .budget = 2048 },
+    .{ .effort = .medium, .budget = 8192 },
+    .{ .effort = .high },
+    .{ .effort = .xhigh },
+    .{ .effort = .max },
+};
+
+/// null = an inherited arch: its effort words keep `responses.effortBudget`.
+pub fn effortArms(model_type: []const u8) ?[]const EffortArm {
+    if (std.mem.eql(u8, model_type, "qwen4_exp")) return &qwen4_exp_efforts;
+    if (std.mem.eql(u8, model_type, "mimo_v2")) return &mimo_v2_efforts;
+    return null;
+}
+
+/// `none` is an alias of off. `minimal` is not an engine word: it keeps the
+/// legacy ladder on every arch.
+pub fn parseEffort(word: []const u8) ?Effort {
+    if (std.mem.eql(u8, word, "none")) return .off;
+    return std.meta.stringToEnum(Effort, word);
+}
+
+pub fn findEffortArm(arms: []const EffortArm, effort: Effort) ?EffortArm {
+    for (arms) |a| if (a.effort == effort) return a;
+    return null;
+}
+
 pub fn isServedArch(model_type: []const u8) bool {
     for (served_model_types) |t| {
         if (std.mem.eql(u8, model_type, t)) return true;
@@ -4846,6 +4894,41 @@ test "defaultEnableThinking: opt-in per arch, and every existing arch stays off"
     const goss = ModelConfig{ .model_type = "gpt_oss" };
     try testing.expect(goss.defaultEnableThinking(false));
     try testing.expect(goss.defaultEnableThinking(true));
+}
+
+test "defaultEnableThinking: mimo_v2 thinks by default, with and without tools" {
+    const mimo = ModelConfig{ .model_type = "mimo_v2" };
+    try testing.expect(mimo.defaultEnableThinking(false));
+    try testing.expect(mimo.defaultEnableThinking(true));
+}
+
+test "effortArms: every engine word on each served arch" {
+    const Budget = struct { on: bool, cap: ?i32 };
+    const Want = struct { word: []const u8, qwen: ?Budget, mimo: ?Budget };
+    const off: Budget = .{ .on = false, .cap = null };
+    const cases = [_]Want{
+        .{ .word = "off", .qwen = off, .mimo = off },
+        .{ .word = "none", .qwen = off, .mimo = off },
+        .{ .word = "low", .qwen = .{ .on = true, .cap = 2048 }, .mimo = .{ .on = true, .cap = 2048 } },
+        .{ .word = "medium", .qwen = .{ .on = true, .cap = 8192 }, .mimo = .{ .on = true, .cap = 8192 } },
+        .{ .word = "high", .qwen = null, .mimo = .{ .on = true, .cap = null } },
+        .{ .word = "xhigh", .qwen = .{ .on = true, .cap = null }, .mimo = .{ .on = true, .cap = null } },
+        .{ .word = "max", .qwen = null, .mimo = .{ .on = true, .cap = null } },
+    };
+    for (cases) |c| {
+        const e = parseEffort(c.word).?;
+        for ([_]struct { arch: []const u8, want: ?Budget }{ .{ .arch = "qwen4_exp", .want = c.qwen }, .{ .arch = "mimo_v2", .want = c.mimo } }) |a| {
+            const got = findEffortArm(effortArms(a.arch).?, e);
+            if (a.want) |w| {
+                try testing.expectEqual(w.on, got.?.effort != .off);
+                try testing.expectEqual(w.cap, got.?.budget);
+            } else try testing.expect(got == null);
+        }
+    }
+    try testing.expect(parseEffort("minimal") == null);
+    try testing.expect(parseEffort("ultra") == null);
+    // Inherited arches keep the legacy ladder.
+    try testing.expect(effortArms("qwen3_5_moe") == null);
 }
 
 test "defaultEnableThinking: the checkpoint's own generation_config default outranks the arch allowlist" {

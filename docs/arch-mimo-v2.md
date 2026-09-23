@@ -17,6 +17,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   (`MiMo-V2.6-Flash-RL-affine-iq2.7`) stays on disk and servable as a BENCHMARK REFERENCE only: no fixes, features
   or tuning for it, but do not delete its serving path while it is the reference.
 - The TINY K2.5 pack (`MiMo-V2.6-Flash-RL-tiny-k2.5-w12-cal`) is retired with the TINY codebook.
+- **Thinking defaults ON** (the vendor template's default; `generation_config.json` declares none); effort words
+  only set the thinking budget (see [server-http-apis](server-http-apis.md)).
 
 ## The checkpoint
 

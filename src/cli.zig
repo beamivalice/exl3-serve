@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const chat = @import("chat.zig");
+const model = @import("model.zig");
 const model_discovery = @import("model_discovery.zig");
 const log = @import("log.zig");
 const status = @import("status.zig");
@@ -685,11 +686,102 @@ pub const Turn = struct {
     content: []const u8,
 };
 
+/// The REPL's thinking request. `model_default` sends no thinking field.
+pub const Think = union(enum) { model_default, on, effort: model.Effort };
+
+pub const ThinkFlag = struct { think: Think, consumed: bool };
+
+/// `--think [effort]`: the next argument is taken only when it is an effort word.
+pub fn parseThinkFlag(next: ?[]const u8) ThinkFlag {
+    if (next) |w| if (model.parseEffort(w)) |e| return .{ .think = .{ .effort = e }, .consumed = true };
+    return .{ .think = .on, .consumed = false };
+}
+
+pub const ThinkCommand = union(enum) { show, set: Think, refuse: []const u8 };
+
+/// `/think [effort]`; null when the line is not that command. An empty
+/// `accepted` (the server listed none) leaves the whole vocabulary to the server.
+pub fn parseThinkCommand(line: []const u8, accepted: []const model.Effort) ?ThinkCommand {
+    if (!std.mem.startsWith(u8, line, "/think")) return null;
+    const rest = line["/think".len..];
+    if (rest.len > 0 and rest[0] != ' ') return null;
+    const word = std.mem.trim(u8, rest, " \t");
+    if (word.len == 0) return .show;
+    const e = model.parseEffort(word) orelse return .{ .refuse = word };
+    if (!effortAccepted(e, accepted)) return .{ .refuse = word };
+    return .{ .set = .{ .effort = e } };
+}
+
+pub fn effortAccepted(e: model.Effort, accepted: []const model.Effort) bool {
+    if (accepted.len == 0) return true;
+    return std.mem.indexOfScalar(model.Effort, accepted, e) != null;
+}
+
+fn writeEffortOptions(w: *std.Io.Writer, accepted: []const model.Effort) !void {
+    const all = std.enums.values(model.Effort);
+    const list = if (accepted.len > 0) accepted else all;
+    for (list, 0..) |e, i| try w.print("{s}{s}", .{ if (i > 0) ", " else "", @tagName(e) });
+}
+
+/// Same text as the server's 400 (`server.effortRefusal`).
+pub fn writeEffortRefusal(w: *std.Io.Writer, word: []const u8, model_id: []const u8, accepted: []const model.Effort) !void {
+    try w.print("reasoning effort '{s}' is not supported by {s}; use one of: ", .{ word, model_id });
+    try writeEffortOptions(w, accepted);
+}
+
+pub fn writeThinkSetting(w: *std.Io.Writer, think: Think, accepted: []const model.Effort) !void {
+    try w.writeAll("thinking: ");
+    try w.writeAll(switch (think) {
+        .model_default => "model default",
+        .on => "on",
+        .effort => |e| @tagName(e),
+    });
+    try w.writeAll(" (options: ");
+    try writeEffortOptions(w, accepted);
+    try w.writeByte(')');
+}
+
+pub const ModelEfforts = struct {
+    id: []u8,
+    /// Empty when the row lists none.
+    efforts: []model.Effort,
+
+    pub fn deinit(self: ModelEfforts, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.efforts);
+    }
+};
+
+/// The first `/v1/models` row (the default model): its id and `reasoning_efforts`.
+pub fn parseModelEfforts(allocator: std.mem.Allocator, body: []const u8) !ModelEfforts {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const data = if (parsed.value == .object) parsed.value.object.get("data") else null;
+    if (data == null or data.? != .array or data.?.array.items.len == 0 or data.?.array.items[0] != .object) return error.ReplNoModel;
+    const row = data.?.array.items[0].object;
+    const id = if (row.get("id")) |v| (if (v == .string) v.string else "") else "";
+    var efforts = std.ArrayList(model.Effort).empty;
+    errdefer efforts.deinit(allocator);
+    if (row.get("reasoning_efforts")) |list| if (list == .array) for (list.array.items) |v| {
+        if (v != .string) continue;
+        if (model.parseEffort(v.string)) |e| try efforts.append(allocator, e);
+    };
+    const efforts_owned = try efforts.toOwnedSlice(allocator);
+    errdefer allocator.free(efforts_owned);
+    return .{ .id = try allocator.dupe(u8, id), .efforts = efforts_owned };
+}
+
 /// /v1/chat/completions request body for the REPL conversation so far.
-pub fn buildReplChatBody(allocator: std.mem.Allocator, history: []const Turn) ![]u8 {
+pub fn buildReplChatBody(allocator: std.mem.Allocator, history: []const Turn, think: Think) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "{\"model\":\"sushi\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"messages\":[");
+    try out.appendSlice(allocator, "{\"model\":\"sushi\",\"stream\":true,\"stream_options\":{\"include_usage\":true},");
+    switch (think) {
+        .model_default => {},
+        .on => try out.appendSlice(allocator, "\"enable_thinking\":true,"),
+        .effort => |e| try out.print(allocator, "\"reasoning_effort\":\"{s}\",", .{@tagName(e)}),
+    }
+    try out.appendSlice(allocator, "\"messages\":[");
     for (history, 0..) |turn, i| {
         if (i > 0) try out.append(allocator, ',');
         try out.appendSlice(allocator, "{\"role\":");
@@ -716,6 +808,8 @@ pub const ReplStats = struct {
 pub const ReplDelta = struct {
     /// Owned by caller.
     content: []u8,
+    /// Owned by caller; the thought, streamed before the answer.
+    reasoning: ?[]u8 = null,
     done: bool,
     stats: ReplStats = .{},
     err: ?[]u8 = null,
@@ -767,11 +861,15 @@ pub fn parseReplLine(allocator: std.mem.Allocator, line: []const u8) ?ReplDelta 
         };
     }
     var content: []const u8 = "";
+    var reasoning: ?[]const u8 = null;
     if (root.get("choices")) |choices| {
         if (choices == .array and choices.array.items.len > 0 and choices.array.items[0] == .object) {
             if (choices.array.items[0].object.get("delta")) |d| {
                 if (d == .object) if (d.object.get("content")) |c| {
                     if (c == .string) content = c.string;
+                };
+                if (d == .object) if (d.object.get("reasoning_content")) |c| {
+                    if (c == .string and c.string.len > 0) reasoning = c.string;
                 };
             }
         }
@@ -785,8 +883,13 @@ pub fn parseReplLine(allocator: std.mem.Allocator, line: []const u8) ?ReplDelta 
         const ms = jsonNumber(t.object.get("predicted_ms"));
         if (ms > 0) stats.eval_duration_ns = @intFromFloat(ms * 1e6);
     };
+    const reasoning_owned = if (reasoning) |r| allocator.dupe(u8, r) catch return null else null;
     return .{
-        .content = allocator.dupe(u8, content) catch return null,
+        .content = allocator.dupe(u8, content) catch {
+            if (reasoning_owned) |r| allocator.free(r);
+            return null;
+        },
+        .reasoning = reasoning_owned,
         .done = false,
         .stats = stats,
     };
@@ -809,7 +912,7 @@ fn jsonNumber(v: ?std.json.Value) f64 {
 /// Interactive loop on the calling thread. Waits for the server to answer
 /// /health, then reads prompts from stdin and streams /v1/chat/completions.
 /// Returns when the user exits (/bye or EOF); caller shuts the server down.
-pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
+pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, think_flag: Think) !void {
     const health_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/health", .{port});
     defer allocator.free(health_url);
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
@@ -835,6 +938,24 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
     var out_buf: [4096]u8 = undefined;
     var stdout_w = std.Io.File.stdout().writer(io, &out_buf);
     const w = &stdout_w.interface;
+
+    const models_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/v1/models", .{port});
+    defer allocator.free(models_url);
+    var models_body: std.Io.Writer.Allocating = .init(allocator);
+    defer models_body.deinit();
+    const models_info: ?ModelEfforts = if (client.fetch(.{ .location = .{ .url = models_url }, .keep_alive = false, .response_writer = &models_body.writer })) |_|
+        parseModelEfforts(allocator, models_body.written()) catch null
+    else |_|
+        null;
+    defer if (models_info) |m| m.deinit(allocator);
+    const accepted: []const model.Effort = if (models_info) |m| m.efforts else &.{};
+    var think = think_flag;
+    if (think == .effort and !effortAccepted(think.effort, accepted)) {
+        try writeEffortRefusal(w, @tagName(think.effort), if (models_info) |m| m.id else "this model", accepted);
+        try w.writeAll("\n");
+        try w.flush();
+        return error.ReplThinkUnsupported;
+    }
     // The initial load finishes BEFORE the listener binds, so an answering
     // /health is the post-load moment. `run` quieted the log to warn on a TTY,
     // so this one line is printed here rather than logged.
@@ -867,14 +988,27 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
         if (std.mem.eql(u8, trimmed, "/bye") or std.mem.eql(u8, trimmed, "/exit") or std.mem.eql(u8, trimmed, "/quit")) break;
+        if (parseThinkCommand(trimmed, accepted)) |cmd| {
+            switch (cmd) {
+                .show => try writeThinkSetting(w, think, accepted),
+                .set => |t| {
+                    think = t;
+                    try writeThinkSetting(w, think, accepted);
+                },
+                .refuse => |word| try writeEffortRefusal(w, word, if (models_info) |m| m.id else "this model", accepted),
+            }
+            try w.writeAll("\n");
+            continue;
+        }
 
         try history.append(allocator, .{ .role = "user", .content = try allocator.dupe(u8, trimmed) });
-        const body = try buildReplChatBody(allocator, history.items);
+        const body = try buildReplChatBody(allocator, history.items, think);
         defer allocator.free(body);
 
         const reply = streamOneTurn(allocator, io, chat_url, body, w) catch |err| {
             try w.print("\n[error: {s}]\n", .{@errorName(err)});
             try w.flush();
+            allocator.free(history.pop().?.content);
             continue;
         };
         try history.append(allocator, .{ .role = "assistant", .content = reply });
@@ -917,6 +1051,9 @@ fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body
     var full = std.ArrayList(u8).empty;
     errdefer full.deinit(allocator);
     var stats: ReplStats = .{};
+    // The thought prints dim so a thinking turn never looks frozen.
+    var in_thought = false;
+    defer if (in_thought) w.writeAll("\x1b[0m") catch {};
 
     while (true) {
         const line = r.takeDelimiter('\n') catch break orelse break;
@@ -929,7 +1066,16 @@ fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body
             try w.flush();
             break;
         }
+        if (delta.reasoning) |t| {
+            defer allocator.free(t);
+            if (!in_thought) try w.writeAll("\x1b[2m");
+            in_thought = true;
+            try w.writeAll(t);
+            try w.flush();
+        }
         if (delta.content.len > 0) {
+            if (in_thought) try w.writeAll("\x1b[0m\n");
+            in_thought = false;
             try w.writeAll(delta.content);
             try w.flush();
             try full.appendSlice(allocator, delta.content);
@@ -1097,7 +1243,7 @@ test "cli: buildReplChatBody and parseReplLine speak /v1/chat/completions SSE" {
         .{ .role = "user", .content = "hi \"there\"\n" },
         .{ .role = "assistant", .content = "hello" },
     };
-    const body = try buildReplChatBody(allocator, &history);
+    const body = try buildReplChatBody(allocator, &history, .model_default);
     defer allocator.free(body);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
     defer parsed.deinit();
@@ -1142,6 +1288,77 @@ test "cli: buildReplChatBody and parseReplLine speak /v1/chat/completions SSE" {
 
     // SSE comments and keepalives carry no event.
     try testing.expect(parseReplLine(allocator, ": keepalive") == null);
+}
+
+test "cli: --think takes the next argument only when it is an effort word" {
+    try testing.expectEqual(ThinkFlag{ .think = .on, .consumed = false }, parseThinkFlag(null));
+    try testing.expectEqual(ThinkFlag{ .think = .on, .consumed = false }, parseThinkFlag("--port"));
+    try testing.expectEqual(ThinkFlag{ .think = .{ .effort = .xhigh }, .consumed = true }, parseThinkFlag("xhigh"));
+    try testing.expectEqual(ThinkFlag{ .think = .{ .effort = .off }, .consumed = true }, parseThinkFlag("off"));
+    try testing.expectEqual(ThinkFlag{ .think = .{ .effort = .off }, .consumed = true }, parseThinkFlag("none"));
+}
+
+test "cli: /think shows, sets an accepted word, and refuses the rest" {
+    const qwen = [_]model.Effort{ .off, .low, .medium, .xhigh };
+    try testing.expectEqual(@as(?ThinkCommand, null), parseThinkCommand("/thinking about it", &qwen));
+    try testing.expectEqual(@as(?ThinkCommand, null), parseThinkCommand("hello", &qwen));
+    try testing.expectEqual(@as(?ThinkCommand, .show), parseThinkCommand("/think", &qwen));
+    try testing.expectEqual(@as(?ThinkCommand, .{ .set = .{ .effort = .medium } }), parseThinkCommand("/think medium", &qwen));
+    try testing.expectEqual(@as(?ThinkCommand, .{ .set = .{ .effort = .off } }), parseThinkCommand("/think  off ", &qwen));
+    try testing.expectEqualStrings("high", parseThinkCommand("/think high", &qwen).?.refuse);
+    try testing.expectEqualStrings("hgih", parseThinkCommand("/think hgih", &qwen).?.refuse);
+    // A server that lists no efforts leaves the whole vocabulary to it.
+    try testing.expectEqual(@as(?ThinkCommand, .{ .set = .{ .effort = .max } }), parseThinkCommand("/think max", &.{}));
+
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeEffortRefusal(&w, "high", "Qwen3.8-Flash-Next-EXL3-K4", &qwen);
+    try testing.expectEqualStrings("reasoning effort 'high' is not supported by Qwen3.8-Flash-Next-EXL3-K4; use one of: off, low, medium, xhigh", w.buffered());
+    w = .fixed(&buf);
+    try writeThinkSetting(&w, .{ .effort = .low }, &qwen);
+    try testing.expectEqualStrings("thinking: low (options: off, low, medium, xhigh)", w.buffered());
+    w = .fixed(&buf);
+    try writeThinkSetting(&w, .model_default, &qwen);
+    try testing.expectEqualStrings("thinking: model default (options: off, low, medium, xhigh)", w.buffered());
+}
+
+test "cli: the REPL chat body carries the thinking setting" {
+    const allocator = testing.allocator;
+    const history = [_]Turn{.{ .role = "user", .content = "hi" }};
+    const Case = struct { think: Think, enable: ?bool, effort: ?[]const u8 };
+    for ([_]Case{
+        .{ .think = .model_default, .enable = null, .effort = null },
+        .{ .think = .on, .enable = true, .effort = null },
+        .{ .think = .{ .effort = .low }, .enable = null, .effort = "low" },
+        .{ .think = .{ .effort = .off }, .enable = null, .effort = "off" },
+    }) |c| {
+        const body = try buildReplChatBody(allocator, &history, c.think);
+        defer allocator.free(body);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+        defer parsed.deinit();
+        const root = parsed.value.object;
+        if (c.enable) |e| try testing.expectEqual(e, root.get("enable_thinking").?.bool) else try testing.expect(root.get("enable_thinking") == null);
+        if (c.effort) |e| try testing.expectEqualStrings(e, root.get("reasoning_effort").?.string) else try testing.expect(root.get("reasoning_effort") == null);
+    }
+}
+
+test "cli: the REPL reads the model's efforts from /v1/models and streams reasoning deltas" {
+    const allocator = testing.allocator;
+    const info = try parseModelEfforts(allocator,
+        \\{"object":"list","data":[{"id":"MiMo","reasoning_efforts":["off","low","max"]},{"id":"other"}]}
+    );
+    defer info.deinit(allocator);
+    try testing.expectEqualStrings("MiMo", info.id);
+    try testing.expectEqualSlices(model.Effort, &.{ .off, .low, .max }, info.efforts);
+    const bare = try parseModelEfforts(allocator, "{\"data\":[{\"id\":\"old\"}]}");
+    defer bare.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), bare.efforts.len);
+
+    const d = parseReplLine(allocator, "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hmm\"}}]}").?;
+    defer allocator.free(d.content);
+    defer if (d.reasoning) |r| allocator.free(r);
+    try testing.expectEqualStrings("hmm", d.reasoning.?);
+    try testing.expectEqualStrings("", d.content);
 }
 
 test "cli: formatSize" {
