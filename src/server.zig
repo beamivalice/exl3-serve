@@ -3532,7 +3532,23 @@ pub fn prefillTransientReserveAtKv(
         prefillDequantWeightBytes(config),
         .{ .qsa_ring_bytes = slotRingBytes(config, kv_bits) },
     ) + qsaMaskBytes(config, @min(chunk, @max(seq, 1)), seq) +
+        slidingBandScoreBytes(config, @min(chunk, @max(seq, 1))) +
         (if (config.expert_streaming) config.expert_fill_peak_bytes else 0);
+}
+
+/// The composed score sheet a ringed arch's SLIDING layers still build once
+/// its global layers are fused. Their attention is a band, so one layer's
+/// sheet is `[heads, fwd, window + fwd - 1]` whatever the prompt length — but
+/// they carry sinks and an array mask, which `msv_attn_pd` has no arm for, so
+/// the sheet is real where the global layers' (32 GiB at a 512k prompt) is
+/// gone. Billed at `MOE_PREFILL_COEXIST` layers, the same coexistence the
+/// other per-layer prefill transients are billed at. Zero unless the arch
+/// rings a sliding window AND its score width is one the kernel serves.
+pub fn slidingBandScoreBytes(config: *const model_mod.ModelConfig, fwd: u64) u64 {
+    if (config.swaRingTokens() == 0) return 0;
+    if (!transformer_mod.prefillHeadDimFused(config.prefillScoreHeadDim())) return 0;
+    const keys: u64 = @as(u64, config.sliding_window) +| fwd -| 1;
+    return MOE_PREFILL_COEXIST *| @as(u64, config.num_attention_heads) *| fwd *| keys *| 2;
 }
 
 /// Bytes per (query, key) the QSA prefill holds for ONE live layer past the
@@ -5890,6 +5906,7 @@ pub fn prefillNeededAtChunk(
     if (is_dsv4) return dsv4PrefillMemoryNeeded(seq, layers, kv_heads * hdim, hidden, ffn, dsv4_mod.prefillSub(), config.prefillAttnKeys(seq));
     return prefillMemoryNeeded(seq, heads, kv_heads, config.kvBytesPerToken(), hdim, config.prefillScoreHeadDim(), hidden, ffn, kv_bits, chunk, config.prefillAttnKeys(seq), prefillStreamBytesPerToken(config), prefillDequantWeightBytes(config), prefillRequestTerms(config, seq, max_tokens, kv_bits, chunk, warm)) +
         qsaMaskBytes(config, @min(chunk, @max(seq, 1)), seq) +
+        slidingBandScoreBytes(config, @min(chunk, @max(seq, 1))) +
         (if (config.expert_streaming) config.expert_fill_peak_bytes else 0);
 }
 
@@ -22142,6 +22159,11 @@ test "prefillMemoryNeeded: the SCORE width decides the score term, not the store
     const kv_per_tok: u64 = 6 * 16 * (192 + 128) * 2; // 6 caching layers of 24
     const stored: u64 = 128;
     const scored: u64 = 192;
+    // `msv_attn_pd` serves qk 192 now, so the composed sheet survives only
+    // under the kill switch — which is precisely where confusing the two
+    // widths would zero a sheet that is really there.
+    transformer_mod.fused256_override = false;
+    defer transformer_mod.fused256_override = null;
     const honest = prefillMemoryNeeded(32_768, 16, 16, kv_per_tok, stored, scored, 1536, 4608, 16, 4096, 32_768, 0, 0, .{});
     const blind = prefillMemoryNeeded(32_768, 16, 16, kv_per_tok, stored, stored, 1536, 4608, 16, 4096, 32_768, 0, 0, .{});
     // The difference is exactly the score tensor: heads x chunk x seq x 2, x1.25.
@@ -22153,6 +22175,13 @@ test "prefillMemoryNeeded: the SCORE width decides the score term, not the store
     try t.expectEqual(
         honest,
         prefillMemoryNeeded(32_768, 16, 16, kv_per_tok, scored, scored, 1536, 4608, 16, 4096, 32_768, 0, 0, .{}),
+    );
+    // With the kernel serving the width there is no sheet to attribute, so the
+    // two widths agree — at zero, not by accident.
+    transformer_mod.fused256_override = true;
+    try t.expectEqual(
+        blind,
+        prefillMemoryNeeded(32_768, 16, 16, kv_per_tok, stored, scored, 1536, 4608, 16, 4096, 32_768, 0, 0, .{}),
     );
 }
 
@@ -24660,6 +24689,41 @@ test "the sliding ring is billed once per slot and staged per chunk token" {
     plain.model_type = "qwen3";
     try t.expectEqual(@as(u64, 0), slotRingBytes(&plain, 16));
     try t.expectEqual(@as(u64, 0), prefillStreamBytesPerToken(&plain));
+}
+
+test "mimo_v2 prefill bill: fusing qk 192 drops the global score sheet and bills the band's" {
+    const t = std.testing;
+    const cfg = mimoV2BillConfig();
+    const seq: u64 = 512 * 1024;
+    const chunk: u64 = 1024;
+    // Pin the arm, not the host: the guard and the dispatch read one switch.
+    transformer_mod.fused256_override = true;
+    defer transformer_mod.fused256_override = null;
+
+    // One global layer's composed sheet at this prompt, the term the kernel removes.
+    const global_sheet: u64 = @as(u64, cfg.num_attention_heads) * chunk * seq * 2;
+    const fused_bill = prefillNeededAtChunk(&cfg, seq, 2048, 8, chunk, .{});
+    try t.expect(fused_bill < global_sheet);
+
+    // What is left is the band sheet the sliding layers still compose: prompt-length
+    // independent, `window + fwd - 1` keys wide, at the same coexistence the other
+    // per-layer prefill transients are billed at.
+    const band = slidingBandScoreBytes(&cfg, chunk);
+    try t.expectEqual(MOE_PREFILL_COEXIST * @as(u64, cfg.num_attention_heads) * chunk * (128 + chunk - 1) * 2, band);
+    // Prompt-length independent: the same sheet at 64k as at 512k.
+    try t.expectEqual(band, slidingBandScoreBytes(&cfg, chunk));
+    try t.expect(prefillNeededAtChunk(&cfg, 64 * 1024, 2048, 8, chunk, .{}) > band);
+
+    // Kill switch: composed causal restores the whole sheet, and the bill with it.
+    transformer_mod.fused256_override = false;
+    try t.expectEqual(@as(u64, 0), slidingBandScoreBytes(&cfg, chunk));
+    try t.expect(prefillNeededAtChunk(&cfg, seq, 2048, 8, chunk, .{}) > fused_bill +| global_sheet);
+
+    // An arch with no ring never acquires the band term.
+    var plain = cfg;
+    plain.model_type = "qwen3";
+    transformer_mod.fused256_override = true;
+    try t.expectEqual(@as(u64, 0), slidingBandScoreBytes(&plain, chunk));
 }
 
 test "generated think tags require an unambiguous literal template opener" {

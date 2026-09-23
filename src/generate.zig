@@ -231,6 +231,15 @@ pub const PREFILL_CHUNK_FLOOR: usize = 512;
 pub fn boundedPrefillChunk(base_chunk: usize, score_head_dim: u32, n_heads: u32, total_ctx: usize, sliding_band_arch: bool, is_moe: bool, long_ctx_gated: bool) usize {
     const head_dim = score_head_dim;
     if (head_dim <= 128 or n_heads == 0 or total_ctx == 0) return base_chunk;
+    // qk 192 (mimo_v2 global layers, MLA): `msv_attn_pd` builds no score
+    // tensor, so the budget formula below — which would pin the floor 512 at
+    // any context past ~256k — measures nothing. What still scales with the
+    // chunk is the MoE gather and the ringed-SWA staging, and those are what
+    // `server.resolvePrefillChunk` prices against this machine; the 4096 cap
+    // is the measured gemma-26B MoE lesson carried over as a ceiling only.
+    if (head_dim == 192 and transformer_mod.prefillHeadDimFused(head_dim)) {
+        return @min(base_chunk, @as(usize, 4096));
+    }
     // Non-sliding hd-256 archs under FUSED causal (the default since the
     // budgeted-dispatch flip): no score tensor exists, so the scores-budget
     // formula below is moot — and its old shrink (1024 at 64K on 24 heads)
@@ -14760,11 +14769,27 @@ test "boundedPrefillChunk: long context shrinks to the scores budget, floored an
     try testing.expectEqual(@as(usize, 2048), boundedPrefillChunk(8192, 256, 8, 131_072, true, false, false));
 }
 
-test "boundedPrefillChunk: a 192-wide MLA score is budgeted, and the hd-256 policies stay hd-256" {
+test "boundedPrefillChunk: qk 192 is fused; the kill switch restores its score budget" {
     // A hybrid MLA arch can declare head_dim 128 (its value width) so it fell
-    // through the "fused SDPA covers it" early-out — while its MLA scores at
-    // qk width 192 on the composed path. 32 heads.
+    // through the "fused SDPA covers it" early-out — while it scores at qk
+    // width 192, the same width mimo_v2's global layers score at. 32 heads.
     //
+    // `msv_attn_pd` serves that width now: no score tensor, so the budget
+    // formula measures nothing and the chunk keeps the MoE ceiling at every
+    // context. Without this the formula pins the 512 floor past ~256k.
+    transformer_mod.fused256_override = true;
+    try testing.expectEqual(@as(usize, 4096), boundedPrefillChunk(8192, 192, 32, 8192, false, true, false));
+    try testing.expectEqual(@as(usize, 4096), boundedPrefillChunk(8192, 192, 32, 262_144, false, true, false));
+    try testing.expectEqual(@as(usize, 4096), boundedPrefillChunk(8192, 192, 32, 1_048_576, false, true, false));
+    // Never raises a caller-lowered base.
+    try testing.expectEqual(@as(usize, 512), boundedPrefillChunk(512, 192, 32, 1_048_576, false, true, false));
+    // A real hd-256 MoE keeps its own measured 4096 branch.
+    try testing.expectEqual(@as(usize, 4096), boundedPrefillChunk(8192, 256, 32, 8192, false, true, false));
+
+    // MLX_SERVE_FUSED_256_CAUSAL=0: composed scores are back and so is the
+    // budget, unchanged — guards and dispatch move on ONE switch.
+    transformer_mod.fused256_override = false;
+    defer transformer_mod.fused256_override = null;
     // Short prompts keep the full chunk: 32 * 8192 * 8192 * 2B = 4 GiB exactly.
     try testing.expectEqual(@as(usize, 8192), boundedPrefillChunk(8192, 192, 32, 8192, false, true, false));
     // Then it halves with the prompt, holding one score tensor at the budget.
@@ -14774,16 +14799,6 @@ test "boundedPrefillChunk: a 192-wide MLA score is budgeted, and the hd-256 poli
     // 4 GiB / (32 * 38201 * 2) = 1757 -> floored to the 512 grain.
     try testing.expectEqual(@as(usize, 1536), boundedPrefillChunk(8192, 192, 32, 38_201, false, true, false));
     try testing.expectEqual(@as(usize, 512), boundedPrefillChunk(8192, 192, 32, 262_144, false, true, false));
-
-    // The two hd-256-measured policies must NOT adopt this arch:
-    // - the fused-kernel branch (no score tensor) is hd-256-only,
-    // - the 2048 composed cap was tuned on a 27B's own prefill ladder.
-    transformer_mod.fused256_override = true;
-    defer transformer_mod.fused256_override = null;
-    // With the fused override on, a real hd-256 MoE takes the 4096 branch...
-    try testing.expectEqual(@as(usize, 4096), boundedPrefillChunk(8192, 256, 32, 8192, false, true, false));
-    // ...and the 192-wide arch still gets its honest full chunk at the same shape.
-    try testing.expectEqual(@as(usize, 8192), boundedPrefillChunk(8192, 192, 32, 8192, false, true, false));
 }
 
 test "MTP history window: threshold gate and chunk membership" {
