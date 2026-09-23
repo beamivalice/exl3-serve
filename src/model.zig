@@ -838,7 +838,7 @@ pub const ModelConfig = struct {
     /// to bill per layer on an arch whose layers really differ (mimo_v2's
     /// global/sliding split); `kvBytesPerToken` keeps the uniform formula
     /// everywhere else so no arch's number moves without its bytes moving.
-    fn layerKvBytes(self: *const ModelConfig, li: u32) u64 {
+    pub fn layerKvBytes(self: *const ModelConfig, li: u32) u64 {
         return @as(u64, self.layerKVHeads(li)) *
             (@as(u64, self.layerHeadDim(li)) + @as(u64, self.layerVHeadDim(li))) * 2;
     }

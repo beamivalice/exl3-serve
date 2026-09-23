@@ -3530,7 +3530,10 @@ pub fn prefillTransientReserveAtKv(
         config.prefillAttnKeys(seq),
         prefillStreamBytesPerToken(config),
         prefillDequantWeightBytes(config),
-        .{ .qsa_ring_bytes = slotRingBytes(config, kv_bits) },
+        .{
+            .qsa_ring_bytes = slotRingBytes(config, kv_bits),
+            .dequant_scratch_bytes = kvDequantScratchBytes(config, seq),
+        },
     ) + qsaMaskBytes(config, @min(chunk, @max(seq, 1)), seq) +
         slidingBandScoreBytes(config, @min(chunk, @max(seq, 1))) +
         (if (config.expert_streaming) config.expert_fill_peak_bytes else 0);
@@ -3549,6 +3552,24 @@ pub fn slidingBandScoreBytes(config: *const model_mod.ModelConfig, fwd: u64) u64
     if (!transformer_mod.prefillHeadDimFused(config.prefillScoreHeadDim())) return 0;
     const keys: u64 = @as(u64, config.sliding_window) +| fwd -| 1;
     return MOE_PREFILL_COEXIST *| @as(u64, config.num_attention_heads) *| fwd *| keys *| 2;
+}
+
+/// Dense bytes ONE layer's `KVCache.denseView` rebuild costs at this prompt
+/// length — the quantized-KV prefill transient, which the eval cadence bounds
+/// to a layer at a time. Zero unless the generic `2 · seq · kv_heads · hdim ·
+/// 2` cannot say it: on a ringed arch the sliding layers rebuild a WINDOW, and
+/// the layers that rebuild the sequence have their own head count and two
+/// different K and V widths (mimo_v2: 4 heads of 192+128, against the generic
+/// 8 heads of 192 twice — 2.4x).
+pub fn kvDequantScratchBytes(config: *const model_mod.ModelConfig, seq: u64) u64 {
+    if (config.swaRingTokens() == 0) return 0;
+    var widest: u64 = 0;
+    var li: u32 = 0;
+    while (li < config.num_hidden_layers) : (li += 1) {
+        const rows: u64 = if (config.isKvPerTokenLayer(li)) seq else @min(seq, config.swaRingTokens());
+        widest = @max(widest, rows *| config.layerKvBytes(li));
+    }
+    return widest;
 }
 
 /// Bytes per (query, key) the QSA prefill holds for ONE live layer past the
@@ -5424,6 +5445,11 @@ pub const PrefillRequestTerms = struct {
     grow_coexist_bytes: u64 = 0,
     qsa_ring_bytes: u64 = 0,
     mtp_head_kv_bytes: u64 = 0,
+    /// The dense rebuild ONE quantized-KV layer really makes at this prompt
+    /// length (`kvDequantScratchBytes`). Zero = the generic
+    /// `2 · seq · kv_heads · hdim · 2` below, which is exact for every arch
+    /// whose caching layers share one head count and one width.
+    dequant_scratch_bytes: u64 = 0,
 };
 
 pub fn prefillMemoryNeeded(seq: u64, heads: u64, kv_heads: u64, kv_per_tok: u64, hdim: u64, score_hdim: u64, hidden: u64, ffn: u64, kv_bits: u64, chunk: u64, attn_keys: u64, stream_per_tok: u64, dequant_weights: u64, req: PrefillRequestTerms) u64 {
@@ -5435,7 +5461,10 @@ pub fn prefillMemoryNeeded(seq: u64, heads: u64, kv_heads: u64, kv_per_tok: u64,
     const fwd: u64 = @min(chunk, @max(seq, 1));
     const kv_bytes: u64 = seq * kvBytesPerTokenAtBits(kv_per_tok, kv_bits);
     const scores: u64 = if (!transformer_mod.prefillHeadDimFused(@intCast(score_hdim))) heads * fwd * @min(attn_keys, seq) * 2 else 0;
-    const dequant: u64 = if (kv_bits < 16) 2 * seq * kv_heads * hdim * 2 else 0;
+    const dequant: u64 = if (kv_bits >= 16) 0 else if (req.dequant_scratch_bytes > 0)
+        req.dequant_scratch_bytes
+    else
+        2 * seq * kv_heads * hdim * 2;
     const mlp: u64 = 8 * fwd * @max(hidden, ffn) * 2;
     // The MLP envelope alone is not the whole per-token working set: an arch
     // with its own prefill streams (linear-attention layers, MoE gather-sort
@@ -5671,6 +5700,7 @@ pub fn prefillRequestTerms(config: *const model_mod.ModelConfig, seq: u64, max_t
         .grow_coexist_bytes = growCoexistBytes(config, warm, seq, kv_per_tok),
         .qsa_ring_bytes = slotRingBytes(config, kv_bits) +| head_qsa_ring,
         .mtp_head_kv_bytes = reserved *| head_per_tok,
+        .dequant_scratch_bytes = kvDequantScratchBytes(config, seq),
     };
 }
 
@@ -24693,6 +24723,36 @@ test "the sliding ring is billed once per slot and staged per chunk token" {
     plain.model_type = "qwen3";
     try t.expectEqual(@as(u64, 0), slotRingBytes(&plain, 16));
     try t.expectEqual(@as(u64, 0), prefillStreamBytesPerToken(&plain));
+}
+
+test "a ringed arch's kv-quant dequant scratch is one layer's rebuild, not the model's" {
+    const t = std.testing;
+    const cfg = mimoV2BillConfig();
+    const seq: u64 = 512 * 1024;
+
+    // The widest rebuild is a GLOBAL layer at the prompt length: 2 kv heads of
+    // qk 192 + v 128. The sliding layers rebuild their ring, not the sequence.
+    try t.expectEqual(seq * 2 * (192 + 128) * 2, kvDequantScratchBytes(&cfg, seq));
+    // The generic expression this replaces reads the SLIDING head count and
+    // doubles the qk width: 1.8x here, 2.4x at the shipped 4/8-head geometry.
+    const generic: u64 = 2 * seq * cfg.num_key_value_heads * cfg.head_dim * 2;
+    try t.expect(generic > kvDequantScratchBytes(&cfg, seq));
+
+    // A short prompt never rebuilds more than it stores, and below the ring the
+    // widest layer is a SLIDING one: it carries more KV heads than a global.
+    try t.expectEqual(@as(u64, 256) * 3 * (192 + 128) * 2, kvDequantScratchBytes(&cfg, 256));
+
+    // Every arch whose caching layers share one geometry keeps the generic term.
+    var plain = cfg;
+    plain.model_type = "qwen3";
+    try t.expectEqual(@as(u64, 0), kvDequantScratchBytes(&plain, seq));
+
+    // fp16 KV never rebuilds anything, whatever the arch.
+    const dense_kv = prefillMemoryNeeded(seq, 4, 3, cfg.kvBytesPerToken(), 192, 192, 384, 1024, 16, 1024, seq, 0, 0, .{ .dequant_scratch_bytes = 1 << 30 });
+    try t.expectEqual(
+        dense_kv,
+        prefillMemoryNeeded(seq, 4, 3, cfg.kvBytesPerToken(), 192, 192, 384, 1024, 16, 1024, seq, 0, 0, .{}),
+    );
 }
 
 test "a ringed arch reserves its KV capacity once and bills the ring it holds" {
