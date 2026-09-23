@@ -183,3 +183,36 @@ MiMo EXL3 kernel history (n=40 readers, codebook-generic): the n=40 prefill read
 12.45 to 8.48 ms at 512 rows; the prefill scatter fused into the finish reduce added +5-9%; the n=40 decode lane
 funnel cut the decode chain 20% at one row and 36% at seven; the prepared-mid dispatch took rows-1 from 0.524 to
 0.485 ms. A 16-lane affine down with f32 scores was slower at every width and is parked.
+
+<a id="exl3-decode-layout"></a>
+## EXL3 decode GEMV layout (two tiles per threadgroup)
+
+The lane-funnel decode GEMVs (n40 MiMo, n48 Flash-Next) take two output tiles per threadgroup, two k-tiles per
+iteration with both loads issued first, and pointer bumps; outputs bit-identical (see
+[engine-exl3-experts](engine-exl3-experts.md#kernels)). Kernel microbench: 47 chained dispatches per round, arms
+interleaved, median net of a null chain, `taskpolicy -a`, lock `exl3-decode-layout`; base = the served kernels,
+recorded in the research run (session scratchpad `rx/q4.jsonl`, `rx/q5.jsonl`, `rx/q7.jsonl`), new arm in
+`dl/tq1.jsonl`, `dl/tq2.jsonl` (sources read verbatim from the commit).
+
+| geometry, kernel | rows 1 | rows 2 | rows 4 | rows 8 |
+|---|---|---|---|---|
+| MiMo pair (gate+up) | 138.6 → 101.1 us | 259.9 → 188.4 | 500.4 → 359.5 | 1123.5 → 698.7 |
+| MiMo prepared-mid down | 63.2 → 47.9 | 117.6 → 87.8 | 228.7 → 167.4 | 471.1 → 322.4 |
+| Flash-Next pair (E=512, in-process old arm) | 43.9 → 36.6 | | 133.0 → 98.7 | |
+| Flash-Next fused-mid down (in-process old arm) | 59.2 → 44.2 | | 95.4 → 65.9 | |
+
+One tile per threadgroup with the unroll and pointer bumps reads the same as two on the Flash-Next pair at one row
+(35.7 us) but loses at four rows (107.2) and on the fused-mid down (54.1 / 86.0), whose SwiGLU prepare two tiles
+share: one policy, two tiles.
+
+Live, llmprobe `--bench-only`, no MTP, one boot per arm, `taskpolicy -a`, lock `exl3-decode-layout`, greedy
+200-token chat completion byte-identical between the arms of each pair (raw: session scratchpad `dl/`):
+
+| pack, flags | base | new | decode | prefill 2k |
+|---|---|---|---|---|
+| MiMo MCG K2.5 w12, stored-affine trunk (post-03:47 layout), kv8, ctx 32768 | 2161e18 | this change on 2161e18 (bc27a4e) | 44.9 → 52.0 | 916 → 1068 |
+| MiMo MCG K2.5 w12, load-time affine trunk (pre-03:47 layout), same flags | c4f3f7a | this change on c4f3f7a (aff4f85) | 44.0 → 50.4 | 964 → 1069 |
+| Flash-Next MCG K3 w12 plugged, kv off, ctx 65536 | 61.8 recorded (28d7fab, `--full`) | this change on c4f3f7a (aff4f85) | 61.8 → 66.2 | 1763 → 1845 |
+
+The MiMo prefill gain (+11-17%, both pairs) is not attributed: prefill rows take `moePrefill`, which this change
+does not touch; re-measure before quoting it.

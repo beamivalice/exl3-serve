@@ -32,6 +32,25 @@ pub fn setPairSplitsForTest(n: ?u32) void {
     pair_splits_force = n;
 }
 
+/// Routes n40/n48 through the generic window reader, one tile per threadgroup:
+/// the byte reference the lane funnel's layout is held to.
+var funnel_off_for_test: bool = false;
+
+/// How a decode GEMV threadgroup (`FUNNEL`, `OTPT`) reads the bank. The lane
+/// funnel (n40, and n48 off MUL1) carries two output tiles per threadgroup,
+/// sharing index math, inputs and the prepare; the other readers carry one.
+const GemvLayout = struct { funnel: bool, tiles: c_int };
+
+fn gemvLayout(n: u32, out_tiles: c_int) GemvLayout {
+    const funnel = !funnel_off_for_test and (n == 40 or (n == 48 and active_decode.codebook != .mul1));
+    return .{ .funnel = funnel, .tiles = if (funnel and @rem(out_tiles, 2) == 0) 2 else 1 };
+}
+
+fn addGemvLayout(cfg: mlx.mlx_fast_metal_kernel_config, layout: GemvLayout) !void {
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "FUNNEL", @intFromBool(layout.funnel)));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "OTPT", layout.tiles));
+}
+
 fn exl3UbenchOn() bool {
     if (ubench_mute) return false;
     if (ubench_env) |v| return v;
@@ -919,8 +938,8 @@ var gemm_nax_failed: bool = false;
 var gemm_nax_cached: ?bool = null;
 var gemm_n40_engaged: bool = false;
 const PairPrepKey = struct { in_dim: c_int, nslots: c_int, topk: c_int };
-const PairGemvKey = struct { in_dim: c_int, out_dim: c_int, nslots: c_int, nsplit: c_int, topk: c_int, n: u32 };
-const DownFusedKey = struct { in_dim: c_int, out_dim: c_int, nslots: c_int, nsplit: c_int, n: u32 };
+const PairGemvKey = struct { in_dim: c_int, out_dim: c_int, nslots: c_int, nsplit: c_int, topk: c_int, n: u32, layout: GemvLayout };
+const DownFusedKey = struct { in_dim: c_int, out_dim: c_int, nslots: c_int, nsplit: c_int, n: u32, layout: GemvLayout };
 const MidKey = struct { dim: c_int, nslots: c_int };
 const ReduceKey = struct { out_dim: c_int, rows: c_int, topk: c_int };
 const DecodeReduceKey = struct { out_dim: c_int, rows: c_int, topk: c_int, dtype: mlx.mlx_dtype };
@@ -1648,9 +1667,9 @@ pub fn indexedGemvCoopF16(s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_
 }
 
 const DOWN_FUSED_SOURCE: [:0]const u8 =
-    \\threadgroup float partial[4 * 16];
+    \\threadgroup float partial[4 * 16 * uint(OTPT)];
     \\threadgroup half prepared[uint(IDIM)];
-    \\uint ot = uint(threadgroup_position_in_grid.x);
+    \\const uint ot = uint(threadgroup_position_in_grid.x) * uint(OTPT);
     \\uint slot = uint(threadgroup_position_in_grid.y);
     \\uint split = uint(threadgroup_position_in_grid.z);
     \\uint sg = uint(simdgroup_index_in_threadgroup);
@@ -1765,7 +1784,7 @@ const DOWN_FUSED_SOURCE: [:0]const u8 =
     \\const uint row1 = prow + 1u;
     \\const uint row2 = prow + 8u;
     \\const uint row3 = prow + 9u;
-    \\float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    \\float acc[OTPT][8] = {};
     \\const device uint* trellis_e = (const device uint*)(trellis + ((size_t)eid * (size_t)IT * (size_t)OT) * PACKED_HW);
     \\if (N == 64u) {
     \\for (uint tk = tk0 + sg; tk < tk1; tk += SGS) {
@@ -1780,28 +1799,43 @@ const DOWN_FUSED_SOURCE: [:0]const u8 =
     \\  for (uint p = 0u; p < 4u; p++) {
     \\    const uint2 cw = uint2(uint(merged >> sh[p * 2u]), uint(merged >> sh[p * 2u + 1u])) & uint2(0xffffu);
     \\    const float2 w = exl3_decode2(cw);
-    \\    acc[p * 2u] = fma(ins[p * 2u], w.x, acc[p * 2u]);
-    \\    acc[p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[p * 2u + 1u]);
+    \\    acc[0][p * 2u] = fma(ins[p * 2u], w.x, acc[0][p * 2u]);
+    \\    acc[0][p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[0][p * 2u + 1u]);
     \\  }
     \\}
     \\}
-    \\else if (N == 40u || (N == 48u && EXL3_FUNNEL48)) {
-    \\for (uint tk = tk0 + sg; tk < tk1; tk += SGS) {
-    \\  const device uint* words = trellis_e + ((size_t)tk * (size_t)OT + ot) * PACKED_W;
-    \\  const ulong merged = N == 40u ? exl3_n40_lane(words, lane) : exl3_n48_lane(words, lane);
-    \\  const float in0 = float(prepared[tk * TILE + row0]);
-    \\  const float in1 = float(prepared[tk * TILE + row1]);
-    \\  const float in2 = float(prepared[tk * TILE + row2]);
-    \\  const float in3 = float(prepared[tk * TILE + row3]);
+    \\else if (FUNNEL && (N == 40u || (N == 48u && EXL3_FUNNEL48))) {
+    \\  // Both k-tiles' words load before either decodes; a k range is whole H128
+    \\  // blocks (8 tiles), so the second k-tile of an iteration is always in range.
+    \\  const device uint *wp = trellis_e + ((size_t)(tk0 + sg) * (size_t)OT + ot) * PACKED_W;
+    \\  const threadgroup half *pp = prepared + (tk0 + sg) * TILE;
     \\  const uint sh[8] = {N == 40u ? 18u : 21u, N == 40u ? 15u : 18u, N == 40u ? 13u : 15u, N == 40u ? 10u : 12u, N == 40u ? 8u : 9u, N == 40u ? 5u : 6u, 3u, 0u};
-    \\  const float ins[8] = {in0, in1, in2, in3, in0, in1, in2, in3};
-    \\  for (uint p = 0u; p < 4u; p++) {
-    \\    const uint2 cw = uint2(uint(merged >> sh[p * 2u]), uint(merged >> sh[p * 2u + 1u])) & uint2(0xffffu);
-    \\    const float2 w = exl3_decode2(cw);
-    \\    acc[p * 2u] = fma(ins[p * 2u], w.x, acc[p * 2u]);
-    \\    acc[p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[p * 2u + 1u]);
+    \\  for (uint tk = tk0 + sg; tk < tk1; tk += 2u * SGS) {
+    \\    ulong merged[2][OTPT];
+    \\    for (uint u = 0u; u < 2u; u++) {
+    \\      for (uint o = 0u; o < uint(OTPT); o++) {
+    \\        const device uint *words = wp + u * SGS * OT * PACKED_W + o * PACKED_W;
+    \\        merged[u][o] = N == 40u ? exl3_n40_lane(words, lane) : exl3_n48_lane(words, lane);
+    \\      }
+    \\    }
+    \\    for (uint u = 0u; u < 2u; u++) {
+    \\      const float in0 = float(pp[u * SGS * TILE + row0]);
+    \\      const float in1 = float(pp[u * SGS * TILE + row1]);
+    \\      const float in2 = float(pp[u * SGS * TILE + row2]);
+    \\      const float in3 = float(pp[u * SGS * TILE + row3]);
+    \\      const float ins[8] = {in0, in1, in2, in3, in0, in1, in2, in3};
+    \\      for (uint o = 0u; o < uint(OTPT); o++) {
+    \\        for (uint p = 0u; p < 4u; p++) {
+    \\          const uint2 cw = uint2(uint(merged[u][o] >> sh[p * 2u]), uint(merged[u][o] >> sh[p * 2u + 1u])) & uint2(0xffffu);
+    \\          const float2 w = exl3_decode2(cw);
+    \\          acc[o][p * 2u] = fma(ins[p * 2u], w.x, acc[o][p * 2u]);
+    \\          acc[o][p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[o][p * 2u + 1u]);
+    \\        }
+    \\      }
+    \\    }
+    \\    wp += 2u * SGS * OT * PACKED_W;
+    \\    pp += 2u * SGS * TILE;
     \\  }
-    \\}
     \\} else {
     \\  uint w0[4];
     \\  uint w1[4];
@@ -1826,28 +1860,31 @@ const DOWN_FUSED_SOURCE: [:0]const u8 =
     \\      const uint funnel = uint(merged >> shv[p]);
     \\      const uint2 cw = uint2((funnel >> frv[p]) & 0xffffu, funnel & 0xffffu);
     \\      const float2 w = exl3_decode2(cw);
-    \\      acc[p * 2u] = fma(ins[p * 2u], w.x, acc[p * 2u]);
-    \\      acc[p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[p * 2u + 1u]);
+    \\      acc[0][p * 2u] = fma(ins[p * 2u], w.x, acc[0][p * 2u]);
+    \\      acc[0][p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[0][p * 2u + 1u]);
     \\    }
     \\  }
     \\}
-    \\float clo = (acc[0] + acc[1]) + (acc[2] + acc[3]);
-    \\float chi = (acc[4] + acc[5]) + (acc[6] + acc[7]);
-    \\clo += simd_shuffle_xor(clo, 1u);
-    \\chi += simd_shuffle_xor(chi, 1u);
-    \\clo += simd_shuffle_xor(clo, 2u);
-    \\chi += simd_shuffle_xor(chi, 2u);
-    \\if ((lane & 3u) == 0u) {
-    \\  partial[sg * 16u + pcol] = clo;
-    \\  partial[sg * 16u + pcol + 8u] = chi;
+    \\for (uint o = 0u; o < uint(OTPT); o++) {
+    \\  float clo = (acc[o][0] + acc[o][1]) + (acc[o][2] + acc[o][3]);
+    \\  float chi = (acc[o][4] + acc[o][5]) + (acc[o][6] + acc[o][7]);
+    \\  clo += simd_shuffle_xor(clo, 1u);
+    \\  chi += simd_shuffle_xor(chi, 1u);
+    \\  clo += simd_shuffle_xor(clo, 2u);
+    \\  chi += simd_shuffle_xor(chi, 2u);
+    \\  if ((lane & 3u) == 0u) {
+    \\    partial[(o * SGS + sg) * 16u + pcol] = clo;
+    \\    partial[(o * SGS + sg) * 16u + pcol + 8u] = chi;
+    \\  }
     \\}
     \\threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\if (lid < 16u) {
+    \\if (lid < 16u * uint(OTPT)) {
+    \\  const uint o = lid >> 4u;
     \\  float sum = 0.0f;
     \\  for (uint g = 0u; g < SGS; g++) {
-    \\    sum += partial[g * 16u + lid];
+    \\    sum += partial[(o * SGS + g) * 16u + (lid & 15u)];
     \\  }
-    \\  y[(size_t)slot * (size_t)(ODIM) + ot * TILE + lid] = half(sum);
+    \\  y[(size_t)slot * (size_t)(ODIM) + (ot + o) * TILE + (lid & 15u)] = half(sum);
     \\}
     \\threadgroup_barrier(mem_flags::mem_threadgroup);
 ;
@@ -1869,18 +1906,20 @@ fn downGemvFusedMid(
     const rate = try packedRate(tsh[tsh.len - 1]);
     const out_tiles = @divExact(out_dim, 16);
     const nsplit: c_int = @intCast(pairSplitCountFor(out_dim));
-    const key = DownFusedKey{ .in_dim = in_dim, .out_dim = out_dim, .nslots = nslots, .nsplit = nsplit, .n = rate.n };
+    const layout = gemvLayout(rate.n, out_tiles);
+    const key = DownFusedKey{ .in_dim = in_dim, .out_dim = out_dim, .nslots = nslots, .nsplit = nsplit, .n = rate.n, .layout = layout };
     const cfg = down_fused_cfgs.get(key) orelse blk: {
         const c = mlx.mlx_fast_metal_kernel_config_new();
         errdefer _ = mlx.mlx_fast_metal_kernel_config_free(c);
         const sh = [_]c_int{ nslots, out_dim };
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &sh, 2, .float16));
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(c, out_tiles * 128, nslots, 1));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(c, @divExact(out_tiles, layout.tiles) * 128, nslots, 1));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(c, 128, 1, 1));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "IDIM", in_dim));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "ODIM", out_dim));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "NSPLIT", nsplit));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "NHW", @intCast(rate.n)));
+        try addGemvLayout(c, layout);
         down_fused_cfgs.put(key, c);
         break :blk c;
     };
@@ -1908,8 +1947,8 @@ pub fn projectIndexed(s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_arra
 /// k range this threadgroup owns, rather than in a dispatch of its own: the tile
 /// loop then reads its operands from threadgroup memory instead of device.
 const PAIR_GEMV_SOURCE: [:0]const u8 =
-    \\threadgroup float partial[4 * 16];
-    \\uint ot = uint(threadgroup_position_in_grid.x);
+    \\threadgroup float partial[4 * 16 * uint(OTPT)];
+    \\const uint ot = uint(threadgroup_position_in_grid.x) * uint(OTPT);
     \\uint slot = uint(threadgroup_position_in_grid.y);
     \\uint split = uint(threadgroup_position_in_grid.z);
     \\uint sg = uint(simdgroup_index_in_threadgroup);
@@ -1980,7 +2019,7 @@ const PAIR_GEMV_SOURCE: [:0]const u8 =
     \\  const uint xb = proj * KSPAN;
     \\  const device ushort *trellis = (proj == 0u) ? tg : tu;
     \\  device float *y = (proj == 0u) ? yg : yu;
-    \\  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    \\  float acc[OTPT][8] = {};
     \\  const device uint *trellis_e = (const device uint *)(trellis + ((size_t)eid * (size_t)IT * (size_t)OT) * PACKED_HW);
     \\  if (N == 64u) {
     \\  for (uint tk = tk0 + sg; tk < tk1; tk += SGS) {
@@ -1995,28 +2034,43 @@ const PAIR_GEMV_SOURCE: [:0]const u8 =
     \\    for (uint p = 0u; p < 4u; p++) {
     \\      const uint2 cw = uint2(uint(merged >> sh[p * 2u]), uint(merged >> sh[p * 2u + 1u])) & uint2(0xffffu);
     \\      const float2 w = exl3_decode2(cw);
-    \\      acc[p * 2u] = fma(ins[p * 2u], w.x, acc[p * 2u]);
-    \\      acc[p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[p * 2u + 1u]);
+    \\      acc[0][p * 2u] = fma(ins[p * 2u], w.x, acc[0][p * 2u]);
+    \\      acc[0][p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[0][p * 2u + 1u]);
     \\    }
     \\  }
     \\  }
-    \\  else if (N == 40u || (N == 48u && EXL3_FUNNEL48)) {
-    \\  for (uint tk = tk0 + sg; tk < tk1; tk += SGS) {
-    \\    const device uint *words = trellis_e + ((size_t)tk * (size_t)OT + ot) * PACKED_W;
-    \\    const ulong merged = N == 40u ? exl3_n40_lane(words, lane) : exl3_n48_lane(words, lane);
-    \\    const float in0 = float(prepared[xb + (tk - tk0) * TILE + row0]);
-    \\    const float in1 = float(prepared[xb + (tk - tk0) * TILE + row1]);
-    \\    const float in2 = float(prepared[xb + (tk - tk0) * TILE + row2]);
-    \\    const float in3 = float(prepared[xb + (tk - tk0) * TILE + row3]);
+    \\  else if (FUNNEL && (N == 40u || (N == 48u && EXL3_FUNNEL48))) {
+    \\    // Both k-tiles' words load before either decodes; a k range is whole H128
+    \\    // blocks (8 tiles), so the second k-tile of an iteration is always in range.
+    \\    const device uint *wp = trellis_e + ((size_t)(tk0 + sg) * (size_t)OT + ot) * PACKED_W;
+    \\    const threadgroup half *pp = prepared + xb + sg * TILE;
     \\    const uint sh[8] = {N == 40u ? 18u : 21u, N == 40u ? 15u : 18u, N == 40u ? 13u : 15u, N == 40u ? 10u : 12u, N == 40u ? 8u : 9u, N == 40u ? 5u : 6u, 3u, 0u};
-    \\    const float ins[8] = {in0, in1, in2, in3, in0, in1, in2, in3};
-    \\    for (uint p = 0u; p < 4u; p++) {
-    \\      const uint2 cw = uint2(uint(merged >> sh[p * 2u]), uint(merged >> sh[p * 2u + 1u])) & uint2(0xffffu);
-    \\      const float2 w = exl3_decode2(cw);
-    \\      acc[p * 2u] = fma(ins[p * 2u], w.x, acc[p * 2u]);
-    \\      acc[p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[p * 2u + 1u]);
+    \\    for (uint tk = tk0 + sg; tk < tk1; tk += 2u * SGS) {
+    \\      ulong merged[2][OTPT];
+    \\      for (uint u = 0u; u < 2u; u++) {
+    \\        for (uint o = 0u; o < uint(OTPT); o++) {
+    \\          const device uint *words = wp + u * SGS * OT * PACKED_W + o * PACKED_W;
+    \\          merged[u][o] = N == 40u ? exl3_n40_lane(words, lane) : exl3_n48_lane(words, lane);
+    \\        }
+    \\      }
+    \\      for (uint u = 0u; u < 2u; u++) {
+    \\        const float in0 = float(pp[u * SGS * TILE + row0]);
+    \\        const float in1 = float(pp[u * SGS * TILE + row1]);
+    \\        const float in2 = float(pp[u * SGS * TILE + row2]);
+    \\        const float in3 = float(pp[u * SGS * TILE + row3]);
+    \\        const float ins[8] = {in0, in1, in2, in3, in0, in1, in2, in3};
+    \\        for (uint o = 0u; o < uint(OTPT); o++) {
+    \\          for (uint p = 0u; p < 4u; p++) {
+    \\            const uint2 cw = uint2(uint(merged[u][o] >> sh[p * 2u]), uint(merged[u][o] >> sh[p * 2u + 1u])) & uint2(0xffffu);
+    \\            const float2 w = exl3_decode2(cw);
+    \\            acc[o][p * 2u] = fma(ins[p * 2u], w.x, acc[o][p * 2u]);
+    \\            acc[o][p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[o][p * 2u + 1u]);
+    \\          }
+    \\        }
+    \\      }
+    \\      wp += 2u * SGS * OT * PACKED_W;
+    \\      pp += 2u * SGS * TILE;
     \\    }
-    \\  }
     \\  } else {
     \\    uint w0[4];
     \\    uint w1[4];
@@ -2041,28 +2095,31 @@ const PAIR_GEMV_SOURCE: [:0]const u8 =
     \\        const uint funnel = uint(merged >> shv[p]);
     \\        const uint2 cw = uint2((funnel >> frv[p]) & 0xffffu, funnel & 0xffffu);
     \\        const float2 w = exl3_decode2(cw);
-    \\        acc[p * 2u] = fma(ins[p * 2u], w.x, acc[p * 2u]);
-    \\        acc[p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[p * 2u + 1u]);
+    \\        acc[0][p * 2u] = fma(ins[p * 2u], w.x, acc[0][p * 2u]);
+    \\        acc[0][p * 2u + 1u] = fma(ins[p * 2u + 1u], w.y, acc[0][p * 2u + 1u]);
     \\      }
     \\    }
     \\  }
-    \\  float clo = (acc[0] + acc[1]) + (acc[2] + acc[3]);
-    \\  float chi = (acc[4] + acc[5]) + (acc[6] + acc[7]);
-    \\  clo += simd_shuffle_xor(clo, 1u);
-    \\  chi += simd_shuffle_xor(chi, 1u);
-    \\  clo += simd_shuffle_xor(clo, 2u);
-    \\  chi += simd_shuffle_xor(chi, 2u);
-    \\  if ((lane & 3u) == 0u) {
-    \\    partial[sg * 16u + pcol] = clo;
-    \\    partial[sg * 16u + pcol + 8u] = chi;
+    \\  for (uint o = 0u; o < uint(OTPT); o++) {
+    \\    float clo = (acc[o][0] + acc[o][1]) + (acc[o][2] + acc[o][3]);
+    \\    float chi = (acc[o][4] + acc[o][5]) + (acc[o][6] + acc[o][7]);
+    \\    clo += simd_shuffle_xor(clo, 1u);
+    \\    chi += simd_shuffle_xor(chi, 1u);
+    \\    clo += simd_shuffle_xor(clo, 2u);
+    \\    chi += simd_shuffle_xor(chi, 2u);
+    \\    if ((lane & 3u) == 0u) {
+    \\      partial[(o * SGS + sg) * 16u + pcol] = clo;
+    \\      partial[(o * SGS + sg) * 16u + pcol + 8u] = chi;
+    \\    }
     \\  }
     \\  threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\  if (lid < 16u) {
+    \\  if (lid < 16u * uint(OTPT)) {
+    \\    const uint o = lid >> 4u;
     \\    float sum = 0.0f;
     \\    for (uint g = 0u; g < SGS; g++) {
-    \\      sum += partial[g * 16u + lid];
+    \\      sum += partial[(o * SGS + g) * 16u + (lid & 15u)];
     \\    }
-    \\    y[(size_t)(slot * uint(NSPLIT) + split) * (size_t)(ODIM) + ot * TILE + lid] = sum;
+    \\    y[(size_t)(slot * uint(NSPLIT) + split) * (size_t)(ODIM) + (ot + o) * TILE + (lid & 15u)] = sum;
     \\  }
     \\  threadgroup_barrier(mem_flags::mem_threadgroup);
     \\}
@@ -2260,20 +2317,22 @@ fn pairGemv(s: mlx.mlx_stream, x: mlx.mlx_array, suhg: mlx.mlx_array, suhu: mlx.
     if (ush[ush.len - 1] != tsh[tsh.len - 1]) return error.BadExl3Shape;
     const out_tiles = @divExact(out_dim, 16);
     const nsplit: c_int = @intCast(pairSplitCountFor(in_dim));
-    const key = PairGemvKey{ .in_dim = in_dim, .out_dim = out_dim, .nslots = nslots, .nsplit = nsplit, .topk = topk, .n = rate.n };
+    const layout = gemvLayout(rate.n, out_tiles);
+    const key = PairGemvKey{ .in_dim = in_dim, .out_dim = out_dim, .nslots = nslots, .nsplit = nsplit, .topk = topk, .n = rate.n, .layout = layout };
     const cfg = pair_gemv_cfgs.get(key) orelse blk: {
         const c = mlx.mlx_fast_metal_kernel_config_new();
         errdefer _ = mlx.mlx_fast_metal_kernel_config_free(c);
         const sh = [_]c_int{ nslots * nsplit, out_dim };
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &sh, 2, .float32));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &sh, 2, .float32));
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(c, out_tiles * 128, nslots, nsplit));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(c, @divExact(out_tiles, layout.tiles) * 128, nslots, nsplit));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(c, 128, 1, 1));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "IDIM", in_dim));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "ODIM", out_dim));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "NSPLIT", nsplit));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "NHW", @intCast(rate.n)));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "TOPK", topk));
+        try addGemvLayout(c, layout);
         pair_gemv_cfgs.put(key, c);
         break :blk c;
     };
@@ -7379,7 +7438,8 @@ const DOWN_PREPARED_SOURCE: [:0]const u8 = blk: {
     const barrier = "threadgroup_barrier(mem_flags::mem_threadgroup);";
     const end = start + std.mem.indexOf(u8, DOWN_FUSED_SOURCE[start..], barrier).? + barrier.len;
     const head = metalReplaceAll(DOWN_FUSED_SOURCE[0..start], "threadgroup half prepared[uint(IDIM)];", "");
-    break :blk head ++ "const device half *prepared = middle + (size_t)slot * uint(IDIM);\n" ++ DOWN_FUSED_SOURCE[end..];
+    const tail = metalReplaceAll(DOWN_FUSED_SOURCE[end..], "const threadgroup half *pp", "const device half *pp");
+    break :blk head ++ "const device half *prepared = middle + (size_t)slot * uint(IDIM);\n" ++ tail;
 };
 
 const DecodeMidKey = struct { dim: c_int, nslots: c_int, nsplit: c_int };
@@ -7417,16 +7477,19 @@ fn downGemvPreparedMid(s: mlx.mlx_stream, ig: mlx.mlx_array, iu: mlx.mlx_array, 
     defer _ = mlx.mlx_array_free(middle);
     const tsh = mlx.getShape(trellis);
     const rate = try packedRate(tsh[tsh.len - 1]);
-    const key = DownFusedKey{ .in_dim = in_dim, .out_dim = out_dim, .nslots = nslots, .nsplit = nsplit, .n = rate.n };
+    const out_tiles = @divExact(out_dim, 16);
+    const layout = gemvLayout(rate.n, out_tiles);
+    const key = DownFusedKey{ .in_dim = in_dim, .out_dim = out_dim, .nslots = nslots, .nsplit = nsplit, .n = rate.n, .layout = layout };
     const cfg = down_prepared_cfgs.get(key) orelse blk: {
         const c = mlx.mlx_fast_metal_kernel_config_new();
         errdefer _ = mlx.mlx_fast_metal_kernel_config_free(c);
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &.{ nslots, out_dim }, 2, .float16));
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(c, @divExact(out_dim, 16) * 128, nslots, 1));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(c, @divExact(out_tiles, layout.tiles) * 128, nslots, 1));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(c, 128, 1, 1));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "IDIM", in_dim));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "ODIM", out_dim));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "NHW", @intCast(rate.n)));
+        try addGemvLayout(c, layout);
         down_prepared_cfgs.put(key, c);
         break :blk c;
     };
@@ -7524,6 +7587,78 @@ test "exl3 the n48 funnel engages for every non-MUL1 codebook" {
         n48_funnel_engaged = @splat(false);
         try n48FunnelCase(cb, 4, 318, true, null);
         try std.testing.expectEqual(cb != .mul1, n48_funnel_engaged[@backingInt(N48FunnelArm.pair)]);
+    }
+}
+
+test "exl3 decode GEMV layout: the lane funnel carries two tiles, every other reader one" {
+    const t = std.testing;
+    defer setDecodeParams(.mul1);
+    setDecodeParams(.{ .codebook = .mcg, .window = .w12 });
+    try t.expectEqual(GemvLayout{ .funnel = true, .tiles = 2 }, gemvLayout(40, 128));
+    try t.expectEqual(GemvLayout{ .funnel = true, .tiles = 2 }, gemvLayout(48, 40));
+    try t.expectEqual(GemvLayout{ .funnel = true, .tiles = 1 }, gemvLayout(40, 45));
+    try t.expectEqual(GemvLayout{ .funnel = false, .tiles = 1 }, gemvLayout(64, 128));
+    try t.expectEqual(GemvLayout{ .funnel = false, .tiles = 1 }, gemvLayout(44, 128));
+    setDecodeParams(.{ .codebook = .mul1, .window = .w16 });
+    try t.expectEqual(GemvLayout{ .funnel = true, .tiles = 2 }, gemvLayout(40, 128));
+    try t.expectEqual(GemvLayout{ .funnel = false, .tiles = 1 }, gemvLayout(48, 40));
+    funnel_off_for_test = true;
+    defer funnel_off_for_test = false;
+    try t.expectEqual(GemvLayout{ .funnel = false, .tiles = 1 }, gemvLayout(40, 128));
+}
+
+fn gemvOutBytes(a: mlx.mlx_array) ![]const u8 {
+    try mlx.check(mlx.mlx_array_eval(a));
+    const n = mlx.mlx_array_size(a);
+    return switch (mlx.mlx_array_dtype(a)) {
+        .float32 => std.mem.sliceAsBytes((mlx.mlx_array_data_float32(a) orelse return error.F32Unreadable)[0..n]),
+        .float16 => std.mem.sliceAsBytes((mlx.mlx_array_data_float16(a) orelse return error.F16Unreadable)[0..n]),
+        else => error.UnexpectedDtype,
+    };
+}
+
+/// The lane funnel's two-tile layout against the generic window reader at one
+/// tile per threadgroup: the pair planes and both downs must match to the bit.
+/// Both downs read the reference pair planes, so a down mismatch is its own.
+fn funnelLayoutBytesMatch(c: MimoMoeCase) !void {
+    setDecodeParams(c.dec);
+    defer setDecodeParams(.mul1);
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var f = try mimoMoeFixture(arena.allocator(), c);
+    defer f.deinit();
+    const a = f.arrays;
+    const hidden: c_int = @intCast(c.hidden);
+    const inter: c_int = @intCast(c.inter);
+    const nslots: c_int = @intCast(c.rows * c.topk);
+    var outs: [2][4]?mlx.mlx_array = @splat(@splat(null));
+    defer for (outs) |arm| for (arm) |o| {
+        if (o) |v| _ = mlx.mlx_array_free(v);
+    };
+    for (0..2) |arm| {
+        funnel_off_for_test = arm == 0;
+        defer funnel_off_for_test = false;
+        outs[arm][0], outs[arm][1] = try pairGemv(s, a[8], a[3], a[3], a[0], a[1], a[7], hidden, inter, nslots, @intCast(c.topk));
+        outs[arm][2] = try downGemvFusedMid(s, outs[0][0].?, outs[0][1].?, a[2], a[4], a[4], a[5], a[7], inter, hidden, nslots);
+        outs[arm][3] = try downGemvPreparedMid(s, outs[0][0].?, outs[0][1].?, a[2], a[4], a[4], a[5], a[7], inter, hidden, nslots);
+    }
+    for (outs[0], outs[1]) |want, got| try std.testing.expectEqualSlices(u8, try gemvOutBytes(want.?), try gemvOutBytes(got.?));
+}
+
+test "exl3 decode GEMV funnel layout is bit-identical to the one-tile reader" {
+    const cases = [_]struct { n: u32, topk: usize, dec: exl3.Decode }{
+        .{ .n = 40, .topk = 8, .dec = .{ .codebook = .mcg, .window = .w12 } },
+        .{ .n = 40, .topk = 8, .dec = .{ .codebook = .mul1, .window = .w16 } },
+        .{ .n = 48, .topk = 10, .dec = .{ .codebook = .mcg, .window = .w12 } },
+        .{ .n = 48, .topk = 10, .dec = .{ .codebook = .mcg, .window = .w15 } },
+        .{ .n = 48, .topk = 10, .dec = .{ .codebook = .mul1, .window = .w16 } },
+    };
+    for (cases) |k| {
+        for ([_]usize{ 1, 2, 4, 8, 16 }) |rows| {
+            try funnelLayoutBytesMatch(.{ .e = 16, .hidden = 1024, .inter = 512, .topk = k.topk, .rows = rows, .rate = .{ .n = k.n }, .dec = k.dec, .seed = 318 + rows, .banks = MIMO_BANKS, .x_scale = 3 });
+        }
     }
 }
 

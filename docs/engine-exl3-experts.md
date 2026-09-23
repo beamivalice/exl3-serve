@@ -57,6 +57,13 @@ source FP8→bf16 loader (`usesMimoSourceTrunk`), billed dense by `mimoSourceRes
   fused into the pair GEMV and the SwiGLU mid is prepared once per (row, expert) (`preparedMidOn`, disabled for
   Qwen). Rows ≤ `DECODE_ROWS_MAX` or verify rows take this chain; wider takes `moePrefill`. The MTP head's MoE rows
   ride the decode chain and refuse wider (`Exl3MtpRowsExceedDecode`).
+- **The decode GEMVs are bound by fixed per-tile work, not DRAM** (64-bit index math, two word loads and a 64-bit
+  shift, four input reads, loop control). The lane-funnel arms (`gemvLayout`: n40, n48 off MUL1) carry two output
+  tiles per threadgroup, load both k-tiles of an iteration before decoding, and bump pointers; the per-tile
+  accumulation order is unchanged, so the bytes equal the one-tile generic reader's (`FUNNEL=0`, the test's
+  reference). A layout that changes which simdgroup sums which k-tile (8 simdgroups) is NOT bit-identical.
+- Dead for the decode GEMVs (microbenched): 4 or 8 tiles per threadgroup, software prefetch, 2 simdgroups, a
+  threadgroup LUT decode, a 24-bit multiply split, half2 input reads, bitfield extracts.
 - **The SwiGLU chain is f32**: gate, up, sigmoid, SiLU and their product stay in f32 registers through the multiply
   by the down suh. In f16, MiMo's activations put gate and up near 400 each and the product past 65504, so a whole
   routed row became inf. The next ceiling is the f16 down inner plane (about 2x above the measured peak).
