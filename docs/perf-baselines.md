@@ -227,8 +227,24 @@ On main 9942e8e (head 83b564a, binary built 04:41, the served pack as stored, sa
 `mimo-mtp`, raw `runs/boot7*`): forced depth 3 code / count / story byte-identical, serial 52.4 -> MTP 66.6 / 84.3 /
 46.2, verify 44.6 ms at 4 rows. One auto boot, llmprobe `--bench-only` MTP direct vs serial through an
 `enable_mtp: false` proxy: decode 59.1 vs 49.6, predictable / novel 71.1 / 50.5 vs 49.6 / 49.9, context 0.5k / 4k / 8k
-/ 16k 55.3 / 60.3 / 60.3 / 58.9 vs 49.7 / 49.4 / 48.9 / 47.6, prefill 2k 925 vs 1007 (the heads' prompt history costs
-~8% of a prefill); auto A/B 3/3 byte-identical. That boot's serial ran 49.6, below the first boot's 52.4.
+/ 16k 55.3 / 60.3 / 60.3 / 58.9 vs 49.7 / 49.4 / 48.9 / 47.6, prefill 2k 925 vs 1007 (one reading per arm: noise, see
+below); auto A/B 3/3 byte-identical. That boot's serial ran 49.6, below the first boot's 52.4.
+
+<a id="mimo-mtp-prefill"></a>
+MTP does not slow MiMo's prefill (7ce480f, binary 05:55, the served pack renamed `MiMo-V2.6-Flash-Sushi2.5bpw`, kv8,
+`--mtp --no-pld --prefix-cache-entries 0`, ctx 81920, `taskpolicy -a`, lock `mimo-mtp-prefill`, raw
+`/Users/beam/claude-tmp/mimo-mtp-prefill/runs/base_{a,b64k,c}*`). One boot per row, MTP on vs `enable_mtp: false`
+alternated ABBA, 8 tokens, median streamed TTFT:
+
+| prompt | pairs | TTFT on / off (ms) | paired diff on - off | MTP-only prefill work (eval, on - off) |
+|---|---|---|---|---|
+| 2.0k (1 chunk) | 10 | 1904 / 1914 | -2.5 ms (se 9.2) | +4 ms |
+| 17.0k (5 chunks of 4096) | 10 | 17285 / 17286 | +108 ms (se 119) | +16 ms |
+| 71.4k (18 chunks) | 2 | 90561 / 89958 | +604 ms (se 1305) | +116 ms |
+
+The MTP-only work is the three heads' last-window forward on every chunk (~6 ms per 4096-row chunk, <= 0.2%); the
+trunk chunk with its full-hidden capture reads the same as without. Within one arm at 2.4k an earlier boot spread
+1862-2248 ms, so a one-reading gap says nothing.
 
 MiMo EXL3 kernel history (n=40 readers, codebook-generic): the n=40 prefill reader took the synthetic MoE layer from
 12.45 to 8.48 ms at 512 rows; the prefill scatter fused into the finish reduce added +5-9%; the n=40 decode lane

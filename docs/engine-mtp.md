@@ -62,6 +62,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
   predictable text: forced depth 3 is +27-52% on code/lists/JSON and -10 to -18% on prose; per-index acceptance on
   code 1.00/0.91/0.81 confirms the non-chained semantics. Greedy MTP is byte-identical to serial (18/18 pairs at 256
   tokens, forced and auto). Numbers: [perf-baselines](perf-baselines.md#mimo-verify-rows).
+- **MTP costs MiMo's prefill nothing measurable**: each chunk's head catch-up (three heads x the 128-row window) is
+  ~6 ms per 4096-row chunk, and same-boot TTFT on vs off stays within noise from 2k to 71k
+  ([perf-baselines](perf-baselines.md#mimo-mtp-prefill)). Compare prefill arms interleaved in one boot, never one
+  reading per arm.
 - The EV planner prices a MiMo EXL3 round with its own surface (`.mimo_exl3`, `MTP_EV_MIMO_EXL3_COSTS`: draft
   .04, verify row .44 of a forward, flat to depth 3); the generic surface prices a row at .20 and over-drafts prose.
 
