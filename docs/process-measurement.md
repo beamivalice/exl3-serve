@@ -39,8 +39,12 @@ scripts/gpu-lock.sh release <owner>
 - Heavy = model load, conversion or pilot, `kld capture|compare`, bench, kernel microbench or timing, Metal trace.
   `zig build test` is not heavy.
 - Acquire immediately before each run, release as soon as it ends: never across a queue or batch, never while
-  analysing, editing, building or waiting. An A B B A re-acquires per arm. `scripts/gpu-lock.sh status` shows the
-  holder. All agents on the box share one lock directory (`GPU_LOCK_DIR`, default `/tmp/sushi-gpu.lock.d`).
+  analysing, editing, building or waiting. An A B B A re-acquires per arm. All agents on the box share one lock
+  directory (`GPU_LOCK_DIR`, default `/tmp/sushi-gpu.lock.d`).
+- Waiters are served first-come-first-served: `acquire` takes the next ticket in `${GPU_LOCK_DIR}.queue/` (a symlink
+  whose text is `<pid> <owner>`) and only the lowest live ticket may take the lock, so a later arrival that polls
+  faster cannot jump the queue. A ticket whose waiter process is gone is skipped and pruned. `scripts/gpu-lock.sh
+  status` prints the holder (or `free`), then the queue in order.
 - In a script: `trap "scripts/gpu-lock.sh release <owner>" EXIT` right after the acquire.
 
 ## 4. Restore QoS for agent-launched timing

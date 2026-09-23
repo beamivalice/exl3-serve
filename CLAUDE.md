@@ -183,8 +183,8 @@ Procedures and examples: [docs/process-measurement.md](docs/process-measurement.
 
 **GPU sharing.** ONE heavy GPU job at a time on the box: model loads, conversions and pilots, KLD, benches, kernel
 timing, traces (`zig build test` is not heavy).
-- Acquire the lock immediately before EACH run and release right after: `scripts/gpu-lock.sh acquire|release <owner>`,
-  `scripts/gpu-lock.sh status` (lock dir `${GPU_LOCK_DIR:-/tmp/sushi-gpu.lock.d}`, shared by every agent).
+- Acquire the lock immediately before EACH run and release right after: `scripts/gpu-lock.sh acquire|release <owner>`;
+  waiters are served FIFO by ticket, `status` shows holder + queue (`${GPU_LOCK_DIR:-/tmp/sushi-gpu.lock.d}`).
 - Never hold it across a batch or queue, or while analysing, editing, building or waiting. An A B B A re-acquires per
   arm. Every brief that runs on the GPU names the lock.
 
