@@ -3,7 +3,7 @@
 #
 # Live layer of the format test suite (the hermetic layer is
 # src/format_corpus_test.zig — run `zig build test -Dtest-filter="format corpus"`).
-# Boots ~6 format-class representatives one at a time and asserts, per model:
+# Boots each served model (qwen4_exp, mimo_v2) one at a time and asserts, per model:
 #
 #   1. Thinking OFF baseline: answer in content, no control-tag leak
 #   2. Thinking ON truncated: reasoning_content only, content empty/clean
@@ -22,11 +22,10 @@
 # harvesting into src/format_corpus_test.zig.
 #
 # Usage: ./tests/test_format_matrix.sh
-#   FORMAT_MODELS=qwen36,gemma4-e4b  — csv filter of logical names
+#   FORMAT_MODELS=qwen4_exp          — csv filter of logical names
 #   Missing model paths skip cleanly (exit 0 if nothing ran but nothing failed).
 #
-# Runtime: ~3–6 min/model, ~20–30 min full matrix.
-# FORMAT_MODELS=gemma4-e4b is the ~3 min smoke run.
+# Runtime: ~3–6 min/model once the weights are warm.
 
 set -u
 
@@ -46,16 +45,10 @@ YELLOW='\033[0;33m'
 BLUE='\033[1;34m'
 NC='\033[0m'
 
-# logical|display|path|engine|has_thinking
+# logical|display|path|engine|has_thinking|extra server flags
 MODELS=(
-    "qwen36|Qwen 3.6 27B dense (think tags + raw-JSON tools)|$HOME/.lmstudio/models/mlx-community/Qwen3.6-27B-4bit|mlx|yes"
-    "gemma4-12b|Gemma 4 12B (channel tags + custom string-delim tool args)|$HOME/.mlx-serve/models/mlx-community/gemma-4-12b-it-4bit|mlx|yes"
-    "gemma4-e4b|Gemma 4 E4B (standard gemma4)|$HOME/.lmstudio/models/mlx-community/gemma-4-e4b-it-4bit|mlx|no"
-    "qwen3-coder|Qwen3-Coder 30B-A3B (qwen3_moe flat-brace quirks)|$HOME/.mlx-serve/models/mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit|mlx|no"
-    "gemma3-12b|Gemma 3 12B (fallback chat format)|$HOME/.mlx-serve/models/mlx-community/gemma-3-12b-it-qat-4bit|mlx|no"
-    "ds4-flash|DeepSeek-V4-Flash GGUF (embedded ds4 engine)|$HOME/.mlx-serve/models/antirez/deepseek-v4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2.gguf|gguf|no"
-    "qwen38-27b|Qwen 3.8 27B dense (think tags + XML tools)|$HOME/.mlx-serve/models/ddalcu/Qwen3.8-27B-MLX-Serve-4bit|mlx|yes"
-    "flashnext-gguf|Qwen 3.8 Flash Next GGUF (embedded ds4 engine)|/Volumes/G Drive SSD/models-dl/antirez/qwen3.8-flash-next-gguf/Qwen3.8-Flash-Next-Q2.gguf|gguf|yes"
+    "qwen4_exp|Qwen3.8 Flash-Next (think tags + XML tools)|${QWEN4_EXP_MODEL:-$HOME/.mlx-serve/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit}|mlx|yes|"
+    "mimo_v2|MiMo-V2.6-Flash (streamed MXFP4 experts)|${MIMO_STREAM_MODEL:-$HOME/.mlx-serve/models/XiaomiMiMo/MiMo-V2.6-Flash-RL}|mlx|yes|--ssd-budget-gb ${MIMO_SSD_BUDGET_GB:-60} --no-vision"
 )
 
 # FORMAT_MODELS=csv filter of logical names. Unknown names simply match
@@ -158,7 +151,7 @@ print(f"{name_ok}|{json_ok}|{path_ok}")
 '
 
 run_model() {
-    local logical="$1" display="$2" path="$3" engine="$4" has_thinking="$5"
+    local logical="$1" display="$2" path="$3" engine="$4" has_thinking="$5" extra="$6"
 
     echo -e "${BLUE}=== [$logical] $display ===${NC}"
 
@@ -192,8 +185,9 @@ run_model() {
     local log="/tmp/test_format_matrix_$logical.log"
     pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
     sleep 1
+    # shellcheck disable=SC2086 # extra is a flag list
     "$BINARY" --model "$path" --serve --port "$PORT" --ctx-size 8192 \
-        --log-level debug > "$log" 2>&1 &
+        --log-level debug $extra > "$log" 2>&1 &
     local sp=$!
 
     # MoE models can take 90+ s on cold weight pages — allow 240 s.
@@ -364,8 +358,8 @@ print(f"{name_ok}|{int(json_ok)}|{path_ok}|{leak}")')
 trap 'pkill -f "mlx-serve.*--port $PORT" 2>/dev/null' EXIT
 
 for entry in "${MODELS[@]}"; do
-    IFS='|' read -r logical display path engine has_thinking <<< "$entry"
-    run_model "$logical" "$display" "$path" "$engine" "$has_thinking"
+    IFS='|' read -r logical display path engine has_thinking extra <<< "$entry"
+    run_model "$logical" "$display" "$path" "$engine" "$has_thinking" "$extra"
     pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
     sleep 2
 done

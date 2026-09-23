@@ -1,16 +1,19 @@
 #!/bin/bash
-# test_smoke_matrix.sh — quick hot smoke: every text arch on the box × server
-# configs × every API surface. Not a bench and not a correctness oracle: the
+# test_smoke_matrix.sh — quick hot smoke: both served archs (qwen4_exp,
+# mimo_v2) × server configs × every API surface. Not a bench and not a correctness oracle: the
 # bar per cell is "answers, no leak, no crash", so a checkpoint's choices
 # (to think, to call the tool) are branched on, never asserted.
 #
 #   ./tests/test_smoke_matrix.sh                 # every arch found, all configs
-#   SMOKE_ARCHES=gemma4,qwen3_5 ./tests/test_smoke_matrix.sh
+#   SMOKE_ARCHES=qwen4_exp ./tests/test_smoke_matrix.sh
 #   SMOKE_CONFIGS=default,kv4 ./tests/test_smoke_matrix.sh
-#   SMOKE_MAX_GB=20 ./tests/test_smoke_matrix.sh  # skip bigger packs (default 40)
+#   SMOKE_MAX_GB=80 ./tests/test_smoke_matrix.sh  # skip bigger packs (default: no cap)
+#   QWEN4_EXP_MODEL=<pack> MIMO_STREAM_MODEL=<pack> MIMO_SSD_BUDGET_GB=60
 #
 # Configs: default (kv8) | off (--kv-quant off) | kv4 (--kv-quant 4) | kv8 (--kv-quant 8) | mtp (--mtp, only
-# where the pack ships a head) | nospec (--no-pld --no-mtp --no-drafter).
+# where the pack ships a head and does not stream) | nospec (--no-pld --no-mtp
+# --no-drafter). MiMo streams its experts, so every mimo_v2 boot carries
+# --ssd-budget-gb.
 # Per boot: chat non-stream/stream, thinking on/off, tools, json_schema,
 # logprobs, max_tokens cap, prefix-cache hit, 2-way concurrency, /v1/completions,
 # /v1/messages (both modes), /v1/responses (both modes), Ollama /api/chat +
@@ -21,34 +24,17 @@ cd "$(dirname "$0")/.."
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
 PORT="${PORT:-11431}"
 BASE="http://127.0.0.1:$PORT"
-MAX_GB="${SMOKE_MAX_GB:-40}"
+MAX_GB="${SMOKE_MAX_GB:-0}"
 OUT="${SMOKE_OUT:-$HOME/claude-tmp/smoke-matrix-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT/home"
 
 [[ -x "$BINARY" ]] || { echo "[fatal] $BINARY missing — zig build -Doptimize=ReleaseFast"; exit 1; }
 
-GD="/Volumes/G Drive SSD"
 MD="$HOME/.mlx-serve/models"
-LS="$HOME/.lmstudio/models"
 # arch|thinking(yes/no)|candidate paths (first that exists wins)
 ARCHES=(
-    "gemma4|yes|$MD/mlx-community/gemma-4-e4b-it-8bit|$MD/mlx-community/gemma-4-e4b-it-4bit"
-    "gemma4_moe|yes|$LS/mlx-community/gemma-4-26B-A4B-it-qat-4bit|$GD/models/mlx-community/gemma-4-26b-a4b-it-4bit"
-    "gemma3|no|$GD/models/mlx-community/gemma-3-12b-it-4bit"
-    "qwen3_5|yes|$MD/mlx-community/Qwen3.5-0.8B-MLX-4bit|$MD/lmstudio-community/Qwen3.5-4B-MLX-4bit"
-    "qwen3_5_27b|yes|$MD/ddalcu/Qwen3.8-27B-MLX-Serve-4bit"
-    "qwen3_5_moe|yes|$GD/models/ddalcu/Qwen3.6-35B-A3B-MLX-Serve-4bit|$GD/models-dl/ddalcu/Qwen3.6-35B-A3B-MLX-Serve-4bit"
-    "lfm2|yes|$MD/LiquidAI/LFM2.5-2.6B-MLX-mxfp4|$GD/models/mlx-community/LFM2.5-2.6B-8bit"
-    "lfm2_moe|yes|$GD/models/LiquidAI/LFM2.5-8B-A1B-MLX-8bit"
-    "lfm2_vl|yes|$MD/mlx-community/LFM2.5-VL-1.6B-4bit"
-    "llama|no|$GD/models/mlx-community/Llama-3.2-3B-Instruct-4bit"
-    "mistral|no|$GD/models/mlx-community/Mistral-7B-Instruct-v0.3-4bit"
-    "nemotron_h|yes|$GD/models-dl/mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4"
-    "muse_glimmer|yes|$MD/ddalcu/Muse-Glimmer-30B-MLX-Serve-4bit"
-    "spark2_5|yes|$MD/abenzerps/Spark-X2.5-4B-MLX-8bit"
-    "k2_horizon|yes|$MD/mlx-community/K2-Horizon-7B-oQ6e"
-    "laguna|yes|$GD/models/poolside/Laguna-XS-2.1-NVFP4-mlx"
-    "qwen4_exp|yes|$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
+    "qwen4_exp|yes|${QWEN4_EXP_MODEL:-$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit}|$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw"
+    "mimo_v2|yes|${MIMO_STREAM_MODEL:-$MD/XiaomiMiMo/MiMo-V2.6-Flash-RL}"
 )
 CONFIGS="${SMOKE_CONFIGS:-default,off,kv4,mtp,nospec}"
 
@@ -259,18 +245,22 @@ for entry in "${ARCHES[@]}"; do
     for p in "${cands[@]}"; do [[ -e "$p" ]] && { model="$p"; break; }; done
     if [[ -z "$model" ]]; then CELL="$arch"; skip "$arch" "no checkpoint on this box"; continue; fi
     gb=$(( $(du -sk "$model" 2>/dev/null | cut -f1) / 1024 / 1024 ))
-    if [[ "$gb" -gt "$MAX_GB" ]]; then CELL="$arch"; skip "$arch" "${gb} GB > SMOKE_MAX_GB=$MAX_GB"; continue; fi
+    if [[ "$MAX_GB" -gt 0 && "$gb" -gt "$MAX_GB" ]]; then CELL="$arch"; skip "$arch" "${gb} GB > SMOKE_MAX_GB=$MAX_GB"; continue; fi
+
+    arch_flags=()
+    [[ "$arch" == mimo_v2 ]] && arch_flags=(--ssd-budget-gb "${MIMO_SSD_BUDGET_GB:-60}" --no-vision)
 
     for cfg in "${WANT_CFG[@]}"; do
         CELL="$arch.$cfg"
-        flags=()
+        flags=(${arch_flags[@]+"${arch_flags[@]}"})
         case "$cfg" in
             default) ;;
-            off)     flags=(--kv-quant off) ;;
-            kv4)     flags=(--kv-quant 4) ;;
-            kv8)     flags=(--kv-quant 8) ;;
-            mtp)     has_mtp_head "$model" || { skip "$CELL" "no MTP head"; continue; }; flags=(--mtp) ;;
-            nospec)  flags=(--no-pld --no-mtp --no-drafter) ;;
+            off)     flags+=(--kv-quant off) ;;
+            kv4)     flags+=(--kv-quant 4) ;;
+            kv8)     flags+=(--kv-quant 8) ;;
+            mtp)     [[ "$arch" == mimo_v2 ]] && { skip "$CELL" "streamed experts refuse MTP"; continue; }
+                     has_mtp_head "$model" || { skip "$CELL" "no MTP head"; continue; }; flags+=(--mtp) ;;
+            nospec)  flags+=(--no-pld --no-mtp --no-drafter) ;;
             *) skip "$CELL" "unknown config"; continue ;;
         esac
         # GGUF rides an embedded engine: KV-quant flags are MLX-only

@@ -1,7 +1,6 @@
 #!/bin/bash
-# test_validator_matrix.sh — API-compliance + agentic matrix across every
-# locally-available Zig MLX architecture plus one
-# ds4-engine GGUF.
+# test_validator_matrix.sh — API-compliance + agentic matrix across both
+# served architectures (qwen4_exp, mimo_v2).
 #
 # Per model, two layers:
 #   1. llmprobe (~/projects/agents/llmprobe) in auto
@@ -11,13 +10,13 @@
 #      mlx.html, then add JS) via tests/pi_integration_run.sh, which manages
 #      its own server lifecycle and appends audit_format leak markers.
 #
-# One model loaded at a time; missing weights skip cleanly. The 81GB ds4
-# model cannot coexist with another large resident model — this script
-# pkills ALL serving mlx-serve instances up front (including the app's).
+# One model loaded at a time; missing weights skip cleanly. Both models are
+# too large to coexist — this script pkills ALL serving mlx-serve instances
+# up front.
 #
 # Usage:
 #   ./tests/test_validator_matrix.sh                      # full matrix
-#   VALIDATOR_MODELS=gemma4,ds4 ./tests/...               # csv filter
+#   VALIDATOR_MODELS=qwen4_exp ./tests/...                # csv filter
 #   SKIP_PI=1 ./tests/test_validator_matrix.sh            # llmprobe only
 #   SKIP_PROBE=1 ./tests/test_validator_matrix.sh         # pi only
 #   BINARY=...  PORT=...  LLMPROBE_DIR=...                # overrides
@@ -39,16 +38,12 @@ mkdir -p "$RESULTS"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
-# logical|display|path|pi_case|probe_timeout_s
-# pi_case must exist in pi_integration_run.sh's html matrix.
+# logical|display|path|pi_case|probe_timeout_s|extra server flags
+# pi_case must exist in pi_integration_run.sh's html matrix; empty = no pi
+# layer (pi's driver boots without the streaming budget MiMo needs).
 MODELS=(
-    "qwen2|Qwen2.5-Coder 32B 8-bit (qwen2)|$HOME/.mlx-serve/models/mlx-community/Qwen2.5-Coder-32B-Instruct-8bit|html-coder|150"
-    "gemma4|Gemma 4 E4B 8-bit (gemma4)|$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit|html-e4b|90"
-    "gemma3|Gemma 3 12B QAT 4-bit (gemma3)|$HOME/.mlx-serve/models/mlx-community/gemma-3-12b-it-qat-4bit|html-gemma3|90"
-    "qwen36|Qwen3.6 27B dense 4-bit (qwen3_5)|$HOME/.lmstudio/models/mlx-community/Qwen3.6-27B-4bit|html-qwen36|150"
-    "qwen36-moe|Qwen3.6 35B-A3B 6-bit (qwen3_5_moe)|$HOME/.mlx-serve/models/mlx-community/Qwen3.6-35B-A3B-6bit|html-qwen-think|150"
-    "qwen3-coder|Qwen3-Coder 30B-A3B 8-bit (qwen3_moe)|$HOME/.mlx-serve/models/mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit|html-coder|150"
-    "ds4|DeepSeek-V4-Flash GGUF (ds4 engine)|$HOME/.mlx-serve/models/antirez/deepseek-v4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2.gguf|html-ds4|240"
+    "qwen4_exp|Qwen3.8 Flash-Next (qwen4_exp)|${QWEN4_EXP_MODEL:-$HOME/.mlx-serve/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit}|html-qwen4|240|"
+    "mimo_v2|MiMo-V2.6-Flash streamed (mimo_v2)|${MIMO_STREAM_MODEL:-$HOME/.mlx-serve/models/XiaomiMiMo/MiMo-V2.6-Flash-RL}||240|--ssd-budget-gb ${MIMO_SSD_BUDGET_GB:-60} --no-vision"
 )
 
 if [[ -n "${VALIDATOR_MODELS:-}" ]]; then
@@ -80,9 +75,10 @@ kill_servers() {
     done
 }
 
-start_server() { # path logfile -> 0 on healthy
+start_server() { # path logfile extra-flags -> 0 on healthy
+    # shellcheck disable=SC2086 # $3 is a flag list
     "$BINARY" --model "$1" --serve --port "$PORT" --log-level info \
-        --ctx-size 32768 > "$2" 2>&1 &
+        --ctx-size 32768 $3 > "$2" 2>&1 &
     SERVER_PID=$!
     for _ in $(seq 1 300); do
         curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && return 0
@@ -103,7 +99,7 @@ overall_fail=0
 declare -a ROWS
 
 for entry in "${MODELS[@]}"; do
-    IFS='|' read -r logical display path pi_case probe_timeout <<< "$entry"
+    IFS='|' read -r logical display path pi_case probe_timeout extra <<< "$entry"
     echo -e "\n${YELLOW}===== $logical — $display =====${NC}"
     if [[ ! -e "$path" ]]; then
         echo -e "${YELLOW}SKIP${NC}: model path missing: $path"
@@ -117,7 +113,7 @@ for entry in "${MODELS[@]}"; do
     if [[ -z "${SKIP_PROBE:-}" ]]; then
         server_log="$RESULTS/$logical.server.log"
         probe_log="$RESULTS/$logical.probe.log"
-        if start_server "$path" "$server_log"; then
+        if start_server "$path" "$server_log" "$extra"; then
             node "$LLMPROBE_MJS" "127.0.0.1:$PORT" --timeout "$probe_timeout" \
                 2>&1 | strip_ansi > "$probe_log"
             probe_rc=${PIPESTATUS[0]}
@@ -143,7 +139,7 @@ for entry in "${MODELS[@]}"; do
     fi
 
     # ---- Layer 2: pi agentic 2-turn html case (multi-turn tool calls) ------
-    if [[ -z "${SKIP_PI:-}" ]]; then
+    if [[ -z "${SKIP_PI:-}" && -n "$pi_case" ]]; then
         pi_log="$RESULTS/$logical.pi.log"
         MLX_BIN="$BINARY" PI_CASES="$pi_case" "$REPO/tests/pi_integration_run.sh" html \
             2>&1 | strip_ansi > "$pi_log"

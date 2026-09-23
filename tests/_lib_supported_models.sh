@@ -1,12 +1,8 @@
 #!/bin/bash
 # Shared helper for multi-model tests: enumerate model subdirectories under a
-# root, filtering out any whose `config.json` declares a `model_type` we don't
-# support. Keeps the multi-model test family from picking up partially-
-# downloaded or wrong-arch checkpoints (e.g. a `deepseek_v4` directory that
-# would crash mlx-serve on tokenizer load).
-#
-# Must stay in sync with `supported_model_types` in src/model_discovery.zig
-# and the `model_type` branches in src/model.zig:parseConfigFromJson.
+# root, filtering out any whose `config.json` declares a `model_type` this
+# build does not serve. Must stay in sync with the arch-acceptance gate
+# (`served_model_types` in src/model.zig): any other arch is refused at load.
 #
 # Usage:
 #   source "$(dirname "$0")/_lib_supported_models.sh"
@@ -19,16 +15,7 @@ list_supported_models() {
     python3 - "$root" "$limit" <<'PY'
 import json, os, sys
 root, limit = sys.argv[1], sys.argv[2]
-supported = {
-    "gemma3", "gemma4", "gemma4_text",
-    "qwen3", "qwen3_5", "qwen3_5_text",
-    "qwen3_5_moe", "qwen3_5_moe_text",
-    "qwen3_next",
-    "llama", "mistral",
-    "nemotron_h", "bert",
-    "bailing_hybrid",
-}
-# lfm2 is a prefix match — any model_type starting with 'lfm2' is supported.
+supported = {"qwen4_exp", "mimo_v2"}
 # The models root is TWO-LEVEL (`<org>/<repo>`); flat `<repo>` is the legacy shape.
 def candidates(root):
     try:
@@ -62,12 +49,10 @@ for name in candidates(root):
         qmode = q.get("mode")
     except Exception:
         continue
-    if mt not in supported and not mt.startswith("lfm2"):
+    if mt not in supported:
         continue
-    # If quantized, only affine is supported. Skips nvfp4 / other non-MLX
-    # quants — they share the gemma/qwen model_type but use a weight layout
-    # mlx-serve's safetensors loader can't decode.
-    if qmode is not None and qmode != "affine":
+    # MiMo's routed experts stay native MXFP4; everything else is affine.
+    if qmode is not None and qmode not in ("affine", "mxfp4"):
         continue
     out.append(name)
 n = int(limit) if limit else len(out)

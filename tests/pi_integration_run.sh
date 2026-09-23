@@ -8,22 +8,23 @@
 # Requires: pi (npm -g @mariozechner/pi-coding-agent), node, python3.
 #
 # Usage: tests/pi_integration_run.sh [matrix]
-#   matrix=all (default): every model × configured mode, express-todo scenario
-#   matrix=quick       : e4b only (smoke), express-todo scenario
-#   matrix=html        : every architecture, 2-turn html scenario —
+#   matrix=all (default): qwen4_exp thinking off + on, express-todo scenario
+#   matrix=quick       : qwen4_exp thinking on only, express-todo scenario
+#   matrix=html        : qwen4_exp, 2-turn html scenario —
 #                        turn 1 creates mlx.html, turn 2 adds JS; scored on
 #                        file existence/structure/content/JS plus the
 #                        audit_format markers (junk filenames, tag leaks,
 #                        thinking separation in the pi session)
-#   matrix=html-quick  : e4b only, html scenario
-#   PI_CASES=csv       : filter cases by label (e.g. PI_CASES=html-12b)
+#   matrix=html-quick  : same as html
+#   PI_CASES=csv       : filter cases by label (e.g. PI_CASES=html-qwen4)
+#   QWEN4_EXP_MODEL    : pack path override
 #   MLX_BIN=path       : server binary override (default: zig-out/bin/mlx-serve)
 #
 # Writes per-run logs into tests/pi-results/ and appends a
 # summary line to tests/pi_integration_run.summary.tsv.
 
 set -u
-REPO="/Users/david/projects/agents/mlx-serve"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 RESULTS="$REPO/tests/pi-results"
 SUMMARY="$REPO/tests/pi_integration_run.summary.tsv"
 MLX_BIN="${MLX_BIN:-$REPO/zig-out/bin/mlx-serve}"
@@ -42,15 +43,7 @@ mkdir -p "$RESULTS" "$WORKSPACE_ROOT"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 
-# -----------------------------------------------------------------------------
-# Model catalog. Each row: model_id | path | served_name | reasoning_supported
-#   served_name is what mlx-serve reports in /v1/models (used by pi as id).
-# -----------------------------------------------------------------------------
-MODELS=(
-    "e4b|$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit|gemma4|no"
-    "a4b|$HOME/.mlx-serve/models/mlx-community/gemma-4-26b-a4b-it-4bit|gemma4|no"
-    "qwen|$HOME/.mlx-serve/models/mlx-community/Qwen3.6-35B-A3B-6bit|qwen3_5_moe|yes"
-)
+QWEN4="${QWEN4_EXP_MODEL:-$HOME/.mlx-serve/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit}"
 
 kill_mlx_serve() {
     # Match by --port, not by binary path — MLX_BIN may point at the app
@@ -424,35 +417,19 @@ run_one_case() {
 declare -a CASES
 
 # Case format: label|path|served_name|thinking_flag|thinking_format|reasoning  (6 fields, 5 pipes)
-# Gemma 4 E4B — streaming, no thinking
-CASES+=("e4b-stream|$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit|gemma4|||false")
+# qwen4_exp — streaming, thinking MEDIUM (pi sends enable_thinking=true)
+CASES+=("qwen4-think|$QWEN4|qwen4_exp|--thinking medium|qwen|true")
 
 if [ "$MATRIX" = "all" ]; then
-    # Gemma 4 26B-A4B — streaming, no thinking
-    CASES+=("a4b-stream|$HOME/.mlx-serve/models/mlx-community/gemma-4-26b-a4b-it-4bit|gemma4|||false")
-
-    # Qwen3.6 35B — streaming, thinking OFF (pi sends enable_thinking=false)
-    CASES+=("qwen-no-think|$HOME/.mlx-serve/models/mlx-community/Qwen3.6-35B-A3B-6bit|qwen3_5_moe|--thinking off|qwen|true")
-
-    # Qwen3.6 35B — streaming, thinking MEDIUM (pi sends enable_thinking=true)
-    CASES+=("qwen-think|$HOME/.mlx-serve/models/mlx-community/Qwen3.6-35B-A3B-6bit|qwen3_5_moe|--thinking medium|qwen|true")
+    # qwen4_exp — streaming, thinking OFF (pi sends enable_thinking=false)
+    CASES+=("qwen4-no-think|$QWEN4|qwen4_exp|--thinking off|qwen|true")
 fi
 
-# HTML scenario: one case per supported architecture (gemma4 dense E4B + 12B,
-# gemma4 MoE, qwen3_5_moe with thinking, qwen3_moe coder, gemma3 fallback).
+# MiMo streams its experts and needs --ssd-budget-gb, which this driver's
+# server boot does not pass, so the html scenario covers qwen4_exp only.
 if [ "$SCENARIO" = "html" ]; then
     CASES=()
-    CASES+=("html-e4b|$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit|gemma4|||false")
-    if [ "$MATRIX" = "html" ]; then
-        CASES+=("html-12b|$HOME/.mlx-serve/models/mlx-community/gemma-4-12b-it-4bit|gemma4|||false")
-        CASES+=("html-a4b|$HOME/.mlx-serve/models/mlx-community/gemma-4-26b-a4b-it-4bit|gemma4|||false")
-        CASES+=("html-qwen-think|$HOME/.mlx-serve/models/mlx-community/Qwen3.6-35B-A3B-6bit|qwen3_5_moe|--thinking medium|qwen|true")
-        CASES+=("html-qwen36|$HOME/.lmstudio/models/mlx-community/Qwen3.6-27B-4bit|qwen3_5|--thinking medium|qwen|true")
-        CASES+=("html-coder|$HOME/.mlx-serve/models/mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit|qwen3_moe|||false")
-        CASES+=("html-gemma3|$HOME/.mlx-serve/models/mlx-community/gemma-3-12b-it-qat-4bit|gemma3|||false")
-        CASES+=("html-e4b-gguf|$HOME/.lmstudio/models/lmstudio-community/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf|gguf|||false")
-        CASES+=("html-ds4|$HOME/.mlx-serve/models/antirez/deepseek-v4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2.gguf|deepseek-v4|||false")
-    fi
+    CASES+=("html-qwen4|$QWEN4|qwen4_exp|--thinking medium|qwen|true")
 fi
 
 if [ ! -f "$SUMMARY" ]; then
