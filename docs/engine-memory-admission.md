@@ -1,0 +1,48 @@
+# Engine: memory, admission and context sizing
+
+How the engine decides what fits on a unified-memory Mac: the GPU ceiling, load-time preflight, auto-context,
+prefill chunk width, the admission line for a long prompt, and why under-billing is fatal. Read this before touching
+any `*Bytes` bill, `Scheduler.init`, the preflight, or the admission path.
+
+Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-kv-cache.md),
+[engine-qsa-long-context](engine-qsa-long-context.md#admission-and-load-time-bills),
+[engine-prefix-cache](engine-prefix-cache.md#budget), [engine-expert-streaming](engine-expert-streaming.md#budget),
+[arch-mimo-v2](arch-mimo-v2.md#bills-the-bill-follows-the-storage-in-the-same-commit).
+
+## Metal OOM
+
+- **Metal OOM is UNCATCHABLE and Metal at the working-set edge returns ZEROS before it aborts**: all-zero logits from
+  healthy inputs = MEMORY symptom.
+- `currentGpuMemoryCeiling` must see EXTERNAL pressure; under-billing is a Metal OOM, so a bill goes down only where
+  the bytes are gone.
+- The box: M5 Max 128 GB; the default wired limit admits about 120 GB; a resident MiMo EXL3 pack is ~97 GB, so two
+  heavy GPU jobs at once risk an OOM for both (and concurrent conversions have died together in a GPU reset).
+
+## Load-time preflight
+
+- Preflight refusals → `InsufficientMemory` → 503 + entry reset to `.unloaded`. A refusal quotes the number it
+  COMPARED (`loadRequirementBytes`) and the flag that would admit (`--wired-margin-gib`, `--skip-mem-preflight`,
+  `iogpu.wired_limit_mb`).
+- `modelDiskBytes` bills the shards the INDEX names; an index that names NO shard on disk is STALE (every shard
+  loads, one warning). Every size sum stats THROUGH symlinks (HF-cache models).
+- Load-time bills run INSIDE `Scheduler.init` ([engine-qsa-long-context](engine-qsa-long-context.md)).
+
+## Context and chunk
+
+- **Auto-context is PINNED at load** (`pinAutoContext`, 85% margin on the memory ceiling); ask
+  `getEffectiveContextLength`. It bills KV at the CONFIGURED width and activations ONCE.
+- The prefill CHUNK is a machine decision (`resolvePrefillChunk`, ladder 8192→512 at ≤ a quarter of the serving
+  budget; `--prefill-chunk` wins). `prefillMemoryNeeded` takes STORED and SCORED widths as two parameters.
+- An explicit `--ctx-size` outranks auto-context and `model-settings.json` `ctx_size`.
+
+## Admission
+
+- One `[admission] needed=… available=… reclaimable=… width=… verdict=…` line per decision.
+- A long prefill evicts the hot cache on the INFERENCE thread to be admitted (`evictLruToAdmit`), crediting only
+  provably reclaimable bytes; `PrefillDoesNotFit` → 400 by name.
+- The hot-cache budget is clamped at load and follows residency ([engine-prefix-cache](engine-prefix-cache.md#budget)).
+- Context-overflow 400s name BOTH counts.
+
+## Observing memory
+
+`/props` reports `active_bytes`, `memory.cache_bytes`, `batching`; RSS is blind to Metal.

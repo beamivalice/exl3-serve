@@ -1694,7 +1694,7 @@ fn foldNormPlusOne(arr: mlx.mlx_array, s: mlx.mlx_stream) !mlx.mlx_array {
 /// pre-folded (`1 + w` baked in → strictly positive weights, which is what
 /// mlx-serve's runtime `rmsnorm(x) * w` and the sidecar builder expect). The
 /// Qwen original checkpoints and oMLX's OptiQ export ship delta norms; a naive
-/// copy of such a head loads but accepts ~0% (see the CLAUDE.md gotcha), so we
+/// copy of such a head loads but accepts ~0% (docs/engine-mtp.md, Norms), so we
 /// detect and fold at load. Folded RMSNorm scales are positive by construction;
 /// delta ones are ~30-50% negative (every channel that downscales), and the
 /// threshold sits far below that — a miss can only make the runtime acceptance

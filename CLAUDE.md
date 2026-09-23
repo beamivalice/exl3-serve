@@ -1,273 +1,223 @@
 # EXL3-serve — project context for AI
 
-Fork of ddalcu's mlx-serve, serving Qwen3.8-Flash-Next (`qwen4_exp`) on Apple Silicon with EXL3 routed experts, resident or SSD-streamed. MiMo-V2.6-Flash (`mimo_v2`) is an experimental text-only bring-up using native MXFP4 expert streaming. Native Zig, OpenAI/Anthropic-compatible HTTP, no Python at serve time.
+A native Zig inference engine for Apple Silicon serving exactly two models: Qwen3.8-Flash-Next (`qwen4_exp`, EXL3
+routed experts, resident or SSD-streamed) and MiMo-V2.6-Flash (`mimo_v2`, experimental, text-only, MCG EXL3 or
+streamed MXFP4). OpenAI/Anthropic-compatible HTTP, no Python at serve time. Fork of ddalcu's mlx-serve.
 
-Everything else in `src/` (other architectures' forwards and loaders in `transformer.zig`/`model.zig`, the dormant ANE driver) is INHERITED upstream code: it builds, it is unreachable, and this file does not document it. The loader refuses any other `model_type` by name (`model.served_model_types`, `ArchitectureUnsupported` → 503). No GGUF engine is part of this build: a `.gguf` is refused by name (`GgufEngineUnsupported` → 503; `--model` exits). Upstream's docs are archived: `git show ff1380d:docs/reference.md`.
+- **sushi** is this engine's new name (runtime, to be opened to the public): a scripted rename changes the binary
+  name, the env prefix and the home dir everywhere; until it lands, write today's names. Treat every change as future
+  public code (license, NOTICE, docs); sushi is not scoped to EXL3 or to these two models forever.
+- **sashimi** is the PRIVATE quant-creation stack (its own private repo): every converter, allocator, imatrix driver
+  and repacker. This repo keeps only the CONSUMER contract — `docs/pack-format.md`, the Zig shard-stamp check, the
+  committed `src/fixtures/`, and `mlx-serve kld`. The oracle fixture dumpers (`tests/dump_*_fixtures.py`) stay: they
+  verify the engine, they do not make packs. Converter knowledge (recipes, calibration data, research notes) never
+  goes into a committed file: it goes to `docs/private/`, and committed files say only that it lives in the private
+  repo.
+- Everything else in `src/` (other architectures' forwards and loaders in `transformer.zig`/`model.zig`, the dormant
+  ANE driver) is INHERITED upstream code: it builds, it is unreachable, and no doc covers it. The loader refuses any
+  other `model_type` by name (`model.served_model_types`, `ArchitectureUnsupported` → 503); a `.gguf` is refused by
+  name (`GgufEngineUnsupported` → 503; `--model` exits). Upstream's docs are archived:
+  `git show ff1380d:docs/reference.md`.
 
-**No conversion side here.** Every converter, allocator, imatrix driver and repacker now lives in PonyExl3 as `python -m ponyexl3.serve_convert <subcommand>`; this repo keeps the CONSUMER contract — `docs/pack-format.md`, the Zig shard-stamp check, the committed `src/fixtures/`, and `mlx-serve kld`. The oracle fixture dumpers (`tests/dump_*_fixtures.py`) stay: they verify the engine, they do not make packs.
+<a id="docs-index"></a>
+## Docs index
 
-- `docs/pack-format.md` — what a pack owes the engine (tensor names/shapes, `expert_quant`, the `__metadata__` stamp and its refusal rule, `window`, the g-scale folded into `suh`).
-- `tests/CLAUDE.md` — integration-test matrix (auto-loads in `tests/`).
-- Skills: `/release` (CalVer, CHANGELOG), `/bench` (llmprobe methodology, comparison traps).
-- **Growth policy (ENFORCED)**: this file stays under 60k bytes; every rule bullet is ≤ 3 lines; no measurements, dates, PR numbers or war stories here — those go in the commit message.
+This file holds rules and the map. Knowledge, measurements and lessons live in `docs/<category>-<topic>.md`; read the
+doc for the area before changing it, and update it in the same landing.
+
+| doc | what it holds |
+|---|---|
+| [docs/arch-qwen4exp.md](docs/arch-qwen4exp.md) | Flash-Next trunk, hyper-connections, n-gram PLE table, oracle and ties, packs on this box |
+| [docs/arch-mimo-v2.md](docs/arch-mimo-v2.md) | MiMo checkpoint, FP8 trunk, rank-local QKV, routing/sinks, sliding ring, bills, product policy |
+| [docs/engine-exl3-experts.md](docs/engine-exl3-experts.md) | EXL3 rate/codebook/window, prefill GEMM, decode chain, f32 SwiGLU, parity bars |
+| [docs/engine-expert-streaming.md](docs/engine-expert-streaming.md) | SSD budget ledger, per-layer LRU, slab I/O, imatrix capture, discovery |
+| [docs/engine-mtp.md](docs/engine-mtp.md) | native MTP head, verify invariant, draft re-scoring, round-cost table, head KV/norms |
+| [docs/engine-qsa-long-context.md](docs/engine-qsa-long-context.md) | QSA arms per query width, indexer and its history, long-context admission and bills |
+| [docs/engine-kv-cache.md](docs/engine-kv-cache.md) | kv8 default, kv-quant contract, growth, GDN step, byte-stability settings |
+| [docs/engine-prefix-cache.md](docs/engine-prefix-cache.md) | hot cache, hybrid restore, trimming, SSD tier, SSD-first, checkouts, spec state |
+| [docs/engine-kernels.md](docs/engine-kernels.md) | decode/MoE/prefill/verify kernels, NAX/MPP pitfalls, how to prove and time a kernel |
+| [docs/engine-mlx-gotchas.md](docs/engine-mlx-gotchas.md) | MLX errors, dtype promotion, barriers, views vs copies, allocator pool, Zig and tokenizer traps |
+| [docs/engine-memory-admission.md](docs/engine-memory-admission.md) | Metal OOM, preflight, auto-context, prefill chunk, admission |
+| [docs/server-http-apis.md](docs/server-http-apis.md) | API contracts, streaming, logprobs/seeds/sampling, reasoning budget, constrained JSON, launcher |
+| [docs/server-tool-calling.md](docs/server-tool-calling.md) | templates, tool-call parse chain and invariants, think tags, loop stops |
+| [docs/server-lifecycle.md](docs/server-lifecycle.md) | arch gate, weight loader, settings precedence, scheduler/batching, threads, ownership, media |
+| [docs/pack-format.md](docs/pack-format.md) | what a pack owes the engine: tensors, `expert_quant`, `__metadata__` stamp, window, g-scale in `suh`, loader rules |
+| [docs/perf-baselines.md](docs/perf-baselines.md) | roofline, recorded tok/s tables with binaries and raw-file paths, ruled-out levers |
+| [docs/quality-kld.md](docs/quality-kld.md) | `kld` tool, teacher fixtures, the 16x512 reading, lossless teacher rule, KLD of every served pack |
+| [docs/process-measurement.md](docs/process-measurement.md) | GPU lock, binary stamp, QoS, waiting, baseline lookup, recording a number |
+| [tests/CLAUDE.md](tests/CLAUDE.md) | the integration-test matrix (auto-loads in `tests/`) |
+
+**Private, local-only** (`docs/private/`, gitignored): they exist only in the main checkout, so a git worktree does
+not contain them; a worker in a worktree reads them from `/Users/beam/llm/exl3-serve/docs/private/`. Never link to or
+quote them from a committed file.
+
+| doc | what it holds |
+|---|---|
+| `docs/private/sashimi-workflow.md` | how to convert with sashimi: venv, subcommands, served-pack recipes, imatrix files and hashes, stamps, window speeds, wall times, speed work, lessons |
+| `docs/private/sashimi-codebooks.md` | MCG decision, TINY dropped, decoder dead ends, fractional-rate trellis |
+
+Skills: `/release` (CalVer, CHANGELOG), `/bench` (llmprobe methodology, comparison traps).
 
 ## Stack
 
-Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds); mlx + mlx-c PINNED SUBMODULES (`lib/mlx-src` v0.32.2, `lib/mlxc-src` 56b2d39) self-built NAX-enabled by `scripts/build-mlx.sh` into `lib/mlx/` (FFI `src/mlx.zig`); jinja.cpp (wangzhaode, Apache-2.0) as `lib/jinja_cpp/libjinja.a`; safetensors; BPE; `stb_image` + libwebp decode image INPUT. Min macOS 26.2; NAX kernels need the 26.2 deployment target (asserted by `tests/test_mlx_staged_nax.sh`). The served binary's only non-system dylibs are `libmlxc` and Homebrew's `libwebp` — no `libllama` (`tests/test_serving_deps.sh`).
+Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds); mlx + mlx-c PINNED SUBMODULES
+(`lib/mlx-src` v0.32.2, `lib/mlxc-src` 56b2d39) self-built NAX-enabled by `scripts/build-mlx.sh` into `lib/mlx/`
+(FFI `src/mlx.zig`); jinja.cpp (wangzhaode, Apache-2.0) as `lib/jinja_cpp/libjinja.a`; safetensors; BPE; `stb_image`
++ libwebp decode image INPUT. Min macOS 26.2; NAX kernels need the 26.2 deployment target (asserted by
+`tests/test_mlx_staged_nax.sh`). The served binary's only non-system dylibs are `libmlxc` and Homebrew's `libwebp` —
+no `libllama` (`tests/test_serving_deps.sh`). Box: M5 Max 128 GB, macOS 27.
 
-## Layout (`src/`, served path only)
+## Navigating `src/` (served path only)
 
-| File | Role |
-|---|---|
-| `main.zig` | Entry, CLI flags + subcommands (`run/pull/list/serve/launch/kld`) |
-| `cli.zig` | alias → HF repo, resumable pull into `~/.mlx-serve/models/<org>/<repo>`, `list`, `run` REPL |
-| `launch.zig` | `mlx-serve launch <agent>` (claude/pi/omp/opencode/codex/hermes/aider): reads `/v1/models`, writes agent configs into `~/.mlx-serve/<agent>/` |
-| `mlx.zig` | mlx-c FFI |
-| `vision.zig` / `qwen_vision.zig` / `mrope.zig` | Media INPUT: Qwen3-VL image/video tower, M-RoPE positions, audio embedder forward |
-| `model.zig` | Config parse + safetensors loading; weight-prefix probing |
-| `mimo_source.zig` / `fp8_block.zig` | MiMo source headers and selective trunk loading; FP8 trunk kept as stored (e4m3 + 128x128 f32 scales) and its GEMV |
-| `tokenizer.zig` | BPE; single special-token splitter; per-model `digit_group` |
-| `transformer.zig` | Forward pass, arch dispatch, quant resolution, custom kernels. Flash Next trunk = `forwardQwen4With` (hyper-connections, PLE, QSA mask over `gatedFullAttnWith`); EXL3 MoE = `moeExl3` |
-| `qwen4_exp.zig` | Flash Next host side: n-gram hash (splitmix multipliers, per-head primes, eos-segment shifts) + the mmapped `ngram_table.bin` row gather (2/3/4/5/6/8-bit or raw bf16) + `PrefetchPool`/`startWarm` |
-| `hc_prefill.zig` | Fused hyper-connection norm/mix prefill kernels (chunk width as a scalar INPUT, never a template) |
-| `expert_stream.zig` | Expert streaming engine: `ExpertStore` spans, per-layer group-exact LRU + union bridge, zero-copy slabs, `BudgetLedger` (`--ssd-budget-gb`), MTP refusal |
-| `expert_io.zig` | SSD→Metal I/O: F_NOCACHE positioned-read `FillPool`, `PageSlab` epoch leases, verified zero-copy `importSlab` |
-| `expert_quant.zig` | Expert layout detection from PACKED shapes: `.quantized_split` (affine banks) vs `.exl3_k4` (trellis); affine (bits, group_size) solved from geometry |
-| `expert_exl3.zig` / `expert_exl3_kernels.zig` | EXL3 trellis experts: prefill run-aligned 32-row window GEMM (NAX body, K4 fast branch), decode 4-dispatch chain (`moeSwigluFused`), `DECODE_ROWS_MAX`, `usesPrefillArm` |
-| `expert_bf16_kernels.zig` | bf16 selected-expert kernels over a slab (`gateUpSwiglu`; `downReduce`) for the unquantized HF checkpoint |
-| `mtp.zig` + `mtp_acceptance.zig` / `mtp_group_planner.zig` / `mtp_group_cost.zig` / `mtp_qmv.zig` | MTP head (in-checkpoint `mtp.*` or sidecar via `resolveMtpSource`); acceptance modes `exact|typical|tokenv3`; grouped verify planner; M=1-exact qmv rows |
-| `round_cost.zig` | Measured per-model/width/KV-bucket spec round-cost table (`Transformer.round_cost`) |
-| `generate.zig` | Generation, sampling, MTP orchestration, `StallClock`, prefill chunking, loop-stop tiers, `commitForcedTokens` |
-| `scheduler.zig` | Slots, inference thread (sole MLX caller), queues, batching, admission, spec wiring, hot-cache budget revise |
-| `prefix_cache.zig` / `kv_disk_cache.zig` / `kv_disk_writer.zig` | Hot prefix cache + SSD tier (`--prefix-cache-disk`); SSD-first mode + its background writer thread |
-| `kv_quant.zig` | Quantized KV storage/dispatch contract (`--kv-quant 4|8`) |
-| `chat.zig` | Chat templates (Jinja2 + fallback), thinking tags, tool-call parsing/repair/coercion |
-| `reasoning_protocol.zig` | Bounded reasoning/header masks and authoritative JSON response routing |
-| `json_schema.zig` / `json_grammar.zig` / `token_mask.zig` / `regex.zig` | Schema IR → streaming grammar → per-token mask for constrained decoding |
-| `server.zig` | All HTTP: `/v1/*` (chat/completions/messages/responses/embeddings/models/load/unload), `/metrics(.json)`, WS, `--api-key` |
-| `responses.zig` / `ws.zig` | Responses API data + `ResponseStore`; RFC 6455 framing |
-| `model_settings.zig` | Per-model `~/.mlx-serve/model-settings.json` (`ctx_size`, `kv_quant`, `mtp`, `mtp_acceptance`, `ssd_budget_gb`), stamped at BOTH load construction sites |
-| `model_discovery.zig` / `model_registry.zig` | Discovery (two-level org/name, multi-root, streaming stubs), multi-model registry |
-| `tokenize_cache.zig` | Per-LoadedModel LRU of rendered+encoded prompts |
-| `metrics.zig` / `status.zig` / `log.zig` | Prometheus + JSON metrics; TUI status bar; leveled logging to `~/.mlx-serve/logs/mlx-serve-<port>.log` |
-| `kld.zig` | `mlx-serve kld capture|compare`: teacher fixture from the bf16 path, KLD scored to the teacher's first end-of-turn token |
-| `restore_dump.zig` | Prefix-cache restore diagnostics (`tests/diff_restore_dump.py`) |
-| `format_corpus_test.zig` / `tool_traffic_replay_test.zig` | Hermetic format corpus + real-traffic replay (`src/fixtures/tool_traffic.jsonl`) |
+| File | Role | Doc |
+|---|---|---|
+| `main.zig` / `cli.zig` | entry, flags, subcommands (`run/pull/list/serve/launch/kld`); pull, `run` REPL | server-lifecycle |
+| `server.zig` / `responses.zig` / `ws.zig` | all HTTP: `/v1/*`, `/metrics(.json)`, WS, `--api-key`; Responses store | server-http-apis |
+| `chat.zig` | chat templates (Jinja2 + fallback), thinking tags, tool-call parse/repair/coercion | server-tool-calling |
+| `reasoning_protocol.zig` / `json_schema.zig` / `json_grammar.zig` / `token_mask.zig` / `regex.zig` | constrained decoding | server-http-apis |
+| `launch.zig` | `mlx-serve launch <agent>` configs | server-http-apis |
+| `scheduler.zig` / `generate.zig` | slots, inference thread, batching, admission; generation, sampling, MTP orchestration | server-lifecycle |
+| `model.zig` / `model_settings.zig` / `model_discovery.zig` / `model_registry.zig` | config + weights, per-model settings, discovery, registry | server-lifecycle |
+| `transformer.zig` | forward pass, arch dispatch, quant resolution, custom kernels, `KVCache` | arch-*, engine-* |
+| `qwen4_exp.zig` / `hc_prefill.zig` | Flash-Next n-gram host side; fused HC prefill | arch-qwen4exp |
+| `mimo_source.zig` / `fp8_block.zig` | MiMo source headers, FP8 trunk kept as stored + its GEMV, rank-local QKV, `trunk_quant`, shard-stamp check | arch-mimo-v2 |
+| `expert_quant.zig` / `expert_exl3.zig` / `expert_exl3_kernels.zig` | expert layout, EXL3 decoders and kernels | engine-exl3-experts |
+| `expert_stream.zig` / `expert_io.zig` / `expert_bf16_kernels.zig` / `imatrix.zig` | SSD expert streaming | engine-expert-streaming |
+| `mtp*.zig` / `round_cost.zig` | MTP head, acceptance, planner, round-cost table | engine-mtp |
+| `kv_quant.zig` | quantized KV contract (`--kv-quant 4|8`) | engine-kv-cache |
+| `prefix_cache.zig` / `kv_disk_cache.zig` / `kv_disk_writer.zig` / `restore_dump.zig` | prefix cache, SSD tier | engine-prefix-cache |
+| `tokenizer.zig` / `tokenize_cache.zig` | BPE, special tokens, per-model `digit_group`; prompt LRU | engine-mlx-gotchas |
+| `vision.zig` / `qwen_vision.zig` / `mrope.zig` | media INPUT (Qwen3-VL tower, M-RoPE) | server-lifecycle |
+| `kld.zig` | `mlx-serve kld capture|compare` | quality-kld |
+| `metrics.zig` / `status.zig` / `log.zig` | metrics, status bar, logging | server-http-apis |
+| `format_corpus_test.zig` / `tool_traffic_replay_test.zig` | hermetic format corpus, real-traffic replay | server-tool-calling |
 
-Flags that matter here: `--model --serve --host --port --ctx-size --kv-quant --kv-attn-mode --mtp --no-mtp --mtp-depth --mtp-head-kv-quant --max-mtp-ctx --ssd-budget-gb --expert-cache-gb --prefix-cache-entries --prefix-cache-mem --prefix-cache-disk --prefill-chunk --max-concurrent --max-tokens --timeout --reasoning-budget --wired-margin-gib --skip-mem-preflight --metrics --api-key --model-dir --log-level --log-file`. `--help` lists the inherited rest. Sampling defaults for omitted fields: body > launch flags > model `generation_config.json` > hardcoded.
+Flags that matter: `--model --serve --host --port --ctx-size --kv-quant --kv-attn-mode --mtp --no-mtp --mtp-depth
+--mtp-head-kv-quant --max-mtp-ctx --ssd-budget-gb --expert-cache-gb --prefix-cache-entries --prefix-cache-mem
+--prefix-cache-disk --prefill-chunk --max-concurrent --max-tokens --timeout --reasoning-budget --wired-margin-gib
+--skip-mem-preflight --metrics --api-key --model-dir --log-level --log-file`. `--help` lists the inherited rest.
 
 ## Building
 
-- First-time: `./scripts/fetch-zig.sh` stages the pinned Zig at `.zig-toolchain/`. After a toolchain/SDK change `rm -rf .zig-cache` (configure-time output is cached).
-- **ALWAYS `zig build -Doptimize=ReleaseFast`, never bare `zig build`** (Debug is 2–4× slower ⇒ fake regressions). `zig build test` does NOT refresh `zig-out/bin/mlx-serve` — rebuild before any live A/B.
-- mlx + mlx-c: `scripts/build-mlx.sh`. Bump = checkout tag → rerun → re-diff `src/mlx.zig` externs against `lib/mlxc-src/mlx/c/*.h`.
-- Jinja after `lib/jinja_cpp/*.cpp` changes: compile the 7 `.cpp` (`clang++ -std=c++17 -O2 -DNDEBUG -I .`) into `obj/`, `ar rcs libjinja.a obj/*.o`.
+- First-time: `./scripts/fetch-zig.sh` stages the pinned Zig at `.zig-toolchain/` (it 404s now: copy an existing
+  one). A git worktree lacks `.zig-toolchain/` and `lib/mlx/`: symlink both from the main checkout. After a
+  toolchain/SDK change `rm -rf .zig-cache` (configure-time output is cached).
+- **ALWAYS `zig build -Doptimize=ReleaseFast`, never bare `zig build`** (Debug is 2–4× slower ⇒ fake regressions).
+  `zig build test` does NOT refresh `zig-out/bin/mlx-serve` — rebuild before any live A/B.
+- mlx + mlx-c: `scripts/build-mlx.sh`. Bump = checkout tag → rerun → re-diff `src/mlx.zig` externs against
+  `lib/mlxc-src/mlx/c/*.h`.
+- Jinja after `lib/jinja_cpp/*.cpp` changes: compile the 7 `.cpp` (`clang++ -std=c++17 -O2 -DNDEBUG -I .`) into
+  `obj/`, `ar rcs libjinja.a obj/*.o`.
 
 ## Testing — TDD is mandatory
 
-Order: (1) failing test FIRST, for the right reason; (2) minimum code to green; (3) full suite (`zig build test` 0 fail + relevant `tests/*.sh`); (4) refactor. A live curl is a sanity check, NOT a test.
+Order: (1) failing test FIRST, for the right reason; (2) minimum code to green; (3) full suite (`zig build test
+-Doptimize=ReleaseFast` 0 fail + relevant `tests/*.sh`); (4) refactor. A live curl is a sanity check, NOT a test.
 
-Feature = unit test that fails without it (+ integration script if HTTP-observable). Bug fix = regression test red→fix→green. Refactor = characterization test first. A live failure revealing a CLASS ships the instance test plus a corpus entry or invariant in `src/format_corpus_test.zig` plus a rule here.
+Feature = unit test that fails without it (+ integration script if HTTP-observable). Bug fix = regression test
+red→fix→green. Refactor = characterization test first. A live failure revealing a CLASS ships the instance test plus a
+corpus entry or invariant in `src/format_corpus_test.zig` plus a rule in the matching doc.
 
-Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter="tool traffic"`. Live: `tests/test_qwen4_exp.sh`, `tests/test_bf16_streaming.sh`, `tests/test_mtp_equivalence.sh`, `tests/test_prefix_cache_*.sh`, `tests/test_smoke_matrix.sh`. Matrix: `tests/CLAUDE.md`.
+Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter="tool traffic"`. Live:
+`tests/test_qwen4_exp.sh`, `tests/test_bf16_streaming.sh`, `tests/test_mtp_equivalence.sh`,
+`tests/test_prefix_cache_*.sh`, `tests/test_smoke_matrix.sh`. Matrix: `tests/CLAUDE.md`.
 
-- **A test never writes to stdout** (stderr only): under `zig build test` fd 1 is the build runner's protocol pipe; one stray line hangs the runner while the standalone binary passes.
-- **A PASSING test prints NOTHING, on either stream**: the pinned nightly renders any test stderr through its failure renderer (`failed command: … --listen=-`, exit 0), which reads as a failed suite. Diagnostics ride an env switch (`MLX_SERVE_EXL3_LAYER_UBENCH`). Guard: `tests/test_test_runner_quiet.sh`.
-- **No source-scan tests** (`@embedFile` + "this string appears in that function"): they pin text, not behaviour. Test the behaviour or state the rule in a comment.
-- **An integration assertion that a MODEL must think/answer/call is a checkpoint expectation**: assert the INVARIANT, branch on the model's choice.
-- `zig build test` sometimes reports `failed command` on a FIRST run and is green on a direct re-run (Metal contention between parallel test binaries, benign, unpinned).
+- **A test never writes to stdout** (stderr only): under `zig build test` fd 1 is the build runner's protocol pipe;
+  one stray line hangs the runner while the standalone binary passes.
+- **A PASSING test prints NOTHING, on either stream**: the pinned nightly renders any test stderr through its failure
+  renderer (`failed command: … --listen=-`, exit 0), which reads as a failed suite. Diagnostics ride an env switch
+  (`MLX_SERVE_EXL3_LAYER_UBENCH`). Guard: `tests/test_test_runner_quiet.sh`.
+- **No source-scan tests** (`@embedFile` + "this string appears in that function"): they pin text, not behaviour.
+  Test the behaviour or state the rule in a comment.
+- **An integration assertion that a MODEL must think/answer/call is a checkpoint expectation**: assert the INVARIANT,
+  branch on the model's choice.
+- `zig build test` sometimes reports `failed command` on a FIRST run and is green on a direct re-run (Metal
+  contention between parallel test binaries, benign, unpinned).
 
 ## Releases & benchmarking
 
-`/release` for process, CalVer, CHANGELOG. Perf gate = `./tests/bench.sh` on the FINAL tree vs the previous column in `benchmarks.md` (ONE new column per release). `/bench` for methodology: same-methodology cells only, spec cells are variance (sample across boots, same-session ratios), an A/B arm is proven by ENGAGEMENT lines in its log. Interleave A/B kernels in ONE process (separate runs drift 15%); same-boot medians per cell; sub-2% calls need an IDLE box.
+`/release` for process, CalVer, CHANGELOG. Perf gate = `./tests/bench.sh` on the FINAL tree vs the previous column in
+`benchmarks.md` (ONE new column per release). `/bench` for methodology: same-methodology cells only, spec cells are
+variance (sample across boots), an A/B arm is proven by ENGAGEMENT lines in its log. Interleave A/B kernels in ONE
+process (separate runs drift 15%); same-boot medians per cell; sub-2% calls need an IDLE box. Recorded baselines to
+inherit: [docs/perf-baselines.md](docs/perf-baselines.md), [docs/quality-kld.md](docs/quality-kld.md).
 
 ## Conventions
 
-- Minimal DRY Zig; tests at the bottom of each source file; shell integration tests in `tests/`. Env levers only for paths with two arms worth comparing (lossy/tradeoff), never for an obvious win/fix. A diagnostic env is read through `diagEnvOn` (absent or `0` = off), never `getenv != null`.
-- Inference thread is the SOLE mlx caller (even frees). Text slots BATCH-decode on `qwen4_exp` (`configBatchesDecode`); `--max-concurrent` sizes the submit queue. A batched group is capped by PADDING WASTE (`batchedKvKeepCount`, `MAX_PAD_WASTE` 1.5 < 2.0), not slot count.
-- A cold prefill YIELDS to decode ticks at chunk boundaries (`scheduler.interleaveDecodeTick`; `MLX_SERVE_PREFILL_INTERLEAVE=0` restores). Greedy byte-identical.
-- **Diffs are read by a human. Keep them small.** A comment says what the code cannot (a non-obvious WHY, a contract, a unit) in one to three lines. Never bug history, measurements, review items, dates, PR numbers or a restatement of the code.
-- **One story per gotcha, one line per rule.** CHANGELOG: one user-facing sentence per change, no provisional numbers.
+- Minimal DRY Zig; tests at the bottom of each source file; shell integration tests in `tests/`.
+- Env levers only for paths with two arms worth comparing (lossy/tradeoff), never for an obvious win/fix. A
+  diagnostic env is read through `diagEnvOn` (absent or `0` = off), never `getenv != null`.
+- **Diffs are read by a human. Keep them small.** A comment says what the code cannot (a non-obvious WHY, a contract,
+  a unit) in one to three lines. Never bug history, measurements, review items, dates, PR numbers or a restatement of
+  the code.
+- **One story per gotcha, one line per rule**, in the matching doc. CHANGELOG: one user-facing sentence per change,
+  no provisional numbers.
 - Squash commits, one per PR. No Co-Authored-By attribution.
 
-## MiMo-V2.6-Flash (`mimo_v2`, experimental)
+## Engine invariants (never break; the doc has the why)
 
-- **Original checkpoint**: `.mxfp4_individual` streams per-expert U8 payloads directly into U32 slabs without changing bytes. The FP8 trunk stays as stored for `fp8_block` (f32 GEMV; wider forwards dequantize ONE linear to billed bf16 scratch) — the KLD teacher carries no quantization of its own; sources are read-only, MTP/media excluded, residency billed as stored.
-- **Converted pack**: the MiMo pack converter (`serve_convert pack-mimo-v2`) optionally restacks the same MXFP4 bytes into `model.layers.N.mlp.switch_mlp` U32 weights + U8 e8m0/32 scales, without biases, and prepares the trunk ahead of time. Both source layouts use the same streaming kernels.
-- **Packed QKV is rank-local**: each rank's FP8 tiles are written straight into global Q/K/V; extra scale rows belong to partial rank-local tiles, not padding.
-- **Geometry**: `hybrid_layer_pattern` 0 = global, 1 = sliding; read heads, KV heads and K/V widths per layer. Rotate only the first `int(head_dim * partial_rotary_factor)` channels; multiply V by `attention_value_scale` BEFORE caching.
-- **Routing/sinks**: sigmoid routing uses f32 inputs/weights, selection-only correction bias and unbiased normalized scores. A sink is an extra softmax denominator column, not a real key; its presence follows the layer type.
-- **Streaming**: `first_moe_layer` preserves absolute layer indices while excluding dense prefix layers from expert slabs and cache budgets. MXFP4 has six operands in nine stable component slots; absent biases acquire no slab or lease. MTP remains refused while streaming.
-- **Imatrix**: the capture keys by ARCH (`imatrix.Arch.mimo_v2` → `model.layers.{L}.mlp.experts.*`, one flat entry per layer) and reaches the streamed QUANTIZED layer through the routing override's tap; armed, it forces the SORTED expert arm — the fused decode kernels never materialize the activation rows the down statistic needs. Driver: `serve_convert imatrix-mimo-serve`.
-- **Sliding layers RING** (`ModelConfig.swaRingTokens`, `KVCache.setSwaRing`): they store `sliding_window + SWA_RING_SLACK` rows, never the context. A non-zero `max_seq` into `KVCache.update` IS the ring predicate, so `slidingViewFor` may never decline the trim on a ringed arch.
-- **A ringed entry's `offset` is LOCAL**; absolute = `base + offset` (`absSeqLen`). A clamp or trim below the retained window declines by NAME (`SlidingRingRewindPastWindow`) — the hot-cache restore cold-prefills, the SSD tier skips such an entry.
-- **A hot entry holds a ringed layer's RETAINED ROWS, never the ring's capacity** (`KVCache.snapshotRetained`): the buffer is allocated at `ringCap` from token one, so a plain share billed and pinned rows no restore can read.
-- **mimo_v2's global layers PREFILL FUSED** (`msv_attn_pd`, qk 192 / v 128, no sink there); the sliding layers still compose their band sheet and `server.slidingBandScoreBytes` bills it. A quantized cache is read one DISPATCH at a time (`fusedSdpaPrefillKv`; `kr` = {begin, end, koff, kL_abs} puts every causal comparison in CACHE coordinates), never rebuilt whole.
-- **A packed-cache global-layer DECODE reads in place** via `msv_qkv_mpp` (matmul2d, `qkvMppDecodeServes`); the SIMD kernel cannot stage gqa 16 x qk 192.
-- **The bill follows the storage in the SAME commit**: `kvBytesPerToken` counts the 9 global layers per token (spread over `kvPerTokenLayerCount`, never every caching layer), `swaRingBytes` the ring once per slot (`server.slotRingBytes`, at `kv_bits`), `swaStreamBytesPerToken` the chunk a prefill stages before compaction, for the layers one eval-cadence window lets coexist. `server.kvDequantScratchBytes` bills the kv-quant dense rebuild as ONE layer at the rows that layer stores.
-- **A ringed arch RESERVES its cache capacity up front** (`ModelConfig.reservesKvCapacity`, narrower than `longCtxGated`) and bills the reservation headroom and the ring: growing +25% at a time duplicated a global layer mid-prefill.
-- **Evidence**: `tests/dump_mimo_v2_fixtures.py` supplies the independent HF oracle; `MIMO_V2_SOURCE` tests the downloaded Flash config/template. Native-byte preservation, forward parity, and live serving are separate gates; a header audit proves neither numerical parity nor generation.
-
-## Qwen3.8-Flash-Next (`qwen4_exp`)
-
-125B-A6B MoE + 51B n-gram table + 4B MTP head. Dispatch on `config.json` `model_type`; a qwen4_exp checkpoint is NOT a qwen3_5 pack: three blocks around the qwen3_5 GDN+MoE trunk.
-
-- **Trunk**: 4 hyper-connection streams (`hcRead`/`hcWrite`, norms folded by the converter), n-gram PLE at layer 1 (host gather from `ngram_table.bin`, never resident), QSA sparse attention past 2048 tokens (`qsaMask`), `hyper_connection_mixer` replaces `model.norm`. The residual stream is bf16 like the checkpoint; the f32 fixture is the MATH oracle (`QWEN4_STREAM_F32=1`).
-- **Module state is READ-ONLY**: text slots batch-decode (`forwardMoeBatchedDecode`), prefix cache ON. Vision (Qwen3-VL tower, `model.visual.` prefix, via `--add-vision` at conversion) decodes serially and is excluded from streamed loads.
-- **Oracle**: `tests/dump_qwen4_exp_fixtures.py` (HF `hidden_states[i]` is the INPUT of layer i: compare layer-i output with stream_{i+1}). The converters, allocators and imatrix drivers live in PonyExl3 (`serve_convert affine-qwen4|exl3-qwen4|imatrix-qwen4|allocate-qwen4|score-qwen4|requant-qwen4`); the format they owe us is `docs/pack-format.md`.
-- **Ties**: a tiny MoE oracle ties everywhere and the tie RATE is scale-invariant (relu leaves exact-zero block scores). The fixture dumps the reference's OWN margins; `Qwen4Ties` acquits under 3% by those, never by our output. Selection coverage for a k < E fixture is the MTP head's one MoE layer (`--topk 2`, `route_gap`).
-
-### EXL3 experts (`expert_layout == .exl3_k4`)
-
-- **Format**: routed experts in turboderp's EXL3 trellis (16x16 MUL1 tiles, `suh`/`svh` with the H128 Hadamard), stacked per layer as `[E, ...]` so gather kernels index expert e on axis 0; `config.json` carries `expert_quant = {format: exl3, k, codebook: mul1|tiny|mcg}`; per-tensor rate read from the trellis shape. Every other module stays the affine pack's. The codebook is ONE per process (`expert_exl3_kernels.setCodebook` at load); every weight kernel inlines `exl3_pairh` from `codebookHelpers`, built per codebook. TINY = MCG's mix and half-pair sum with the fixed bits ADDED (`TINY_ADD`), MUL1's quality at MCG's decode cost; A/B: `MLX_SERVE_EXL3_CODEBOOK_AB=1` on the `codebook A/B` test.
-- **A rate is K = n/16**, n the packed halfwords per 256-weight tile (40 = K2.5, 48 = K3, 64 = K4): weight t's codeword is the 16-bit window ending at `((t+1)*n)>>4`, so its fresh bits follow from n and the pattern is never stored. Even n in [32, 64] admits; `expert_quant.k` may be fractional JSON.
-- **Every reader keys on n, never on an integer K** (`exl3.Rate`, kernel template `NHW`, cache keys, `exl3ExpertBytes`); a K printed anywhere reads 2.5, not 40. The K4 fast branch is `n == 64`.
-- **A MiMo EXL3 pack serves RESIDENT**: its banks nest under `model.layers.` (qwen4's under `language_model.model.layers.`), `expertStreamingRequired` excepts `.exl3_k4`, and the trunk takes the source loader (`usesMimoSourceTrunk`), billed as stored; `trunk_quant` in the pack packs o_proj/lm_head/embed at load (docs/pack-format.md).
-- **A shard's `__metadata__` stamp is CHECKED against `expert_quant` before upload** (`mimo_source.validateShardStamps`): k, codebook or window disagreeing is `Exl3ShardStampMismatch`, never garbage weights; an unstamped shard is legacy and admitted.
-- **The conversion side is PonyExl3's** (`python -m ponyexl3.serve_convert exl3-qwen4|exl3-mimo`, each with its own `--self-test`): we own only what a pack owes the engine. That contract — tensor names and shapes, `expert_quant`, the `__metadata__` stamp and its refusal rule, the window, the g-scale folded into `suh` — is `docs/pack-format.md`, and a change there is a format change.
-- **A stamp string is load-bearing across both repos**: packs on disk carry `converter: qwen4-exl3-1-rotated-gss` / `mimo-exl3-3-calibrated-regularize`, so renaming one invalidates every resume and every verify against them.
-- **Component packs** (`serve_convert repack`, converter `--component-output`): flat index-named shards, routed gate/up/down together per layer, MTP separate; tensor names and payload bytes unchanged. `--share-with` hard-links only identical files; shared files are immutable (replace, never modify in place).
-- **Prefill**: run-aligned 32-row windows over a host-built window table, K-generic cooperative readers, the NAX 16x32x16 GEMM body with a K4 fast branch; ONE GEMM config reused across window counts (a per-row-count JIT compiled per novel prompt length).
-- **Decode**: four dispatches per MoE layer — pair prepare, split-K pair GEMV with f32 inner planes, fused mid+down GEMV, f32 finish reduce (`moeSwigluFused`; top-k ≤ 32, named refusal above). Rows ≤ `DECODE_ROWS_MAX` or verify rows take this chain; wider takes `moePrefill`. The MTP head's MoE rows ride the decode chain and refuse wider (`Exl3MtpRowsExceedDecode`).
-- **Quality bar**: KLD vs the bf16 teacher (`mlx-serve kld capture|compare`), never bytes against the affine pack. The EXL3 kernel arms are not byte-identical to any composite (they round once). MTP: EXL3 cold-start depth cap 2 on M5 Max, binding the auto path only.
-- **A GEMM/GEMV parity bar is relative to the SUMMANDS, never the result** (`Exl3GemmParity`): a trellis dot product cancels orders below sum|w·x|, so a result-magnitude floor is seed-locked. Element ceiling = one f16 store + an f32 accumulation `in_dim` deep; whole-tensor RMS no worse than 3x mlx's own f16 matmul over the decoded weights (`measureInnerGemmParity`). A parity case sweeps `PARITY_SEEDS`, never one chosen seed.
-- **Levers**: `MLX_SERVE_EXL3_GEMM_WIN`, `MLX_SERVE_EXL3_WIN_ALIGN` (window geometry A/B); diagnostics `MLX_SERVE_EXL3_LAYER_UBENCH`, `MLX_SERVE_EXL3_UNION_HIST`, `MLX_SERVE_EXL3_SWIGLU_MAXABS`.
-- **The shared-expert add must free the routed output it consumed**. Owned-copy hidden captures at the chunk boundary; kernel configs dropped on their error paths.
-
-### Expert streaming (`--ssd-budget-gb` / `--expert-cache-gb` / per-model `ssd_budget_gb`)
-
-Any qwen4_exp checkpoint whose routed experts are leading-index banks streams: the HF fused bf16 layout (`mlp.experts.gate_up_proj` `[512,1280,2560]` + `down_proj` `[512,2560,640]`, 335 GB total, `streaming_required`), the MLX split layout (`switch_mlp.{gate,up,down}_proj.{weight,scales,biases}`), or EXL3. Trunk + MTP resident; routed experts come from SSD through zero-copy slabs. With no budget a pack loads resident as before.
-
-- **Budget** (`expert_stream.budgetLedger`, one `[expert-stream] ssd budget` boot line): `--ssd-budget-gb N` is a TOTAL resident target of N GiB = trunk + MTP + the 512-expert union workspace + selected slab + bounce; the remainder is a uniform per-layer LRU. `--expert-cache-gb` overrides (decimal GB of expert cache). Precedence: `--expert-cache-gb` > `--ssd-budget-gb` > setting > `ExpertStreamingRequired` 503 naming all three. Admission `budget + planned KV <= wired limit`; the refusal names the `iogpu.wired_limit_mb` that would admit.
-- **Cache policy** (`GroupCache`): plain per-layer LRU, prefill misses at MRU, every HIT of a route touched before any admit, surplus misses fall to the union workspace. Batched decode rides the union path. **MTP is refused at the door** (`ExpertStreamingMtpUnsupported`; `enable_mtp:true` = named 400): the streamed forward declines spec's per-position SSM capture.
-- **Load-time cache warm**: preload the lowest expert IDs into `floor(0.8 * slots_per_layer)` slots per MoE layer before kernel warmup and readiness, within the existing budget. These are ordinary LRU entries, not predicted routes; dense prefix layers are skipped.
-- **I/O** (`expert_io.zig`): `FillPool` = F_NOCACHE + F_RDAHEAD 0 positioned preads, fd cache validated by (dev, ino, size, mtime), spans sorted and coalesced to 64 MiB, page-aligned bounce otherwise; `PageSlab` epoch leases (`free → filling → ready → leased → readers_complete → reclaimable`, CPU writes only in `filling`); `importSlab` = `mlx_array_new_data_managed_payload` verified by pointer identity (`ExpertSlabImportCopied` refuses). Bench: `tests/ssd_fill_bench.sh`.
-- **MLX releases an IMPORTED host buffer asynchronously**: `mlx_array_free` returns BEFORE the payload deleter runs; wait for the deleter (`SlabOperand.destroy`), leak (counted, logged on the breakdown line) rather than unmap what MLX still holds.
-- **Compute**: bf16 checkpoint → `expert_bf16_kernels` (`downKernelPreferred(rows) = rows >= 2`: the in-dispatch k-reduction tail loses at one row; `MLX_SERVE_EXPERT_BF16_KERNELS=0` restores the `gather_mm` composite). Quantized packs → the RESIDENT fused kernels over the slab with remapped ids, bit-identical to the resident load (bytes and top-20 logprobs on greedy prompts). A warm quantized forward pays the per-layer barrier, not the fills.
-- **Correctness bar**: store-level same-expert byte identity (`real qwen expert store spans and source bytes are exact`); teacher replay via `kld compare` (the affine pack is the control); greedy determinism. Cross-day comparisons must match forwards on `hits` + `fill_bytes_per_row` (the SSD's delivered rate drifts). `MLX_SERVE_NGRAM_BF16_DIR=<hf checkpoint>` serves any pack with the ORIGINAL bf16 n-gram table so `kld compare` isolates the PLE table's cost.
-- **Imatrix capture rides the streamed bf16 forward** (`MLX_SERVE_IMATRIX_OUT=<abs>.safetensors`, `src/imatrix.zig`): per-layer per-expert sum(x²) and routed counts accumulate ON the GPU keyed by GLOBAL expert ids (slab slots are remapped), in the collector's contract the converter reads; the flush runs on the INFERENCE thread (loop exit or `/v1/unload-model`), never on `Scheduler.deinit`'s caller thread. Driver: `serve_convert imatrix-qwen4-serve`.
-- **Discovery**: a dense qwen4_exp checkpoint with a complete streaming index registers as a streaming stub (`streamingStubMarker`); `/v1/models` carries `streaming`, `streaming_required`, `ssd_budget_gb` at top level and `input_modalities: ["text"]` when it must stream. Guards: `tests/test_bf16_streaming.sh`, `tests/test_model_settings.sh` [5].
-
-### MTP (native head, opt-in `--mtp`)
-
-- The head = the checkpoint's own QSA+MoE layer over the PRE-mixer stream (`Qwen4Mtp`, `MtpHeadRef.qwen4`): `capture_hidden(_all)` = `[B,L,hc*hidden]`, never the mixed 2560; head row r = (stream at r, token r+1) at query position r+1, so QSA takes a `pos_base`. Per-request state is a `Qwen4MtpState` swapped onto the module (`qwen4MtpActivate` before EVERY head touch); nothing is module-owned, so MTP slots are not exclusive.
-- **Spec verify invariant**: `cache.step = prompt_len + emitted`, t1 NOT in cache on entry, verify input `[t1, draft…]`, partial-accept correction from ORIGINAL `verify_logits[accepted]`. A block decoder checks its ENTRY token before drafting (`generate.tokenStops`); the token budget is a PRE-COMMIT invariant; a committed argmax is a `CommittedArgmax` (only `verifyArgmax` builds one, masking reserved ids).
-- **A qwen4 verify row is BYTES, not dispatches**: a second row's own experts are read, so a depth-2 round ≈ 2 serial forwards and prose accepts ~1.0. Acceptance is a PROMPT-TYPE property (code ≫ prose; `MLX_SERVE_MTP_FORCE_DEPTH=n` + `acc_idx=` on `[mtp-trace]`), so MTP stays opt-in. Rounds stay solo; two interleave, three or more go plain (`mtpRoundsStaySolo`; `MLX_SERVE_MTP_BATCHED_QWEN4` opts in).
-- **Drafts shortlist on a coarse lm_head copy and re-score exactly** from the MIXER output (`buildRerankCoarse`/`rerankShortlist`/`fullReadoutArgmax`, `StepWant.mixed`; `MLX_SERVE_MTP_DRAFT_RERANK=0` restores the full readout). A greedy target drafts the argmax (byte-identity contract); a sampled target draws from the re-scored top-32 (`mtpDraftStepPath`); draft temperature is per family.
-- **Round cost is MEASURED** per model/width/KV bucket from live single-chunk rounds (`round_cost.zig`; `MLX_SERVE_MTP_COST_TABLE=0` = prior only); width trials m_lo then m_lo+1 never m_lo−1; the silicon depth row is a COLD-START cap. Persistence is OPT-IN (`MLX_SERVE_ROUND_COST_PERSIST=1`); an A/B with the table live measures the TABLE, so set `=0` on BOTH arms. A round's wall is between round ENDS, so an interleaved prefill chunk drops the round clock too.
-- **Auto-mode MTP output is NOT byte-reproducible** (round times pick depths → widths → kernels → greedy near-tie flips); byte bar = `MLX_SERVE_MTP_FORCE_DEPTH`. `test_mtp_equivalence.sh` acquits divergences at serial top-2 gap ≤ 0.15 nats and boots `--prefix-cache-entries 0`. `--no-mtp` gates the IN-CHECKPOINT head too (`entry.mtp` reads `mtpChoiceFor`, logged `[mtp] on|off (<source>)`).
-- **Head KV**: dense by default; `--mtp-head-kv-quant` opts it into `--kv-quant` (billed at its effective width either way, `mtpHeadKvBytesPerToken`); a spec sidecar under another scheme is declined at restore and rewritten on the next commit. Head persistence with its QSA half: `tests/test_qwen4_mtp_head_persist.sh`. Acceptance modes `exact|typical|tokenv3` (`mtp_acceptance.zig`, per-model `mtp_acceptance`).
-- **Norms**: delta-encoded head norms AUTO-FOLD at load (raw-HF heads get the `+1` repair, `mtpNormNeedsRepair` reads the norm's OWN negative fraction, whole-head 5% bar); publish packs FOLDED (`--fold-mtp-norms`). Quant re-solved PER WEIGHT; a sidecar's mode is solved from GEOMETRY (`quantParamsFromGeometry`); dense bf16 head trunks requantize at load (`MLX_SERVE_MTP_HEAD_QUANT_BITS` 4/g64).
-- **The deferred PLE leaf is filled before anything evaluates the build** (`ForwardCtx.ple_defer` + `flushDeferredPle`, set + flushed by BOTH `lazyForward` and the MTP verify build; `pleClaimSpecCapture` claims the spec slot at BUILD time): a host token read inside the graph build serialized the build with the GPU, and a capture evaluated before the fill saw a zero PLE.
-- **The EV seed lives on `Qwen4Mtp`** (`ev_seed_accept`/`ev_seed_m_lo`), per loaded model; publish AND consume decline under `MLX_SERVE_MTP_FORCE_DEPTH`. `MtpCostProfile` comes from the runtime fingerprint (`g17_nax_qwen4_q4_gs64`; `MLX_SERVE_MTP_QWEN4_PROFILE=0` revokes it); unmeasured = generic/cap-6.
-
-### QSA + long context (every mechanism gated by ONE predicate, `ModelConfig.longCtxGated()`)
-
-- **QSA GATHERS selected blocks, never a dense `[S, kv]` mask**: prefill `gatherQsa256`; verify on QUANTIZED KV = split-K `qsaSparseAttn` (dense: union gather); decode `qsaDecodeGatherAttn`; batched slots at kv ≤ 8192 keep the mask. Selection = exact radix-select `msv_qsa_select`, SPLIT over 16 threadgroups at decode (`MLX_SERVE_QSA_SELECT_SPLIT=0`).
-- **A packed cache never takes the QSA mask arm**: split-K `qsaSparseAttn` to `QSA_ATTN_PACKED_MAX_S`, then `gatherQsa256Packed` (reuse ≤ `QSA_PACKED_GATHER_MAX_REUSE`), else a gather over ONE rebuild, billed per width (`qsaDenseRebuildRows`).
-- **The always-visible tail is PER QUERY** (tokens at/after `ratio·floor((p+1)/ratio)`), scores in f32 like the reference, `torch.topk` keeps the LOWER block index on exact-zero ties. The n-gram hash's eos is the TEXT config's (`ngram_eos`).
-- **Indexer**: the score sheet is ONE NAX kernel (`msv_qsa_score`, bit-identical to the stock tf32 chain; `MLX_SERVE_QSA_SCORE_FUSED=0`); the prefill gather rides NAX cooperative tensors on its own predicate (`qsaNaxEligible`: G17 + macOS 26.3 + bf16 + hd 256 + gqa 12 + q_len ≥ 16; bar = per-element error vs float64 no worse than stock, `tests/qsa_nax_precision.py`, never bytes). One effective YaRN mscale on every indexer arm; the indexer ropes with the SAME M-RoPE table as attention.
-- **Indexer history**: ONE copy per (slot ∪ entry); the newest snap VIEWS the live buffer at commit (`handoffQsaHistoryToLatest`); none after restore = MISS; the f32 score bank is billed; raw keys are a 32-row ring billed once per slot (`qsaRingBytes`). Per-request state outside conv/ssm rides `SSMCacheEntry.aux_state` + `ple_prev`, freed only through `ssmFreeQsaState`. Never hand a null `mlx_array` to the spec tensor-map insert (a pooled-only head arrives with `aux_state.ctx == null`).
-- **Verify gather kv floor is per KV SCHEME** (`qsaVerifyGatherMinKvFor`: dense 32768, quantized 16384). A cache keyed on a POINTER is invalidated by an ATOMIC MARK (`markQsaPooledRopeStale`), never an off-thread free.
-- **Admission**: past 32k a request RESERVES its KV capacity up front (`KVCache.reservedTokens`; `MLX_SERVE_KV_RESERVE=0`); a long prefill EVICTS the hot cache to be admitted on the INFERENCE thread (`evictLruToAdmit`, credits only PROVABLY reclaimable bytes, refuses by NAME `PrefillDoesNotFit` → 400, defers a warm prompt to the `WarmPrefix` bill); ONE `[admission]` line. The prefill width is per-REQUEST and re-chosen per CHUNK (`chooseRequestPrefillChunk`, `adaptivePrefillWidth`).
-- **Load-time bills** run INSIDE `Scheduler.init`: KV width from `configuredKvQuantFor(config)`, context from `resolvedContextForLoad` with the CONSTANT `CTX_SIZING_CACHE_RESERVE`, the hot-cache clamp reserves the ladder FLOOR. A KV bill is per CACHING LAYER (`kvBytesPerToken` via `attnCacheLayerCount`); `prefillStreamBytesPerToken` adds the arch's own streams (GDN chunk-wide q/k/v, MoE `top_k` replication); the chunk-independent part is a RUNTIME floor.
-- **The n-gram table**: `mx.quantize` packs DENSELY (element i at bit offset `i*bits`, straddling words at 3/5/6 bits; `dequantRow` tested at every width) or raw bf16 (bits-16 arm); a random read into a cold 32 GB mmap is a serial SSD fault, so `gather` rides a `PrefetchPool` (`QWEN4_PLE_PREFETCH=0`) and `startWarm` preads the table at load (`MLX_SERVE_NGRAM_WARM=0`).
-
-### Prefix cache + SSD-first
-
-- KV reuse via prompt-prefix matching; invalidated after tool calls + pad-only gens (`commitDeclinesPadOnly`: only an ALL-pad generation declines); hot cache spills to SSD; RAM invalidation propagates to disk. Restore ALWAYS clamps (`truncate(final_len)`); a failed restore hands back an EMPTY cache; every eviction loop has a no-progress exit (checked-out entries are unevictable).
-- **A restore is not bit-identical on a HYBRID** ⇒ byte-stable greedy needs `--prefix-cache-entries 0`. The always-on SSM snapshot sits 30 tokens BEFORE prompt end; a restored tail inside that window forwards as ONE span (`ssmSnapshotBackoff`). Guard: `tests/test_hybrid_reuse_equivalence.sh`.
-- **Hybrid candidates rank by RESTORABLE checkpoint position, not raw match** (`findBestRestorableMatch` RAM, `bestHybridMatch` disk). Checkpoint retention thins the INTERIOR with a dense newest quarter (`spanPreservingDropIndex`, `ThinPolicy`); an oversized candidate is TRIMMED to the longest restorable prefix that fits (`trimLenForBudget`, `KVCacheSnapshot.trimmedCopy` is a REAL copy); a QSA trim bills the bank on the final retained checkpoint. A decline carries its `TrimDecline` reason; a RAM-budget decline spills to SSD (`spillDeclinedToDisk`).
-- **The hot-cache budget is CLAMPED at load** to what the weights leave under the GPU ceiling and is a HARD cap; it FOLLOWS residency (`reviseHotCacheBudgets` after every load/unload, repeated for 10 s because the OS returns pages lazily). Eviction is WORKLOAD-fair (`cache_key`: `prompt_cache_key` > `metadata.user_id` > system-prompt hash; `lruIndexExcluding`).
-- **SSD-first** (`prefix_cache.ssdFirstActive` = capable arch AND a disk tier, mirrored onto `HotPrefixCache.ssd_first` + `DiskTier.ssd_first`): RAM floors at ONE session, `--prefix-cache-mem` = the IDLE allowance; spill and EVICT are two decisions (`PersistOutcome`: only `.persisted` + an agreeing index + landed files license discarding RAM); writes ride `kv_disk_writer.zig` (FIFO, `meta.json` last, epoch fence at the ONE removal site); per-chunk write-through; a diverging turn hard-links the donor's LANDED chunks; a full-prefix hit CHECKS the entry OUT so the first append donates.
-- **A checkout is a PROMISE until the append DONATES** (`donateCheckout` right before `Generator.initWithOptions`, below every refusal; `releaseCheckout` hands an undonated entry back intact). Disk checkpoints come off the TOP of the flush budget; the disk tier serves the pre-media text prefix only.
-- **Spec state rides the cache**: `Entry.mtp` + `restoreSpecSnap`, adopt only on `base + step == matched`; MTP trims to `mtpCommittedLen`; survives the SSD tier (`spec.safetensors`). An adopted spec cache has ONE owner at a time (`runPrefill` clears its locals BEFORE `initWithOptions`).
-- **"Free disk" is what the OS will GRANT** (`msv_volume_free_for_use`, statfs fallback): purgeable space is released on demand. The `volumeSpace` test must not race the OS's purgeable answer.
-
-## HTTP APIs + tool calling
-
-- **OpenAI chat/completions + Responses**: usage ALWAYS carries `prompt_tokens_details.cached_tokens`; thinking opt-ins = `reasoning_effort` OR `enable_thinking` (`reasoning_budget_tokens` outranks; Qwen3.8 = the `xhigh|medium|low` effort vocabulary); `n>1` 400s. `/v1/responses`: `sequence_number` on every event, stateful via `ResponseStore`, WS via Upgrade. Continuing a partial reply: `continue_final_message` explicit on chat, INFERRED on `/v1/messages`.
-- **Anthropic `/v1/messages`** (Claude Code): typed blocks, `input_schema`→`parameters`, stop-reason map incl. `stop_sequence` echo, full SSE block lifecycle; a `system`-role message past index 0 FOLDS into the leading system message (`foldSystemMessages`); `developer` reads as `system` (`canonicalRole`). Launcher env: `ANTHROPIC_BASE_URL` + dummy keys + `ANTHROPIC_DEFAULT_*_MODEL=mlx-serve`.
-- **Agent budgets** (`launch.budgetForContext` + `compactionReserve`): output share ctx/2, compaction reserve ctx/4 capped at 20000, carried into pi's `settings.json` and opencode's `compaction` + `limit.output`. A launch below the agent's context floor WARNS (claude 64k, opencode 32k, others 16k). Effort budgets = pi's ladder (`responses.effortBudget`).
-- `/v1/models` rows carry `context_length` + `max_model_len` at TOP level. Context-overflow 400s name BOTH counts. Endpoint EXISTENCE never depends on model state and the 404 is answered BEFORE the model resolves (`ROUTE_PATHS`); a status route never reaches `ensureLoaded` (`handlePropsNoModel`).
-- **Observability** (`--metrics`): zero cost off; TTFT at prefill completion; live tok/s via ONE atomic per tick. `--api-key`: loopback exempt, `/health` + OPTIONS open, `constTimeEql`. Default bind is 0.0.0.0 and serve mode WARNS.
-- **Tool calling pipeline**: with `tools`, tokens buffer for detection; thinking buffers separately. Parse chain strict → tolerant repairs → truncation salvage, then the ONE chokepoint `server.parseToolCallsForRequest` = parse → inferred-name filter → parallel clamp → buried-param hoist → schema coercion (last two gated by `--no-tool-autocorrect`; emitted `arguments` ALWAYS valid JSON). Serialization `chat.serializeMessagesJson`: role "tool" native, args as JSON STRINGS, every string via `appendJsonString`. Streaming: full args in ONE SSE delta, thinking → `reasoning_content`.
-- **Reasoning budget is enforced at DECODE** (`server.armThinkBound` → `SamplingParams.think_bound`, `scheduler.thinkBoundTick`): at the budget the early-stop line + the atomic closer commit as ONE multi-token forward (`commitForcedTokens`); the whole closed thought is delivered. Guard: `tests/test_reasoning_budget_stream.sh`.
-- **Constrained JSON**: the payload offset is AUTHORITATIVE (`reasoning_protocol.Delivery`, all surfaces, stream + non-stream); the grammar mask never walks the whole vocabulary (`token_mask.buildMask`); every grammar state has a legal byte; no whitespace OUTSIDE the root value, the model's OWN layout inside (`MAX_FREE_WS` 16); every schema-mask surface uses ONE thinking policy (`schemaMasksThinking`); tools present = no mask. Per-model grammar table lives on `LoadedModel`.
+- The inference thread is the SOLE mlx caller, even for frees ([engine-mlx-gotchas](docs/engine-mlx-gotchas.md)).
+- The weight loader is ONE decision, `model.loadWeightsForConfig` ([server-lifecycle](docs/server-lifecycle.md)).
+- An explicit launch flag outranks `model-settings.json`, which outranks the default
+  ([server-lifecycle](docs/server-lifecycle.md#settings)).
+- A bill follows the storage in the SAME commit; under-billing is a Metal OOM
+  ([engine-memory-admission](docs/engine-memory-admission.md)).
+- A stream and a non-stream answer are the SAME BYTES; emitted tool `arguments` are ALWAYS valid JSON
+  ([server-http-apis](docs/server-http-apis.md), [server-tool-calling](docs/server-tool-calling.md)).
+- A pack is judged by KLD against a lossless teacher, never by bytes against another pack
+  ([quality-kld](docs/quality-kld.md)).
 
 ## Debugging
 
-Server log `~/.mlx-serve/logs/mlx-serve-<port>.log` is THE post-mortem file (`--log-level debug`). Grep: `jinja error:`, `[cache]`, `<- N+M tokens`, `tool_msgs=`, `[spec-stats]`, `[mtp-planner]`, `[mtp-trace]`, `[loop-stop]`, `[admission]`, `[kv-cache]`, `[expert-stream]`, `[disk-cache]`, `[hot-cache]`, `[dtype-trace]`, `[short-gen]`. Capture traffic: `MLX_SERVE_RAW_DUMP_FILE=<abs>` → `tests/harvest_tool_traffic.py`. Reproduce tool bugs `stream:false` first; `pkill -f mlx-serve` between KV-poison tests. `/props` reports `active_bytes`, `memory.cache_bytes`, `batching`; RSS is blind to Metal.
+Server log `~/.mlx-serve/logs/mlx-serve-<port>.log` is THE post-mortem file (`--log-level debug`). Grep:
+`jinja error:`, `[cache]`, `<- N+M tokens`, `tool_msgs=`, `[spec-stats]`, `[mtp-planner]`, `[mtp-trace]`,
+`[loop-stop]`, `[admission]`, `[kv-cache]`, `[expert-stream]`, `[disk-cache]`, `[hot-cache]`, `[dtype-trace]`,
+`[short-gen]`. Capture traffic: `MLX_SERVE_RAW_DUMP_FILE=<abs>` → `tests/harvest_tool_traffic.py`. Reproduce tool bugs
+`stream:false` first; `pkill -f mlx-serve` between KV-poison tests. `/props` reports `active_bytes`,
+`memory.cache_bytes`, `batching`; RSS is blind to Metal.
 
-## Rules (distilled gotchas — every bullet ≤ 3 lines)
+<a id="team-process"></a>
+## Team process
 
-### Tool calling & formats
+Procedures and examples: [docs/process-measurement.md](docs/process-measurement.md).
 
-- **Control bytes**: ONE raw byte <0x20 in history kills the strict render → SILENT `fallbackFormatChat` (model loses its stop token). Everything through `appendJsonString`; wrong-family tags out ⇒ suspect silent fallback first. A NUL byte truncated the rendered prompt (`jinja_render_chat` returns its LENGTH; tell: the same `prompt=` count on consecutive turns).
-- **A `chat_template` value can be a POINTER** (`{% include 'chat_template.jinja' %}`): `chat.isIncludeStub` reads it as "no inline template" so the sidecar loads. Grep the log for `jinja` first. A template can raise on OUR extra-context values: `serializeExtraContext` sniffs the family; tool-call `arguments` stay OBJECTS; history tool_calls carry `"id"`; only a refusing template gets `noThinkTailSuffix`.
-- **A `<tool_call>` body carrying `<function=` is the XML dialect and is read FIRST** (qwen 3.5+ template mandates it); a parameter VALUE never decides the call. A `<parameter>` VALUE may spell the dialect's own close tags (`hermesValueEnd` = LAST `</parameter>` before the next opener). A Hermes value keeps its own whitespace (`stripHermesValueFraming`).
-- **A JSON call cut INSIDE the object still names its tool** (`truncatedJsonCallName`): recover NAME + `{}`, NEVER ship partial values, never ship raw markup as content. Model-mangled arg JSON → `looseRepairToolCallJson`, never drop the whole call. A tag parser never bails on ONE missing delimiter.
-- **A `</think>` inside a tool ARGUMENT is payload** (`thinkCloseIsToolCallPayload`): decline a close whose nearest preceding tool opener is still OPEN AND whose block closes afterwards.
-- **Types come from the SCHEMA, never the value's spelling** (`coerceToolArgsToSchema`; undecidable → untouched). Buried required params hoist only on all-schema-read unanimity. A container string with a key repeated at the SAME value still coerces (`parseContainerAllowingRepeats`). Heuristic raw-JSON inference must name a DECLARED tool (`filterInferredBySchema`).
-- **Hard invariants (replay-pinned)**: emitted args ALWAYS valid JSON; every converter escapes + dedups; coercion never worsens conformance; a parsed NAME never contains `<|`; no tag leaks. Harness: `src/tool_traffic_replay_test.zig`.
-- **Loop-stop tiers**: a short exact cycle convicts on SPAN (`degenerate_loop_min_span` 128; a 24-wide map row is legit), near-repeat needs THREE low ratios incl. PROGRESS (1024-token window, `near_repeat_min_span` 4096), long-period tier 9..64 at 10 reps. Cuts are intentional stops: `finish_reason "stop"`, `finish_details:{"type":"repetition_loop"}`, `[loop-stop]` logged, non-streaming trimmed to the span start. Guard: `tests/test_loop_stop_signal.sh`.
-- **Think-tag handling**: strip pos-0 unclosed openers; `trimTrailingThinkClosers`; unparsed tool markup never rides out as reasoning OR content (`trimLeakedToolMarkup`, ONE cut). Whether a prompt ends inside a think block is a property of the RENDERED BYTES (`promptOpensThink`), never ANDed with `enable_thinking`; `in_think_block` seeds from `prompt_opened_think` ALONE at every stream site; a model can open its OWN block (`modelThinkOpener`).
-- **Streaming + tools + thinking**: buffer until pattern resolution; reasoning streams INCREMENTALLY on the tools path (`.hold_thinking` + `unstreamedReasoning`, never a resend); the think gate scans with a CURSOR (`ThinkScan`). Thinking-off is enforced in the PROMPT; generated reasoning is ALWAYS delivered (every site splits via `splitThinkBlock(text, true, …)`).
-- **Assistant-history reasoning round-trips** (`Message.reasoning_content`, OMITTED when absent). A contract COMMENT is read as a spec — pin it with a test.
-- **A generic ChatML role header preserves tool roles**: absence of a literal `'tool'` branch does not license rewriting tool results as user text (`templateReferencesToolRole`).
+**GPU sharing.** ONE heavy GPU job at a time on the box: model loads, conversions and pilots, KLD, benches, kernel
+timing, traces (`zig build test` is not heavy).
+- Acquire the lock immediately before EACH run and release right after: `scripts/gpu-lock.sh acquire|release <owner>`,
+  `scripts/gpu-lock.sh status` (lock dir `${GPU_LOCK_DIR:-/tmp/sushi-gpu.lock.d}`, shared by every agent).
+- Never hold it across a batch or queue, or while analysing, editing, building or waiting. An A B B A re-acquires per
+  arm. Every brief that runs on the GPU names the lock.
 
-### Server, HTTP, lifecycle
+**Baselines.**
+- Never rerun an old-binary/old-code baseline that is already recorded: run only the new arm and compare it with the
+  recorded number. Within a session, inherit the previous number.
+- Run an old-binary baseline only in a clean new session (or when none exists for that exact setting; say which).
+- Existing pack shards are a converter's byte-identity baseline.
+- Cite the recorded file/commit beside every new number.
 
-- **A stream and a non-stream answer are the SAME BYTES**; leading whitespace is the one thing a stream may withhold (`streamContentLead`). A spent reasoning budget WITHHOLDS the rest of the thought; a non-stream tool-call reply carries the pre-markup text (`visibleToolPreamble`); a non-stream disconnect reports `client_disconnect`, never `length`; a stop sequence cuts at its INDEX (`stopSequenceCut`); request ints clamp (`parseRequestSeed`, `clampJsonI32`).
-- **`stream_options.include_usage` chunk ships `"choices": []`** (`sendSSEUsageChunk`); the ending appears on exactly ONE chunk; a client cannot time our stream — use the final chunk's server `timings`. Liveness is a property of the SOCKET: `beatStreamKeepalive` at the bottom of every streaming loop, emit on 5 s byte-silence. `--timeout` is a STALL timeout.
-- **A `seed` binds EVERY sampler with a fresh key PER DRAW** (`generate.seedKey`). Logprobs are the MODEL's distribution (pre-temperature), ids travel WITH values, entry belongs to the RETURNED token (one-token delay); `logprobs.content` describes `message.content` (`contentTokenRange`); streaming logprobs are a SIBLING of `delta` shipped EXACTLY once against a high-water mark. logprobs>0 + grammar disable spec.
-- **NO string built from model bytes is guaranteed UTF-8**: sanitizing lives INSIDE the escaper (`chat.utf8Next` under every `jsonEscape`/`appendJsonString`); logprobs `bytes` keeps the exact bytes. Hand-written error text is escaped at the SINK.
-- **A missing tensor is a load ERROR, never `unreachable`** (`error.MissingWeight` → named 503 via `loadErrorFromName`); a load failure crosses the inference thread by NAME (`req.error_name`); preflight refusals → `InsufficientMemory` → 503 + entry reset to `.unloaded`. A refusal quotes the number it COMPARED (`loadRequirementBytes`) and the flag that would admit.
-- **`modelDiskBytes` bills the shards the INDEX names**; an index that names NO shard on disk is STALE (every shard loads, one warning). Every size sum stats THROUGH symlinks (HF-cache models).
-- **An MLX failure is CATCHABLE; mlx-c's DEFAULT handler `exit(-1)` is what killed us** (`mlx.installErrorHandler` once in `main()`): `checkError` per prefill chunk (before snapshot/persist) + `checkErrorDecode` per tick; a latched error never 200s; streaming shares `mapGenerationError`. A swallowed failure must DROP the latch it raised (`dropLatchedErrorUnless(had_error)`, passing the `errorPending()` read BEFORE the op). Guard: `tests/test_mlx_error_recovery.sh`.
-- **Metal OOM is UNCATCHABLE and Metal at the working-set edge returns ZEROS before it aborts**: all-zero logits from healthy inputs = MEMORY symptom. `currentGpuMemoryCeiling` must see EXTERNAL pressure; under-billing is a Metal OOM, so a bill goes down only where the bytes are gone. A weight outside every warmup forward is still LAZY at serve time (`appendWeightArrays`).
-- **Thread lifecycle**: detach every per-connection `std.Thread` immediately; on teardown drain conn threads before `scheduler.deinit`. Sleep inhibition follows the inference-thread wait. `Slot.deinit` runs on conn threads: it stores marks, the inference thread frees.
-- **The embedded REPL uses in-process HTTP**: never fork `curl` from the resident engine for readiness checks or chat turns. Test `run` on a real TTY; a serving-only smoke test does not exercise its client.
-- **`messages.deinit(allocator)` frees the Message array and NOTHING it points at**: request media is owned by ONE `server.RequestMedia`; `Message` BORROWS. Ownership by PROVENANCE (`{slice, owned}` returns), never free-unless-equals-literal.
-- **A reload FREES the CPU state `unloadResident` retains** while the entry is `.loading` (`releaseRetainedCpuState`): a reader holding no refcount takes the mutex AND skips them while `.loading`. One path never registers under TWO ids (`registry.peekByPath`).
-- **An explicit launch flag outranks `model-settings.json`**, which outranks the default (`model_settings.pick`; `--ctx-size 0` = not given). A flag that shapes a LOAD is retained on the Scheduler with its `*_explicit` bit (`ensureLoaded`'s cold-load `LoadRequest` is a SECOND site); read via `server.manualContext` / `kvCacheFor` / `mtpChoiceFor`. Guard: `tests/test_cold_load_launch_flags.sh`, `tests/test_model_settings.sh`.
-- **The weight loader is ONE decision** (`model.loadWeightsForConfig`: streaming index > MiMo source trunk > vision > plain). A second site builds a model the server never serves — a MiMo pack read without its source trunk binds the raw FP8 fused QKV and its logits stop following the routed experts.
-- **An arg loop with no else branch is a silent flag eater** (`cli.classifyUnparsedArg`): every `--flag` any script passes must be in main.zig's match list. A client-supplied PATH is proven on OUR side of the mlx boundary (stat → 400; an MLX error there latches). `openDirAbsolute` on an empty/relative path is ReleaseFast UB — guard every site.
-- **Auto-context is PINNED at load** (`pinAutoContext`, 85% margin on the memory ceiling); ask `getEffectiveContextLength`. It bills KV at the CONFIGURED width and activations ONCE; the prefill CHUNK is a machine decision (`resolvePrefillChunk`, ladder 8192→512 at ≤ a quarter of the serving budget; `--prefill-chunk` wins). `prefillMemoryNeeded` takes STORED and SCORED widths as two parameters.
-- **Serial ≠ exclusive**: only a slot driving a module-owned decode state is exclusive (`slotExclusiveDecode`); qwen4's state is read-only shared and batches freely. The batched-decode gate reads DISPATCH, not ARMED flags (`slotTicksRegular` asks `specTickMode`). A batched decode guard that only runs at N=1 pins nothing: `tests/test_batched_equivalence.sh` runs a real two-stream arm.
-- **A media placeholder id occurs in ordinary TEXT**, so a media boundary is gated on the request CARRYING media (`firstMediaPlaceholder(has_media)`); active-turn media is selected from WIRE METADATA before decoding; a decode failure is a NAMED 400, never a silent drop; media on a tower-less/streamed load is refused by NAME (`mediaRejectReason`).
-- **A content array's text parts JOIN in order** (`joinedTextParts`).
-- **Sampling**: top-k and top-p are ONE pass (`filterTopKTopP`); a filter cuts by RANK, never by value (bf16 ties at the top constantly; `ranksDescending` ties by lowest id); the nucleus is the mass STRICTLY above each rank, cumsum in f32; `top_p` 0 is GREEDY (`applyTopP` floors at `floatMin(f32)`). A sampler never draws a RESERVED special or PADDING row (`installSuppressMask`; logprobs stay RAW). Helpers that could take a block use the `_axis` op.
-- **Allocator-cache growth**: `mlx_clear_cache()` once per CHUNK and per emitted block, INTERVAL-based (`step -| last_clear >= 256`), un-skippable; `Generator.advanceStep` is the one step mover. KV growth is PROPORTIONAL (`nextCapacity` +25%, capped 8192). `active` flat while phys climbs = the POOL (`memory.cache_bytes`).
+**Measurement hygiene.**
+- Rebuild ReleaseFast from the head under test right before any live number; stamp commit + binary mtime beside it.
+- Restore QoS for agent-launched timed jobs (`taskpolicy -a`); state the QoS, lock and baseline beside every number.
+- Never wait on `pgrep -f <string>` (the waiting shell matches itself): wait on END markers, PIDs, or `pgrep -x`.
+- Launch flags outrank `model-settings.json`; confirm the load lines (`[kv-cache]`, `[mtp]`) show the intended arm.
+- KLD is 16 prompts x 512 tokens scored to the first EOS, for every model; the teacher carries no lossy step of its own.
 
-### Engine: KV, kernels, MLX
+**Coordinator.**
+- Reports partial work to the owner every :00 and :30 while work runs.
+- Relays owner decisions and rule changes to ALL live workers at once.
+- Keeps docs/ fresh: every landing updates the matching doc (knowledge, numbers, lessons learned) in the same
+  landing, and this index when a doc appears. CLAUDE.md stays rules + index, never the knowledge store.
 
-- **KV defaults to kv8** (below request/flag/setting): each load logs `[kv-cache] <scheme> (<source>)` = `kv_cache` on `/props` + `/v1/models`; the KLD teacher + MTP head stay dense.
-- **kv-quant contract**: attention always reads `KVCache.denseView` on EVERY path (batched included); schemes extend via enum + two switch arms; `HotEntry` records its scheme. Packed reads are kernel-or-DENSE per WIDTH (`kvAttnFusedEligible` t_q==1, `kvAttnVerifyEligible` t_q 2..8; verify kernel OFF on G17, `MLX_SERVE_KV_ATTN_VERIFY=1|0`; floor 2048). Guard: `tests/test_kv_quant_fused_equivalence.sh`.
-- **A GDN trunk's `KVCache.step` is 0 forever** (it advances on layer 0, a linear layer): batched rope offsets read the slot's `moe_seq_offset`; the pad-waste cap reads `KVCache.kvLenForBatching`. Batched N=2 acquits near-ties (≤ 0.15 nats).
-- **A fallible re-init BEHIND a `deinit` leaves a freed object on the error path** — build first, then swap (`KVCache.reinit`). A handle freed before a fallible op is reset AT the free (`updateDense`). A lazily copied side-channel state is not in the residual's graph: name the owned copy in the cadence eval vector (`evalCadencePoint`, the `conv1dWithCache` tail).
-- **An f32 SCALAR array promotes every bf16 operand it touches**: scalars go through `scalarOf(v, dtype)`; a chain that returns f32 BY DESIGN makes the CALLER own the dtype; `[dtype-trace] residual widened` is the tell. A load-time constant table in the WRONG DTYPE silently widens every read (`constTableAs`).
-- **A host read inside a layer loop is a GPU BARRIER**: defer non-consumed reads into ONE batched eval. A rollback that re-forwards is a SECOND forward: capture only what verify overwrites, truncate the rest by offset. A multi-token forward is not a prefill (`prefillEvalCadenceApplies`, seq ≥ 32).
-- **Slice-born weights into gather_qmm/quantized_matmul are `mlx_contiguous`-materialized at load**; mlx `Copy`/`contiguous` are VIEW ops (a slice OUTLIVING its parent goes through `materializedOwnedCopy`); a raw data-pointer read must PROVE row-major contiguity; a helper that materializes a VIEW owns it (`sliceContig`); a weights MAP outliving the model pins every buffer; mlx-c `iterator_next` hands a +1; `mlx_array_new_data` COPIES shape-worth of bytes.
-- **Decode kernels**: a custom kernel can be LATENCY-bound rather than op-bound (qwen4 fused hc read, `MLX_SERVE_HC_FUSED=0`; `hcWrite` DEFERS into the next read); a kernel keyed on `batch*seq == 1` declines every verify row AND batched slot, so the grid carries the rows (`HC_FUSED_MAX_ROWS`/`GDN_FUSED_MAX_ROWS` 16). GDN decode = three fused dispatches (`MLX_SERVE_GDN_DECODE_FUSED=0`; S 1..9 bit-identity is SAMPLING). A dependent-kernel cut that REDISTRIBUTES a reduction into every threadgroup loses; a routing-independent chain the GPU already OVERLAPS is not a dispatch to fuse. Meter: `MLX_SERVE_DECODE_FWD_UBENCH`.
-- **MoE kernels**: fused gate+up made `gatherQmv` the decode default (eligibility = the kernel's OWN conditions, `useGatherQmvDecode`, never a model_type list); down+reduce is ONE dispatch splitting each row over 8 lanes with packs hoisted (bar = fp32-truth RMS no worse than the composed chain); 3-bit is a BYTE TRIPLE (`mlxserve_qpack`). MoE PREFILL uses `_gather_sort`. The grouped-expert NAX tile at verify widths is a measured LOSS (parked upstream).
-- **Prefill kernels**: `msv_attn_pd` at (qk,v) 256/256 and 192/128 — the widths MLX's steel kernel lacks (band always fused; q_len < 16 declined); a width `prefillHeadDimFused` lists owes a dispatch at EVERY prefill site scoring at it; on NAX the stock sdpa is the hd-256 kernel (`naxSdpaPreferred`, `MLX_SERVE_NAX_SDPA=0|1`); MLX sdpa has a WIDTH WALL at hd 256 (dense causal q 6..9 ride `splitCausalSdpa`); `use_fallback` has NO fused arm for an hd-256 ARRAY mask (`splitMaskedSdpa256`). Qwen4 HC + GDN prefill fusions take the chunk WIDTH as a scalar INPUT (`MLX_SERVE_HC_PREFILL=0` / `MLX_SERVE_GDN_PREFILL_FUSED=0`).
-- **Verify lanes** (`vqmmLaneFor`): split-K M 2–7 / wide tile N≥100K / NAX m16 M 8–16; parity = fp32-dequant per width, never vs stock's worst element (`VerifyQmmParity`); a verify lane is never byte-identical to stock. `--decode-attn-quant` (default ON, LOSSY) requants dense attention at decode AND verify.
-- **A cooperative-tensor template arg is `metal::remove_addrspace_t<decltype(t)>`**, never `decltype(t)` (the macOS 27 MPP header rejects the `thread` qualifier). Metal JIT-compiles at first EVAL, not at apply, so an optional NAX arm is PROBED on a one-tile problem before it is trusted (`buildNaxGemmKernel`); a failed probe declines by name and the sorted arm serves.
-- **Kernel testing**: GPU parity = no-worse-than fp32 ground truth, never kernel-vs-kernel; a parity loop asserts FINITENESS before it diffs; every shape an eligibility predicate adopts gets its own A/B; a `metal_kernel` config is cached by FULL SHAPE (`ShapeKey`); a per-token-varying TEMPLATE value is a fresh JIT per value — ramping values ride INPUTS; threadgroup memory is an OCCUPANCY decision (≤ ~10 KiB); JIT vs metallib transcendentals disagree (a 16-bit domain is swept ENTIRELY, `swigluSigTable`).
-- **Reproducing an MLX op means reproducing its REDUCTION TREE and ACCUMULATOR**; `mlx_compile` on the same math is NOT output-preserving; a weight-layout fusion changes which KERNEL runs; a fusion pays only if it shortens the DEPENDENCY CHAIN. A lever that pays in another harness may pay for a constraint we don't have — a DEFAULT belongs to the engine that MEASURED it.
-- **Special-token splitting only in `Tokenizer.encode`** (first-byte buckets); any per-position loop over a vocab-derived collection needs an index. A hand-rolled pretokenizer is calibrated to ONE tokenizer.json — digit GROUPING is per-model; cross-check `/tokenize` vs HF at bring-up.
-- **INT4 long-greedy divergence is legit**; byte-stable greedy ⇒ no spec + `--kv-quant off/8` + `--prefix-cache-entries 0`. A struct inside a generic fn that captures NO comptime param is memoized to ONE type. A custom kernel's signature comes from each input's ACTUAL dtype; <8-element arrays land in `constant`; every new kernel ships a one-shot "engaged" log + parity on the LIVE dtype.
+**Workers.**
+- Report progress and blockers to the coordinator; commit per step; don't push or merge unless told.
+- State the QoS, lock and baseline used beside every number; put new knowledge in the matching doc in the branch.
 
-### Packs, configs, converters
+**Growth policy (ENFORCED).** This file holds rules and links only and stays well under 20 KB; every rule bullet is
+≤ 3 lines. Knowledge, measurements and war stories go to `docs/` (converter knowledge to `docs/private/`); commit
+messages carry the story of a change.
 
-- **Expert layout is solved from PACKED shapes** (`expert_quant.zig`): affine (bits, group_size) from `w_cols*32 / in_dim`; EXL3 K from the trellis shape; `expert_layout` decides `moeExl3` vs the affine kernels and the streaming byte plan (`exl3ExpertBytes`). No literal quant width at any `mlx_quantized_matmul`/`mlx_dequantize` site — `affineParamsFromGeometry`. Affine bits outside {2,3,4,5,6,8} reject at PARSE.
-- **Quant modes resolve PER WEIGHT** (`computeQuantParams`; scales dtype decides fp8 vs affine; `.biases` mandatory under affine, optional in `loadLinear`; `qLinearFwd` passes `mode.cstr()`). A layer-init path that DEMANDS `.scales` can't load a DENSE checkpoint (`getLayerScaleOpt`; every dense contracted weight owes `maybeTransposeForBf16`).
-- **`generation_config.json` `eos_token_id` is part of the stop set** (additive). Read `text_config` FIRST, then root, PER FIELD. A config field HF allows in two SHAPES must be read as both (`chat_template` string OR list); `.string` on unchecked `std.json.Value` panics. When an arch's reference IGNORES a config field, that field is not the truth.
-- **A gather-read table may be quantized only where the READER has a quantized-gather path**: LM `embed_tokens` via `gatherQuantizedRows` is a SIZE decision (our packs quantize it, `serve_convert restandardize-qwen38`).
-- **Calibrated quantization**: imatrix weights PER-INPUT-CHANNEL and PER-EXPERT; bit width beats group granularity ≤ 3 bits; round (s,b) to the STORED dtype before q; an imatrix is only valid for the WEIGHTS it was collected on (byte-identical shard reuse enforced by COPYING). Uniform ≤ 2-bit experts to the LAST layer cause TURN-LEVEL agent loops — 4-bit tail experts fix it.
-- **A reference probe with SYNTHETIC dtypes proves the reference's SEMANTICS, not the checkpoint**; dtype-gate any `mlx_array_data_float32` load-time read; parity fixtures for deep stacks are dumped fp32 on CPU. **`--model-dir` is REPEATABLE** (`discoverModelsMany` merges roots FIRST-WINS).
+## Licensing
 
-### Licensing
-
-Ported kernels + vendored code are enumerated in `NOTICE` (the ONE place); `LICENSE`/`LICENSE-APACHE-2.0`/`NOTICE` ride every packaging path (`tests/test_release_workflow_gates.sh`). To enumerate ports, grep comments for `mlxfast|oMLX|MTPLX|mlx-lm|port`.
+Ported kernels + vendored code are enumerated in `NOTICE` (the ONE place); `LICENSE`/`LICENSE-APACHE-2.0`/`NOTICE`
+ride every packaging path (`tests/test_release_workflow_gates.sh`). To enumerate ports, grep comments for
+`mlxfast|oMLX|MTPLX|mlx-lm|port`.

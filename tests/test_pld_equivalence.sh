@@ -87,8 +87,8 @@ print(json.dumps({
 # tokens can flip beyond ~30–80 tokens. We tolerate that tail by asserting
 # byte-equivalence only on the first 30 tokens — that catches real logic
 # regressions (wrong argmax from token 0, off-by-one in rollback, etc.) while
-# accepting the float-noise cascade. See CLAUDE.md "MTP/PLD/drafter long-greedy
-# byte-divergence at INT4".
+# accepting the float-noise cascade. See docs/engine-kv-cache.md "Byte stability"
+# (INT4 long-greedy divergence).
 LONG_PROMPT='Recite the first paragraph of "A Tale of Two Cities" by Charles Dickens.'
 LONG_JSON_PAYLOAD=$(python3 -c "
 import json, sys
@@ -210,7 +210,7 @@ fi
 echo
 echo "== PLD long-greedy first-${FIRST_N_TOKENS}-tokens equivalence =="
 echo "  prompt: <memorized recital, max_tokens=200>"
-echo "  rationale: see CLAUDE.md 'MTP/PLD/drafter long-greedy byte-divergence at INT4'"
+echo "  rationale: see docs/engine-kv-cache.md 'Byte stability' (INT4 long-greedy divergence)"
 echo
 
 sleep 2
@@ -226,7 +226,7 @@ run_and_tokenize "with --pld (long)" "--pld" "$LONG_JSON_PAYLOAD" LONG_COMPLETIO
 echo "  with-pld long completion ($(echo "$LONG_COMPLETION_PLD" | wc -c) bytes, $(echo "$LONG_TOKENS_PLD" | tr ',' '\n' | wc -l | tr -d ' ') tokens)"
 
 # Compare the first FIRST_N_TOKENS tokens. We tolerate divergence past that
-# point because of the AR/verify INT4 kernel float-noise tail (see CLAUDE.md).
+# point because of the AR/verify INT4 kernel float-noise tail (docs/engine-kv-cache.md).
 DIVERGENCE=$(python3 - <<PY
 nopld = "$LONG_TOKENS_NOPLD".split(",") if "$LONG_TOKENS_NOPLD" else []
 pld   = "$LONG_TOKENS_PLD".split(",") if "$LONG_TOKENS_PLD" else []

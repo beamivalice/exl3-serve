@@ -1,9 +1,12 @@
 # Pack format — the consumer contract
 
-What this engine reads out of an EXL3 pack. The conversion side lives in
-PonyExl3 (`python -m ponyexl3.serve_convert`); this document is the interface
-between them, and a converter change that changes any line here is a format
-change.
+What this engine reads out of an EXL3 pack. The conversion side lives in the
+private converter repo; this document is the interface between them, and a
+converter change that changes any line here is a format change.
+
+Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related:
+[engine-exl3-experts](engine-exl3-experts.md), [quality-kld](quality-kld.md),
+[arch-qwen4exp](arch-qwen4exp.md), [arch-mimo-v2](arch-mimo-v2.md).
 
 Readers in this repo: `src/expert_quant.zig` (layout + `expert_quant` parse),
 `src/expert_exl3.zig` (decode), `src/mimo_source.zig` (`validateShardStamps`),
@@ -57,15 +60,18 @@ search and one converted with it differ only in these `suh` values.
 ## `config.json`
 
 ```json
-"expert_quant": { "format": "exl3", "k": 2.5, "codebook": "tiny", "window": 12 }
+"expert_quant": { "format": "exl3", "k": 2.5, "codebook": "mcg", "window": 12 }
 ```
 
 - `format` — must be the string `exl3`; anything else is `ExpertLayoutUnsupported`.
 - `k` — the rate, a JSON number and possibly fractional. It names the WIDEST
   rate a layer packs and is what the engine bills.
-- `codebook` — `mul1`, `tiny` or `mcg`. One per process: the codebook is bound
-  at load (`expert_exl3_kernels.setCodebook`) and every weight kernel inlines
-  its `exl3_pairh`.
+- `codebook` — `mul1`, `tiny` or `mcg`. MCG is the codebook for new packs;
+  MUL1 serves turboderp's packs; TINY is retired (the engine on main still
+  decodes it). The codebook and window follow the MODEL: `moeExl3` sets them
+  (`expert_exl3_kernels.setDecodeParams`) before every dispatch, so packs with
+  different codebooks can be resident together, and every weight kernel
+  inlines its `exl3_pairh`.
 - `window` — the codeword width the search hashed, 8..16. **Absent means 16.**
   The same bitstream decodes to different weights at each width, so a window
   this build cannot decode is `Exl3WindowUnsupported`, never a fallback to 16.
@@ -141,14 +147,37 @@ decodes or requantizes. See README.md.
 ## Fixtures
 
 `src/fixtures/exl3_*_linear.safetensors` are committed and `@embedFile`d by
-`src/expert_exl3.zig` and `src/transformer.zig`. They are produced by
-`python -m ponyexl3.serve_convert linear-fixture`; regenerate one only to change
-the format, and keep the one searched and decoded at window 12
-(`exl3_k2p5_tiny_w12_linear.safetensors`), which is what certifies a narrowed
-window against PonyExl3 rather than against our own masking of a w16 bitstream.
+`src/expert_exl3.zig` and `src/transformer.zig`. They are produced by the
+private converter; regenerate one only to change the format, and keep the one
+searched and decoded at window 12 (`exl3_k2p5_tiny_w12_linear.safetensors`),
+which is what certifies a narrowed window against the converter's own decode
+rather than against our own masking of a w16 bitstream.
 
 ## Quality bar
 
 A pack is judged by KLD against the bf16 teacher (`mlx-serve kld capture` /
-`kld compare`), never by bytes against an affine pack: the EXL3 kernel arms round
-once and are not byte-identical to any composite.
+`kld compare`, see [quality-kld](quality-kld.md)), never by bytes against an
+affine pack: the EXL3 kernel arms round once and are not byte-identical to any
+composite.
+
+## Loader rules the engine applies to every pack
+
+- **Expert layout is solved from PACKED shapes** (`expert_quant.zig`): affine
+  (bits, group_size) from `w_cols*32 / in_dim`; EXL3 K from the trellis shape;
+  `expert_layout` decides `moeExl3` vs the affine kernels and the streaming byte
+  plan (`exl3ExpertBytes`). No literal quant width at any
+  `mlx_quantized_matmul`/`mlx_dequantize` site — `affineParamsFromGeometry`.
+  Affine bits outside {2,3,4,5,6,8} reject at PARSE.
+- A trellis whose packed shape does not match the config's rate or expert
+  geometry is refused by name at load; a config `k` narrower than a shard would
+  under-bill, which on this engine is a Metal OOM rather than an error.
+- **Quant modes resolve PER WEIGHT** (`computeQuantParams`; scales dtype decides
+  fp8 vs affine; `.biases` mandatory under affine, optional in `loadLinear`;
+  `qLinearFwd` passes `mode.cstr()`). A layer-init path that DEMANDS `.scales`
+  can't load a DENSE checkpoint (`getLayerScaleOpt`; every dense contracted
+  weight owes `maybeTransposeForBf16`).
+- **A gather-read table may be quantized only where the READER has a
+  quantized-gather path**: LM `embed_tokens` via `gatherQuantizedRows` is a
+  SIZE decision (our packs quantize it).
+- A component pack's shared files are immutable: a converter replaces a
+  hard-linked file, never modifies it in place.

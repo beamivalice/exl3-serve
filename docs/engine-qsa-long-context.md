@@ -1,0 +1,67 @@
+# Engine: QSA sparse attention and long context (qwen4_exp)
+
+How Qwen3.8-Flash-Next attends past 2048 tokens: the QSA indexer, block selection, the gather/split-K arms per query
+width, the indexer history, and the long-context admission and load-time bills. Every mechanism here is gated by ONE
+predicate, `ModelConfig.longCtxGated()`. Read this before touching any `qsa*` function in `src/transformer.zig`.
+
+Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4exp.md),
+[engine-kv-cache](engine-kv-cache.md), [engine-memory-admission](engine-memory-admission.md),
+[engine-mtp](engine-mtp.md), [perf-baselines](perf-baselines.md#qsa).
+
+## Attention arms by query width
+
+- **QSA GATHERS selected blocks, never a dense `[S, kv]` mask** on a packed cache.
+- Selection = the exact radix-select `msv_qsa_select` on both arms, SPLIT across 16 threadgroups at decode widths
+  (`MLX_SERVE_QSA_SELECT_SPLIT=0`).
+- Rows 1..15 (decode and verify) = the fused split-K `qsaSparseAttn` on dense and packed caches alike
+  (`qsaAlignedSparseAttn`; `MLX_SERVE_QSA_ATTN_MIN_S` raises its floor). When it declines, decode falls to
+  `qsaDecodeGatherAttn` and rows 2..15 to the union gather `qsaVerifyGatherAttn`
+  (`MLX_SERVE_QSA_ATTN_KERNEL=0` forces the union gather).
+- **A PACKED (kv8/kv4) cache never takes the dense-mask arm and never rebuilds whole per layer**
+  (`qsaSparseAttnServes`): split-K serves up to `QSA_ATTN_PACKED_MAX_S` = 40 rows; past that
+  `gatherQsa256Packed` gathers the packed rows in place while each cache row is staged at most
+  `QSA_PACKED_GATHER_MAX_REUSE` = 4 times (`qsaPackedGatherServes`), else a gather over ONE rebuild.
+  `kvDequantScratchBytes` bills the rebuild per forward width (`qsaDenseRebuildRows`); `MLX_SERVE_QSA_ATTN_KERNEL=0`
+  restores the old route and its bill.
+- Prefill = `gatherQsa256`; batched slots + kv ≤ 8192 keep the dense mask.
+- **Verify gather kv floor is per KV SCHEME** (`qsaVerifyGatherMinKvFor`: dense 32768, quantized 16384).
+
+## Selection semantics
+
+- **The always-visible tail is PER QUERY** (tokens at/after `ratio·floor((p+1)/ratio)`), scores in f32 like the
+  reference, `torch.topk` keeps the LOWER block index on exact-zero ties.
+- QSA caps attended keys at top-512 blocks x 4 = 2048 per query: decode attention reads ~25 MB/token at kv8, under
+  1% of the weights, which is why generic kv8 attention kernels never engage on this arch.
+
+## Indexer
+
+- The score sheet is ONE NAX kernel (`msv_qsa_score`, bit-identical to the stock tf32 chain;
+  `MLX_SERVE_QSA_SCORE_FUSED=0`).
+- The prefill gather rides NAX cooperative tensors on its own predicate (`qsaNaxEligible`: G17 + macOS 26.3 + bf16 +
+  hd 256 + gqa 12 + q_len ≥ 16; bar = per-element error vs float64 no worse than stock,
+  `tests/qsa_nax_precision.py`, never bytes). The packed NAX variant joins the NAX probe.
+- One effective YaRN mscale on every indexer arm; the indexer ropes with the SAME M-RoPE table as attention.
+
+## Indexer history
+
+- ONE copy per (slot ∪ entry); the newest snap VIEWS the live buffer at commit (`handoffQsaHistoryToLatest`); none
+  after restore = MISS; the f32 score bank is billed; raw keys are a 32-row ring billed once per slot
+  (`qsaRingBytes`).
+- Per-request state outside conv/ssm rides `SSMCacheEntry.aux_state` + `ple_prev`, freed only through
+  `ssmFreeQsaState`. Never hand a null `mlx_array` to the spec tensor-map insert (a pooled-only head arrives with
+  `aux_state.ctx == null`).
+- A cache keyed on a POINTER is invalidated by an ATOMIC MARK (`markQsaPooledRopeStale`), never an off-thread free.
+
+## Admission and load-time bills
+
+- Past 32k a request RESERVES its KV capacity up front (`KVCache.reservedTokens`; `MLX_SERVE_KV_RESERVE=0`).
+- A long prefill EVICTS the hot cache to be admitted on the INFERENCE thread (`evictLruToAdmit`, credits only
+  PROVABLY reclaimable bytes, refuses by NAME `PrefillDoesNotFit` → 400, defers a warm prompt to the `WarmPrefix`
+  bill); ONE `[admission]` line.
+- The prefill width is per-REQUEST and re-chosen per CHUNK (`chooseRequestPrefillChunk`, `adaptivePrefillWidth`).
+- **Load-time bills** run INSIDE `Scheduler.init`: KV width from `configuredKvQuantFor(config)`, context from
+  `resolvedContextForLoad` with the CONSTANT `CTX_SIZING_CACHE_RESERVE`, the hot-cache clamp reserves the ladder
+  FLOOR. A KV bill is per CACHING LAYER (`kvBytesPerToken` via `attnCacheLayerCount`); `prefillStreamBytesPerToken`
+  adds the arch's own streams (GDN chunk-wide q/k/v, MoE `top_k` replication); the chunk-independent part is a
+  RUNTIME floor.
+- The general admission and memory rules: [engine-memory-admission](engine-memory-admission.md).

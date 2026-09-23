@@ -238,7 +238,7 @@ fi
 echo
 echo "== batched-kernel long-greedy first-${FIRST_N_TOKENS}-tokens equivalence =="
 echo "  prompt: <memorized recital, max_tokens=200>"
-echo "  rationale: see CLAUDE.md 'MTP/PLD/drafter long-greedy byte-divergence at INT4'"
+echo "  rationale: see docs/engine-kv-cache.md 'Byte stability' (INT4 long-greedy divergence)"
 echo
 
 sleep 2

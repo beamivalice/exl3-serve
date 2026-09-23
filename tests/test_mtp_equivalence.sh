@@ -121,7 +121,7 @@ python3 "$(dirname "$0")/test_mtp_equivalence_strict.py" || exit 1
 start_server() { # $1 = extra flags
     BOOT=$((BOOT+1))
     # --prefix-cache-entries 0: byte-stable greedy on a HYBRID needs the
-    # prefix cache off (CLAUDE.md) — a warm restore re-runs the recurrence in
+    # prefix cache off (docs/engine-prefix-cache.md) — a warm restore re-runs the recurrence in
     # a different block size and legitimately flips near-tie argmaxes inside
     # the byte-compared prefix (the char-~116 drift noted above was this).
     # --no-drafter: a pack shipping its own drafter/ would otherwise outrank

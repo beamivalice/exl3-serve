@@ -46,6 +46,9 @@ agent-tools/
 .spec-progress.md
 docs/perf/
 docs/tmp
+
+# Private converter knowledge (sashimi): local-only, never committed (CLAUDE.md, Docs index).
+docs/private/
 tests/pi-results
 tests/validator-results
 tests/pi_integration_run.summary.tsv
@@ -54,7 +57,7 @@ tests/pi_integration_run.summary.tsv
 
 # Local working notes, not project context. The mission log's TOP entry is the
 # session handoff — one file, so two copies of "where things stand" cannot
-# drift apart. Checked-in context stays in CLAUDE.md.
+# drift apart. Checked-in context stays in CLAUDE.md and docs/.
 /missionlog.md
 /.mc.json
 tests/soak_log.csv

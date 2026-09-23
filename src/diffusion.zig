@@ -770,7 +770,7 @@ test "diffusion: each committed canvas releases the MLX allocator cache (DIFFUSI
     // Live 2026-07-09 (soak): diffusiongemma-26B-A4B reached a 92 GB
     // phys_footprint for a 14 GB model. `active_bytes` stayed FLAT the whole
     // time — the signature of allocator-cache growth, NOT leaked handles
-    // (see the phantom-ref gotcha in CLAUDE.md). Ten growing-prompt requests
+    // (see the allocator-pool rule in docs/engine-mlx-gotchas.md). Ten growing-prompt requests
     // reproduced it: phys 27.6 → 35.8 GB, active pinned at 22.32 GB.
     //
     // Gated on DIFFUSION_TEST_MODEL; skips when unset so CI stays green.

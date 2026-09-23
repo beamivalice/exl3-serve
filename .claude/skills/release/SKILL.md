@@ -28,7 +28,7 @@ Timings measured 2026-07-16 on the M4 Max 128 GB, AFTER the `stop_all_engines` p
 
 ## Release benchmark artifacts
 
-The record is `benchmarks.md` plus the saved llmprobe reports under `~/claude-tmp/bench-<tag>/`. Nothing lands in `docs/` any more — no CSVs, no charts. Run the gate on the FINAL release tree (a number taken mid-cycle is stale the moment another perf round lands):
+The release record is `benchmarks.md` plus the saved llmprobe reports under `~/claude-tmp/bench-<tag>/`; no CSVs or charts land in `docs/`. The working baselines agents inherit between releases live in `docs/perf-baselines.md` (a release column is also added there as a cited row). Run the gate on the FINAL release tree (a number taken mid-cycle is stale the moment another perf round lands):
 
 ```
 ./tests/bench.sh --tag <ver>

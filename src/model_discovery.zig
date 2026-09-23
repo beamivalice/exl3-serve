@@ -334,7 +334,7 @@ fn scanLlmGguf(io: std.Io, allocator: std.mem.Allocator, dir: *std.Io.Dir) !Gguf
 /// Empty / non-absolute paths (e.g. headless boot with no --model) return
 /// false — guarded BEFORE `openDirAbsolute`, which ASSERTS the path is
 /// absolute (`unreachable` on "") and in ReleaseFast that's UB that
-/// miscompiles the caller (see the openDirAbsolute gotcha in CLAUDE.md).
+/// miscompiles the caller (see the openDirAbsolute rule in docs/engine-mlx-gotchas.md).
 pub fn isGgufModelPath(io: std.Io, path: []const u8) bool {
     if (path.len == 0 or !std.fs.path.isAbsolute(path)) return false;
     // A direct .gguf file path always routes to the gguf branch so

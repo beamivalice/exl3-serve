@@ -5,8 +5,8 @@
 # against the server with `--kv-quant 4` or `--kv-quant 8` produces the same
 # first-N tokens as `--kv-quant off`. KV quant is mathematically lossy, so we
 # tolerate divergence past a per-bit-width threshold — same approach as the
-# PLD/drafter long-greedy tests at INT4 weights (see CLAUDE.md "PLD/drafter
-# long-greedy byte-divergence at INT4").
+# PLD/drafter long-greedy tests at INT4 weights (see docs/engine-kv-cache.md
+# "Byte stability").
 #
 # Thresholds (empirical; override via env vars per architecture):
 #   - 4-bit KV: $KV_QUANT_FIRST_N_4BIT tokens must match (default 30)
@@ -16,7 +16,7 @@
 # slice_update, NaN propagation). Beyond ~30 tokens at INT4 *weights* the
 # long-greedy float-reduction noise tail dominates regardless of KV bits,
 # so a stricter bar would test float-reduction stability, not the quant
-# code path. See CLAUDE.md "PLD/drafter long-greedy byte-divergence at INT4".
+# code path. See docs/engine-kv-cache.md "Byte stability".
 #
 # Empirical per-arch numbers (loose first-N where we observed divergence;
 # raise via env var for stricter testing on a given family):

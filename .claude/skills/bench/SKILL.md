@@ -20,6 +20,10 @@ description: mlx-serve benchmarking methodology — bench.sh/llmprobe usage, com
 
 The only artifacts: the paste-ready rows bench.sh prints at the end, which go into `benchmarks.md` (one column per release in the history table, plus the cross-engine table rewritten when a comparison is run), and the saved llmprobe reports + server logs under `~/claude-tmp/bench-<tag>/`.
 
+### Before you run anything
+
+Follow CLAUDE.md's Team process and `docs/process-measurement.md`: take `scripts/gpu-lock.sh` per run, rebuild and stamp the binary, restore QoS (`taskpolicy -a`), and look up the recorded baseline in `docs/perf-baselines.md` first. A recorded old-binary baseline is inherited, not rerun (rerun only in a clean new session); cite its file and commit beside the new number, and record the new number there in the same landing.
+
 ### Comparison traps (these cost real days)
 
 - **Only diff same-methodology cells.** Columns through 26.7.12 are the old in-repo harness; 26.8 on is llmprobe — different prompts, different warmup, different rate math. Never diff across that boundary. Same rule inside one column: a forced-spec cell and a shipping-defaults cell are not the same measurement.

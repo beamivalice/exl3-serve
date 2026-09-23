@@ -15,7 +15,7 @@
 #   4. the staged MLX is still linked (the contract is "no llama", not "no deps")
 #   5. the llama-only flags are REJECTED BY NAME, never silently eaten — a
 #      script that still passes one must fail loudly, not serve under
-#      different settings (CLAUDE.md's flag-eater rule)
+#      different settings (the flag-eater rule, docs/server-lifecycle.md)
 #
 # No model, no server, seconds.
 #
