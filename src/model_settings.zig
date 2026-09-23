@@ -8,6 +8,78 @@ const kv_quant = @import("kv_quant.zig");
 const log = @import("log.zig");
 const mtp_acceptance = @import("mtp_acceptance.zig");
 
+/// Where a load's value for one key came from. A request's own field outranks all three.
+pub const Source = enum { flag, model_settings, default };
+
+pub fn Pick(comptime T: type) type {
+    return struct { value: T, source: Source };
+}
+
+/// An explicit launch flag outranks the file, which outranks the default. `flag` null = not given.
+pub fn pick(comptime T: type, flag: ?T, setting: ?T, default: T) Pick(T) {
+    if (flag) |f| return .{ .value = f, .source = .flag };
+    if (setting) |s| return .{ .value = s, .source = .model_settings };
+    return .{ .value = default, .source = .default };
+}
+
+pub fn sourceLabel(source: Source, flag_name: []const u8) []const u8 {
+    return switch (source) {
+        .flag => flag_name,
+        .model_settings => "model-settings.json",
+        .default => "default",
+    };
+}
+
+/// A launch value counts as a flag only when the operator passed it.
+pub fn launchFlag(comptime T: type, value: T, explicit: bool) ?T {
+    return if (explicit) value else null;
+}
+
+/// The manual context: `--ctx-size` > `ctx_size` > auto. 0 = auto, i.e. not given, on both sides.
+pub fn contextPick(flag: u32, setting: u32) Pick(u32) {
+    return pick(u32, if (flag > 0) flag else null, if (setting > 0) setting else null, 0);
+}
+
+/// Whether a load arms the MTP head, and whether requests then default to it on any arch.
+pub const MtpChoice = struct {
+    on: bool,
+    source: Source,
+
+    pub fn resolve(flag: ?bool, setting: ?bool, default: bool) MtpChoice {
+        const p = pick(bool, flag, setting, default);
+        return .{ .on = p.value, .source = p.source };
+    }
+
+    /// The engine default arms the head but leaves the request default to the arch
+    /// (`server.defaultEnableMtp`); an operator's `on` forces it for MoE targets too.
+    pub fn forced(self: MtpChoice) bool {
+        return self.on and self.source != .default;
+    }
+
+    pub fn label(self: MtpChoice) []const u8 {
+        return if (self.on) "on" else "off";
+    }
+
+    pub fn sourceName(self: MtpChoice) []const u8 {
+        return sourceLabel(self.source, if (self.on) "--mtp" else "--no-mtp");
+    }
+};
+
+/// Log token for a manual context; 0 is auto.
+pub fn contextLabel(buf: []u8, ctx: u32) []const u8 {
+    if (ctx == 0) return "auto";
+    return std.fmt.bufPrint(buf, "{d}", .{ctx}) catch "auto";
+}
+
+/// The flag an acceptance mode would have been launched with.
+pub fn acceptanceFlagName(mode: mtp_acceptance.Mode) []const u8 {
+    return switch (mode) {
+        .exact => "default",
+        .typical => "--mtp-typical",
+        .tokenv3 => "--mtp-tokenv3",
+    };
+}
+
 pub const Override = struct {
     ctx_size: ?u32 = null,
     kv_quant: ?kv_quant.KVQuantConfig = null,
@@ -169,4 +241,50 @@ test "model_settings: ssd_budget_gb rides the same file as the other keys" {
     try std.testing.expect(s.lookup("/m/c").isEmpty());
     try std.testing.expectEqual(@as(?u32, null), s.lookup("/m/d").ssd_budget_gb);
     try std.testing.expect(!s.lookup("/m/a").isEmpty());
+}
+
+test "an explicit --mtp / --no-mtp outranks the per-model mtp, which outranks the default" {
+    const t = std.testing;
+    const no_mtp = MtpChoice.resolve(false, true, true);
+    try t.expect(!no_mtp.on);
+    try t.expectEqualStrings("--no-mtp", no_mtp.sourceName());
+    try t.expect(!no_mtp.forced());
+    const mtp = MtpChoice.resolve(true, false, true);
+    try t.expect(mtp.on and mtp.forced());
+    try t.expectEqualStrings("--mtp", mtp.sourceName());
+    const file = MtpChoice.resolve(null, true, true);
+    try t.expect(file.on and file.forced());
+    try t.expectEqualStrings("model-settings.json", file.sourceName());
+    const engine = MtpChoice.resolve(null, null, true);
+    try t.expect(engine.on and !engine.forced());
+    try t.expectEqualStrings("default", engine.sourceName());
+    try t.expectEqualStrings("off", MtpChoice.resolve(null, false, true).label());
+}
+
+test "an explicit --ctx-size outranks the per-model ctx_size; 0 is auto on both sides" {
+    const t = std.testing;
+    const flag = contextPick(16384, 4096);
+    try t.expectEqual(@as(u32, 16384), flag.value);
+    try t.expectEqualStrings("--ctx-size", sourceLabel(flag.source, "--ctx-size"));
+    const file = contextPick(0, 4096);
+    try t.expectEqual(@as(u32, 4096), file.value);
+    try t.expectEqual(Source.model_settings, file.source);
+    const auto = contextPick(0, 0);
+    try t.expectEqual(@as(u32, 0), auto.value);
+    try t.expectEqual(Source.default, auto.source);
+}
+
+test "an explicit --mtp-typical / --mtp-tokenv3 outranks the per-model mtp_acceptance" {
+    const t = std.testing;
+    const Mode = mtp_acceptance.Mode;
+    const typical: Mode = .{ .typical = .{ .delta = 0.3 } };
+    const flag = pick(Mode, typical, .{ .tokenv3 = 0.95 }, .exact);
+    try t.expectEqual(@as(f32, 0.3), flag.value.typical.delta);
+    try t.expectEqualStrings("--mtp-typical", sourceLabel(flag.source, acceptanceFlagName(flag.value)));
+    const file = pick(Mode, null, .{ .tokenv3 = 0.95 }, .exact);
+    try t.expectEqual(@as(f32, 0.95), file.value.tokenv3);
+    try t.expectEqual(Source.model_settings, file.source);
+    const engine = pick(Mode, null, null, .exact);
+    try t.expect(engine.value == .exact);
+    try t.expectEqual(Source.default, engine.source);
 }

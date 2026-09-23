@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Per-model settings (`~/.mlx-serve/model-settings.json`, issue #269): a model's
-# `ctx_size` / `kv_quant` follow the MODEL, apply on its load (boot AND cold
-# load), and a second model in the same process keeps the globals.
+# `ctx_size` / `kv_quant` / `mtp` / `mtp_acceptance` follow the MODEL, apply on its
+# load (boot AND cold load), and a second model in the same process keeps the
+# globals. An explicit launch flag outranks the file.
 #
 # Runs under a private HOME so the real settings file is never touched.
 # NEEDS REAL MODELS: skips when the two small defaults are absent.
@@ -44,20 +45,23 @@ sleep 0.5
 
 write_settings() { # write_settings <ctx> <kv>  — override for MODEL_A only
     cat >"$SETTINGS" <<JSON
-{ "$MODEL_A/": { "ctx_size": $1, "kv_quant": "$2", "mtp_acceptance": "typical" }, "not-a-model": 1 }
+{ "$MODEL_A/": { "ctx_size": $1, "kv_quant": "$2", "mtp": true, "mtp_acceptance": "typical" }, "not-a-model": 1 }
 JSON
 }
 write_settings 4096 8
 
-HOME="$FAKE_HOME" "$BIN" --serve --model "$MODEL_A" --model-dir "$MODELS_ROOT" --ctx-size 16384 --port "$PORT" --log-file off >"$LOG" 2>&1 &
-SRV=$!
-UP=0
-for _ in $(seq 1 240); do
-    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && { UP=1; break; }
-    kill -0 "$SRV" 2>/dev/null || break
-    sleep 0.5
-done
-[ "$UP" = "1" ] || { echo "FAIL: server never became healthy"; tail -5 "$LOG"; exit 1; }
+boot() { # boot <extra flags...> — MODEL_A primary; no --ctx-size / --kv-quant unless passed
+    HOME="$FAKE_HOME" "$BIN" --serve --model "$MODEL_A" --model-dir "$MODELS_ROOT" --port "$PORT" --log-file off "$@" >"$LOG" 2>&1 &
+    SRV=$!
+    UP=0
+    for _ in $(seq 1 240); do
+        curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && { UP=1; break; }
+        kill -0 "$SRV" 2>/dev/null || break
+        sleep 0.5
+    done
+    [ "$UP" = "1" ] || { echo "FAIL: server never became healthy"; tail -5 "$LOG"; exit 1; }
+}
+boot --no-mtp
 
 row() { # row <model path> <ctx|kv|src> — context_length, meta.kv_quant or meta.kv_cache.source of the READY row
     curl -s "http://127.0.0.1:$PORT/v1/models" | python3 -c "
@@ -70,26 +74,34 @@ for m in json.load(sys.stdin)['data']:
         break
 " "$1" "$2"
 }
+props_mtp_source() { # props_mtp_source <model path> — /props settings.mtp.source
+    local id; id="$(basename "$(dirname "$1")")/$(basename "$1")"
+    curl -s "http://127.0.0.1:$PORT/props?model=$id" | python3 -c "import sys, json; print(json.load(sys.stdin)['settings']['mtp']['source'])"
+}
 post() { # post <route> <json>
     curl -s -o /dev/null -w '%{http_code}' --max-time 300 -X POST "http://127.0.0.1:$PORT/v1/$1" \
         -H 'Content-Type: application/json' -d "$2"
 }
 
-# [1] boot load honours the file
+# [1] boot load honours the file where no flag was given; --no-mtp outranks its mtp: true
 check "[1] boot: context_length 4096 from the file (got $(row "$MODEL_A" ctx))" "$([ "$(row "$MODEL_A" ctx)" = "4096" ] && echo 1 || echo 0)"
 check "[1] boot: meta.kv_quant 8 from the file (got $(row "$MODEL_A" kv))" "$([ "$(row "$MODEL_A" kv)" = "8" ] && echo 1 || echo 0)"
 check "[1] boot: kv_cache source model-settings.json (got $(row "$MODEL_A" src))" "$([ "$(row "$MODEL_A" src)" = "model-settings.json" ] && echo 1 || echo 0)"
-check "[1] load log names the KV choice" "$(grep -q "\[kv-cache\] kv8 (model-settings.json)" "$LOG" && echo 1 || echo 0)"
-check "[1] log names the override" "$(grep -q "\[model-settings\] .*ctx=4096 kv=8" "$LOG" && echo 1 || echo 0)"
+check "[1] load log names the KV and ctx choices" "$(grep -q "\[kv-cache\] kv8 (model-settings.json); ctx 4096 (model-settings.json)" "$LOG" && echo 1 || echo 0)"
+check "[1] load log: --no-mtp outranks mtp:true, acceptance from the file" \
+    "$(grep -q "\[mtp\] off (--no-mtp); acceptance typical (model-settings.json)" "$LOG" && echo 1 || echo 0)"
+check "[1] /props settings.mtp.source --no-mtp (got $(props_mtp_source "$MODEL_A"))" "$([ "$(props_mtp_source "$MODEL_A")" = "--no-mtp" ] && echo 1 || echo 0)"
+check "[1] log names the override" "$(grep -q "\[model-settings\] .*ctx=4096 kv=8 mtp=on" "$LOG" && echo 1 || echo 0)"
 check "[1] log names the MTP acceptance mode" "$(grep -q "\[model-settings\] .*accept=typical" "$LOG" && echo 1 || echo 0)"
 
-# [2] a second model keeps the globals
+# [2] a second model keeps the globals, and its cold load carries the explicit --no-mtp
 CODE="$(post load-model "{\"model\":\"$MODEL_B\"}")"
 check "[2] cold load of model B -> 200 (got $CODE)" "$([ "$CODE" = "200" ] && echo 1 || echo 0)"
-check "[2] model B keeps --ctx-size 16384 (got $(row "$MODEL_B" ctx))" "$([ "$(row "$MODEL_B" ctx)" = "16384" ] && echo 1 || echo 0)"
 check "[2] model B keeps the kv8 default (got $(row "$MODEL_B" kv))" "$([ "$(row "$MODEL_B" kv)" = "8" ] && echo 1 || echo 0)"
 check "[2] model B kv_cache source default (got $(row "$MODEL_B" src))" "$([ "$(row "$MODEL_B" src)" = "default" ] && echo 1 || echo 0)"
-check "[2] cold-load log names the KV choice" "$(grep -q "\[kv-cache\] kv8 (default)" "$LOG" && echo 1 || echo 0)"
+check "[2] cold-load log names the KV and ctx choices" "$(grep -q "\[kv-cache\] kv8 (default); ctx auto (default)" "$LOG" && echo 1 || echo 0)"
+check "[2] cold-load log: --no-mtp, exact acceptance" "$(grep -q "\[mtp\] off (--no-mtp); acceptance exact (default)" "$LOG" && echo 1 || echo 0)"
+check "[2] /props settings.mtp.source --no-mtp for B (got $(props_mtp_source "$MODEL_B"))" "$([ "$(props_mtp_source "$MODEL_B")" = "--no-mtp" ] && echo 1 || echo 0)"
 check "[2] model A still 4096 (got $(row "$MODEL_A" ctx))" "$([ "$(row "$MODEL_A" ctx)" = "4096" ] && echo 1 || echo 0)"
 
 # [3] edit + unload + load applies the new values, no restart
@@ -106,8 +118,8 @@ kill -0 "$SRV" 2>/dev/null; check "[3] server never restarted" "$([ $? = 0 ] && 
 echo '{nope' >"$SETTINGS"
 post unload-model "{\"model\":\"$MODEL_A\"}" >/dev/null
 CODE="$(post load-model "{\"model\":\"$MODEL_A\"}")"
-check "[4] malformed file: load -> 200 (got $CODE), globals apply (ctx $(row "$MODEL_A" ctx))" \
-    "$([ "$CODE" = "200" ] && [ "$(row "$MODEL_A" ctx)" = "16384" ] && echo 1 || echo 0)"
+check "[4] malformed file: load -> 200 (got $CODE), defaults apply (kv source $(row "$MODEL_A" src))" \
+    "$([ "$CODE" = "200" ] && [ "$(row "$MODEL_A" src)" = "default" ] && echo 1 || echo 0)"
 check "[4] malformed file logged" "$(grep -q "\[model-settings\] .*malformed" "$LOG" && echo 1 || echo 0)"
 
 # [5] ssd_budget_gb on a model that does not stream experts: ignored, warned once, load still 200
@@ -120,6 +132,20 @@ check "[5] ssd_budget_gb on a non-streaming model: load -> 200 (got $CODE)" "$([
 check "[5] the setting is logged" "$(grep -q "\[model-settings\] .*ssd_budget_gb=60" "$LOG" && echo 1 || echo 0)"
 check "[5] one line says it is ignored" \
     "$([ "$(grep -c "ssd_budget_gb ignored" "$LOG")" = "1" ] && echo 1 || echo 0)"
+
+# [6] explicit launch flags outrank every competing key in the file
+kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; SRV=""
+cat >"$SETTINGS" <<JSON
+{ "$MODEL_A/": { "ctx_size": 4096, "kv_quant": "8", "mtp": false, "mtp_acceptance": "typical" } }
+JSON
+boot --ctx-size 16384 --kv-quant 4 --mtp --mtp-tokenv3 0.9
+check "[6] --ctx-size 16384 outranks ctx_size 4096 (got $(row "$MODEL_A" ctx))" "$([ "$(row "$MODEL_A" ctx)" = "16384" ] && echo 1 || echo 0)"
+check "[6] --kv-quant 4 outranks kv_quant 8 (got $(row "$MODEL_A" kv), source $(row "$MODEL_A" src))" \
+    "$([ "$(row "$MODEL_A" kv)" = "4" ] && [ "$(row "$MODEL_A" src)" = "--kv-quant" ] && echo 1 || echo 0)"
+check "[6] load log names the flags" "$(grep -q "\[kv-cache\] kv4 (--kv-quant); ctx 16384 (--ctx-size)" "$LOG" && echo 1 || echo 0)"
+check "[6] --mtp outranks mtp:false, --mtp-tokenv3 outranks typical" \
+    "$(grep -q "\[mtp\] on (--mtp); acceptance tokenv3 (--mtp-tokenv3)" "$LOG" && echo 1 || echo 0)"
+check "[6] /props settings.mtp.source --mtp (got $(props_mtp_source "$MODEL_A"))" "$([ "$(props_mtp_source "$MODEL_A")" = "--mtp" ] && echo 1 || echo 0)"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = "0" ]

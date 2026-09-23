@@ -14,6 +14,7 @@ const pld_index = @import("pld_index.zig");
 const drafter_mod = @import("drafter.zig");
 const mtp_mod = @import("mtp.zig");
 const mtp_acceptance = @import("mtp_acceptance.zig");
+const model_settings = @import("model_settings.zig");
 const round_cost = @import("round_cost.zig");
 const group_cost = @import("mtp_group_cost.zig");
 const group_planner = @import("mtp_group_planner.zig");
@@ -50,6 +51,13 @@ pub var prefill_trace_force: bool = false;
 /// Set once by the serve CLI before request construction. Direct callers may
 /// override it through InitOptions; exact remains the library default.
 pub var mtp_acceptance_default: mtp_acceptance.Mode = .exact;
+/// `--mtp-typical` / `--mtp-tokenv3` (or their env twins) chose the default above.
+pub var mtp_acceptance_explicit: bool = false;
+
+/// THIS model's acceptance mode: the launch flag > its `mtp_acceptance` > exact.
+pub fn mtpAcceptanceFor(setting: ?mtp_acceptance.Mode) model_settings.Pick(mtp_acceptance.Mode) {
+    return model_settings.pick(mtp_acceptance.Mode, model_settings.launchFlag(mtp_acceptance.Mode, mtp_acceptance_default, mtp_acceptance_explicit), setting, mtp_acceptance_default);
+}
 
 /// The width `MLX_SERVE_PREFILL_CHUNK` asked for, or 0. A pinned width also turns the per-chunk adaptive width off.
 pub fn envPrefillChunk() usize {

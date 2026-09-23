@@ -244,8 +244,8 @@ fn printUsage(io: std.Io) void {
         \\                        windowing costs acceptance on stock Qwen heads).
         \\  --kv-quant <mode>   KV-cache quantization scheme:
         \\                        off, 4, 8 (default)     — affine group quant.
-        \\                          `off` keeps dense bf16 KV. A model's
-        \\                          model-settings.json `kv_quant` outranks it.
+        \\                          `off` keeps dense bf16 KV. It outranks a
+        \\                          model's model-settings.json `kv_quant`.
         \\                          Per-request override via the `kv_quant`
         \\                          body field.
         \\  --kv-attn-mode {{auto|dense|fused}}
@@ -535,6 +535,8 @@ pub fn main(init: std.process.Init) !void {
     // ships a sidecar is otherwise unreachable from clients that never send
     // `enable_mtp:true` (llmprobe, Claude Code, curl).
     var force_mtp = false;
+    // Either flag given: it outranks the per-model `mtp` (the last one wins).
+    var mtp_explicit = false;
     var mtp_head_kv_quant = false;
     var mtp_depth: u32 = 0; // 0 = auto (EV cap 8 on eligible M5 NAX, else 6; fixed cap 3); explicit wins
     var mtp_typical_raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_TYPICAL")) |v| std.mem.span(v) else null;
@@ -718,8 +720,12 @@ pub fn main(init: std.process.Init) !void {
             no_drafter = true;
         } else if (std.mem.eql(u8, args[i], "--no-mtp")) {
             enable_mtp = false;
+            force_mtp = false;
+            mtp_explicit = true;
         } else if (std.mem.eql(u8, args[i], "--mtp")) {
+            enable_mtp = true;
             force_mtp = true;
+            mtp_explicit = true;
         } else if (std.mem.eql(u8, args[i], "--mtp-head-kv-quant")) {
             mtp_head_kv_quant = true;
         } else if (std.mem.eql(u8, args[i], "--ane-prefill")) {
@@ -973,6 +979,7 @@ pub fn main(init: std.process.Init) !void {
         log.err("MTP acceptance settings: {s} (--mtp-typical needs d > 0; --mtp-tokenv3 needs 0 <= a <= 1; choose one)\n", .{@errorName(err)});
         std.process.exit(1);
     };
+    generate_mod.mtp_acceptance_explicit = mtp_typical_raw != null or mtp_tokenv3_raw != null;
 
     // Subcommand plumbing: `run <model>` supplies the model dir + serve
     // mode; `run`/`serve` default the discovery root to ~/.mlx-serve/models
@@ -1201,7 +1208,7 @@ pub fn main(init: std.process.Init) !void {
         if (model_dir.len == 0) {
             const discovery_for_registry = discovery_storage;
             discovery_storage = null; // ownership moves to the registry
-            try runHeadlessServe(io, allocator, discovery_for_registry, host, port, ctx_size, timeout, reasoning_budget, max_resident_models, max_resident_mem, max_resident_mem_explicit, idle_evict_secs, kv_quant_config, kv_quant_explicit, force_mtp, cli_pld);
+            try runHeadlessServe(io, allocator, discovery_for_registry, host, port, ctx_size, timeout, reasoning_budget, max_resident_models, max_resident_mem, max_resident_mem_explicit, idle_evict_secs, kv_quant_config, kv_quant_explicit, enable_mtp, mtp_explicit, cli_pld);
             return;
         }
 
@@ -1413,6 +1420,7 @@ pub fn main(init: std.process.Init) !void {
             .drafter_dir = drafter_dir orelse "",
             .no_drafter = no_drafter,
             .mtp_enabled = enable_mtp,
+            .mtp_explicit = mtp_explicit,
             .mtp_head_kv_quant = mtp_head_kv_quant,
             .mtp_depth = mtp_depth,
             .ane_prefill = ane_prefill,
@@ -1482,6 +1490,8 @@ pub fn main(init: std.process.Init) !void {
         // Transformer's own legacy cache to match.
         const kv_cache = transformer_mod.KvCacheChoice.resolve(config.kv_quant_override, kv_quant_config, kv_quant_explicit);
         log.info("[kv-cache] {s} ({s})\n", .{ kv_cache.label(), kv_cache.sourceName() });
+        const mtp_choice = scheduler_mod.mtpChoiceFor(enable_mtp, mtp_explicit, config);
+        log.info("[mtp] {s} ({s})\n", .{ mtp_choice.label(), mtp_choice.sourceName() });
         if (kv_cache.config.scheme != .off) {
             try xfm.cache.reinit(config.num_hidden_layers, kv_cache.config);
         }
@@ -1511,7 +1521,7 @@ pub fn main(init: std.process.Init) !void {
         // file or in-checkpoint tensors in the trunk shards).
         var mtp_head: ?mtp_mod.MtpModel = null;
         defer if (mtp_head) |*h| h.deinit();
-        if (enable_mtp and mtp_mod.hasMtpHead(io, allocator, model_dir)) {
+        if (mtp_choice.on and mtp_mod.hasMtpHead(io, allocator, model_dir)) {
             // A failed load (e.g. a sidecar layout we can't bind yet) only
             // disables the head — mirrors the serve path's graceful degrade.
             if (mtp_mod.loadMtp(io, allocator, xfm.s, model_dir)) |loaded| {
@@ -1924,7 +1934,8 @@ fn runHeadlessServe(
     idle_evict_secs: ?u32,
     kv_quant_config: transformer_mod.KVQuantConfig,
     kv_quant_explicit: bool,
-    force_mtp: bool,
+    enable_mtp: bool,
+    mtp_explicit: bool,
     pld: server_mod.PldDefaults,
 ) !void {
     log.info("mlx-serve {s} (headless — models load on demand)\n", .{VERSION});
@@ -1993,6 +2004,8 @@ fn runHeadlessServe(
         .draft_block_size = 0,
         .kv_quant_config = kv_quant_config,
         .kv_quant_explicit = kv_quant_explicit,
+        .mtp_enabled = enable_mtp,
+        .mtp_explicit = mtp_explicit,
         .mtp_head_kv_quant = transformer_mod.Transformer.mtp_head_kv_quant_flag,
         // Seed the scheduler's prefix-cache config from the server globals so
         // on-demand (headless/discover-mode) loads get the SAME hot prefix
@@ -2044,7 +2057,7 @@ fn runHeadlessServe(
         .kv_attn_mode = .auto,
         // On-demand MLX loads auto-attach an MTP sidecar (LoadParams.mtp_enabled
         // defaults true), so the MoE force flag has to reach this path too.
-        .default_force_mtp = force_mtp,
+        .default_force_mtp = enable_mtp and mtp_explicit,
     });
 }
 
@@ -2072,7 +2085,7 @@ fn runDs4Serve(
     idle_evict_secs: ?u32,
 ) !void {
     const settings = model_settings_mod.overrideFor(allocator, io, model_dir);
-    const model_ctx = settings.ctx_size orelse ctx_size;
+    const model_ctx = model_settings_mod.contextPick(ctx_size, settings.ctx_size orelse 0).value;
     // Resolve the GGUF file once on this thread so the engine's open() call
     // (running on the inference thread) gets an absolute path.
     const gguf_path_owned = resolveGgufFile(io, allocator, model_dir) catch |err| {

@@ -10,6 +10,7 @@
 - **MiMo-V2.6-Flash serves long context at a fraction of the KV.** Its 39 sliding-window layers now keep a short ring instead of a full-length cache, so a token costs only the 9 global layers' keys and values; a prefix whose match falls below the retained window cold-prefills instead of restoring.
 - **A MiMo affine expert pack serves resident.** Routed experts packed as `switch_mlp` weight/scales/biases under the arch's own nesting are recognized, load beside the source FP8 trunk, and resolve their (bits, group size) per layer and projection; such a pack is no longer reported as streaming-required.
 - **The KV cache is 8-bit by default.** `--kv-quant off` (or `4`), the per-model `kv_quant` setting and the per-request `kv_quant` field still choose another scheme; every load logs its choice as `[kv-cache] <scheme> (<source>)`, and `/props` and `/v1/models` report it as `kv_cache`.
+- **An explicit launch flag now outranks `model-settings.json`**: `--mtp`/`--no-mtp`, `--kv-quant`, `--ctx-size` and `--mtp-typical`/`--mtp-tokenv3` win over the model's `mtp`, `kv_quant`, `ctx_size` and `mtp_acceptance`; each load logs `[mtp] <on|off> (<source>)` and `/props` reports `settings.mtp.source`.
 - **`mlx-serve kld` scores a resident MiMo pack through the model the server serves.** It loads the source FP8 trunk like every other path, so two packs that differ only in their routed experts no longer compare identical.
 
 ## Exl3-serve - v26.9.5

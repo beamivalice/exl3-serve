@@ -72,8 +72,8 @@ except Exception: print('')" "$1" 2>/dev/null
 SERVER_PID=""
 boot() { # $1 model path, $2... extra flags
     local model="$1"; shift
-    # Isolated HOME: ~/.mlx-serve/model-settings.json outranks launch flags, so a real
-    # profile would silently turn a kv4 cell into whatever the user saved for that model.
+    # Isolated HOME: ~/.mlx-serve/model-settings.json decides every key a cell leaves
+    # unflagged, so a real profile would silently change what the cell measures.
     HOME="$OUT/home" "$BINARY" --model "$model" --serve --host 127.0.0.1 --port "$PORT" --log-level info --metrics "$@" \
         > "$OUT/$CELL.server.log" 2>&1 &
     SERVER_PID=$!

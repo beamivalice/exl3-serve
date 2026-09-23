@@ -52,6 +52,7 @@ const kv_disk_cache = @import("kv_disk_cache.zig");
 const tokenize_cache_mod = @import("tokenize_cache.zig");
 const model_registry_mod = @import("model_registry.zig");
 const model_settings = @import("model_settings.zig");
+const mtp_acceptance_mod = @import("mtp_acceptance.zig");
 const model_discovery = @import("model_discovery.zig");
 const gguf_meta = @import("gguf_meta.zig");
 const arch_ds4 = if (@import("build_options").ios) @import("arch/ds4_stub.zig") else @import("arch/ds4.zig");
@@ -122,6 +123,8 @@ pub const LoadParams = struct {
     no_drafter: bool = false,
     /// Auto-load the Qwen native MTP sidecar when the model dir ships one.
     mtp_enabled: bool = true,
+    /// `--mtp` / `--no-mtp` was given: `mtp_enabled` then outranks the per-model `mtp`.
+    mtp_explicit: bool = false,
     mtp_head_kv_quant: bool = false,
     /// Max MTP draft depth (CLI --mtp-depth; 0 = auto, resolved by
     /// generate_mod.resolveMtpDepthCap at load/Generator init).
@@ -152,7 +155,7 @@ pub const LoadParams = struct {
     /// KV-cache storage backend: `--kv-quant`, else the kv8 engine default. Stored on every
     /// per-slot KVCache and consulted at every read/write boundary.
     kv_quant_config: transformer_mod.KVQuantConfig = transformer_mod.KVQuantConfig.engine_default,
-    /// `--kv-quant` was given; only the reported source of the scheme depends on it.
+    /// `--kv-quant` was given: the flag then outranks the per-model `kv_quant`.
     kv_quant_explicit: bool = false,
     /// Per-model hot prefix cache capacity (count). 0 disables.
     prefix_cache_capacity: u32 = 1,
@@ -1119,6 +1122,7 @@ pub const LoadRequest = struct {
     ds4_dspark: bool = false,
     /// Auto-load the Qwen native MTP sidecar when the model dir ships one.
     mtp_enabled: bool = true,
+    mtp_explicit: bool = false,
     mtp_head_kv_quant: bool = false,
     /// Max MTP draft depth (CLI --mtp-depth; 0 = auto, resolved by
     /// generate_mod.resolveMtpDepthCap at load/Generator init).
@@ -1269,6 +1273,7 @@ pub const Scheduler = struct {
     /// (mtp on, default depth), silently ignoring these flags on every
     /// on-demand load and model switch.
     mtp_enabled: bool,
+    mtp_explicit: bool,
     mtp_head_kv_quant: bool,
     mtp_depth: u32,
     /// Launch-flag ds4 speculative settings, retained for cold loads (same
@@ -1466,6 +1471,7 @@ pub const Scheduler = struct {
             .ssm_checkpoint_stride = params.ssm_checkpoint_stride,
             .ssm_checkpoint_max = params.ssm_checkpoint_max,
             .mtp_enabled = params.mtp_enabled,
+            .mtp_explicit = params.mtp_explicit,
             .mtp_head_kv_quant = params.mtp_head_kv_quant,
             .mtp_depth = params.mtp_depth,
             .ds4_mtp = params.ds4_mtp,
@@ -1657,7 +1663,8 @@ pub const Scheduler = struct {
         // different architectures (e.g. pure-attention + hybrid SSM)
         // share one scheduler.
         const slot_config: *const ModelConfig = params.model.config orelse return error.ModelNotReady;
-        const eff_kv_quant = params.kv_quant_config orelse slot_config.kv_quant_override orelse self.kv_quant_config;
+        const eff_kv_quant = params.kv_quant_config orelse
+            transformer_mod.KvCacheChoice.resolve(slot_config.kv_quant_override, self.kv_quant_config, self.kv_quant_explicit).config;
         const slot = try Slot.init(self.allocator, self.io, slot_config, params, eff_kv_quant);
         errdefer slot.deinit();
 
@@ -1830,7 +1837,7 @@ pub const Scheduler = struct {
         // future ensureLoaded calls fail fast instead of re-tripping the
         // same parse error). FileNotFound / parse errors land here.
         const settings = model_settings.overrideFor(self.allocator, self.io, entry.path);
-        const cpu_state = preloadCpuState(self.allocator, self.io, entry.path, settings.ctx_size orelse self.gguf_ctx_size) catch |err| {
+        const cpu_state = preloadCpuState(self.allocator, self.io, entry.path, model_settings.contextPick(self.gguf_ctx_size, settings.ctx_size orelse 0).value) catch |err| {
             self.registry.mutex.lockUncancelable(self.io);
             self.registry.markErrorLocked(entry, @errorName(err));
             self.registry.mutex.unlock(self.io);
@@ -1869,7 +1876,8 @@ pub const Scheduler = struct {
             const layout = expert_stream_mod.quant.layoutOfDirWithFirstMoe(self.allocator, self.io, owned.config.model_type, entry.path, geometry.layers, geometry.first_moe_layer) orelse
                 return error.ExpertStreamingUnsupportedLayout;
             const split = try model_mod.streamingResidentSplit(self.io, self.allocator, entry.path, layout);
-            switch (expert_stream_mod.mtpUnderStreaming(self.mtp_enabled, owned.config.mtp_override)) {
+            const mtp = mtpChoiceFor(self.mtp_enabled, self.mtp_explicit, owned.config);
+            switch (expert_stream_mod.mtpUnderStreaming(mtp.on, mtp.source == .model_settings)) {
                 .refuse => return error.ExpertStreamingMtpUnsupported,
                 .drop_settings => owned.config.mtp_override = false,
                 .off => {},
@@ -1986,6 +1994,7 @@ pub const Scheduler = struct {
             // defaults, so --no-mtp / --mtp-depth were silently dropped on
             // every on-demand load and model switch.
             .mtp_enabled = self.mtp_enabled,
+            .mtp_explicit = self.mtp_explicit,
             .mtp_head_kv_quant = self.mtp_head_kv_quant,
             .mtp_depth = self.mtp_depth,
             .ds4_mtp = self.ds4_mtp,
@@ -2523,6 +2532,11 @@ pub fn applyModelSettings(config: *ModelConfig, o: model_settings.Override) void
     config.ssd_budget_gb_override = o.ssd_budget_gb orelse 0;
     if (resolveSsdBudget(0, config.ssd_budget_gb_override, config.supportsExpertStreaming()).setting_ignored)
         log.warn("[model-settings] ssd_budget_gb ignored: this checkpoint does not stream experts from SSD\n", .{});
+}
+
+/// A load's MTP decision: `--mtp`/`--no-mtp` > the per-model `mtp` > on.
+pub fn mtpChoiceFor(mtp_enabled: bool, mtp_explicit: bool, config: *const ModelConfig) model_settings.MtpChoice {
+    return model_settings.MtpChoice.resolve(model_settings.launchFlag(bool, mtp_enabled, mtp_explicit), config.mtp_override, true);
 }
 
 pub const SsdBudgetChoice = struct {
@@ -3303,7 +3317,7 @@ test "the cold-load LoadRequest re-applies EVERY retained launch setting" {
         "no_drafter",                "draft_block_size",      "draft_block_size_explicit",
         "ane_prefill",               "ane_chunk_resolver",    "ane_headroom_resolver",
         "prefix_cache_mem_resolver", "expert_cache_bytes",    "expert_cache_fit_resolver",
-        "ssd_budget_bytes",          "kv_quant_explicit",
+        "ssd_budget_bytes",          "kv_quant_explicit",     "mtp_explicit",
     }) |field| {
         const needle = "." ++ field ++ " = self" ++ "." ++ field ++ ",";
         try testing.expect(std.mem.indexOf(u8, src, needle) != null);
@@ -3617,9 +3631,10 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         if (layout == .exl3_k4) return error.ExpertLayoutUnsupported;
         params.config.expert_layout = layout;
         const split = try model_mod.streamingResidentSplit(sch.io, sch.allocator, params.model_dir, layout);
-        switch (expert_stream_mod.mtpUnderStreaming(params.mtp_enabled, params.config.mtp_override)) {
+        const mtp = mtpChoiceFor(params.mtp_enabled, params.mtp_explicit, params.config);
+        switch (expert_stream_mod.mtpUnderStreaming(mtp.on, mtp.source == .model_settings)) {
             .refuse => {
-                log.err("[expert-stream] {s}; drop --mtp\n", .{expert_stream_mod.MTP_UNSUPPORTED});
+                log.err("[expert-stream] {s}; MTP is on ({s}), pass --no-mtp\n", .{ expert_stream_mod.MTP_UNSUPPORTED, mtp.sourceName() });
                 return error.ExpertStreamingMtpUnsupported;
             },
             .drop_settings => {
@@ -3726,11 +3741,22 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // caches in serve mode honor this independently in `Slot.init`; this
     // call covers any path that still touches `xfm.cache` directly (legacy
     // single-slot fallbacks, prompt-cache reuse).
-    // Per-model settings (stamped on the config at BOTH construction sites) outrank the flags.
+    // An explicit launch flag outranks the per-model settings stamped on the config at BOTH construction sites.
     const kv_cache = transformer_mod.KvCacheChoice.resolve(params.config.kv_quant_override, params.kv_quant_config, params.kv_quant_explicit);
-    log.info("[kv-cache] {s} ({s})\n", .{ kv_cache.label(), kv_cache.sourceName() });
+    const load_ctx = model_settings.contextPick(sch.gguf_ctx_size, params.config.ctx_override);
+    var ctx_buf: [16]u8 = undefined;
+    log.info("[kv-cache] {s} ({s}); ctx {s} ({s})\n", .{
+        kv_cache.label(),                                      kv_cache.sourceName(),
+        model_settings.contextLabel(&ctx_buf, load_ctx.value), model_settings.sourceLabel(load_ctx.source, "--ctx-size"),
+    });
     const kv_quant_config = kv_cache.config;
-    const mtp_enabled = params.config.mtp_override orelse params.mtp_enabled;
+    const mtp = mtpChoiceFor(params.mtp_enabled, params.mtp_explicit, params.config);
+    const acceptance = generate_mod.mtpAcceptanceFor(params.config.mtp_acceptance_override);
+    log.info("[mtp] {s} ({s}); acceptance {s} ({s})\n", .{
+        mtp.label(),                               mtp.sourceName(),
+        mtp_acceptance_mod.name(acceptance.value), model_settings.sourceLabel(acceptance.source, model_settings.acceptanceFlagName(acceptance.value)),
+    });
+    const mtp_enabled = mtp.on;
     if (kv_quant_config.scheme != .off) {
         try xfm_ptr.cache.reinit(params.config.num_hidden_layers, kv_quant_config);
     }
@@ -6323,7 +6349,7 @@ fn runPrefill(sch: *Scheduler, slot: *Slot) !void {
                 slot.model.config.?.isMoe(),
             ),
             .mtp_enabled = use_mtp,
-            .mtp_acceptance = slot.model.config.?.mtp_acceptance_override orelse generate_mod.mtp_acceptance_default,
+            .mtp_acceptance = generate_mod.mtpAcceptanceFor(slot.model.config.?.mtp_acceptance_override).value,
             .mtp = if (use_mtp) slot.mtp else null,
             // The model's head before this request's opt-out (`entry.mtp` already ANDs `--no-mtp`).
             .model_has_mtp = slot.mtp != null,

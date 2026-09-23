@@ -140,13 +140,12 @@ pub const MTP_UNSUPPORTED: []const u8 = "MTP speculative decode is not supported
 /// `error.StreamingSpecCaptureUnsupported` inside the forward instead.
 pub const MtpUnderStreaming = enum { off, refuse, drop_settings };
 
-/// An explicit `--mtp` launch flag is refused; a per-model `mtp: true` setting is
-/// dropped with a warning (the setting was written for the resident load of the same
-/// pack, and a dead server is the wrong answer to it).
-pub fn mtpUnderStreaming(flag_mtp: bool, settings_mtp: ?bool) MtpUnderStreaming {
-    if (flag_mtp) return .refuse;
-    if (settings_mtp == true) return .drop_settings;
-    return .off;
+/// Takes the load's RESOLVED MTP choice. On from a launch flag (or the engine default) is
+/// refused; on from a per-model `mtp: true` is dropped with a warning (the setting was
+/// written for the resident load of the same pack, and a dead server is the wrong answer to it).
+pub fn mtpUnderStreaming(mtp_on: bool, from_settings: bool) MtpUnderStreaming {
+    if (!mtp_on) return .off;
+    return if (from_settings) .drop_settings else .refuse;
 }
 
 pub fn mtpRefusal(expert_streaming: bool, mtp_requested: bool) ?[]const u8 {
@@ -2907,11 +2906,10 @@ test "expert stream quantized slabs alias the nine pack tensors and remap ids" {
     for (handles, 0..) |handle, ci| try t.expectEqual(handle, again.quantOperand(@fromBackingInt(@intCast(ci))).ctx);
 }
 
-test "expert stream: under streaming an explicit --mtp refuses, a settings mtp is dropped, else off" {
+test "expert stream: under streaming an MTP on by flag refuses, a settings mtp is dropped, else off" {
     const t = std.testing;
-    try t.expectEqual(MtpUnderStreaming.refuse, mtpUnderStreaming(true, null));
-    try t.expectEqual(MtpUnderStreaming.refuse, mtpUnderStreaming(true, true));
-    try t.expectEqual(MtpUnderStreaming.drop_settings, mtpUnderStreaming(false, true));
+    try t.expectEqual(MtpUnderStreaming.refuse, mtpUnderStreaming(true, false));
+    try t.expectEqual(MtpUnderStreaming.drop_settings, mtpUnderStreaming(true, true));
+    try t.expectEqual(MtpUnderStreaming.off, mtpUnderStreaming(false, true));
     try t.expectEqual(MtpUnderStreaming.off, mtpUnderStreaming(false, false));
-    try t.expectEqual(MtpUnderStreaming.off, mtpUnderStreaming(false, null));
 }

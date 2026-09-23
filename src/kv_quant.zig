@@ -79,15 +79,16 @@ pub const KVQuantConfig = struct {
 /// Where a load's KV scheme came from. A request's own `kv_quant` outranks all three.
 pub const KvCacheSource = enum { model_settings, flag, default };
 
-/// The KV scheme a load stores at, with its provenance: per-model setting > `--kv-quant` >
+/// The KV scheme a load stores at, with its provenance: `--kv-quant` > per-model setting >
 /// `KVQuantConfig.engine_default`. `launch` is the flag's value, or the default when unflagged.
 pub const KvCacheChoice = struct {
     config: KVQuantConfig,
     source: KvCacheSource,
 
     pub fn resolve(setting: ?KVQuantConfig, launch: KVQuantConfig, launch_explicit: bool) KvCacheChoice {
+        if (launch_explicit) return .{ .config = launch, .source = .flag };
         if (setting) |s| return .{ .config = s, .source = .model_settings };
-        return .{ .config = launch, .source = if (launch_explicit) .flag else .default };
+        return .{ .config = launch, .source = .default };
     }
 
     pub fn label(self: KvCacheChoice) []const u8 {
@@ -570,7 +571,7 @@ test "quantizeAffine + dequantizeAffine round-trip at 8 bits" {
     try testing.expect(max_err < 0.01);
 }
 
-test "a load's KV choice: setting > --kv-quant > the kv8 default, each named by its source" {
+test "a load's KV choice: --kv-quant > setting > the kv8 default, each named by its source" {
     const t = std.testing;
     try t.expectEqual(KVQuantConfig.affine(8), KVQuantConfig.engine_default);
     const unflagged = KvCacheChoice.resolve(null, KVQuantConfig.engine_default, false);
@@ -580,7 +581,10 @@ test "a load's KV choice: setting > --kv-quant > the kv8 default, each named by 
     const flagged = KvCacheChoice.resolve(null, KVQuantConfig.affine(4), true);
     try t.expectEqualStrings("kv4", flagged.label());
     try t.expectEqualStrings("--kv-quant", flagged.sourceName());
-    const set = KvCacheChoice.resolve(KVQuantConfig.dense, KVQuantConfig.affine(4), true);
+    const flag_wins = KvCacheChoice.resolve(KVQuantConfig.dense, KVQuantConfig.affine(4), true);
+    try t.expectEqual(KVQuantConfig.affine(4), flag_wins.config);
+    try t.expectEqualStrings("--kv-quant", flag_wins.sourceName());
+    const set = KvCacheChoice.resolve(KVQuantConfig.dense, KVQuantConfig.engine_default, false);
     try t.expectEqual(KVQuantConfig.dense, set.config);
     try t.expectEqualStrings("off", set.label());
     try t.expectEqualStrings("model-settings.json", set.sourceName());

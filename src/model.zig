@@ -458,13 +458,11 @@ pub const ModelConfig = struct {
     pinned_context: u32 = 0,
 
     /// Per-model settings from `model-settings.json`, set at the load
-    /// construction site. `ctx_override` 0 = the process `--ctx-size`/auto;
-    /// `kv_quant_override` null = the process `--kv-quant`; `mtp_override`
-    /// true = head loaded AND on by default (the `--mtp` force, per model).
+    /// construction site; an explicit launch flag outranks each (`model_settings.pick`).
+    /// 0/null = unset; `mtp_override` true = head loaded AND on by default (`--mtp`, per model).
     ctx_override: u32 = 0,
     kv_quant_override: ?kv_quant_mod.KVQuantConfig = null,
     mtp_override: ?bool = null,
-    /// null = the process `--mtp-typical`/`--mtp-tokenv3` (exact when neither).
     mtp_acceptance_override: ?mtp_acceptance_mod.Mode = null,
     /// Per-model `ssd_budget_gb` (GiB, the `--ssd-budget-gb` unit) from model-settings.json; 0 = none.
     ssd_budget_gb_override: u32 = 0,

@@ -581,9 +581,16 @@ fn resolveSamplingDefault(comptime T: type, request: ?T, cli: ?T, gen_config: ?T
 /// checkpoint AND has been measured no-worse-than-serial across the context
 /// ladder (`Transformer.nativeMoeMtpHeadMeasured`, which carries the bar). It
 /// still needs a head LOADED — the claim is about the head, not the arch.
-/// `--mtp` process-wide, or the model's own `"mtp": true` in `model-settings.json`.
+/// `--mtp` process-wide, or the model's own `"mtp": true` in `model-settings.json` when unflagged.
 fn forceMtpFor(config: *const model_mod.ModelConfig) bool {
-    return config.mtp_override == true or server_config.default_force_mtp;
+    return mtpChoiceFor(config).forced();
+}
+
+/// THIS model's MTP decision and its source, the answer the load log and `/props` read.
+pub fn mtpChoiceFor(config: *const model_mod.ModelConfig) model_settings.MtpChoice {
+    if (global_scheduler) |sch| return scheduler_mod.mtpChoiceFor(sch.mtp_enabled, sch.mtp_explicit, config);
+    const flag: ?bool = if (server_config.default_force_mtp) true else null;
+    return model_settings.MtpChoice.resolve(flag, config.mtp_override, true);
 }
 
 pub fn defaultEnableMtp(mtp_loaded: bool, is_moe: bool, force: bool, dsv4_stages: bool, native_measured: bool) bool {
@@ -688,10 +695,10 @@ pub fn configuredKvQuantFor(config: *const model_mod.ModelConfig) transformer_mo
     return kvCacheFor(config).config;
 }
 
-/// The explicit context for THIS model: its `model-settings.json` `ctx_size`, else `--ctx-size`.
+/// The explicit context for THIS model: `--ctx-size`, else its `model-settings.json` `ctx_size`.
 /// 0 = auto. Every reader of the manual context goes through here, never `server_config.max_context_size`.
 pub fn manualContext(config: *const model_mod.ModelConfig) u32 {
-    return if (config.ctx_override > 0) config.ctx_override else server_config.max_context_size;
+    return model_settings.contextPick(server_config.max_context_size, config.ctx_override).value;
 }
 
 /// Plan 05 — model registry. Always non-null in serve mode (set by
@@ -1797,7 +1804,8 @@ pub fn serve(
     // whole session, so it must not drift with system load. `--ctx-size` wins.
     const pinned = pinAutoContext(@constCast(config));
     if (manualContext(config) > 0) {
-        log.info("Context size: {d} tokens (manual)\n", .{manualContext(config)});
+        const ctx = model_settings.contextPick(server_config.max_context_size, config.ctx_override);
+        log.info("Context size: {d} tokens ({s})\n", .{ ctx.value, model_settings.sourceLabel(ctx.source, "--ctx-size") });
     } else {
         const memory_ctx = computeMemoryContext(config);
         const memory_allows = safeAutoContext(memory_ctx);
@@ -4839,6 +4847,20 @@ test "the load-time session bill is billed at the boot's --kv-quant, not bf16" {
     try t.expectEqual(@as(u64, 8_640 * MiB), at16 -| at8);
 }
 
+test "manualContext: an explicit --ctx-size outranks the model's ctx_size, which outranks auto" {
+    const t = std.testing;
+    const original = server_config.max_context_size;
+    defer server_config.max_context_size = original;
+    var cfg = model_mod.ModelConfig{};
+    cfg.ctx_override = 4096;
+    server_config.max_context_size = 16384;
+    try t.expectEqual(@as(u32, 16384), manualContext(&cfg));
+    server_config.max_context_size = 0;
+    try t.expectEqual(@as(u32, 4096), manualContext(&cfg));
+    cfg.ctx_override = 0;
+    try t.expectEqual(@as(u32, 0), manualContext(&cfg));
+}
+
 test "with no --kv-quant, the per-token KV bill and the auto-context follow the kv8 engine default" {
     const qsa_fused_off = qsaScoreFusedOffGuard();
     defer qsa_fused_off.deinit();
@@ -7504,7 +7526,9 @@ const PropsSettings = struct {
     prefill_chunk: usize,
     mtp_loaded: bool,
     mtp_default_on: bool,
+    mtp_choice: model_settings.MtpChoice = model_settings.MtpChoice.resolve(null, null, true),
     mtp_acceptance: mtp_acceptance_mod.Mode,
+    mtp_acceptance_source: []const u8 = "default",
     /// 0 = auto.
     mtp_depth: u32,
     mtp_adaptive: bool,
@@ -7545,6 +7569,7 @@ fn mlxPropsSettings(lm: *LoadedModel) PropsSettings {
     const config = lm.config.?;
     const kv_cache = kvCacheFor(config);
     const kv = kv_cache.config;
+    const acceptance = generate_mod.mtpAcceptanceFor(config.mtp_acceptance_override);
     return .{
         .engine = "mlx",
         .kv_quant = if (kv.isQuant()) (if (kv.bits == 4) "4" else "8") else "off",
@@ -7554,7 +7579,9 @@ fn mlxPropsSettings(lm: *LoadedModel) PropsSettings {
         .prefill_chunk = generate_mod.prefill_chunk_override,
         .mtp_loaded = mtpCapable(lm),
         .mtp_default_on = defaultEnableMtp(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm)),
-        .mtp_acceptance = config.mtp_acceptance_override orelse generate_mod.mtp_acceptance_default,
+        .mtp_choice = mtpChoiceFor(config),
+        .mtp_acceptance = acceptance.value,
+        .mtp_acceptance_source = model_settings.sourceLabel(acceptance.source, model_settings.acceptanceFlagName(acceptance.value)),
         .mtp_depth = lm.mtp_depth,
         .mtp_adaptive = generate_mod.Generator.mtpAdaptiveEnabled(),
         .max_mtp_ctx = generate_mod.max_mtp_ctx,
@@ -7574,12 +7601,13 @@ fn settingsPropsJson(allocator: std.mem.Allocator, st: PropsSettings) ![]u8 {
         .typical => |t| try std.fmt.bufPrint(&param_buf, "{d}", .{t.delta}),
         .tokenv3 => |a| try std.fmt.bufPrint(&param_buf, "{d}", .{a}),
     };
-    return std.fmt.allocPrint(allocator, ",\"settings\":{{\"version\":\"{s}\",\"engine\":\"{s}\",\"kv_quant\":\"{s}\",\"kv_cache\":{{\"scheme\":\"{s}\",\"source\":\"{s}\"}},\"kv_attn_mode\":\"{s}\",\"decode_attn_quant\":{},\"prefill_chunk\":{d},\"mtp\":{{\"loaded\":{},\"default_on\":{},\"acceptance\":\"{s}\",\"acceptance_param\":{s},\"depth\":{d},\"adaptive\":{},\"max_ctx\":{d}}},\"drafter\":\"{s}\",\"pld\":{{\"default_on\":{},\"draft_len\":{d},\"key_len\":{d}}},\"max_concurrent\":{d},\"prefix_cache\":{{\"mem_bytes\":{d},\"disk_bytes\":{d}}}}}", .{
+    return std.fmt.allocPrint(allocator, ",\"settings\":{{\"version\":\"{s}\",\"engine\":\"{s}\",\"kv_quant\":\"{s}\",\"kv_cache\":{{\"scheme\":\"{s}\",\"source\":\"{s}\"}},\"kv_attn_mode\":\"{s}\",\"decode_attn_quant\":{},\"prefill_chunk\":{d},\"mtp\":{{\"loaded\":{},\"default_on\":{},\"source\":\"{s}\",\"acceptance_source\":\"{s}\",\"acceptance\":\"{s}\",\"acceptance_param\":{s},\"depth\":{d},\"adaptive\":{},\"max_ctx\":{d}}},\"drafter\":\"{s}\",\"pld\":{{\"default_on\":{},\"draft_len\":{d},\"key_len\":{d}}},\"max_concurrent\":{d},\"prefix_cache\":{{\"mem_bytes\":{d},\"disk_bytes\":{d}}}}}", .{
         build_options.version,                      st.engine,
         st.kv_quant,                                st.kv_cache.label(),
         st.kv_cache.sourceName(),                   @tagName(st.kv_attn_mode),
         st.decode_attn_quant,                       st.prefill_chunk,
         st.mtp_loaded,                              st.mtp_default_on,
+        st.mtp_choice.sourceName(),                 st.mtp_acceptance_source,
         mtp_acceptance_mod.name(st.mtp_acceptance), param,
         st.mtp_depth,                               st.mtp_adaptive,
         st.max_mtp_ctx,                             st.drafter,
@@ -21071,7 +21099,9 @@ test "settingsPropsJson: /props names the effective serving settings a benchmark
         .prefill_chunk = 8192,
         .mtp_loaded = true,
         .mtp_default_on = true,
+        .mtp_choice = model_settings.MtpChoice.resolve(true, false, true),
         .mtp_acceptance = .{ .tokenv3 = 0.95 },
+        .mtp_acceptance_source = "--mtp-tokenv3",
         .mtp_depth = 0,
         .mtp_adaptive = true,
         .max_mtp_ctx = 32768,
@@ -21098,6 +21128,8 @@ test "settingsPropsJson: /props names the effective serving settings a benchmark
     try testing.expect(st.get("decode_attn_quant").?.bool);
     const mtp = st.get("mtp").?.object;
     try testing.expect(mtp.get("default_on").?.bool);
+    try testing.expectEqualStrings("--mtp", mtp.get("source").?.string);
+    try testing.expectEqualStrings("--mtp-tokenv3", mtp.get("acceptance_source").?.string);
     try testing.expectEqualStrings("tokenv3", mtp.get("acceptance").?.string);
     try testing.expectApproxEqAbs(@as(f64, 0.95), mtp.get("acceptance_param").?.float, 1e-6);
     try testing.expectEqual(@as(i64, 32768), mtp.get("max_ctx").?.integer);

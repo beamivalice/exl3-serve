@@ -36,6 +36,7 @@ pub const Options = struct {
     expert_cache_bytes: u64 = 0,
     ssd_budget_bytes: u64 = 0,
     enable_mtp: bool = false,
+    mtp_explicit: bool = false,
 };
 
 pub const ArgError = error{
@@ -110,8 +111,10 @@ pub fn parseArgs(args: []const []const u8) ArgError!Options {
             o.no_template = true;
         } else if (std.mem.eql(u8, a, "--no-mtp")) {
             o.enable_mtp = false;
+            o.mtp_explicit = true;
         } else if (std.mem.eql(u8, a, "--mtp")) {
             o.enable_mtp = true;
+            o.mtp_explicit = true;
         } else if (valueFlag(a)) |flag| {
             if (i + 1 >= args.len) return error.MissingFlagValue;
             i += 1;
@@ -803,7 +806,7 @@ pub fn loadModel(io: std.Io, allocator: std.mem.Allocator, opts: Options) !*Load
     };
     errdefer self.config.deinit(allocator);
     scheduler_mod.applyModelSettings(&self.config, model_settings_mod.overrideFor(allocator, io, opts.model_dir));
-    if (opts.ctx_size > 0 and self.config.ctx_override == 0) self.config.ctx_override = opts.ctx_size;
+    self.config.ctx_override = model_settings_mod.contextPick(opts.ctx_size, self.config.ctx_override).value;
 
     const kld_budget = scheduler_mod.resolveSsdBudget(opts.ssd_budget_bytes, self.config.ssd_budget_gb_override, self.config.supportsExpertStreaming());
     if (expert_stream_mod.expertStreamingEngaged(
@@ -814,7 +817,8 @@ pub fn loadModel(io: std.Io, allocator: std.mem.Allocator, opts: Options) !*Load
     )) {
         const budget = kld_budget;
         if (opts.expert_cache_bytes == 0 and budget.bytes == 0) return error.ExpertStreamingRequired;
-        switch (expert_stream_mod.mtpUnderStreaming(opts.enable_mtp, self.config.mtp_override)) {
+        const mtp = model_settings_mod.MtpChoice.resolve(model_settings_mod.launchFlag(bool, opts.enable_mtp, opts.mtp_explicit), self.config.mtp_override, false);
+        switch (expert_stream_mod.mtpUnderStreaming(mtp.on, mtp.source == .model_settings)) {
             .refuse => {
                 log.err("[expert-stream] {s}; drop --mtp\n", .{expert_stream_mod.MTP_UNSUPPORTED});
                 return error.ExpertStreamingMtpUnsupported;
