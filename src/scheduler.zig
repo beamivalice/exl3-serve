@@ -39,6 +39,7 @@ const generate_mod = @import("generate.zig");
 const rp_mod = @import("reasoning_protocol.zig");
 const drafter_mod = @import("drafter.zig");
 const mtp_mod = @import("mtp.zig");
+const mimo_mtp = @import("mimo_mtp.zig");
 const ane_mod = @import("ane.zig");
 const diffusion_mod = @import("diffusion.zig");
 const model_mod = @import("model.zig");
@@ -2311,6 +2312,21 @@ fn ubenchRowArms(rows: usize, is_mimo: bool, both: bool) []const bool {
     return if (both) &.{ false, true } else &.{true};
 }
 
+/// MiMo's MTP heads from the checkpoint's own shard, bound to the trunk they share.
+fn loadMimoHeads(sch: *Scheduler, model_dir: []const u8, config: *const ModelConfig, xfm: *Transformer) !?*mimo_mtp.Head {
+    var weights = try @import("mimo_source.zig").loadMtpWeights(sch.io, sch.allocator, model_dir);
+    defer weights.deinit();
+    var head = (try mimo_mtp.Head.load(sch.allocator, mlx.gpuStream(), config, &weights)) orelse return null;
+    errdefer head.deinit();
+    head.target = xfm;
+    const ptr = try sch.allocator.create(mimo_mtp.Head);
+    ptr.* = head;
+    // The coarse lm_head copy is a load cost, never the first draft's.
+    const rerank = ptr.canRerankDrafts();
+    log.info("[mimo-mtp] {d} heads loaded ({d:.2} GB resident); draft rerank {s}\n", .{ head.heads, @as(f64, @floatFromInt(head.residentBytes())) / 1e9, if (rerank) "on" else "off" });
+    return ptr;
+}
+
 /// A load's MTP decision: `--mtp`/`--no-mtp` > the per-model `mtp` > on.
 pub fn mtpChoiceFor(mtp_enabled: bool, mtp_explicit: bool, config: *const ModelConfig) model_settings.MtpChoice {
     return model_settings.MtpChoice.resolve(model_settings.launchFlag(bool, mtp_enabled, mtp_explicit), config.mtp_override, true);
@@ -3062,6 +3078,11 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         // A resident MiMo load is billed by what the source loader PREPARES:
         // the disk shards are FP8 plus scale grids, not the affine-8 trunk.
         streaming_resident_bytes = try model_mod.mimoSourceResidentBytes(sch.io, sch.allocator, params.model_dir);
+        if (mtpChoiceFor(params.mtp_enabled, params.mtp_explicit, params.config).on) {
+            streaming_resident_bytes.? += try model_mod.mimoMtpResidentBytes(sch.io, sch.allocator, params.model_dir);
+            if (mtp_mod.MtpModel.draftRerankMode() != .off)
+                streaming_resident_bytes.? += mtp_mod.rerankCoarseBytes(@intCast(params.config.vocab_size), @intCast(params.config.hidden_size), mtp_mod.rerankCoarseBits());
+        }
     }
 
     // GPU-memory pre-flight (MLX path). A Metal OOM during weight load / warmup
@@ -3540,7 +3561,19 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // bind only disables the head — the model still serves.
     var mtp_ptr: ?*mtp_mod.MtpModel = null;
     var mtp_cost_profile: mtp_mod.MtpCostProfile = .generic;
-    if (mtp_enabled and mtp_mod.hasMtpHead(sch.io, sch.allocator, params.model_dir)) {
+    // MiMo's trained heads, resident beside a resident trunk (streaming refuses MTP above).
+    var mimo_head: ?*mimo_mtp.Head = null;
+    if (mtp_enabled and params.config.isMimo() and !params.config.expert_streaming) {
+        mimo_head = loadMimoHeads(sch, params.model_dir, params.config, xfm_ptr) catch |err| blk: {
+            log.warn("[mimo-mtp] heads not loaded ({s}) — MTP off\n", .{@errorName(err)});
+            break :blk null;
+        };
+    }
+    errdefer if (mimo_head) |h| {
+        h.deinit();
+        sch.allocator.destroy(h);
+    };
+    if (mtp_enabled and !params.config.isMimo() and mtp_mod.hasMtpHead(sch.io, sch.allocator, params.model_dir)) {
         if (sch.allocator.create(mtp_mod.MtpModel)) |h| {
             if (mtp_mod.loadMtp(sch.io, sch.allocator, mlx.gpuStream(), params.model_dir)) |loaded| {
                 h.* = loaded;
@@ -3691,12 +3724,18 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         generate_mod.MtpHeadRef{ .qwen = h }
     else if (mtp_enabled and xfm_ptr.qwen4_mtp != null)
         generate_mod.MtpHeadRef{ .qwen4 = xfm_ptr }
+    else if (mimo_head) |h|
+        generate_mod.MtpHeadRef{ .mimo = h }
     else
         null;
     // Resolve the auto (0) cap here so every downstream reader of
     // `lm.mtp_depth` (server log lines, slot params) sees the real value.
     entry.mtp_depth = mtp_mod.applyExl3DepthCap(ane_mod.chipBrand(), xfm_ptr.config.expert_layout, generate_mod.Generator.resolveMtpDepthCapForProfile(params.mtp_depth, mtp_cost_profile), params.mtp_depth, generate_mod.Generator.mtpAdaptiveEnabled(), generate_mod.Generator.mtpForcedDepth() != null);
     xfm_ptr.mtp_depth_free = generate_mod.Generator.mtpDepthCapFree(params.mtp_depth);
+    if (mimo_head) |h| {
+        entry.mtp_depth = @min(entry.mtp_depth, @as(u32, @intCast(h.heads)));
+        xfm_ptr.mtp_depth_free = @min(xfm_ptr.mtp_depth_free, @as(u32, @intCast(h.heads)));
+    }
     // A MERGED drafter has no `--drafter` to echo, so the reported path comes
     // from what was actually resolved — `drafter_loaded` and `drafter_path`
     // must not disagree about the same sidecar.
@@ -7016,6 +7055,8 @@ var merged_verify_decline_logged: bool = false;
 
 fn mtpRoundsStaySolo(slot: *const Slot) bool {
     const t = slot.model.transformer orelse return true;
+    // A MiMo verify keeps each row's decode arithmetic only in its own solo forward.
+    if (t.config.isMimo()) return true;
     return mtpQwen4StaySolo(t.qwen4 != null, mtpBatchedQwen4Enabled());
 }
 

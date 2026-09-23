@@ -4033,6 +4033,11 @@ pub fn mimoSourceResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_d
     return @import("mimo_source.zig").residentBytes(io, allocator, model_dir);
 }
 
+/// Resident bytes of a MiMo checkpoint's MTP heads as `mimo_source` uploads them.
+pub fn mimoMtpResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !u64 {
+    return @import("mimo_source.zig").mtpResidentBytes(io, allocator, model_dir);
+}
+
 /// The architectures this build serves. Every other `model_type` is refused
 /// by name at the loader, so the inherited forwards behind it are unreachable.
 pub const served_model_types = [_][]const u8{ "qwen4_exp", "mimo_v2" };

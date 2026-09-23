@@ -13,6 +13,7 @@ const io_util = @import("io_util.zig");
 const pld_index = @import("pld_index.zig");
 const drafter_mod = @import("drafter.zig");
 const mtp_mod = @import("mtp.zig");
+const mimo_mtp = @import("mimo_mtp.zig");
 const mtp_acceptance = @import("mtp_acceptance.zig");
 const model_settings = @import("model_settings.zig");
 const round_cost = @import("round_cost.zig");
@@ -349,6 +350,8 @@ pub const MtpHeadRef = union(enum) {
     /// (`qwen4_mtp`, module-owned ⇒ single-flight); row r of the history is
     /// (pre-mixer stream at position r, token r+1), query position r+1.
     qwen4: *Transformer,
+    /// mimo_v2: the checkpoint's trained heads; per-request rows live in `mimo_mtp.State`.
+    mimo: *mimo_mtp.Head,
 
     /// Is this head's decode state module-owned (one per model, `Qwen4Mtp.cache`) rather
     /// than per-request? Both the scheduler and the sticky-serial arm ask this.
@@ -356,7 +359,7 @@ pub const MtpHeadRef = union(enum) {
         return switch (self) {
             .qwen => false,
             // Per-request state swaps onto the module (`Qwen4MtpState`); nothing is shared.
-            .qwen4 => false,
+            .qwen4, .mimo => false,
         };
     }
 
@@ -370,6 +373,7 @@ pub const MtpHeadRef = union(enum) {
                 t.qwen4MtpActivate(st);
                 break :blk .{ .qwen4 = .{ .t = t, .st = st, .allocator = allocator } };
             },
+            .mimo => |h| .{ .mimo = .{ .st = try h.newState(allocator) } },
         };
     }
 
@@ -394,7 +398,9 @@ pub const MtpHeadRef = union(enum) {
     /// One head forward over L positions. `.logits` returns the LAST row only,
     /// on both arms. `.mixed` asks for the lm_head's INPUT vector instead: on
     /// the sidecar that is `hidden_next` and nothing extra is produced, on
-    /// qwen4_exp it is the mixer output, returned in `rerank_x`.
+    /// qwen4_exp it is the mixer output, returned in `rerank_x`. `host_ids` are
+    /// `id_arr`'s values when the caller holds them (a round's committed rows);
+    /// the MiMo arm records them.
     pub fn forward(
         self: MtpHeadRef,
         target: *Transformer,
@@ -404,14 +410,40 @@ pub const MtpHeadRef = union(enum) {
         rope_offset: c_int,
         want: mtp_mod.StepWant,
         mrope_ctx: ?mtp_mod.MropeContext,
+        host_ids: ?[]const u32,
     ) !mtp_mod.StepOut {
         return switch (self) {
+            .mimo => |h| mimoStep(h, target, &cache.mimo, id_arr, hidden, @intCast(rope_offset), want, host_ids),
             .qwen => |h| mtp_mod.forwardWithMrope(h, target, &cache.qwen, id_arr, hidden, rope_offset, want == .logits, mrope_ctx),
             .qwen4 => |t| blk: {
                 cache.activate();
                 break :blk qwen4Step(t, id_arr, hidden, rope_offset, want, mrope_ctx);
             },
         };
+    }
+
+    /// MiMo draft steps chain no hidden: step 0 carries the round's committed rows
+    /// (`hidden` the target's), each later step only its draft. The step index
+    /// travels in `hidden_next`, a scalar the next call recognises by its rank.
+    fn mimoStep(h: *mimo_mtp.Head, target: *Transformer, ref: *MtpCacheRef.MimoRef, id_arr: mlx.mlx_array, hidden: mlx.mlx_array, rope_offset: usize, want: mtp_mod.StepWant, host_ids: ?[]const u32) !mtp_mod.StepOut {
+        const chained = mlx.mlx_array_ndim(hidden) != 3;
+        if (want == .none) {
+            try h.appendHistory(target, ref.st, host_ids orelse return error.MimoMtpNeedsHostIds, hidden, rope_offset);
+            return .{ .logits = .{ .ctx = null }, .hidden_next = mlx.mlx_array_new_int(0) };
+        }
+        const step_i: usize = if (chained) ref.next_step else 0;
+        const last = if (chained)
+            try h.draftStep(target, ref.st, step_i, id_arr, &.{}, null, rope_offset)
+        else
+            try h.draftStep(target, ref.st, 0, null, host_ids orelse return error.MimoMtpNeedsHostIds, hidden, rope_offset);
+        errdefer _ = mlx.mlx_array_free(last);
+        ref.next_step = step_i + 1;
+        var out: mtp_mod.StepOut = .{ .logits = .{ .ctx = null }, .hidden_next = mlx.mlx_array_new_int(@intCast(step_i + 1)) };
+        if (want == .logits) {
+            defer _ = mlx.mlx_array_free(last);
+            out.logits = try target.lmHeadLogits(last);
+        } else out.rerank_x = last;
+        return out;
     }
 
     /// Append committed history without projecting logits.
@@ -427,6 +459,7 @@ pub const MtpHeadRef = union(enum) {
     ) !void {
         switch (self) {
             .qwen => |h| try mtp_mod.appendHistoryWithMrope(h, target, &cache.qwen, token_ids, hidden, rope_offset, mrope_ctx),
+            .mimo => |h| try h.appendHistory(target, cache.mimo.st, token_ids, hidden, @intCast(rope_offset)),
             .qwen4 => |t| {
                 const ids_i32 = try allocator.alloc(i32, token_ids.len);
                 defer allocator.free(ids_i32);
@@ -451,6 +484,7 @@ pub const MtpHeadRef = union(enum) {
             // Transformer is still under construction and its lm_head — the
             // very weight the coarse head is a copy of — is not assigned yet.
             .qwen4 => |t| t.qwen4DraftRerankReady(),
+            .mimo => |h| h.canRerankDrafts(),
         };
     }
 
@@ -466,6 +500,7 @@ pub const MtpHeadRef = union(enum) {
         return switch (self) {
             .qwen => |h| h.draftSelect(target, x, suppress_mask),
             .qwen4 => |t| t.qwen4DraftSelect(x, suppress_mask),
+            .mimo => |h| h.draftSelect(target, x, suppress_mask),
         };
     }
 
@@ -481,6 +516,7 @@ pub const MtpHeadRef = union(enum) {
         return switch (self) {
             .qwen => |h| h.draftShortlist(target, x, suppress_mask),
             .qwen4 => |t| t.qwen4DraftShortlist(x, suppress_mask),
+            .mimo => |h| h.draftShortlist(target, x, suppress_mask),
         };
     }
 
@@ -493,6 +529,7 @@ pub const MtpHeadRef = union(enum) {
         return switch (self) {
             .qwen => |h| h.m5NaxCostProfile(target),
             .qwen4 => |t| mtp_mod.qwen4G17CostProfileForKv(t, kv),
+            .mimo => .generic,
         };
     }
 
@@ -503,6 +540,7 @@ pub const MtpHeadRef = union(enum) {
     pub fn evSeed(self: MtpHeadRef) ?struct { accept: [mtp_mod.MAX_DEPTH]f32, m_lo: u32 } {
         return switch (self) {
             .qwen => |h| if (h.ev_seed_accept) |a| .{ .accept = a, .m_lo = h.ev_seed_m_lo } else null,
+            .mimo => |h| if (h.ev_seed_accept) |a| .{ .accept = a, .m_lo = h.ev_seed_m_lo } else null,
             .qwen4 => |t| blk: {
                 if (t.qwen4_mtp) |*m| {
                     if (m.ev_seed_accept) |a| break :blk .{ .accept = a, .m_lo = m.ev_seed_m_lo };
@@ -515,6 +553,10 @@ pub const MtpHeadRef = union(enum) {
     pub fn setEvSeed(self: MtpHeadRef, accept: [mtp_mod.MAX_DEPTH]f32, m_lo: u32) void {
         switch (self) {
             .qwen => |h| {
+                h.ev_seed_accept = accept;
+                h.ev_seed_m_lo = m_lo;
+            },
+            .mimo => |h| {
                 h.ev_seed_accept = accept;
                 h.ev_seed_m_lo = m_lo;
             },
@@ -549,6 +591,10 @@ pub fn mtpHeadPersistEnabled() bool {
 pub const MtpCacheRef = union(enum) {
     qwen: KVCache,
     qwen4: Qwen4Ref,
+    mimo: MimoRef,
+
+    /// A MiMo request's head rows, and the draft step its next forward runs.
+    pub const MimoRef = struct { st: *mimo_mtp.State, next_step: usize = 0 };
 
     /// The in-checkpoint head plus this request's own half of it.
     pub const Qwen4Ref = struct { t: *Transformer, st: *transformer_mod.Transformer.Qwen4MtpState, allocator: std.mem.Allocator };
@@ -556,7 +602,7 @@ pub const MtpCacheRef = union(enum) {
     /// Install this request's state on the qwen4 head; no-op on the sidecar arm.
     pub fn activate(self: *const MtpCacheRef) void {
         switch (self.*) {
-            .qwen => {},
+            .qwen, .mimo => {},
             .qwen4 => |r| r.t.qwen4MtpActivate(r.st),
         }
     }
@@ -574,6 +620,7 @@ pub const MtpCacheRef = union(enum) {
                 r.t.qwen4MtpActivate(r.st);
                 break :blk r.t.qwen4_mtp.?.seq_offset;
             },
+            .mimo => |r| r.st.step(),
         };
     }
 
@@ -587,13 +634,15 @@ pub const MtpCacheRef = union(enum) {
                 r.t.qwen4MtpActivate(r.st);
                 break :blk if (mtpHeadPersistEnabled()) &r.t.qwen4_mtp.?.cache else null;
             },
+            // Head rows are rebuilt from the prompt's last window; a snapshot would carry nothing more.
+            .mimo => null,
         };
     }
 
     /// The Transformer owning the in-checkpoint head; null on the sidecar arm and whenever `kv()` is null.
     pub fn head(self: *MtpCacheRef) ?*Transformer {
         return switch (self.*) {
-            .qwen => null,
+            .qwen, .mimo => null,
             .qwen4 => |r| blk: {
                 r.t.qwen4MtpActivate(r.st);
                 break :blk if (mtpHeadPersistEnabled()) r.t else null;
@@ -608,6 +657,10 @@ pub const MtpCacheRef = union(enum) {
                 r.t.qwen4MtpActivate(r.st);
                 try r.t.qwen4MtpTruncate(len);
             },
+            .mimo => |*r| {
+                try r.st.truncate(s, len);
+                r.next_step = 0;
+            },
         }
     }
 
@@ -618,6 +671,11 @@ pub const MtpCacheRef = union(enum) {
                 r.t.qwen4MtpRelease(r.st);
                 r.st.deinit();
                 r.allocator.destroy(r.st);
+            },
+            .mimo => |r| {
+                const allocator = r.st.allocator;
+                r.st.deinit();
+                allocator.destroy(r.st);
             },
         }
     }
@@ -632,6 +690,7 @@ pub const MtpCacheRef = union(enum) {
                 r.t.qwen4MtpActivate(r.st);
                 r.t.qwen4_mtp.?.cache.appendEvalArrays(vec);
             },
+            .mimo => |r| r.st.appendEvalArrays(vec),
         }
     }
 };
@@ -5534,6 +5593,8 @@ pub const Generator = struct {
         /// mtp_off0). The consume-time truncate drops the producing round's
         /// stale draft tail past it.
         off0: usize,
+        /// `ids` on the host (the MiMo head records committed tokens).
+        host_ids: [mtp_mod.MAX_DEPTH + 1]u32 = undefined,
 
         pub fn deinit(self: *MtpHistStash) void {
             _ = mlx.mlx_array_free(self.ids);
@@ -5736,8 +5797,11 @@ pub const Generator = struct {
                     _ = mlx.mlx_vector_array_append_value(hv, h_prev_arg);
                     try mlx.check(mlx.mlx_concatenate_axis(&merged_hidden, hv, 1, s));
                 }
-                break :blk try head.forward(xfm, mc, merged_ids, merged_hidden, @intCast(st.off0), want, mtp_mrope_ctx);
-            } else try head.forward(xfm, mc, prev_tok_arr, h_prev_arg, @intCast(chain.off0 + i), want, mtp_mrope_ctx);
+                var merged_host: [mtp_mod.MAX_DEPTH + 2]u32 = undefined;
+                @memcpy(merged_host[0..st.n], st.host_ids[0..st.n]);
+                merged_host[st.n] = chain.t1;
+                break :blk try head.forward(xfm, mc, merged_ids, merged_hidden, @intCast(st.off0), want, mtp_mrope_ctx, merged_host[0 .. st.n + 1]);
+            } else try head.forward(xfm, mc, prev_tok_arr, h_prev_arg, @intCast(chain.off0 + i), want, mtp_mrope_ctx, if (i == 0) &[_]u32{chain.t1} else null);
             errdefer {
                 if (step_out.logits.ctx != null) _ = mlx.mlx_array_free(step_out.logits);
                 _ = mlx.mlx_array_free(step_out.hidden_next);
@@ -6004,7 +6068,7 @@ pub const Generator = struct {
             if (g.mtpMropeContext() != null) any_mrope = true;
             switch (g.mtp.?) {
                 .qwen4 => {},
-                .qwen => all_qwen4 = false,
+                .qwen, .mimo => all_qwen4 = false,
             }
         }
         if (!all_qwen4 or any_mrope or gens.len == 1) {
@@ -6621,6 +6685,7 @@ pub const Generator = struct {
             @intCast(st.off0),
             .none,
             self.mtpMropeContext(),
+            st.host_ids[0..st.n],
         );
         if (out.logits.ctx != null) _ = mlx.mlx_array_free(out.logits);
         if (out.hidden_next.ctx != null) _ = mlx.mlx_array_free(out.hidden_next);
@@ -7828,6 +7893,7 @@ pub const Generator = struct {
                 .n = 1 + n_commit,
                 .off0 = mtp_off0,
             };
+            for (ids_i32, 0..) |id, idx| self.mtp_hist_stash.?.host_ids[idx] = @intCast(id);
         }
         if (tracing) {
             self.mtp_trace.add(.hist, ph.read());
@@ -9903,7 +9969,7 @@ pub const Generator = struct {
         if (self.mtp_cache == null) return null;
         const mc = &self.mtp_cache.?;
         return switch (mc.*) {
-            .qwen => 0,
+            .qwen, .mimo => 0,
             .qwen4 => |r| blk: {
                 r.t.qwen4MtpActivate(r.st);
                 const m = &(r.t.qwen4_mtp orelse break :blk 0);

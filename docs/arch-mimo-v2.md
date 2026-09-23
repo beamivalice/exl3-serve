@@ -28,10 +28,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   `ignored_layers`). lm_head and embed_tokens are bf16, 1.25 GB each, untied.
 - **Loaded by the engine: text only.** The checkpoint also ships a vision tower (mimovl, 360 tensors, video via
   `temporal_patch_size` 2), an audio encoder + 20 speech-embedding tables + a separate 24 kHz audio tokenizer, 3 MTP
-  layers (`model.mtp.*`, 48 tensors; ~396 MB each, 1.19 GB, draft cost dominated by the shared lm_head) and a 5-layer
-  DFlash drafter (block 8, target layers 0/11/23/35/47). `mimo_source` skips `visual.`, `audio_encoder.`,
-  `speech_embeddings.` and `model.mtp.`; `model.zig` sets `has_vision=false` for mimo_v2; `dflash.zig`/`mtp.zig` have
-  no mimo_v2 arm.
+  layers (`model.mtp.*`, 48 tensors; ~396 MB each, 1.19 GB) and a 5-layer DFlash drafter (block 8, target layers
+  0/11/23/35/47). The trunk loader skips `visual.`, `audio_encoder.`, `speech_embeddings.` and `model.mtp.`;
+  `model.zig` sets `has_vision=false` for mimo_v2. The three MTP heads load separately under `--mtp`
+  (`mimo_source.loadMtpWeights`, `mimo_mtp.zig`; [engine-mtp](engine-mtp.md#mimo)); the DFlash drafter is not loaded.
 
 ## Source checkpoint and packs
 

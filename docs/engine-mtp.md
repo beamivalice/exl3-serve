@@ -1,8 +1,9 @@
-# Engine: MTP speculative decoding (native head, opt-in `--mtp`)
+# Engine: MTP speculative decoding (native heads, opt-in `--mtp`)
 
-How the Qwen3.8-Flash-Next native MTP head drafts and verifies: the head's inputs, the spec-verify invariant, draft
-re-scoring, the measured round-cost table, head KV and norms. Read this before touching `src/mtp.zig`,
-`src/mtp_*.zig`, `src/round_cost.zig` or the MTP orchestration in `src/generate.zig`.
+How the native MTP heads draft and verify: Qwen3.8-Flash-Next's one head and MiMo-V2.6's three, their inputs, the
+spec-verify invariant, draft re-scoring, the measured round-cost table, head KV and norms. Read this before touching
+`src/mtp.zig`, `src/mtp_*.zig`, `src/mimo_mtp.zig`, `src/round_cost.zig` or the MTP orchestration in
+`src/generate.zig`.
 
 Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4exp.md),
 [engine-qsa-long-context](engine-qsa-long-context.md), [engine-prefix-cache](engine-prefix-cache.md#spec-state),
@@ -16,6 +17,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
 | `src/mtp_acceptance.zig` | acceptance modes `exact|typical|tokenv3` |
 | `src/mtp_group_planner.zig` / `src/mtp_group_cost.zig` | grouped verify planner |
 | `src/mtp_qmv.zig` | M=1-exact qmv rows |
+| `src/mimo_mtp.zig` | MiMo's three trained heads (`model.mtp.layers.{0,1,2}`), per-request row state |
 | `src/round_cost.zig` | Measured per-model/width/KV-bucket spec round-cost table (`Transformer.round_cost`) |
 | `src/generate.zig` | MTP orchestration, `commitForcedTokens` |
 
@@ -28,7 +30,34 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
   nothing is module-owned, so MTP slots are not exclusive.
 - `--no-mtp` gates the IN-CHECKPOINT head too (`entry.mtp` reads `mtpChoiceFor`, logged `[mtp] on|off (<source>)`);
   an explicit `--mtp`/`--no-mtp` beats `model-settings.json` `mtp`. MTP is refused while
-  streaming ([engine-expert-streaming](engine-expert-streaming.md)). MiMo's 3 MTP layers are not loaded.
+  streaming ([engine-expert-streaming](engine-expert-streaming.md)).
+
+<a id="mimo"></a>
+## MiMo's three heads
+
+- **What is generic and what is qwen4's.** The controller is head-agnostic (`MtpHeadRef` switches five
+  operations): the round phases, verify invariant, draft rerank, acceptance modes, EV planner, round-cost table,
+  depth caps and EV seed serve any head. qwen4-only: the pre-mixer hyper-connection stream as the head input, the
+  mixer output as the lm_head input, QSA `pos_base`, the deferred PLE leaf, `forwardQwen4VerifyRows`, head
+  persistence, the G17 cost profile and merged multi-slot verify.
+- **Semantics (SGLang's multi-layer EAGLE for MiMo; vLLM runs layer 0 only).** Head k's row p =
+  `eh_proj(cat[enorm(embed(x_{p+k+1})), hnorm(h_p)])` at rope position p, `h_p` the trunk's FINAL-NORMED hidden
+  (`capture_hidden_all`), predicting x_{p+k+2}. Every head reads the target's hidden, never the previous head's
+  output, so a round drafts d1..d3 by running head i at the round's last committed position q; head i's rows past
+  q-i carry drafts and are truncated at the next round (`mimo_mtp.State.truncate`).
+- Each head is a sliding (128) layer with sinks: FP8 qkv (rank-local, tp 4 solved from the 116 scale rows) + bf16
+  o_proj, FP8 dense SwiGLU 16384, own `final_layernorm`, the trunk's embedding and lm_head. Its K/V live in a
+  per-request `RowCache` holding the window, never a `KVCache`; the prompt appends only its last window per head.
+- The `.mimo` arm maps the generic stash + merged first step onto head 0 and each later step onto head i
+  (`draftStep`); the step index rides `hidden_next` (a scalar), host token ids ride `host_ids`. Depth and the free
+  EV cap clamp to the head count; rounds stay solo (`mtpRoundsStaySolo`); no prefix-cache persistence (the head
+  rebuilds from the prompt's last window).
+- **Verify rows keep decode arithmetic** (`ForwardCtx.verify_rows`, up to `MIMO_VERIFY_ROWS_MAX` = 4 rows, the FP8
+  GEMV's direct-row limit): every row's attention runs through `mimoDecodeAttn` on the keys its own decode tick saw
+  (`mimoVerifyRowsAttn`), the rest of the forward is row-identical already (FP8 GEMV <= 4 rows, `mtp_qmv` affine-8,
+  serial router rows, the EXL3 decode chain). A partial accept truncates the cache (attention-only trunk).
+- Oracle: `tests/dump_mimo_v2_mtp_fixtures.py` renders the heads from the HF reference's own modules on the tiny
+  fixture model; `mimo mtp heads track the torch rendering…` replays history, rounds, wrong drafts and rollbacks.
 
 ## Spec verify invariant
 

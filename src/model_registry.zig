@@ -302,6 +302,10 @@ pub const LoadedModel = struct {
                     q.deinit();
                     self.allocator.destroy(q);
                 },
+                .mimo => |m| {
+                    m.deinit();
+                    self.allocator.destroy(m);
+                },
                 .qwen4 => {}, // in-trunk head, owned by the Transformer
             }
             self.mtp = null;
@@ -435,6 +439,10 @@ pub const LoadedModel = struct {
                 .qwen => |q| {
                     q.deinit();
                     self.allocator.destroy(q);
+                },
+                .mimo => |m| {
+                    m.deinit();
+                    self.allocator.destroy(m);
                 },
                 .qwen4 => {}, // in-trunk head, owned by the Transformer
             }

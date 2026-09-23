@@ -119,6 +119,50 @@ pub fn loadWeights(
     return weights;
 }
 
+/// The checkpoint's MTP heads (`model.mtp.layers.*`) as stored: FP8 projections
+/// keep their codes under `.weight` and tile scales under `.scales`, the rest is
+/// uploaded as is. Empty when the checkpoint carries none.
+pub fn loadMtpWeights(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !model.Weights {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var source = try loadSourceIndex(io, arena.allocator(), model_dir);
+    var weights = model.Weights.init(allocator);
+    errdefer weights.deinit();
+    var it = source.tensors.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const meta = entry.value_ptr.*;
+        if (!isMtpKey(key) or std.mem.endsWith(u8, key, ".weight_scale_inv")) continue;
+        if (meta.dtype == .fp8_e4m3) {
+            try loadFp8Weight(&weights, allocator, model_dir, key, meta, &source);
+            continue;
+        }
+        const raw = try readTensor(allocator, model_dir, meta);
+        defer allocator.free(raw);
+        const arr = try uploadDense(raw, meta, .{ .ctx = null });
+        errdefer _ = mlx.mlx_array_free(arr);
+        try putWeight(&weights, allocator, key, arr);
+    }
+    return weights;
+}
+
+/// Resident bytes `loadMtpWeights` uploads.
+pub fn mtpResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !u64 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const source = try loadSourceIndex(io, arena.allocator(), model_dir);
+    var total: u64 = 0;
+    var it = source.tensors.iterator();
+    while (it.next()) |entry| {
+        if (isMtpKey(entry.key_ptr.*)) total += try payloadBytes(entry.value_ptr.*, null);
+    }
+    return total;
+}
+
+fn isMtpKey(key: []const u8) bool {
+    return std.mem.startsWith(u8, key, "model.mtp.layers.");
+}
+
 /// Exact resident byte count of the raw source trunk as served.
 pub fn residentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !u64 {
     if (model_dir.len == 0 or !std.fs.path.isAbsolute(model_dir))
@@ -1848,4 +1892,17 @@ test "mimo source keeps the FP8 trunk in its source bytes and bills them" {
         const grid = mlx.mlx_array_data_float32(sc) orelse return error.TestUnexpectedNullData;
         try std.testing.expectEqualSlices(u8, case.scales, std.mem.sliceAsBytes(grid[0 .. case.scales.len / 4]));
     }
+}
+
+test "mimo source loads the MTP heads apart from the trunk and bills what it uploads" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try makeTinySourceFixture(io, std.testing.allocator, &tmp);
+    defer fixture.deinit();
+    var heads = try loadMtpWeights(io, std.testing.allocator, fixture.path);
+    defer heads.deinit();
+    try std.testing.expectEqual(@as(u32, 1), heads.count());
+    try std.testing.expect(heads.get("model.mtp.layers.0.fake.weight") != null);
+    try std.testing.expectEqual(@as(u64, 2), try mtpResidentBytes(io, std.testing.allocator, fixture.path));
 }

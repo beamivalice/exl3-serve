@@ -17684,6 +17684,11 @@ pub const Transformer = struct {
         return self.qmatmul(x, self.lm_head_w, self.lm_head_s, self.lm_head_b);
     }
 
+    /// The trunk's full vocabulary projection of `x` (an MTP head's draft logits).
+    pub fn lmHeadLogits(self: *const Transformer, x: mlx.mlx_array) !mlx.mlx_array {
+        return self.lmHeadProject(x, false);
+    }
+
     /// Certified lm_head prune dispatch: all gates, the lazy one-time MXFP8
     /// coarse-copy build, and the three-kernel pruned projection. Returns null
     /// on any decline (caller keeps the dense path); never errors a request
@@ -27226,7 +27231,7 @@ pub const Transformer = struct {
 
         var attn_out = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(attn_out);
-        if (ctx.verify_rows and seq_len > 1) {
+        if (ctx.verify_rows and seq_len > 1 and seq_len <= MIMO_VERIFY_ROWS_MAX) {
             _ = mlx.mlx_array_free(attn_out);
             attn_out = try mimoVerifyRowsAttn(self.s, @intCast(cfg.sliding_window), q_rope, &kv_view, fa.sinks, is_global, offset, seq_len, attn_scale, local_decode_mask);
         } else if (!is_prefill) {
@@ -41748,7 +41753,7 @@ fn getLayerScaleOrEmptyOpt(weights: *const Weights, buf: *[256]u8, prefix: []con
 }
 
 /// A 0-d scalar in `dt` (a bare f32 scalar array promotes bf16 operands).
-fn scalarOf(val: f32, dt: mlx.mlx_dtype, s: mlx.mlx_stream) !mlx.mlx_array {
+pub fn scalarOf(val: f32, dt: mlx.mlx_dtype, s: mlx.mlx_stream) !mlx.mlx_array {
     const raw = mlx.mlx_array_new_float(val);
     defer _ = mlx.mlx_array_free(raw);
     var out = mlx.mlx_array_new();
@@ -69160,7 +69165,7 @@ fn mimoExpectClose(label: []const u8, actual: []const f32, expected: []const f32
 }
 
 /// The HF oracle keeps separate experts; the serving contract uses leading-index banks.
-fn stackMimoFixtureExperts(weights: *Weights, config: ModelConfig, s: mlx.mlx_stream) !void {
+pub fn stackMimoFixtureExperts(weights: *Weights, config: ModelConfig, s: mlx.mlx_stream) !void {
     const a = weights.allocator;
     for (config.first_k_dense_replace..config.num_hidden_layers) |li| {
         for ([_][]const u8{ "gate", "up", "down" }) |projection| {
