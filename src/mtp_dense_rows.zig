@@ -7,7 +7,7 @@ var env_enabled: ?bool = null;
 pub fn enabled() bool {
     if (override) |value| return value;
     if (env_enabled) |value| return value;
-    const p = std.c.getenv("MLX_SERVE_MTP_DENSE_ROWS");
+    const p = std.c.getenv("SUSHI_MTP_DENSE_ROWS");
     const value = p != null and std.mem.eql(u8, std.mem.span(p.?), "1");
     env_enabled = value;
     return value;

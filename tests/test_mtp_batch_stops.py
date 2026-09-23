@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Live EOS/cancellation parity against a running server.
 
-Start it with native MTP, MLX_SERVE_MTP_GROUP_PLANNER=1, and
-MLX_SERVE_MTP_FORCE_DEPTH=4 so both arms use the same verify width.
+Start it with native MTP, SUSHI_MTP_GROUP_PLANNER=1, and
+SUSHI_MTP_FORCE_DEPTH=4 so both arms use the same verify width.
 The caller owns model loading and GPU/thermal controls.
 """
 import argparse

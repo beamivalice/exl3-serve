@@ -2,7 +2,7 @@
 # Integration tests for the Anthropic Messages API (/v1/messages).
 # Tests both non-streaming and streaming, tool calling, thinking, and error handling.
 # Usage: ./tests/test_anthropic_api.sh [port] [launch_max_tokens]
-# Requires a running mlx-serve server with a loaded model.
+# Requires a running sushi server with a loaded model.
 # Pass its --max-tokens value when set; otherwise the default is 0 (unset).
 
 PORT=${1:-8080}
@@ -88,7 +88,7 @@ RESULT=$(curl -sf "$BASE/v1/messages" \
   -H "x-api-key: test-key" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "max_tokens": 64,
     "messages": [
       {"role": "user", "content": "Say hello in one word."}
@@ -126,7 +126,7 @@ echo "--- Test 2: System prompt (top-level) ---"
 RESULT=$(curl -sf "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "max_tokens": 64,
     "system": "You are a pirate. Every response must include the word arrr.",
     "messages": [
@@ -145,9 +145,9 @@ sys_tokens() {
     | python3 -c "import sys,json; print(json.load(sys.stdin)['usage']['input_tokens'])" 2>/dev/null
 }
 SYS_TEXT="You are a pirate. Every response must include the word arrr."
-BASE_TOKENS=$(sys_tokens '{"model":"mlx-serve","max_tokens":1,"messages":[{"role":"user","content":"Greet me."}]}')
-TOP_TOKENS=$(sys_tokens "{\"model\":\"mlx-serve\",\"max_tokens\":1,\"system\":\"$SYS_TEXT\",\"messages\":[{\"role\":\"user\",\"content\":\"Greet me.\"}]}")
-IN_TOKENS=$(sys_tokens "{\"model\":\"mlx-serve\",\"max_tokens\":1,\"messages\":[{\"role\":\"system\",\"content\":\"$SYS_TEXT\"},{\"role\":\"user\",\"content\":\"Greet me.\"}]}")
+BASE_TOKENS=$(sys_tokens '{"model":"sushi","max_tokens":1,"messages":[{"role":"user","content":"Greet me."}]}')
+TOP_TOKENS=$(sys_tokens "{\"model\":\"sushi\",\"max_tokens\":1,\"system\":\"$SYS_TEXT\",\"messages\":[{\"role\":\"user\",\"content\":\"Greet me.\"}]}")
+IN_TOKENS=$(sys_tokens "{\"model\":\"sushi\",\"max_tokens\":1,\"messages\":[{\"role\":\"system\",\"content\":\"$SYS_TEXT\"},{\"role\":\"user\",\"content\":\"Greet me.\"}]}")
 echo "  input_tokens: none=$BASE_TOKENS top-level=$TOP_TOKENS in-messages=$IN_TOKENS"
 assert_gt "system in messages is rendered, not dropped" "$IN_TOKENS" "$BASE_TOKENS"
 assert_eq "system in messages costs the same as top-level" "$TOP_TOKENS" "$IN_TOKENS"
@@ -158,7 +158,7 @@ echo "--- Test 3: Streaming /v1/messages ---"
 SSE=$(curl -sf "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "max_tokens": 32,
     "stream": true,
     "messages": [
@@ -187,7 +187,7 @@ echo "--- Test 4: Multi-turn conversation ---"
 RESULT=$(curl -sf "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "max_tokens": 64,
     "messages": [
       {"role": "user", "content": "My name is Alice."},
@@ -205,7 +205,7 @@ echo "--- Test 5: Tool calling (non-streaming) ---"
 RESULT=$(curl -sf "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "max_tokens": 256,
     "system": "You have access to tools. When the user asks what time or date it is, always use the shell tool to run the date command. Do not answer from memory.",
     "messages": [
@@ -277,7 +277,7 @@ echo "--- Test 6: Tool result round-trip ---"
 RESULT=$(curl -sf "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "max_tokens": 128,
     "messages": [
       {"role": "user", "content": "What day is it?"},
@@ -317,7 +317,7 @@ echo "--- Test 7: Streaming with tool_choice=any ---"
 SSE=$(curl -sf "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "max_tokens": 256,
     "stream": true,
     "system": "Always use the shell tool when asked about time or date.",
@@ -351,7 +351,7 @@ echo "--- Test 8: Missing max_tokens ---"
 RESULT=$(curl -s "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [{"role": "user", "content": "hi"}]
   }')
 if [ "$LAUNCH_MAX_TOKENS" -gt 0 ]; then
@@ -374,7 +374,7 @@ echo ""
 echo "--- Test 9: Error — missing messages ---"
 RESULT=$(curl -s "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
-  -d '{"model": "mlx-serve", "max_tokens": 64}')
+  -d '{"model": "sushi", "max_tokens": 64}')
 ERR_TYPE=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['error']['type'])" 2>/dev/null)
 assert_eq "error type is invalid_request_error" "invalid_request_error" "$ERR_TYPE"
 echo ""
@@ -395,7 +395,7 @@ RESULT=$(curl -sf "$BASE/v1/messages" \
   -H "anthropic-version: 2023-06-01" \
   -H "anthropic-beta: interleaved-thinking-2025-05-14" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "max_tokens": 16,
     "messages": [{"role": "user", "content": "hi"}]
   }')
@@ -408,7 +408,7 @@ echo "--- Test 12: stop_sequences ---"
 RESULT=$(curl -sf "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "max_tokens": 128,
     "messages": [{"role": "user", "content": "Count from 1 to 20, one number per line."}],
     "stop_sequences": ["5"]
@@ -438,7 +438,7 @@ echo "--- Test 14: Streaming event order ---"
 SSE=$(curl -sf "$BASE/v1/messages" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "max_tokens": 16,
     "stream": true,
     "messages": [{"role": "user", "content": "Say one word."}]
@@ -473,7 +473,7 @@ echo ""
 # both the non-streaming response and the streaming message_delta.
 echo "=== Cache usage reporting ==="
 CACHE_PROMPT="You are a careful assistant. Here is a long preamble we will reuse verbatim across requests so the server prefix cache gets a long match. The quick brown fox jumps over the lazy dog, again and again, sentence after sentence, to pad this prefix out to a few hundred tokens. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. Question: what is 1+1? Reply with just the number."
-CACHE_BODY="{\"model\":\"mlx-serve\",\"max_tokens\":8,\"temperature\":0,\"messages\":[{\"role\":\"user\",\"content\":\"$CACHE_PROMPT\"}]}"
+CACHE_BODY="{\"model\":\"sushi\",\"max_tokens\":8,\"temperature\":0,\"messages\":[{\"role\":\"user\",\"content\":\"$CACHE_PROMPT\"}]}"
 # warm the cache
 curl -s -m 60 -X POST "$BASE/v1/messages" -H "Content-Type: application/json" -d "$CACHE_BODY" > /dev/null
 RESP=$(curl -s -m 60 -X POST "$BASE/v1/messages" -H "Content-Type: application/json" -d "$CACHE_BODY")

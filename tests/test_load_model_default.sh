@@ -3,7 +3,7 @@
 #
 # The app's model picker hot-switches a running server instead of restarting
 # it — but a hot-load alone leaves the DEFAULT untouched, so requests that
-# omit `model` (or use the "mlx-serve" alias: the Claude Code launcher env,
+# omit `model` (or use the "sushi" alias: the Claude Code launcher env,
 # curl users) kept hitting the OLD model, and /v1/models kept sorting the old
 # default first — which is exactly what the app's own pill/tray read back.
 # The flag is explicit opt-in: a media-gen side-load loads BESIDE the chat
@@ -17,10 +17,10 @@
 set -uo pipefail
 PORT="${1:-11381}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/zig-out/bin/mlx-serve"
+BIN="$ROOT/zig-out/bin/sushi"
 [ -x "$BIN" ] || { echo "FAIL: build first (zig build -Doptimize=ReleaseFast)"; exit 1; }
 
-MODELS_ROOT="${MODELS_ROOT:-$HOME/.mlx-serve/models}"
+MODELS_ROOT="${MODELS_ROOT:-$HOME/.sushi/models}"
 BOOT_MODEL="${BOOT_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 SWITCH_MODEL="${SWITCH_MODEL:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}"
 if [ ! -f "$BOOT_MODEL/config.json" ] || [ ! -f "$SWITCH_MODEL/config.json" ]; then
@@ -46,11 +46,11 @@ LOG="$(mktemp)"
 SRV=""
 cleanup() {
     [ -n "$SRV" ] && kill "$SRV" 2>/dev/null
-    pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+    pkill -f "sushi.*--port $PORT" 2>/dev/null
     rm -f "$LOG"
 }
 trap cleanup EXIT
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+pkill -f "sushi.*--port $PORT" 2>/dev/null
 sleep 0.5
 
 "$BIN" --serve --model "$BOOT_MODEL" --model-dir "$MODELS_ROOT" --port "$PORT" --log-file off >"$LOG" 2>&1 &

@@ -1,4 +1,4 @@
-//! Qwen3.5/3.6 (Qwen3-VL) vision tower + preprocessing math for mlx-serve.
+//! Qwen3.5/3.6 (Qwen3-VL) vision tower + preprocessing math for sushi.
 //!
 //! Mirrors mlx-vlm `qwen3_vl/vision.py` (the ViT) and `qwen3_vl/processing_qwen3_vl.py`
 //! (`_smart_resize_image`). This file currently holds the pure preprocessing math

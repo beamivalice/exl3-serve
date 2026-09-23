@@ -21,11 +21,11 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [perf-baselines](perf-base
 ```sh
 git diff --quiet HEAD || echo "tree is dirty: commit or stash your change first"
 ./.zig-toolchain/zig build -Doptimize=ReleaseFast
-echo "$(git rev-parse --short HEAD) $(stat -f %Sm zig-out/bin/mlx-serve)" > <run>.binary.txt
+echo "$(git rev-parse --short HEAD) $(stat -f %Sm zig-out/bin/sushi)" > <run>.binary.txt
 ```
 
 - Rebuild right before the run, inside the queue script if the run is queued. `zig build test` and cherry-picks do
-  not refresh `zig-out/bin/mlx-serve`.
+  not refresh `zig-out/bin/sushi`.
 - Reject any number whose binary stamp is older than the change it claims to measure.
 
 ## 3. Take the lock for exactly one run
@@ -72,5 +72,5 @@ commit, binary stamp, pack path, flags, QoS, lock owner, date, raw-file path, an
 
 - The pinned Zig nightly is no longer downloadable (`scripts/fetch-zig.sh` 404s); copy an existing `.zig-toolchain/`.
 - A git worktree has neither `.zig-toolchain/` nor the built `lib/mlx/`: symlink both from the main checkout
-  (`/Users/beam/llm/exl3-serve`).
+  (`/Users/beam/llm/sushi`).
 - `lib/mlx-src` and `lib/mlxc-src` are the only submodules; they are needed only to rebuild MLX.

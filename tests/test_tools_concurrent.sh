@@ -30,12 +30,12 @@ bad() { echo -e "  ${RED}FAIL${NC} $1"; shift; for l in "$@"; do echo "        $
 
 [ -n "$MODEL" ] || { echo "SKIP: CONC_TEST_MODEL not set"; exit 0; }
 [ -f "$MODEL/config.json" ] || { echo "SKIP: no config.json at $MODEL"; exit 0; }
-[ -x ./zig-out/bin/mlx-serve ] || { echo "FAIL: build first"; exit 1; }
+[ -x ./zig-out/bin/sushi ] || { echo "FAIL: build first"; exit 1; }
 
 LOG=$(mktemp /tmp/tools_conc.XXXXXX)
 OUTDIR=$(mktemp -d /tmp/tools_conc_out.XXXXXX)
-pkill -f "bin/mlx-serve" 2>/dev/null; sleep 1
-./zig-out/bin/mlx-serve --model "$MODEL" --serve --port "$PORT" \
+pkill -f "bin/sushi" 2>/dev/null; sleep 1
+./zig-out/bin/sushi --model "$MODEL" --serve --port "$PORT" \
     --max-concurrent 8 --log-level debug > "$LOG" 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; rm -rf "$OUTDIR"; rm -f "$LOG"; }
@@ -55,7 +55,7 @@ for i in $(seq 0 $((N-1))); do
     python3 - "$BASE" "$TOK" "$OUTDIR/$i.json" <<'PY' &
 import json, sys, urllib.request
 base, tok, out = sys.argv[1], sys.argv[2], sys.argv[3]
-body = {"model": "mlx-serve",
+body = {"model": "sushi",
         "messages": [{"role": "user", "content":
             "The session code is %s. Call write_file exactly once to save the session "
             "code to notes.txt, putting the code in the content argument." % tok}],
@@ -148,7 +148,7 @@ else
 fi
 
 R=$(curl -sf -m 60 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
-    -d '{"model":"mlx-serve","messages":[{"role":"user","content":"Say OK."}],"max_tokens":8,"temperature":0}' 2>/dev/null)
+    -d '{"model":"sushi","messages":[{"role":"user","content":"Say OK."}],"max_tokens":8,"temperature":0}' 2>/dev/null)
 [ -n "$R" ] && ok "server still functional after the concurrent round" \
             || bad "server unresponsive after the concurrent round"
 

@@ -3,7 +3,7 @@
 // D and block IDs are contiguous; KV rows are aligned for uint4 loads.
 using namespace mlx::steel;
 // Two simdgroups split D=256 (warp*128) and share exchange[2][512]; one 32-key tile per KV pass.
-static_assert(NSG == 2 && BK == 32, "msv_qsa_nax_precise is written for 2 simdgroups and BK 32");
+static_assert(NSG == 2 && BK == 32, "sushi_qsa_nax_precise is written for 2 simdgroups and BK 32");
 constexpr int BD = 256, LD = 264, TDH = 8, TK = BK / 16;
 const int qL=q_shape[2], kL=k_shape[2], Hq=q_shape[1], Hk=k_shape[1];
 const int gqa=Hq/Hk, KB=blocks_shape[2];
@@ -47,9 +47,9 @@ for(int t0=0;t0<L;t0+=BK) {
   for(int i=tid;i<BK*32;i+=64) {
     int r=i>>5,c=i&31; uint4 value=uint4(0);
     if(r<rows) {
-      int pos=msv_qsa_pos(blk,t0+r,sel_len,tail_start,RATIO);
+      int pos=sushi_qsa_pos(blk,t0+r,sel_len,tail_start,RATIO);
 #if QSA_PACKED
-      value=msv_qsa_unpack8<T,BITS,GS>(Kp+(long)pos*k_strides[2],Kscp+(long)pos*ksc_strides[2],Kbip+(long)pos*kbi_strides[2],c);
+      value=sushi_qsa_unpack8<T,BITS,GS>(Kp+(long)pos*k_strides[2],Kscp+(long)pos*ksc_strides[2],Kbip+(long)pos*kbi_strides[2],c);
 #else
       value=*((const device uint4*)(Kp+(long)pos*k_strides[2])+c);
 #endif
@@ -100,9 +100,9 @@ for(int t0=0;t0<L;t0+=BK) {
   for(int i=tid;i<BK*32;i+=64) {
     int r=i>>5,c=i&31; uint4 value=uint4(0);
     if(r<rows) {
-      int pos=msv_qsa_pos(blk,t0+r,sel_len,tail_start,RATIO);
+      int pos=sushi_qsa_pos(blk,t0+r,sel_len,tail_start,RATIO);
 #if QSA_PACKED
-      value=msv_qsa_unpack8<T,BITS,GS>(Vp+(long)pos*v_strides[2],Vscp+(long)pos*vsc_strides[2],Vbip+(long)pos*vbi_strides[2],c);
+      value=sushi_qsa_unpack8<T,BITS,GS>(Vp+(long)pos*v_strides[2],Vscp+(long)pos*vsc_strides[2],Vbip+(long)pos*vbi_strides[2],c);
 #else
       value=*((const device uint4*)(Vp+(long)pos*v_strides[2])+c);
 #endif

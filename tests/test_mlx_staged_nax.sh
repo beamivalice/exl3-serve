@@ -1,7 +1,7 @@
 #!/bin/bash
 # test_mlx_staged_nax.sh — static guard for the self-built, NAX-enabled MLX runtime.
 #
-# mlx-serve pins mlx + mlx-c as git submodules and builds them via
+# sushi pins mlx + mlx-c as git submodules and builds them via
 # scripts/build-mlx.sh with CMAKE_OSX_DEPLOYMENT_TARGET=26.2 so MLX's NAX
 # (M5 neural-accelerator) kernels are compiled in — the Homebrew bottle is
 # built at deployment target 26.0 and silently ships with MLX_METAL_NO_NAX
@@ -15,7 +15,7 @@
 #      deployment target that unlocks the gate
 #   4. libmlxc.dylib links the staged libmlx, not /opt/homebrew's bottle
 #   5. the .version stamp exists (build-mlx.sh provenance)
-#   6. if zig-out/bin/mlx-serve is built: it links no Homebrew mlx/mlx-c
+#   6. if zig-out/bin/sushi is built: it links no Homebrew mlx/mlx-c
 #
 # Usage: ./tests/test_mlx_staged_nax.sh
 
@@ -76,13 +76,13 @@ else
   fail "cannot check linkage: libmlxc.dylib missing"
 fi
 
-echo "== mlx-serve binary linkage + min-OS (if built) =="
-BIN="zig-out/bin/mlx-serve"
+echo "== sushi binary linkage + min-OS (if built) =="
+BIN="zig-out/bin/sushi"
 if [ -f "$BIN" ]; then
   if otool -L "$BIN" | grep -Eq "/opt/homebrew/(opt|Cellar)/(mlx|mlx-c)/"; then
-    fail "mlx-serve still links Homebrew mlx/mlx-c:"$'\n'"$(otool -L "$BIN" | grep -E '/opt/homebrew/(opt|Cellar)/(mlx|mlx-c)/')"
+    fail "sushi still links Homebrew mlx/mlx-c:"$'\n'"$(otool -L "$BIN" | grep -E '/opt/homebrew/(opt|Cellar)/(mlx|mlx-c)/')"
   else
-    ok "mlx-serve links no Homebrew mlx/mlx-c"
+    ok "sushi links no Homebrew mlx/mlx-c"
   fi
   # The binary's own minos must state the honest floor (26.2, matching the
   # libmlx it links) — a 14.0-minos binary "loads" on old macOS only to die
@@ -91,9 +91,9 @@ if [ -f "$BIN" ]; then
   BMAJOR=${BIN_MINOS%%.*}
   BMINOR=$(echo "$BIN_MINOS" | cut -d. -f2)
   if [ -n "$BIN_MINOS" ] && { [ "$BMAJOR" -gt 26 ] || { [ "$BMAJOR" -eq 26 ] && [ "${BMINOR:-0}" -ge 2 ]; }; }; then
-    ok "mlx-serve minos is $BIN_MINOS"
+    ok "sushi minos is $BIN_MINOS"
   else
-    fail "mlx-serve minos is '$BIN_MINOS' — must be >= 26.2 (build.zig os_version_min must match the libmlx floor)"
+    fail "sushi minos is '$BIN_MINOS' — must be >= 26.2 (build.zig os_version_min must match the libmlx floor)"
   fi
 else
   echo "  NOTE: $BIN not built — linkage + minos checks skipped (build with: zig build -Doptimize=ReleaseFast)"

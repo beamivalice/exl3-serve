@@ -31,7 +31,7 @@
 #
 # Defaults:
 #   model   = /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
-#   drafter = ~/.mlx-serve/models/mlx-community/gemma-4-E4B-it-assistant-bf16 (only used if
+#   drafter = ~/.sushi/models/mlx-community/gemma-4-E4B-it-assistant-bf16 (only used if
 #             AGENT_SPEC_TEST_MODEL points at a Gemma 4 target)
 #
 # Auto-skips cleanly when the model directory is missing.
@@ -58,7 +58,7 @@ if [ ! -f "$MODEL/config.json" ]; then
     exit 1
 fi
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first with 'zig build -Doptimize=ReleaseFast'."
     exit 1
@@ -83,7 +83,7 @@ echo "  model:   $MODEL  (model_type=$TARGET_TYPE)"
 echo "  drafter: $([ "$USE_DRAFTER" = "1" ] && echo "$DRAFTER" || echo "(none)")"
 echo
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 LOGFILE=$(mktemp)
@@ -186,7 +186,7 @@ echo "--- Turn 1: plain message (spec-decode active) ---"
 TURN1_PAYLOAD=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [
         {'role': 'system', 'content': 'You are helpful. Be brief.'},
         {'role': 'user', 'content': 'What is 12 + 30? Just the number.'}
@@ -206,7 +206,7 @@ echo "--- Turn 2: tools array (spec auto-disables) ---"
 TURN2_PAYLOAD=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [
         {'role': 'system', 'content': 'You are a helpful assistant. Use tools to answer factual questions about system state.'},
         {'role': 'user', 'content': 'Use the shell tool to run \"date\" and tell me the current day.'}
@@ -242,7 +242,7 @@ echo "--- Turn 3: tool result fed back (spec re-activates) ---"
 TURN3_PAYLOAD=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [
         {'role': 'system', 'content': 'You are a helpful assistant.'},
         {'role': 'user', 'content': 'Use the shell tool to run \"date\" and tell me the current day.'},
@@ -275,7 +275,7 @@ TURN4_PAYLOAD=$(python3 -c "
 import json
 long_text = '''$LONG_BLOCK'''
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [
         {'role': 'system', 'content': 'You are helpful. Be brief.'},
         {'role': 'user', 'content': 'Here is some text:\n' + long_text + '\n\nHow many lines did I send? Just the number.'}
@@ -300,7 +300,7 @@ echo "--- Turn 6: enable_thinking:true (reasoning_content) ---"
 TURN6_PAYLOAD=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [
         {'role': 'system', 'content': 'You are a careful reasoner.'},
         {'role': 'user', 'content': 'Briefly: is 17 a prime number?'}

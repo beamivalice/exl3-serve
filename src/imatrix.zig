@@ -20,14 +20,14 @@
 //! above; a converter slices expert e out of it. gate and up share one statistic
 //! because they read the same MLP input row.
 //!
-//! Opt-in through `MLX_SERVE_IMATRIX_OUT=<abs>.safetensors`; absent or empty = off,
+//! Opt-in through `SUSHI_IMATRIX_OUT=<abs>.safetensors`; absent or empty = off,
 //! and nothing is allocated.
 
 const std = @import("std");
 const mlx = @import("mlx.zig");
 const log = @import("log.zig");
 
-pub const ENV_VAR = "MLX_SERVE_IMATRIX_OUT";
+pub const ENV_VAR = "SUSHI_IMATRIX_OUT";
 
 /// The architectures with an expert-naming contract. The converter looks the
 /// imatrix up by SOURCE HF weight name, never by the engine's internal module
@@ -277,7 +277,7 @@ pub const Collector = struct {
         defer _ = mlx.mlx_map_string_to_string_free(meta);
         _ = mlx.mlx_map_string_to_string_insert(meta, "keys", "SOURCE checkpoint weight names");
         _ = mlx.mlx_map_string_to_string_insert(meta, "values", "experts: sum(x^2)/layer tokens, per expert concatenated");
-        _ = mlx.mlx_map_string_to_string_insert(meta, "producer", "mlx-serve " ++ ENV_VAR);
+        _ = mlx.mlx_map_string_to_string_insert(meta, "producer", "sushi " ++ ENV_VAR);
 
         const path_z = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{self.path}, 0);
         defer self.allocator.free(path_z);

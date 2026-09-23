@@ -246,13 +246,13 @@ pub fn warmEnvCaches() void {
     _ = restoreMoveEnabled();
 }
 
-/// SSD-first prefix cache mode (`MLX_SERVE_PREFIX_SSD_FIRST=0` restores RAM-first); armed only
+/// SSD-first prefix cache mode (`SUSHI_PREFIX_SSD_FIRST=0` restores RAM-first); armed only
 /// where `ModelConfig.ssdFirstCapable()`.
 pub fn ssdFirstEnabled() bool {
     if (ssd_first_override) |v| return v;
     if (ssd_first_env_cached) |v| return v;
     const v = blk: {
-        const raw = std.c.getenv("MLX_SERVE_PREFIX_SSD_FIRST") orelse break :blk true;
+        const raw = std.c.getenv("SUSHI_PREFIX_SSD_FIRST") orelse break :blk true;
         break :blk !std.mem.eql(u8, std.mem.sliceTo(raw, 0), "0");
     };
     ssd_first_env_cached = v;
@@ -263,13 +263,13 @@ var restore_move_env_cached: ?bool = null;
 /// Test/bench override for `restoreMoveEnabled()`. Null = read the environment.
 pub var restore_move_override: ?bool = null;
 
-/// Restore by move. `MLX_SERVE_RESTORE_MOVE=0` restores the refcount share whose first append
+/// Restore by move. `SUSHI_RESTORE_MOVE=0` restores the refcount share whose first append
 /// copies the whole prefix. Armed only where `HotPrefixCache.ssd_first` is.
 pub fn restoreMoveEnabled() bool {
     if (restore_move_override) |v| return v;
     if (restore_move_env_cached) |v| return v;
     const v = blk: {
-        const raw = std.c.getenv("MLX_SERVE_RESTORE_MOVE") orelse break :blk true;
+        const raw = std.c.getenv("SUSHI_RESTORE_MOVE") orelse break :blk true;
         break :blk !std.mem.eql(u8, std.mem.sliceTo(raw, 0), "0");
     };
     restore_move_env_cached = v;

@@ -22,7 +22,7 @@ set -u
 MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11267}"
 BASE="http://127.0.0.1:$PORT"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 BUDGET=24
 PASS=0
 FAIL=0

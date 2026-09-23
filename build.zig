@@ -9,7 +9,7 @@ comptime {
     // fixed upstream by 0.17.0-dev, which is why the floor moved.
     if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 17) {
         @compileError(std.fmt.comptimePrint(
-            "mlx-serve requires Zig 0.17 (nightly until 0.17.0 stable ships) (have {d}.{d}.{d}). Grab a nightly from https://ziglang.org/download/.",
+            "sushi requires Zig 0.17 (nightly until 0.17.0 stable ships) (have {d}.{d}.{d}). Grab a nightly from https://ziglang.org/download/.",
             .{ builtin.zig_version.major, builtin.zig_version.minor, builtin.zig_version.patch },
         ));
     }
@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) void {
     // the same number release.sh gates a dispatch on.
     const version = b.option([]const u8, "version", "Version string") orelse readChangelogVersion(b) orelse "0.0.0-dev";
 
-    // Engine-version pins surfaced by `mlx-serve --version` (the macOS app spawns
+    // Engine-version pins surfaced by `sushi --version` (the macOS app spawns
     // it and parses the output — see src/version.zig). These are the versions
     // that have NO runtime query API (MLX reports itself at runtime):
     //   --mlx-c-version  pinned mlx-c submodule version; defaults from the
@@ -119,7 +119,7 @@ pub fn build(b: *std.Build) void {
     mod.linkFramework("IOSurface", .{});
 
     const exe = b.addExecutable(.{
-        .name = "mlx-serve",
+        .name = "sushi",
         .root_module = mod,
     });
 
@@ -133,7 +133,7 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
 
-    const run_step = b.step("run", "Run mlx-serve");
+    const run_step = b.step("run", "Run sushi");
     run_step.dependOn(&run_cmd.step);
 
     // Unit tests — reuses the same module config (mlx-c, jinja_cpp, etc.)
@@ -269,7 +269,7 @@ fn verifyMlxStage(b: *std.Build) void {
     };
     if (!stage_ok) {
         std.debug.print(
-            "\n[mlx-serve] lib/mlx is not staged (self-built mlx + mlx-c). Run:\n" ++
+            "\n[sushi] lib/mlx is not staged (self-built mlx + mlx-c). Run:\n" ++
                 "  git submodule update --init lib/mlx-src lib/mlxc-src && ./scripts/build-mlx.sh\n\n",
             .{},
         );
@@ -278,7 +278,7 @@ fn verifyMlxStage(b: *std.Build) void {
 }
 
 /// The newest version documented in CHANGELOG.md ("## vYY.M.N"), surfaced by
-/// `mlx-serve --version`. Read at configure time so a plain `zig build`
+/// `sushi --version`. Read at configure time so a plain `zig build`
 /// reports the release the tree is written against instead of a made-up
 /// literal. Same rule as release.sh's changelog_top_version; null → "0.0.0-dev".
 fn readChangelogVersion(b: *std.Build) ?[]const u8 {
@@ -303,7 +303,7 @@ fn readChangelogVersion(b: *std.Build) ?[]const u8 {
 
 /// The pinned mlx-c revision from lib/mlx/.version (written by
 /// scripts/build-mlx.sh as "mlx=<sha> mlxc=<sha> target=<ver>"), surfaced in
-/// `mlx-serve --version`. Returns null (→ "unknown") when not staged yet.
+/// `sushi --version`. Returns null (→ "unknown") when not staged yet.
 fn readMlxcPin(b: *std.Build) ?[]const u8 {
     const bytes = buildRootHandle(b).readFileAlloc(
         b.graph.io,
@@ -335,26 +335,26 @@ fn verifyBrewDeps(b: *std.Build) void {
             .inherit,
         ) catch {
             std.debug.print(
-                "\n[mlx-serve] missing Homebrew dependency '{s}' (>= {d}.{d}.{d}). Install with: brew install webp\n\n",
+                "\n[sushi] missing Homebrew dependency '{s}' (>= {d}.{d}.{d}). Install with: brew install webp\n\n",
                 .{ dep.name, dep.min.major, dep.min.minor, dep.min.patch },
             );
             std.process.exit(1);
         };
         const trimmed = std.mem.trim(u8, stdout, " \n\r\t");
         const space = std.mem.indexOfScalar(u8, trimmed, ' ') orelse {
-            std.debug.print("[mlx-serve] cannot parse `brew list --versions {s}` output: {s}\n", .{ dep.name, trimmed });
+            std.debug.print("[sushi] cannot parse `brew list --versions {s}` output: {s}\n", .{ dep.name, trimmed });
             std.process.exit(1);
         };
         var ver_str = trimmed[space + 1 ..];
         // Strip Homebrew revision suffix (e.g., "0.6.0_2" -> "0.6.0").
         if (std.mem.indexOfScalar(u8, ver_str, '_')) |us| ver_str = ver_str[0..us];
         const have = std.SemanticVersion.parse(ver_str) catch {
-            std.debug.print("[mlx-serve] cannot parse '{s}' version '{s}'\n", .{ dep.name, ver_str });
+            std.debug.print("[sushi] cannot parse '{s}' version '{s}'\n", .{ dep.name, ver_str });
             std.process.exit(1);
         };
         if (have.order(dep.min) == .lt) {
             std.debug.print(
-                "\n[mlx-serve] Homebrew '{s}' is {d}.{d}.{d}; need >= {d}.{d}.{d}. Run: brew upgrade {s}\n\n",
+                "\n[sushi] Homebrew '{s}' is {d}.{d}.{d}; need >= {d}.{d}.{d}. Run: brew upgrade {s}\n\n",
                 .{ dep.name, have.major, have.minor, have.patch, dep.min.major, dep.min.minor, dep.min.patch, dep.name },
             );
             std.process.exit(1);

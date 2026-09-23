@@ -21,7 +21,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 PORT="${PORT:-11431}"
 BASE="http://127.0.0.1:$PORT"
 MAX_GB="${SMOKE_MAX_GB:-0}"
@@ -30,7 +30,7 @@ mkdir -p "$OUT/home"
 
 [[ -x "$BINARY" ]] || { echo "[fatal] $BINARY missing — zig build -Doptimize=ReleaseFast"; exit 1; }
 
-MD="$HOME/.mlx-serve/models"
+MD="$HOME/.sushi/models"
 # arch|thinking(yes/no)|candidate paths (first that exists wins)
 ARCHES=(
     "qwen4_exp|yes|${QWEN4_EXP_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}|$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw"
@@ -58,7 +58,7 @@ except Exception: print('')" "$1" 2>/dev/null
 SERVER_PID=""
 boot() { # $1 model path, $2... extra flags
     local model="$1"; shift
-    # Isolated HOME: ~/.mlx-serve/model-settings.json decides every key a cell leaves
+    # Isolated HOME: ~/.sushi/model-settings.json decides every key a cell leaves
     # unflagged, so a real profile would silently change what the cell measures.
     HOME="$OUT/home" "$BINARY" --model "$model" --serve --host 127.0.0.1 --port "$PORT" --log-level info --metrics "$@" \
         > "$OUT/$CELL.server.log" 2>&1 &
@@ -73,7 +73,7 @@ boot() { # $1 model path, $2... extra flags
 stop() {
     [[ -n "$SERVER_PID" ]] || return
     kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=""
-    pkill -f "zig-out/bin/mlx-serve.*--port $PORT" 2>/dev/null || true
+    pkill -f "zig-out/bin/sushi.*--port $PORT" 2>/dev/null || true
 }
 trap stop EXIT
 

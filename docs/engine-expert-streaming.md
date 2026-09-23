@@ -62,7 +62,7 @@ zero-copy slabs. With no budget a pack loads resident as before.
 ## Compute
 
 - bf16 checkpoint → `expert_bf16_kernels` (`downKernelPreferred(rows) = rows >= 2`: the in-dispatch k-reduction tail
-  loses at one row; `MLX_SERVE_EXPERT_BF16_KERNELS=0` restores the `gather_mm` composite).
+  loses at one row; `SUSHI_EXPERT_BF16_KERNELS=0` restores the `gather_mm` composite).
 - Quantized packs → the RESIDENT fused kernels over the slab with remapped ids, bit-identical to the resident load
   (bytes and top-20 logprobs on greedy prompts). A warm quantized forward pays the per-layer barrier, not the fills.
 
@@ -71,13 +71,13 @@ zero-copy slabs. With no budget a pack loads resident as before.
 - Store-level same-expert byte identity (`real qwen expert store spans and source bytes are exact`); teacher replay
   via `kld compare` (the affine pack is the control); greedy determinism.
 - Cross-day comparisons must match forwards on `hits` + `fill_bytes_per_row` (the SSD's delivered rate drifts).
-- `MLX_SERVE_NGRAM_BF16_DIR=<hf checkpoint>` serves any pack with the ORIGINAL bf16 n-gram table so `kld compare`
+- `SUSHI_NGRAM_BF16_DIR=<hf checkpoint>` serves any pack with the ORIGINAL bf16 n-gram table so `kld compare`
   isolates the PLE table's cost.
 
 <a id="imatrix"></a>
 ## Imatrix capture
 
-Imatrix capture rides the streamed bf16 forward (`MLX_SERVE_IMATRIX_OUT=<abs>.safetensors`, `src/imatrix.zig`):
+Imatrix capture rides the streamed bf16 forward (`SUSHI_IMATRIX_OUT=<abs>.safetensors`, `src/imatrix.zig`):
 per-layer per-expert sum(x²) and routed counts accumulate ON the GPU keyed by GLOBAL expert ids (slab slots are
 remapped), in the collector's contract the converter reads; the flush runs on the INFERENCE thread (loop exit or
 `/v1/unload-model`), never on `Scheduler.deinit`'s caller thread. The drivers that feed it a corpus live in the private

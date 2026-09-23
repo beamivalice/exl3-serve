@@ -1,8 +1,8 @@
 #!/bin/bash
-# pi ↔ mlx-serve integration test driver.
+# pi ↔ sushi integration test driver.
 #
 # Tests every model × streaming × thinking combo by pointing the `pi`
-# (https://github.com/badlogic/pi-mono) coding agent at a running mlx-serve
+# (https://github.com/badlogic/pi-mono) coding agent at a running sushi
 # instance and having it build + test a tiny express todo app.
 #
 # Requires: pi (npm -g @mariozechner/pi-coding-agent), node, python3.
@@ -18,7 +18,7 @@
 #   matrix=html-quick  : same as html
 #   PI_CASES=csv       : filter cases by label (e.g. PI_CASES=html-qwen4)
 #   QWEN4_EXP_MODEL    : pack path override
-#   MLX_BIN=path       : server binary override (default: zig-out/bin/mlx-serve)
+#   MLX_BIN=path       : server binary override (default: zig-out/bin/sushi)
 #
 # Writes per-run logs into tests/pi-results/ and appends a
 # summary line to tests/pi_integration_run.summary.tsv.
@@ -27,7 +27,7 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 RESULTS="$REPO/tests/pi-results"
 SUMMARY="$REPO/tests/pi_integration_run.summary.tsv"
-MLX_BIN="${MLX_BIN:-$REPO/zig-out/bin/mlx-serve}"
+MLX_BIN="${MLX_BIN:-$REPO/zig-out/bin/sushi}"
 PI_MODELS_JSON="$HOME/.pi/agent/models.json"
 PORT="${PORT:-8080}"
 SERVED_MODEL="${SERVED_MODEL:-}"
@@ -45,13 +45,13 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 
 QWEN4="${QWEN4_EXP_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 
-kill_mlx_serve() {
+kill_sushi() {
     # Match by --port, not by binary path — MLX_BIN may point at the app
     # bundle OR a dev build; a path-based pattern silently leaves the other
     # one running and the next case reuses the wrong model.
-    pkill -f "mlx-serve.*--serve.*--port $PORT" 2>/dev/null || true
+    pkill -f "sushi.*--serve.*--port $PORT" 2>/dev/null || true
     for _ in $(seq 1 10); do
-        if ! pgrep -f "mlx-serve.*--serve.*--port $PORT" >/dev/null; then
+        if ! pgrep -f "sushi.*--serve.*--port $PORT" >/dev/null; then
             return 0
         fi
         sleep 0.5
@@ -59,10 +59,10 @@ kill_mlx_serve() {
     return 1
 }
 
-start_mlx_serve() {
+start_sushi() {
     local path="$1"
     local logfile="$2"
-    kill_mlx_serve
+    kill_sushi
     "$MLX_BIN" --model "$path" --serve --port "$PORT" \
         --log-level info --ctx-size 32768 > "$logfile" 2>&1 &
     local pid=$!
@@ -75,7 +75,7 @@ start_mlx_serve() {
         fi
         sleep 1
     done
-    echo "FAILED to start mlx-serve" >&2
+    echo "FAILED to start sushi" >&2
     return 1
 }
 
@@ -337,14 +337,14 @@ run_one_case() {
     local pid load_start load_end
     load_start=$(date +%s)
     if [ -z "${SKIP_SERVER_START:-}" ]; then
-        pid=$(start_mlx_serve "$path" "$server_log" 2> >(tee -a "$agent_log"))
+        pid=$(start_sushi "$path" "$server_log" 2> >(tee -a "$agent_log"))
         if [ -z "$pid" ]; then
             echo "FAIL: server failed" | tee -a "$agent_log"
             printf "%s\t%s\t%s\t%s\t%s\n" "$(date +%Y-%m-%dT%H:%M:%S)" "$label" "server-start-fail" "0" "" >> "$SUMMARY"
             return 1
         fi
         load_end=$(date +%s)
-        echo "mlx-serve PID=$pid (loaded in $((load_end-load_start))s)" | tee -a "$agent_log"
+        echo "sushi PID=$pid (loaded in $((load_end-load_start))s)" | tee -a "$agent_log"
     else
         pid="external"
         load_end=$load_start
@@ -406,7 +406,7 @@ run_one_case() {
     printf "%s\t%s\t%s\t%s\t%s\n" "$(date +%Y-%m-%dT%H:%M:%S)" "$label" "$score/$max_score" "$total_elapsed" "$notes" >> "$SUMMARY"
 
     if [ -z "${SKIP_SERVER_START:-}" ]; then
-        kill_mlx_serve
+        kill_sushi
     fi
     return 0
 }
@@ -451,7 +451,7 @@ for case in "${CASES[@]}"; do
     run_one_case "$label" "$path" "$served_name" "$thinking_flag" "$thinking_format" "$reasoning"
 done
 
-kill_mlx_serve
+kill_sushi
 rm -f "$PI_MODELS_JSON"
 echo -e "${GREEN}Done. Summary: $SUMMARY${NC}"
 cat "$SUMMARY"

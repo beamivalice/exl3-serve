@@ -1,6 +1,6 @@
 #!/bin/bash
 # An MLX error costs ONE REQUEST, never the server (#353). mlx-c's default handler was
-# exit(-1). `MLX_SERVE_MLX_FAULT_CHUNK=<n>` / `_STEP=<n>` latch a synthetic Metal OOM at the
+# exit(-1). `SUSHI_MLX_FAULT_CHUNK=<n>` / `_STEP=<n>` latch a synthetic Metal OOM at the
 # n-th prefill-chunk / decode-step checkpoint and disarm, so one boot exercises the failure
 # (a 503 with a body, `[mlx]` in the log) and the recovery (200 on the next request).
 #
@@ -14,11 +14,11 @@ ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
 
 [ -d "$MODEL" ] || { echo "SKIP: model not found at $MODEL"; exit 0; }
-[ -x ./zig-out/bin/mlx-serve ] || { echo "FAIL: build with -Doptimize=ReleaseFast first"; exit 1; }
+[ -x ./zig-out/bin/sushi ] || { echo "FAIL: build with -Doptimize=ReleaseFast first"; exit 1; }
 
 LOG=$(mktemp -t mlxerr).log
 # Chunk 2, not 1, so real forward work precedes the fault.
-MLX_SERVE_MLX_FAULT_CHUNK=2 ./zig-out/bin/mlx-serve serve --model "$MODEL" \
+SUSHI_MLX_FAULT_CHUNK=2 ./zig-out/bin/sushi serve --model "$MODEL" \
   --host 127.0.0.1 --port "$PORT" --log-level info > "$LOG" 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null' EXIT
@@ -27,7 +27,7 @@ for _ in $(seq 1 120); do curl -sf -m 2 "$BASE/health" >/dev/null 2>&1 && break;
 req() { # $1 = prompt
   curl -s -o /tmp/mlxerr_body.json -w '%{http_code}' -m 300 \
     -H 'content-type: application/json' \
-    -d "{\"model\":\"mlx-serve\",\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}],\"max_tokens\":8,\"temperature\":0,\"stream\":false}" \
+    -d "{\"model\":\"sushi\",\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}],\"max_tokens\":8,\"temperature\":0,\"stream\":false}" \
     "$BASE/v1/chat/completions"
 }
 
@@ -65,7 +65,7 @@ kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 # The decode checkpoint: a decode-time failure used to finish 200 and become the next request's 503.
 echo "[4] an MLX error during DECODE fails that request, not the next one"
 LOG2=$(mktemp -t mlxerr2).log
-MLX_SERVE_MLX_FAULT_STEP=2 ./zig-out/bin/mlx-serve serve --model "$MODEL" \
+SUSHI_MLX_FAULT_STEP=2 ./zig-out/bin/sushi serve --model "$MODEL" \
   --host 127.0.0.1 --port "$PORT" --log-level info > "$LOG2" 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null' EXIT
@@ -89,13 +89,13 @@ fi
 echo "[6] a decode-time MLX error on a STREAMING request sends the mapped SSE error"
 kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 LOG3=$(mktemp -t mlxerr3).log
-MLX_SERVE_MLX_FAULT_STEP=2 ./zig-out/bin/mlx-serve serve --model "$MODEL" \
+SUSHI_MLX_FAULT_STEP=2 ./zig-out/bin/sushi serve --model "$MODEL" \
   --host 127.0.0.1 --port "$PORT" --log-level info > "$LOG3" 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null' EXIT
 for _ in $(seq 1 120); do curl -sf -m 2 "$BASE/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -s -m 300 -N -H 'content-type: application/json' \
-  -d '{"model":"mlx-serve","messages":[{"role":"user","content":"Write one sentence about the sea."}],"max_tokens":32,"temperature":0,"stream":true}' \
+  -d '{"model":"sushi","messages":[{"role":"user","content":"Write one sentence about the sea."}],"max_tokens":32,"temperature":0,"stream":true}' \
   "$BASE/v1/chat/completions" > /tmp/mlxerr_stream.txt 2>&1
 if grep -q '"finish_reason":"error"' /tmp/mlxerr_stream.txt &&
    grep -q 'ran out of GPU memory' /tmp/mlxerr_stream.txt &&
@@ -123,7 +123,7 @@ LONG=$(python3 -c "print(('The quick brown fox jumps over the lazy dog. ' * 9000
 CODE6=$(python3 - "$BASE" "$LONG" <<'PY2'
 import json,sys,urllib.request,urllib.error
 base,long_text=sys.argv[1:3]
-body={"model":"mlx-serve","messages":[{"role":"user","content":long_text+"\n\nReply with one word."}],
+body={"model":"sushi","messages":[{"role":"user","content":long_text+"\n\nReply with one word."}],
       "temperature":0,"stream":False}   # NO max_tokens field on purpose
 req=urllib.request.Request(base+"/v1/chat/completions",data=json.dumps(body).encode(),
                            headers={"content-type":"application/json"})

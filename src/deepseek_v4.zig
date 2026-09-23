@@ -646,7 +646,7 @@ pub const Dsv4Model = struct {
     // per-layer wo_a quantized triples reshaped to per-group slabs
     // [og, ol, ·] (pure views of the checkpoint arrays — batched
     // quantized_matmul reads the 8-bit weight in place). Empty when
-    // `MLX_SERVE_DSV4_WO_QMM=0` restores the dequantized operands.
+    // `SUSHI_DSV4_WO_QMM=0` restores the dequantized operands.
     wo_a_q3: []Q3,
     // per-layer int8-g32 side copies of comp_in_t served at decode/verify
     // widths (C ≤ 32) under the user-facing --decode-attn-quant flag; big
@@ -666,11 +666,11 @@ pub const Dsv4Model = struct {
     hada_g: ?mlx.mlx_array, // [ihd, ihd] f32 Hadamard matrix (x @ H == FWHT)
     // fused Sinkhorn kernel (GPU streams; null → host-sync fallback)
     sink_k: ?SinkhornK = null,
-    // fused Sinkhorn + y-collapse kernel (`MLX_SERVE_DSV4_SINKY=0` kills;
+    // fused Sinkhorn + y-collapse kernel (`SUSHI_DSV4_SINKY=0` kills;
     // falls back to sink_k + the composed multiply/sum tail)
     sink_y_k: ?SinkhornK = null,
     sink_y_logged: bool = false,
-    // fused hc_post kernel (`MLX_SERVE_DSV4_HCPOST=0` kills; needs sink_y_k
+    // fused hc_post kernel (`SUSHI_DSV4_HCPOST=0` kills; needs sink_y_k
     // for the pack input — falls back to the composed matmul/multiply/add)
     hc_post_k: ?SinkhornK = null,
     hc_post_logged: bool = false,
@@ -732,7 +732,7 @@ pub const Dsv4Model = struct {
     /// verification (see `dsparkConfThreshold`). Tests move it to ±inf to pin
     /// the open/shut ends.
     ds_conf_thr: f32 = 0,
-    /// Per-round cost audit, armed by `MLX_SERVE_DSPARK_PROFILE` at load.
+    /// Per-round cost audit, armed by `SUSHI_DSPARK_PROFILE` at load.
     ds_prof: ?DsparkProfile = null,
     /// Scratch laps written by the last `extendChunk` (profiling only): the
     /// trunk layer loop vs the vocab head, so a round can attribute its
@@ -1021,7 +1021,7 @@ pub fn initModel(gpa: std.mem.Allocator, cfg: *const ModelConfig, dw: Dsv4Weight
     // wo_a: per-group slabs for the grouped low-rank O. Default = quantized
     // VIEWS [og, ol, ·] read in place by batched quantized_matmul (the bf16
     // wo_a_deq slabs were 2.9 GB of the ~7.8 GB read per serial token);
-    // `MLX_SERVE_DSV4_WO_QMM=0` restores the dequantized [og, gin, ol]
+    // `SUSHI_DSV4_WO_QMM=0` restores the dequantized [og, gin, ol]
     // operands (dense matmul reads strided views fine).
     const og: c_int = @intCast(cfg.dsv4_o_groups);
     const ol: c_int = @intCast(cfg.dsv4_o_lora_rank);
@@ -1141,17 +1141,17 @@ pub fn initModel(gpa: std.mem.Allocator, cfg: *const ModelConfig, dw: Dsv4Weight
         try mlx.check(mlx.mlx_array_eval(arr));
         break :blk arr;
     };
-    const sink_env_off = if (std.c.getenv("MLX_SERVE_DSV4_SINKHORN")) |v| v[0] == '0' else false;
+    const sink_env_off = if (std.c.getenv("SUSHI_DSV4_SINKHORN")) |v| v[0] == '0' else false;
     const sink_k = if (mlx.streamIsGpu(s) and !sink_env_off)
         buildSinkhornKernel(hc, cfg.dsv4_hc_sinkhorn_iters)
     else
         null;
-    const sink_y_env_off = if (std.c.getenv("MLX_SERVE_DSV4_SINKY")) |v| v[0] == '0' else false;
+    const sink_y_env_off = if (std.c.getenv("SUSHI_DSV4_SINKY")) |v| v[0] == '0' else false;
     const sink_y_k = if (sink_k != null and !sink_y_env_off)
         buildSinkhornYKernel(hc, cfg.dsv4_hc_sinkhorn_iters, dim)
     else
         null;
-    const hc_post_env_off = if (std.c.getenv("MLX_SERVE_DSV4_HCPOST")) |v| v[0] == '0' else false;
+    const hc_post_env_off = if (std.c.getenv("SUSHI_DSV4_HCPOST")) |v| v[0] == '0' else false;
     const hc_post_k = if (sink_y_k != null and !hc_post_env_off)
         buildHcPostKernel(hc, dim)
     else
@@ -1163,12 +1163,12 @@ pub fn initModel(gpa: std.mem.Allocator, cfg: *const ModelConfig, dw: Dsv4Weight
     // command buffers dying at the ceiling and MLX returning ZERO-filled
     // outputs (token-0 drafts verified by token-0 logits = fake 100%
     // acceptance). So DSpark is OPT-IN (`--dspark` sets
-    // MLX_SERVE_DSV4_DSPARK=1; "force" additionally skips the fit gate):
+    // SUSHI_DSV4_DSPARK=1; "force" additionally skips the fit gate):
     // opted in → collect the stage tensors, decide the fit BEFORE touching
     // them (logical bytes need no eval), and either pay the true footprint
     // here in one batched eval or disable with an honest log. Default OFF:
     // untouched lazy stages cost nothing and the model serves serial.
-    const ds_env = std.c.getenv("MLX_SERVE_DSV4_DSPARK");
+    const ds_env = std.c.getenv("SUSHI_DSV4_DSPARK");
     const ds_opt_in = if (ds_env) |v| (v[0] == '1' or v[0] == 'f') else false;
     const ds_force = if (ds_env) |v| v[0] == 'f' else false;
     const has_stages = dw.dspark != null and dw.layers.len > n_layers;
@@ -1198,7 +1198,7 @@ pub fn initModel(gpa: std.mem.Allocator, cfg: *const ModelConfig, dw: Dsv4Weight
             log.info("dsv4: materialized {d} DSpark stage weight tensors ({d} MB) at load\n", .{ stages.n, stages.bytes / mb });
         } else {
             dspark_on = false;
-            log.warn("dsv4: DSpark DISABLED — trunk {d} MB + stages {d} MB + headroom {d} MB exceed the {d} MB working-set budget; serving serial. MLX_SERVE_DSV4_DSPARK=force overrides\n", .{ trunk.bytes / mb, stages.bytes / mb, DSPARK_MEM_HEADROOM / mb, max_rec / mb });
+            log.warn("dsv4: DSpark DISABLED — trunk {d} MB + stages {d} MB + headroom {d} MB exceed the {d} MB working-set budget; serving serial. SUSHI_DSV4_DSPARK=force overrides\n", .{ trunk.bytes / mb, stages.bytes / mb, DSPARK_MEM_HEADROOM / mb, max_rec / mb });
         }
     }
     return .{
@@ -1268,7 +1268,7 @@ pub fn initModel(gpa: std.mem.Allocator, cfg: *const ModelConfig, dw: Dsv4Weight
         .ds_hc_head_base = if (dspark_on) try toHostF32(a, dw.dspark.?.hc_head_base, hc, s) else &.{},
         .ds_hc_head_scale = if (dspark_on) try toHostF32(a, dw.dspark.?.hc_head_scale, 1, s) else &.{},
         .ds_conf_thr = dsparkConfThreshold(),
-        .ds_prof = if (dspark_on and std.c.getenv("MLX_SERVE_DSPARK_PROFILE") != null) DsparkProfile{} else null,
+        .ds_prof = if (dspark_on and std.c.getenv("SUSHI_DSPARK_PROFILE") != null) DsparkProfile{} else null,
     };
 }
 
@@ -1286,7 +1286,7 @@ pub fn initModel(gpa: std.mem.Allocator, cfg: *const ModelConfig, dw: Dsv4Weight
 /// threshold pay there. Port, measure, let the number pick the default.
 fn dsparkConfThreshold() f32 {
     var p: f32 = 0;
-    if (std.c.getenv("MLX_SERVE_DSV4_DSPARK_CONF")) |v| {
+    if (std.c.getenv("SUSHI_DSV4_DSPARK_CONF")) |v| {
         p = std.fmt.parseFloat(f32, std.mem.span(v)) catch 0;
     }
     if (p <= 0) return -std.math.inf(f32);
@@ -1608,36 +1608,36 @@ fn sqrtSoftplus(x: f64) f64 {
     return @sqrt(sp);
 }
 
-/// GPU MoE routing kill switch (`MLX_SERVE_DSV4_MOE_ROUTE_GPU=0` → the host
+/// GPU MoE routing kill switch (`SUSHI_DSV4_MOE_ROUTE_GPU=0` → the host
 /// routing sync via routeToken). Cached: read once per process.
 var moe_route_gpu_state: ?bool = null;
 var moe_route_gpu_logged: bool = false;
 fn moeRouteGpuEnabled() bool {
     if (moe_route_gpu_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_MOE_ROUTE_GPU")) |e| e[0] != '0' else true;
+    const v = if (std.c.getenv("SUSHI_DSV4_MOE_ROUTE_GPU")) |e| e[0] != '0' else true;
     moe_route_gpu_state = v;
     return v;
 }
 
 /// Deferred compressor-row sync kill switch
-/// (`MLX_SERVE_DSV4_COMP_DEFER=0` → every position syncs in-layer, the
+/// (`SUSHI_DSV4_COMP_DEFER=0` → every position syncs in-layer, the
 /// pre-deferral behavior). Cached: read once per process.
 var comp_defer_state: ?bool = null;
 fn compDeferEnabled() bool {
     if (comp_defer_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_COMP_DEFER")) |e| e[0] != '0' else true;
+    const v = if (std.c.getenv("SUSHI_DSV4_COMP_DEFER")) |e| e[0] != '0' else true;
     comp_defer_state = v;
     return v;
 }
 
-/// wo_a served quantized (`MLX_SERVE_DSV4_WO_QMM=0` → the bf16 wo_a_deq
+/// wo_a served quantized (`SUSHI_DSV4_WO_QMM=0` → the bf16 wo_a_deq
 /// slabs, the pre-quantized behavior). LOAD-time decision: the enabled path
 /// never builds the 2.9 GB of dequantized operands. Cached once per process.
 var wo_qmm_state: ?bool = null;
 var wo_qmm_logged: bool = false;
 fn woAQmmEnabled() bool {
     if (wo_qmm_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_WO_QMM")) |e| e[0] != '0' else true;
+    const v = if (std.c.getenv("SUSHI_DSV4_WO_QMM")) |e| e[0] != '0' else true;
     wo_qmm_state = v;
     return v;
 }
@@ -1672,13 +1672,13 @@ fn woAMatmul(m: *const Dsv4Model, li: usize, ob: mlx.mlx_array) !mlx.mlx_array {
     return try gpuOp2(mlx.mlx_matmul, ob, m.wo_a_deq[li], m.s);
 }
 
-/// GPU window emission kill switch (`MLX_SERVE_DSV4_GPU_EMIT=0` → host
+/// GPU window emission kill switch (`SUSHI_DSV4_GPU_EMIT=0` → host
 /// emission with the in-layer blocking sync, the pre-GPU behavior). Cached.
 var gpu_emit_state: ?bool = null;
 var gpu_emit_logged: bool = false;
 fn gpuEmitEnabled() bool {
     if (gpu_emit_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_GPU_EMIT")) |e| e[0] != '0' else true;
+    const v = if (std.c.getenv("SUSHI_DSV4_GPU_EMIT")) |e| e[0] != '0' else true;
     gpu_emit_state = v;
     return v;
 }
@@ -1689,7 +1689,7 @@ fn gpuEmitActive(m: *const Dsv4Model) bool {
     return gpuEmitEnabled() and mlx.streamIsGpu(m.s);
 }
 
-/// Fused window-emission kernel kill switch (`MLX_SERVE_DSV4_EMIT_KERNEL=0`
+/// Fused window-emission kernel kill switch (`SUSHI_DSV4_EMIT_KERNEL=0`
 /// → the composed ~60-op emission graph, the pre-kernel behavior). Cached.
 var emit_kernel_state: ?bool = null;
 var emit_kernel_logged: bool = false;
@@ -1698,7 +1698,7 @@ var emit_kernel_logged: bool = false;
 var emit_kernel_hits: usize = 0;
 fn emitKernelEnabled() bool {
     if (emit_kernel_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_EMIT_KERNEL")) |e| e[0] != '0' else true;
+    const v = if (std.c.getenv("SUSHI_DSV4_EMIT_KERNEL")) |e| e[0] != '0' else true;
     emit_kernel_state = v;
     return v;
 }
@@ -1707,14 +1707,14 @@ fn emitKernelSetForTest(v: ?bool) void {
     emit_kernel_state = v;
 }
 
-/// Fused decode-chain kernel kill switch (`MLX_SERVE_DSV4_DEC_CHAIN=0` → the
+/// Fused decode-chain kernel kill switch (`SUSHI_DSV4_DEC_CHAIN=0` → the
 /// composed per-head RMS/rope/sim op chains, the pre-kernel behavior). Cached.
 var dec_chain_state: ?bool = null;
 var dec_chain_logged: bool = false;
 var dec_chain_hits: usize = 0;
 fn decChainEnabled() bool {
     if (dec_chain_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_DEC_CHAIN")) |e| e[0] != '0' else true;
+    const v = if (std.c.getenv("SUSHI_DSV4_DEC_CHAIN")) |e| e[0] != '0' else true;
     dec_chain_state = v;
     return v;
 }
@@ -1723,7 +1723,7 @@ fn decChainSetForTest(v: ?bool) void {
     dec_chain_state = v;
 }
 
-/// Fused MoE gate+up gather — OPT-IN (`MLX_SERVE_DSV4_MOE_GATEUP=1`): the
+/// Fused MoE gate+up gather — OPT-IN (`SUSHI_DSV4_MOE_GATEUP=1`): the
 /// same-boot A/B on the real 2-bit gs64 trunk measured it ~2.5% SLOWER than
 /// the two stock gather_qmm dispatches + clippedSwigluG (29.6 → 28.9 tok/s,
 /// 2026-08-01) — the house "stock gather wins where O(bank) doesn't dominate
@@ -1734,7 +1734,7 @@ var moe_gateup_logged: bool = false;
 var moe_gateup_hits: usize = 0;
 fn moeGateUpEnabled() bool {
     if (moe_gateup_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_MOE_GATEUP")) |e| e[0] == '1' else false;
+    const v = if (std.c.getenv("SUSHI_DSV4_MOE_GATEUP")) |e| e[0] == '1' else false;
     moe_gateup_state = v;
     return v;
 }
@@ -1743,7 +1743,7 @@ fn moeGateUpSetForTest(v: ?bool) void {
     moe_gateup_state = v;
 }
 
-/// Fused sink-softmax — OPT-IN (`MLX_SERVE_DSV4_SINK_SOFTMAX=1`): the
+/// Fused sink-softmax — OPT-IN (`SUSHI_DSV4_SINK_SOFTMAX=1`): the
 /// same-boot A/B measured it NEUTRAL-to-slightly-negative (~29.6 vs ~29.8
 /// tok/s composed, 2026-08-01) — the composed 4-dispatch chain is already
 /// overlapped by the GPU (the fusedAttnGate on-chain-but-overlapped class),
@@ -1754,7 +1754,7 @@ var sink_softmax_logged: bool = false;
 var sink_softmax_hits: usize = 0;
 fn sinkSoftmaxEnabled() bool {
     if (sink_softmax_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_SINK_SOFTMAX")) |e| e[0] == '1' else false;
+    const v = if (std.c.getenv("SUSHI_DSV4_SINK_SOFTMAX")) |e| e[0] == '1' else false;
     sink_softmax_state = v;
     return v;
 }
@@ -1792,18 +1792,18 @@ fn compInProj(m: *const Dsv4Model, h: *const HostLayer, li: usize, x_g: mlx.mlx_
     return try gpuOp2(mlx.mlx_matmul, x_g, h.comp_in_t.?, m.s);
 }
 
-/// Lazy pipelined decode kill switch (`MLX_SERVE_DSV4_LAZY_DECODE=0` → the
+/// Lazy pipelined decode kill switch (`SUSHI_DSV4_LAZY_DECODE=0` → the
 /// synchronous decodeStep with per-token host logits). Cached.
 var lazy_decode_state: ?bool = null;
 var lazy_decode_logged: bool = false;
 fn lazyDecodeEnabled() bool {
     if (lazy_decode_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_LAZY_DECODE")) |e| e[0] != '0' else true;
+    const v = if (std.c.getenv("SUSHI_DSV4_LAZY_DECODE")) |e| e[0] != '0' else true;
     lazy_decode_state = v;
     return v;
 }
 
-/// Per-token/per-chunk phase trace (`MLX_SERVE_DSV4_TRACE=1`): decode logs
+/// Per-token/per-chunk phase trace (`SUSHI_DSV4_TRACE=1`): decode logs
 /// pos, build/head/defer/comp µs + the gap since the previous step returned;
 /// extendChunk logs C, layers/comp/defer/head ms. Wall-clock only, no extra
 /// evals — everything is lazy until the head sync, so "build" is honest CPU
@@ -1812,7 +1812,7 @@ fn lazyDecodeEnabled() bool {
 var dsv4_trace_state: ?bool = null;
 fn dsv4TraceEnabled() bool {
     if (dsv4_trace_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_TRACE")) |e| e[0] == '1' else false;
+    const v = if (std.c.getenv("SUSHI_DSV4_TRACE")) |e| e[0] == '1' else false;
     dsv4_trace_state = v;
     return v;
 }
@@ -2419,7 +2419,7 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 /// DSpark is opt-in at load; tests that exercise it must say so explicitly
 /// (test order must not decide whether the stages arm).
 fn testEnableDspark() void {
-    _ = setenv("MLX_SERVE_DSV4_DSPARK", "1", 1);
+    _ = setenv("SUSHI_DSV4_DSPARK", "1", 1);
 }
 
 test "dsv4: fp8/fp4 QAT sims match the python oracle goldens" {
@@ -3017,7 +3017,7 @@ test "dsv4: lazy pipelined decode matches decodeStep at every position (DSV4_MIN
     const dw = try loadDsv4Weights(allocator, &cfg, &weights);
     const s = mlx.gpuStream();
     defer _ = mlx.mlx_stream_free(s);
-    _ = unsetenv("MLX_SERVE_DSV4_DSPARK"); // test-order hygiene: lazy needs DSpark off
+    _ = unsetenv("SUSHI_DSV4_DSPARK"); // test-order hygiene: lazy needs DSpark off
     var mdl = try initModel(allocator, &cfg, dw, s);
     defer mdl.deinit();
     try testing.expect(mdl.embed_g != null);
@@ -3141,7 +3141,7 @@ test "dsv4: DSpark is OPT-IN — stages stay off (and lazy) without the flag (DS
     const s = mlx.mlx_default_cpu_stream_new();
     defer _ = mlx.mlx_stream_free(s);
 
-    _ = unsetenv("MLX_SERVE_DSV4_DSPARK");
+    _ = unsetenv("SUSHI_DSV4_DSPARK");
     {
         const dw = try loadDsv4Weights(allocator, &cfg, &weights);
         var mdl = try initModel(allocator, &cfg, dw, s);
@@ -4941,7 +4941,7 @@ fn gpuRms(x: mlx.mlx_array, w: mlx.mlx_array, eps: f32, s: mlx.mlx_stream) !mlx.
 // a 4×4 matrix, so occupancy is irrelevant and one thread is the right shape.
 // Reference = hcSplitSinkhorn (golden-tested); metal::exp differs from libm
 // by ~1 ulp — the comb path is continuous (no quantizer downstream), and the
-// decode-equivalence gate arbitrates. Kill: MLX_SERVE_DSV4_SINKHORN=0.
+// decode-equivalence gate arbitrates. Kill: SUSHI_DSV4_SINKHORN=0.
 /// SINKHORN + y-collapse in one dispatch: the composed tail (pre slice →
 /// reshape → multiply → sum) was 4 strictly-serial dispatches per sublayer,
 /// ~350/token at hc-chain depth. Grid (S, D); each threadgroup's lane-0
@@ -5428,7 +5428,7 @@ fn hcPostGpu(m: *Dsv4Model, stream_g: mlx.mlx_array, out_g: mlx.mlx_array, pre: 
 /// MoE call — at decode that was ~43 blocking round-trips per token. Hash
 /// layers never read scores for selection (pure token-id table, host-known),
 /// so their index rows are an UPLOAD, not a sync; their weights ride the
-/// same GPU gather. `MLX_SERVE_DSV4_MOE_ROUTE_GPU=0` restores the host sync
+/// same GPU gather. `SUSHI_DSV4_MOE_ROUTE_GPU=0` restores the host sync
 /// (routeToken, f64 normalize) for A/B.
 fn traceMemMb(comptime which: enum { active, cache, peak }) usize {
     var v: usize = 0;
@@ -5604,7 +5604,7 @@ fn moeGpuImpl(m: *const Dsv4Model, alloc: std.mem.Allocator, li: usize, x_g: mlx
     defer _ = mlx.mlx_array_free(sd_r);
     const total = try gpuOp2(mlx.mlx_add, routed, sd_r, m.s);
     defer _ = mlx.mlx_array_free(total);
-    if (li >= m.n_layers and std.c.getenv("MLX_SERVE_DSPARK_TRACE") != null) {
+    if (li >= m.n_layers and std.c.getenv("SUSHI_DSPARK_TRACE") != null) {
         const pr = struct {
             fn f(al: std.mem.Allocator, arr: mlx.mlx_array, n: usize, s2: mlx.mlx_stream) f64 {
                 const hh = toHostF32(al, arr, n, s2) catch return -1;
@@ -5905,14 +5905,14 @@ fn attentionDecodeGpu(m: *const Dsv4Model, alloc: std.mem.Allocator, st: *Dsv4De
 /// captures when armed (sync path only — the lazy path requires DSpark off).
 fn decodeLayers(m: *Dsv4Model, a: std.mem.Allocator, st: *Dsv4DecodeState, stream_in: mlx.mlx_array, id: u32, id_arr: ?mlx.mlx_array, pos: usize, rr_plain: *const RopeRows, rr_yarn: *const RopeRows, fr_plain: *const Freqs, fr_yarn: *const Freqs, deferred: *std.ArrayList(DeferredCompRow), mh_parts: *std.ArrayList(mlx.mlx_array)) !mlx.mlx_array {
     var stream_g = stream_in;
-    // Timing-only probes (GARBAGE OUTPUT): `MLX_SERVE_DSV4_LAYER_CAP=N`
-    // truncates the walk, `MLX_SERVE_DSV4_SKIP_MOE=1` drops the ffn
+    // Timing-only probes (GARBAGE OUTPUT): `SUSHI_DSV4_LAYER_CAP=N`
+    // truncates the walk, `SUSHI_DSV4_SKIP_MOE=1` drops the ffn
     // sublayer — slope/intercept attribution of the serial forward.
     const cap = blk: {
-        const e = std.c.getenv("MLX_SERVE_DSV4_LAYER_CAP") orelse break :blk m.n_layers;
+        const e = std.c.getenv("SUSHI_DSV4_LAYER_CAP") orelse break :blk m.n_layers;
         break :blk std.fmt.parseInt(usize, std.mem.span(e), 10) catch m.n_layers;
     };
-    const skip_moe = std.c.getenv("MLX_SERVE_DSV4_SKIP_MOE") != null;
+    const skip_moe = std.c.getenv("SUSHI_DSV4_SKIP_MOE") != null;
     for (0..@min(m.n_layers, cap)) |li| {
         const h = &m.hl[li];
         const ly = &m.dw.layers[li];
@@ -6252,12 +6252,12 @@ pub fn drainPending(m: *const Dsv4Model, st: *Dsv4DecodeState) !void {
     st.pending.clearRetainingCapacity();
 }
 
-/// Boundary-prefetch kill switch (`MLX_SERVE_DSV4_DRAIN_PREFETCH=0` → the
+/// Boundary-prefetch kill switch (`SUSHI_DSV4_DRAIN_PREFETCH=0` → the
 /// boundary token drains everything itself, the pre-prefetch behavior).
 var drain_prefetch_state: ?bool = null;
 fn drainPrefetchEnabled() bool {
     if (drain_prefetch_state) |v| return v;
-    const v = if (std.c.getenv("MLX_SERVE_DSV4_DRAIN_PREFETCH")) |e| e[0] != '0' else true;
+    const v = if (std.c.getenv("SUSHI_DSV4_DRAIN_PREFETCH")) |e| e[0] != '0' else true;
     drain_prefetch_state = v;
     return v;
 }
@@ -8055,7 +8055,7 @@ fn attentionBatch(m: *Dsv4Model, alloc: std.mem.Allocator, st: *Dsv4DecodeState,
 /// (C·(window+idx_topk)·head_dim f32 ≈ 670 MB at 512 on the real geometry).
 const PREFILL_SUB: usize = 512;
 
-/// Prefill sub-chunk size, env-tunable for A/B (`MLX_SERVE_DSV4_PREFILL_SUB`;
+/// Prefill sub-chunk size, env-tunable for A/B (`SUSHI_DSV4_PREFILL_SUB`;
 /// default `PREFILL_SUB`). Bigger chunks raise the per-expert M of the
 /// sorted MoE gather (small-M qmm efficiency) at the cost of larger
 /// attention-gather transients. Cached once per process.
@@ -8063,12 +8063,12 @@ var prefill_sub_state: ?usize = null;
 /// Pub: server.zig's prefill memory guard bills the SUB-chunk this arch
 /// actually forwards (dsv4PrefillMemoryNeeded), and it must read the same
 /// env-overridable value the engine runs — billing a stale constant while
-/// MLX_SERVE_DSV4_PREFILL_SUB raises the real width under-bills into an
+/// SUSHI_DSV4_PREFILL_SUB raises the real width under-bills into an
 /// uncatchable Metal OOM.
 pub fn prefillSub() usize {
     if (prefill_sub_state) |v| return v;
     var v: usize = PREFILL_SUB;
-    if (std.c.getenv("MLX_SERVE_DSV4_PREFILL_SUB")) |e| {
+    if (std.c.getenv("SUSHI_DSV4_PREFILL_SUB")) |e| {
         const parsed = std.fmt.parseInt(usize, std.mem.span(e), 10) catch PREFILL_SUB;
         if (parsed > 0) v = parsed;
     }
@@ -8464,7 +8464,7 @@ pub const DsparkDraft = struct {
     }
 };
 
-// ── DSpark cost audit (`MLX_SERVE_DSPARK_PROFILE=1`) ───────────────────
+// ── DSpark cost audit (`SUSHI_DSPARK_PROFILE=1`) ───────────────────
 //
 // Unlike the decode profiler (whose per-phase evals kill pipelining and make
 // it a lying sizing tool), every phase boundary measured here is ALREADY a
@@ -8628,7 +8628,7 @@ pub fn dsparkDraft(m: *Dsv4Model, gpa: std.mem.Allocator, st: *Dsv4DecodeState, 
     };
     defer _ = mlx.mlx_array_free(stream_g);
 
-    const ds_trace = std.c.getenv("MLX_SERVE_DSPARK_TRACE") != null;
+    const ds_trace = std.c.getenv("SUSHI_DSPARK_TRACE") != null;
     if (ds_trace) {
         const sh = try toHostF32(a, stream_g, B * hcm * d, m.s);
         defer a.free(sh);
@@ -8987,7 +8987,7 @@ pub fn dsparkFinish(m: *Dsv4Model, gpa: std.mem.Allocator, st: *Dsv4DecodeState,
 }
 
 /// Feed a finished round's phases into the profile (armed via
-/// MLX_SERVE_DSPARK_PROFILE=1) — shared by the greedy wrapper here and the
+/// SUSHI_DSPARK_PROFILE=1) — shared by the greedy wrapper here and the
 /// stochastic arm in generate.zig.
 pub fn dsparkObserve(m: *Dsv4Model, ph: DsparkPhases) void {
     if (m.ds_prof) |*p| {
@@ -9052,7 +9052,7 @@ fn dsparkRoundWith(m: *Dsv4Model, gpa: std.mem.Allocator, st: *Dsv4DecodeState, 
     for (nrow, 0..) |v, j| {
         if (v > nrow[next_am]) next_am = j;
     }
-    if (std.c.getenv("MLX_SERVE_DSPARK_TRACE") != null) {
+    if (std.c.getenv("SUSHI_DSPARK_TRACE") != null) {
         var vam: [16]u32 = undefined;
         for (0..B) |k| {
             const row = vl[k * m.vocab ..][0..m.vocab];
@@ -10061,7 +10061,7 @@ test "dsv4: boundary prefetch drains older pending rows a token early (DSV4_MINI
     const dw = try loadDsv4Weights(allocator, &cfg, &weights);
     const s = mlx.gpuStream();
     defer _ = mlx.mlx_stream_free(s);
-    _ = unsetenv("MLX_SERVE_DSV4_DSPARK");
+    _ = unsetenv("SUSHI_DSV4_DSPARK");
     var mdl = try initModel(allocator, &cfg, dw, s);
     defer mdl.deinit();
 
@@ -10213,7 +10213,7 @@ test "dsv4: comp_in decode requant rides --decode-attn-quant (DSV4_MINI)" {
         const dw = try loadDsv4Weights(allocator, &cfg, &weights);
         const s = mlx.gpuStream();
         defer _ = mlx.mlx_stream_free(s);
-        _ = unsetenv("MLX_SERVE_DSV4_DSPARK");
+        _ = unsetenv("SUSHI_DSV4_DSPARK");
         var mdl = try initModel(allocator, &cfg, dw, s);
         defer mdl.deinit();
         var st = try initDecodeState(&mdl, allocator);

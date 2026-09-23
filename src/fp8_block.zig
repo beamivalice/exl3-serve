@@ -73,7 +73,7 @@ pub const RowSplit = struct {
 /// IEEE multiply is sign-magnitude symmetric, so `* 256h` is exact for every
 /// code including -0 (0x80).
 pub const E4M3_HEADER =
-    \\static inline float4 mlxserve_e4m3_decode4(uint w) {
+    \\static inline float4 sushi_e4m3_decode4(uint w) {
     \\    uint lo = ((w & 0x007F007Fu) << 7) | ((w & 0x00800080u) << 8);
     \\    uint hs = w >> 8;
     \\    uint hi = ((hs & 0x007F007Fu) << 7) | ((hs & 0x00800080u) << 8);
@@ -128,7 +128,7 @@ const GEMV_DIRECT =
     \\  for (int i = 0; i < 4; ++i) {
     \\    float4 wv[NR];
     \\    #pragma clang loop unroll(full)
-    \\    for (int r = 0; r < NR; ++r) wv[r] = mlxserve_e4m3_decode4(wr[r][i]) * sc[r];
+    \\    for (int r = 0; r < NR; ++r) wv[r] = sushi_e4m3_decode4(wr[r][i]) * sc[r];
     \\    #pragma clang loop unroll(full)
     \\    for (int m = 0; m < M; ++m) {
     \\      float4 xv = float4(*((const device vec<T, 4>*)(x + (size_t)m * (size_t)K + c * 16u + uint(i) * 4u)));
@@ -157,7 +157,7 @@ const GEMV_STAGED =
     \\    float4 wv[NR];
     \\    #pragma clang loop unroll(full)
     \\    for (int r = 0; r < NR; ++r)
-    \\      wv[r] = mlxserve_e4m3_decode4(((const device uint*)wp[r])[col >> 2]) * scales[srow[r] + (col >> 7)];
+    \\      wv[r] = sushi_e4m3_decode4(((const device uint*)wp[r])[col >> 2]) * scales[srow[r] + (col >> 7)];
     \\    #pragma clang loop unroll(full)
     \\    for (int m = 0; m < M; ++m) {
     \\      float4 xv = *((threadgroup const float4*)(xs + m * 128 * S + b * 128) + lane);
@@ -227,7 +227,7 @@ const DEQUANT_DST_3 =
 const DEQUANT_TAIL =
     \\#pragma clang loop unroll(full)
     \\for (int i = 0; i < 4; ++i) {
-    \\  *((device vec<T, 4>*)(dst + c * 16u + uint(i) * 4u)) = vec<T, 4>(mlxserve_e4m3_decode4(wr[i]) * sc);
+    \\  *((device vec<T, 4>*)(dst + c * 16u + uint(i) * 4u)) = vec<T, 4>(sushi_e4m3_decode4(wr[i]) * sc);
     \\}
 ;
 
@@ -254,9 +254,9 @@ fn getKernel(kind: Kind, three: bool) !mlx.mlx_fast_metal_kernel {
         .dequant => if (three) DEQUANT_BODY ++ DEQUANT_DST_3 ++ DEQUANT_TAIL else DEQUANT_BODY ++ DEQUANT_DST_1 ++ DEQUANT_TAIL,
     };
     const name: [*:0]const u8 = switch (kind) {
-        .gemv => if (three) "mlxserve_fp8_block_gemv3" else "mlxserve_fp8_block_gemv",
-        .staged => if (three) "mlxserve_fp8_block_gemv_staged3" else "mlxserve_fp8_block_gemv_staged",
-        .dequant => if (three) "mlxserve_fp8_block_dequant3" else "mlxserve_fp8_block_dequant",
+        .gemv => if (three) "sushi_fp8_block_gemv3" else "sushi_fp8_block_gemv",
+        .staged => if (three) "sushi_fp8_block_gemv_staged3" else "sushi_fp8_block_gemv_staged",
+        .dequant => if (three) "sushi_fp8_block_dequant3" else "sushi_fp8_block_dequant",
     };
     const in_vec = mlx.mlx_vector_string_new_data(inputs.ptr, inputs.len);
     defer _ = mlx.mlx_vector_string_free(in_vec);
@@ -983,13 +983,13 @@ fn benchCell(s: mlx.mlx_stream, shape: BenchShape, bw: *const BenchWeights, m: c
     }
 }
 
-test "fp8 block microbench vs bf16 and affine-8 at MiMo's trunk shapes (MLX_SERVE_FP8_UBENCH=1)" {
-    const raw = std.c.getenv("MLX_SERVE_FP8_UBENCH") orelse return error.SkipZigTest;
+test "fp8 block microbench vs bf16 and affine-8 at MiMo's trunk shapes (SUSHI_FP8_UBENCH=1)" {
+    const raw = std.c.getenv("SUSHI_FP8_UBENCH") orelse return error.SkipZigTest;
     if (std.mem.eql(u8, std.mem.sliceTo(raw, 0), "0")) return error.SkipZigTest;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const sweep = std.c.getenv("MLX_SERVE_FP8_UBENCH_SWEEP") != null;
-    const only = std.c.getenv("MLX_SERVE_FP8_UBENCH_SHAPE");
+    const sweep = std.c.getenv("SUSHI_FP8_UBENCH_SWEEP") != null;
+    const only = std.c.getenv("SUSHI_FP8_UBENCH_SHAPE");
     for (BENCH_SHAPES, 0..) |shape, si| {
         if (only) |name| if (!std.mem.eql(u8, std.mem.sliceTo(name, 0), shape.name)) continue;
         var bw = try benchWeights(s, shape, 0xF8 + si * 16);

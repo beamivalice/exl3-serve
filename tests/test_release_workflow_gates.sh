@@ -79,12 +79,12 @@ check("prerelease" not in rel_with,
 check("pull_request" not in step_if("Notarize CLI"),
       "Notarize CLI not excluded on pull_request")
 
-mlx_serve_builds = [s for s in job["steps"]
-                    if s.get("name") == "Build mlx-serve (Zig)"]
-check(len(mlx_serve_builds) == 1, "exactly one mlx-serve release-artifact build")
+sushi_builds = [s for s in job["steps"]
+                    if s.get("name") == "Build sushi (Zig)"]
+check(len(sushi_builds) == 1, "exactly one sushi release-artifact build")
 check(any("-Dgit-sha=${{ github.sha }}" in str(s.get("run", ""))
-          for s in mlx_serve_builds),
-      "release mlx-serve build passes -Dgit-sha=${{ github.sha }}")
+          for s in sushi_builds),
+      "release sushi build passes -Dgit-sha=${{ github.sha }}")
 
 # The NAX static guard must run in the RELEASE pipeline itself — ci.yml
 # checking the same cache key doesn't cover a cache-miss rebuild on the

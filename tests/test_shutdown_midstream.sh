@@ -3,7 +3,7 @@
 # must NOT crash the server. Pre-fix, the accept loop exited and scheduler.deinit
 # tore down the slot queues while a detached connection thread was still inside
 # Scheduler.complete() → use-after-free SIGSEGV (crash report
-# mlx-serve-2026-06-20-141700.ips). Fix: serve() cancels in-flight slots and
+# sushi-2026-06-20-141700.ips). Fix: serve() cancels in-flight slots and
 # drains connection threads before returning (so deinit runs after they finish).
 #
 # Each iteration boots a fresh server, fires a long streaming generation, sends
@@ -14,7 +14,7 @@ set -u
 MODEL="${MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${1:-11455}"
 ITERS="${2:-8}"
-BIN="./zig-out/bin/mlx-serve"
+BIN="./zig-out/bin/sushi"
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; NC=$'\033[0m'
 
 [ -x "$BIN" ] || { echo "SKIP: $BIN not built"; exit 0; }
@@ -38,7 +38,7 @@ for i in $(seq 1 "$ITERS"); do
   CURLPIDS=()
   for _ in 1 2 3; do
     curl -s "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: application/json' \
-      -d '{"model":"mlx-serve","stream":true,"max_tokens":400,"temperature":0.7,"messages":[{"role":"user","content":"Write a long detailed essay about the history of computing, at least 300 words."}]}' \
+      -d '{"model":"sushi","stream":true,"max_tokens":400,"temperature":0.7,"messages":[{"role":"user","content":"Write a long detailed essay about the history of computing, at least 300 words."}]}' \
       >/dev/null 2>&1 &
     CURLPIDS+=($!)
   done

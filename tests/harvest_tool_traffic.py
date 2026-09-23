@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Harvest real (declared tool schema, raw model output) pairs from mlx-serve
+"""Harvest real (declared tool schema, raw model output) pairs from sushi
 into a replay fixture.
 
 Every pair is a REAL thing a model emitted with a REAL client's tools attached,
@@ -7,7 +7,7 @@ so `src/tool_traffic_replay_test.zig` can replay it through the actual
 parse+coerce path and assert the universal invariants forever. This turns an
 hour of agentic soak into permanent regression coverage.
 
-Source of truth is `MLX_SERVE_RAW_DUMP_FILE`, which the server writes at the one
+Source of truth is `SUSHI_RAW_DUMP_FILE`, which the server writes at the one
 site where the schema and the raw text are both in scope:
 
     \\n===MLX_RAW_DUMP tools=<T> raw=<N>===\\n<T bytes of tools JSON><N bytes of raw>
@@ -17,8 +17,8 @@ request bodies never re-parse and a scraper silently pairs a model output with a
 earlier request's schema (which is exactly the bug this file was rewritten to fix).
 
 Usage:
-    MLX_SERVE_RAW_DUMP_FILE=/tmp/rawdump.txt \\
-      mlx-serve --model <m> --serve --log-level debug
+    SUSHI_RAW_DUMP_FILE=/tmp/rawdump.txt \\
+      sushi --model <m> --serve --log-level debug
     # drive agents at it, then:
     tests/harvest_tool_traffic.py --dump /tmp/rawdump.txt \\
         --out src/fixtures/tool_traffic.jsonl

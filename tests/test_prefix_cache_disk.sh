@@ -6,7 +6,7 @@
 #      capture output + TTFT. Assert `[disk-cache] persisted` fires after the
 #      response.
 #   2. Kill the server. Assert chunked entries exist on disk
-#      (~/.mlx-serve/kv-cache/<fp>/e*/{meta.json,tokens.bin,c*.safetensors}).
+#      (~/.sushi/kv-cache/<fp>/e*/{meta.json,tokens.bin,c*.safetensors}).
 #   3. Boot again, re-issue the identical request. Assert:
 #        * `[disk-cache] restored N/M tokens from SSD` fires,
 #        * the restart TTFT beats the cold TTFT by >= 2x,
@@ -36,13 +36,13 @@ if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_prefix_cache_disk: $MODEL not found."
     exit 0
 fi
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first."
     exit 1
 fi
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 # Isolated HOME so the test never touches the user's real kv-cache.
@@ -92,7 +92,7 @@ fire_long() { # -> "elapsed_ms|content"
     local body
     body=$(python3 -c "
 import json,sys
-print(json.dumps({'model':'mlx-serve','messages':[{'role':'user','content':sys.argv[1]}],'max_tokens':24,'temperature':0.0,'stream':False}))
+print(json.dumps({'model':'sushi','messages':[{'role':'user','content':sys.argv[1]}],'max_tokens':24,'temperature':0.0,'stream':False}))
 " "$LONG_PROMPT")
     python3 - "$BASE" "$body" <<'PY'
 import json, sys, time, urllib.request
@@ -107,7 +107,7 @@ PY
 }
 
 FAIL=0
-KV_DIR="$SCRATCH_HOME/.mlx-serve/kv-cache"
+KV_DIR="$SCRATCH_HOME/.sushi/kv-cache"
 
 echo "== 1. cold boot + long request (persist) =="
 start_server || { echo -e "${RED}FAIL${NC} server 1 failed to start"; exit 1; }
@@ -167,7 +167,7 @@ echo
 echo "== 4. multi-turn extension appends chunks =="
 EXT_BODY=$(python3 -c "
 import json,sys
-print(json.dumps({'model':'mlx-serve','messages':[
+print(json.dumps({'model':'sushi','messages':[
   {'role':'user','content':sys.argv[1]},
   {'role':'assistant','content':sys.argv[2]},
   {'role':'user','content':'Now answer the same question for log entry 43.'}],
@@ -215,7 +215,7 @@ else
     # Repoint the server helpers at the hybrid model + a fresh isolated HOME.
     MODEL="$HYBRID_MODEL"
     SCRATCH_HOME="$HYBRID_HOME"
-    KV_DIR="$SCRATCH_HOME/.mlx-serve/kv-cache"
+    KV_DIR="$SCRATCH_HOME/.sushi/kv-cache"
 
     echo "  -- cold boot + long request (persist) --"
     start_server --no-mtp || { echo -e "${RED}FAIL${NC} hybrid server failed to start"; exit 1; }

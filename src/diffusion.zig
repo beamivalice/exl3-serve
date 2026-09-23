@@ -431,7 +431,7 @@ pub const Runner = struct {
             canvas = new_canvas;
             try mlx.check(mlx.mlx_array_eval(canvas));
 
-            if (std.c.getenv("MLX_SERVE_DIFFUSION_TRACE") != null) {
+            if (std.c.getenv("SUSHI_DIFFUSION_TRACE") != null) {
                 const me = try meanScalar(entropy, self.xfm.s);
                 var mask_i32 = mlx.mlx_array_new();
                 defer _ = mlx.mlx_array_free(mask_i32);

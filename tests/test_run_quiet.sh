@@ -1,8 +1,8 @@
 #!/bin/bash
-# `mlx-serve run` (TTY REPL mode) must not print `[discovery] skip …` lines.
+# `sushi run` (TTY REPL mode) must not print `[discovery] skip …` lines.
 #
 # Regression: the REPL log-quieting (info → warn) sat AFTER the models-root
-# discovery scan in main(), so every unsupported dir under ~/.mlx-serve/models
+# discovery scan in main(), so every unsupported dir under ~/.sushi/models
 # (LTX, a ViT classifier, partial downloads, …) printed an info-level
 # skip line into the chat REPL greeting. The quieting must take effect BEFORE
 # discovery runs; an explicit --log-level keeps the diagnostics reachable.
@@ -13,7 +13,7 @@
 # because REPL mode only engages when stdin is a TTY.
 set -u
 
-BIN="${MLX_SERVE_BIN:-./zig-out/bin/mlx-serve}"
+BIN="${SUSHI_BIN:-./zig-out/bin/sushi}"
 PORT="${1:-11321}"
 
 if [ ! -x "$BIN" ]; then
@@ -24,10 +24,10 @@ fi
 SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT
 FAKE_HOME="$SCRATCH/home"
-mkdir -p "$FAKE_HOME/.mlx-serve/models/fake-vit-classifier"
-printf '{"model_type": "vit"}\n' > "$FAKE_HOME/.mlx-serve/models/fake-vit-classifier/config.json"
+mkdir -p "$FAKE_HOME/.sushi/models/fake-vit-classifier"
+printf '{"model_type": "vit"}\n' > "$FAKE_HOME/.sushi/models/fake-vit-classifier/config.json"
 
-# Run `mlx-serve run` under a pty, transcript to $1. Bounded wait so a
+# Run `sushi run` under a pty, transcript to $1. Bounded wait so a
 # regression can't hang the suite; the process normally exits on its own
 # (config parse failure on the nonexistent model dir).
 run_case() {

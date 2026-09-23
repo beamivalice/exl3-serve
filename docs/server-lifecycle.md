@@ -11,7 +11,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
 ## Entry points
 
 - `src/main.zig`: entry, CLI flags + subcommands (`run/pull/list/serve/launch/kld`).
-- `src/cli.zig`: alias → HF repo, resumable pull into `~/.mlx-serve/models/<org>/<repo>`, `list`, `run` REPL.
+- `src/cli.zig`: alias → HF repo, resumable pull into `~/.sushi/models/<org>/<repo>`, `list`, `run` REPL.
 - **The embedded REPL uses in-process HTTP**: never fork `curl` from the resident engine for readiness checks or chat
   turns. Test `run` on a real TTY; a serving-only smoke test does not exercise its client.
 - **An arg loop with no else branch is a silent flag eater** (`cli.classifyUnparsedArg`): every `--flag` any script
@@ -44,7 +44,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
   `LoadRequest` is a SECOND site); read via `server.manualContext` / `kvCacheFor` / `mtpChoiceFor`. Each load logs its
   resolved value and source (`[kv-cache] kv8 (source); ctx N (source)`, `[mtp] on|off (source)`; `/props
   settings.mtp.source`). Guard: `tests/test_cold_load_launch_flags.sh`, `tests/test_model_settings.sh`.
-- Per-model settings live in `~/.mlx-serve/model-settings.json` (`src/model_settings.zig`: `ctx_size`, `kv_quant`,
+- Per-model settings live in `~/.sushi/model-settings.json` (`src/model_settings.zig`: `ctx_size`, `kv_quant`,
   `mtp`, `mtp_acceptance`, `ssd_budget_gb`), stamped at BOTH load construction sites and resolved ONCE in
   `doLoadOnInferenceThread`; read via `server.manualContext(config)` / `configuredKvQuantFor(config)`, never the raw
   server config.
@@ -58,7 +58,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
 - Text slots BATCH-decode on `qwen4_exp` (`configBatchesDecode`); `--max-concurrent` sizes the submit queue. A
   batched group is capped by PADDING WASTE (`batchedKvKeepCount`, `MAX_PAD_WASTE` 1.5 < 2.0), not slot count.
 - A cold prefill YIELDS to decode ticks at chunk boundaries (`scheduler.interleaveDecodeTick`;
-  `MLX_SERVE_PREFILL_INTERLEAVE=0` restores). Greedy byte-identical.
+  `SUSHI_PREFILL_INTERLEAVE=0` restores). Greedy byte-identical.
 - **Serial ≠ exclusive**: only a slot driving a module-owned decode state is exclusive (`slotExclusiveDecode`);
   qwen4's state is read-only shared and batches freely. The batched-decode gate reads DISPATCH, not ARMED flags
   (`slotTicksRegular` asks `specTickMode`). A batched decode guard that only runs at N=1 pins nothing:

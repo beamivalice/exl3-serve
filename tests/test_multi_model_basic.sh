@@ -9,11 +9,11 @@
 #
 # Usage:
 #   ./tests/test_multi_model_basic.sh [model_dir_root] [port]
-# Defaults: root = ~/.mlx-serve/models, port = 8095.
+# Defaults: root = ~/.sushi/models, port = 8095.
 
 set -e
 
-ROOT="${1:-$HOME/.mlx-serve/models}"
+ROOT="${1:-$HOME/.sushi/models}"
 PORT="${2:-8095}"
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
@@ -26,7 +26,7 @@ fi
 # Find the first two model dirs with a supported model_type — see
 # tests/_lib_supported_models.sh and src/model_discovery.zig. Picking by
 # config.json existence alone is not enough: a partial download of an
-# unsupported arch (e.g. deepseek_v4) would crash mlx-serve on load.
+# unsupported arch (e.g. deepseek_v4) would crash sushi on load.
 source "$(dirname "$0")/_lib_supported_models.sh"
 MODELS=()
 while IFS= read -r m; do MODELS+=("$m"); done < <(list_supported_models "$ROOT" 2)
@@ -39,16 +39,16 @@ M1="${MODELS[0]}"
 M2="${MODELS[1]}"
 echo "  using models: $M1, $M2"
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first."
     exit 1
 fi
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 LOGFILE=$(mktemp)
-"$BINARY" --model-dir "$ROOT" --model "$ROOT/$M1" --serve --port "$PORT" --max-resident-models 4 ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
+"$BINARY" --model-dir "$ROOT" --model "$ROOT/$M1" --serve --port "$PORT" --max-resident-models 4 ${SUSHI_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
 SERVER_PID=$!
 cleanup() {
     kill $SERVER_PID 2>/dev/null || true

@@ -1,5 +1,5 @@
-#ifndef MLXSERVE_ANE_BRIDGE_H
-#define MLXSERVE_ANE_BRIDGE_H
+#ifndef SUSHI_ANE_BRIDGE_H
+#define SUSHI_ANE_BRIDGE_H
 
 #include <IOSurface/IOSurface.h>
 #include <stdbool.h>
@@ -15,12 +15,12 @@
  * parameters so the sort order matches the surface indices (i0_*, i1_*, or
  * x0..x7). Same-shape mismatches swap data silently. */
 
-typedef struct msv_ane_model msv_ane_model;
+typedef struct sushi_ane_model sushi_ane_model;
 
-int msv_ane_bridge_available(void);
+int sushi_ane_bridge_available(void);
 
 /* 16KB-aligned, host-mapped, zero-fill on create is the caller's job. */
-IOSurfaceRef msv_ane_bridge_surface(size_t bytes);
+IOSurfaceRef sushi_ane_bridge_surface(size_t bytes);
 
 /* Compile (or restore from the compile cache) and load one MIL program.
  * Takes ownership of the malloc'd weights blob. The input surfaces bind to
@@ -35,40 +35,40 @@ IOSurfaceRef msv_ane_bridge_surface(size_t bytes);
  * kANEFAneInstanceHint together with the single-ANE procedure-variant hint.
  * BOTH keys are required — the scheduler only honours an instance hint for
  * the single-ANE variant. */
-msv_ane_model *msv_ane_model_create(const char *name, const char *mil,
+sushi_ane_model *sushi_ane_model_create(const char *name, const char *mil,
                                   void *weights, size_t weight_bytes,
                                   IOSurfaceRef *inputs, uint32_t input_count,
                                   IOSurfaceRef output,
                                   uint32_t procedure_count, int ane_instance,
                                   char *error, size_t error_size);
-void msv_ane_model_free(msv_ane_model *model);
+void sushi_ane_model_free(sushi_ane_model *model);
 
-int msv_ane_model_eval(msv_ane_model *model, uint32_t procedure, char *error,
+int sushi_ane_model_eval(sushi_ane_model *model, uint32_t procedure, char *error,
                        size_t error_size);
 
 /* Residency rotation: unload releases the wired compiled net but keeps the
  * handle and request; reload re-wires it from the compile cache. */
-int msv_ane_model_unload(msv_ane_model *model, char *error, size_t error_size);
-int msv_ane_model_reload(msv_ane_model *model, char *error, size_t error_size);
+int sushi_ane_model_unload(sushi_ane_model *model, char *error, size_t error_size);
+int sushi_ane_model_reload(sushi_ane_model *model, char *error, size_t error_size);
 
 /* Load cost of the create: a fresh compile or a cached load. */
-double msv_ane_model_compile_seconds(const msv_ane_model *model);
-bool msv_ane_model_cache_hit(const msv_ane_model *model);
+double sushi_ane_model_compile_seconds(const sushi_ane_model *model);
+bool sushi_ane_model_cache_hit(const sushi_ane_model *model);
 
-/* Compiled models persist in ~/.mlx-serve/ane-cache/entries/<content-hash>
+/* Compiled models persist in ~/.sushi/ane-cache/entries/<content-hash>
  * (the hash covers the MIL text AND the weights, so same-shape
- * different-weight models never collide; MLX_SERVE_ANE_CACHE_DIR overrides
+ * different-weight models never collide; SUSHI_ANE_CACHE_DIR overrides
  * the root). Only the compiled artifacts are kept; the `data` file embeds
- * the constants. MLX_SERVE_ANE_CACHE=0 disables reuse, and freeing a model
+ * the constants. SUSHI_ANE_CACHE=0 disables reuse, and freeing a model
  * while disabled also evicts its entry. */
-bool msv_ane_cache_enabled(void);
+bool sushi_ane_cache_enabled(void);
 
 /* Names the (seam + shape, share) the next compiles belong to: entries of
  * the same group at a different variant are pruned on the cold-compile
  * path, so a share sweep replaces its predecessors. Empty group = untagged. */
-void msv_ane_cache_lineage(const char *group, const char *variant);
+void sushi_ane_cache_lineage(const char *group, const char *variant);
 /* The variant of the most recently used entry tagged with `group` (empty
  * when none), so a later build can reuse the share that set was built at. */
-void msv_ane_cache_variant(const char *group, char *out, int out_len);
+void sushi_ane_cache_variant(const char *group, char *out, int out_len);
 
 #endif

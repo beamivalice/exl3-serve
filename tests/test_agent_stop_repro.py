@@ -3,7 +3,7 @@
 Repro probe: "agent suddenly stops mid-task with no apparent reason."
 
 Drives a faithful copy of the Swift `ChatView.runAgentLoop` against a live
-mlx-serve, with canned tool outputs so it runs entirely in-memory (no real
+sushi, with canned tool outputs so it runs entirely in-memory (no real
 filesystem mutations). The same system prompt and tool definitions used by
 the macOS app are embedded inline so the model sees an identical request to
 what it gets in production.
@@ -98,7 +98,7 @@ class FakeFS:
     """
 
     def __init__(self):
-        self.cwd = "/Users/david/.mlx-serve/workspace"
+        self.cwd = "/Users/david/.sushi/workspace"
         self.files = {}   # path → content
         self.dirs = set([self.cwd])
 
@@ -405,7 +405,7 @@ def run_once(args, run_idx):
 
     for turn_i in range(args.max_turns):
         body = {
-            "model": "mlx-serve",
+            "model": "sushi",
             "messages": history,
             "max_tokens": args.max_tokens,
             "temperature": args.temperature,

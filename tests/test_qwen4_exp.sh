@@ -9,9 +9,9 @@
 # `--no-vision` (tower absent, text works, media 400s by name). SKIPs without the pack.
 #   QWEN4_MODEL=<pack dir> ./tests/test_qwen4_exp.sh [port]
 set -u
-MODEL="${QWEN4_MODEL:-$HOME/.mlx-serve/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-4bit}"
+MODEL="${QWEN4_MODEL:-$HOME/.sushi/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-4bit}"
 PORT="${1:-11411}"
-BIN="${MLX_SERVE_BIN:-./zig-out/bin/mlx-serve}"
+BIN="${SUSHI_BIN:-./zig-out/bin/sushi}"
 LOG="$HOME/claude-tmp/qwen4-live/server-$PORT.log"
 mkdir -p "$(dirname "$LOG")"
 [ -f "$MODEL/config.json" ] || { echo "SKIP: no pack at $MODEL"; exit 0; }
@@ -39,7 +39,7 @@ check() { if [ "$2" = "$3" ]; then echo "  ok   $1"; pass=$((pass+1)); else echo
 # --max-concurrent 4: [8]-[10] batch plain slots; --prefix-cache-entries 0: the
 # serial reruns those arms compare against must not restore (hybrid restore
 # class 0.14-0.30 nats > the near-tie bar).
-MLX_SERVE_MTP_FORCE_DEPTH=3 "$BIN" --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" --log-level info --max-concurrent 4 --prefix-cache-entries 0 > "$LOG" 2>&1 &
+SUSHI_MTP_FORCE_DEPTH=3 "$BIN" --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" --log-level info --max-concurrent 4 --prefix-cache-entries 0 > "$LOG" 2>&1 &
 SPID=$!
 trap 'kill $SPID 2>/dev/null; wait $SPID 2>/dev/null' EXIT
 for _ in $(seq 1 600); do curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && grep -q "ready" "$LOG" && break; kill -0 $SPID 2>/dev/null || { echo "server died"; tail -20 "$LOG"; exit 1; }; sleep 2; done
@@ -72,9 +72,9 @@ echo "  prompt_tokens|answer: $la"
 check "qsa engaged line" "$(grep -c '\[qsa\] sparse attention engaged' "$LOG")" "1"
 check "needle recovered" "$(echo "$la" | grep -c 'PELICAN-42')" "1"
 # Assert the invariant (some QSA attention arm engaged), never one kernel's name.
-check "qsa prefill attention arm engaged (gather kernel or msv_attn_p256 mask arm)" "$(grep -cE '\[qsa-gather\] engaged|\[qsa-fused\] engaged' "$LOG" | sed 's/^[1-9][0-9]*$/1/')" "1"
+check "qsa prefill attention arm engaged (gather kernel or sushi_attn_p256 mask arm)" "$(grep -cE '\[qsa-gather\] engaged|\[qsa-fused\] engaged' "$LOG" | sed 's/^[1-9][0-9]*$/1/')" "1"
 # Decode (S=1): `[qsa-decode-gather] engaged` serves it, since the fused kernel
-# floors at S=2 — `MLX_SERVE_QSA_ATTN_MIN_S=1` hands the row to `[qsa-attn]`.
+# floors at S=2 — `SUSHI_QSA_ATTN_MIN_S=1` hands the row to `[qsa-attn]`.
 check "qsa decode attention arm engaged (S=1 subset rows)" "$(grep -cE '\[qsa-decode-gather\] engaged|\[qsa-attn\] engaged' "$LOG" | sed 's/^[1-9][0-9]*$/1/')" "1"
 echo "[5b] MTP past the QSA budget (verify rows under the QSA mask)"
 longm=$(echo "$long" | python3 -c "import sys,json; d=json.load(sys.stdin); d['enable_mtp']=True; print(json.dumps(d))")

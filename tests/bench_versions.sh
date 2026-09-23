@@ -41,8 +41,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-DEV_BIN="${DEV_BIN:-$ROOT/zig-out/bin/mlx-serve}"
-SHIPPED_BIN="${SHIPPED_BIN:-$(command -v mlx-serve)}"
+DEV_BIN="${DEV_BIN:-$ROOT/zig-out/bin/sushi}"
+SHIPPED_BIN="${SHIPPED_BIN:-$(command -v sushi)}"
 LLMPROBE="${LLMPROBE:-npx --yes llmprobe@latest}"
 PORT="${BENCH_PORT:-11260}"
 RUNS_ROOT="${RUNS_ROOT:-$HOME/claude-tmp/bench-versions}"
@@ -78,7 +78,7 @@ RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[0;33m'; DIM='\033[2m'; NC='\033[0m
 # there; PLD wins). The only two rows that need a flag are the ones whose
 # sidecar lives OUTSIDE the model dir, or whose default is off by policy.
 # Both arms get byte-identical flags, and the shipped binary was checked to
-# accept every one of them — an unknown flag is REJECTED by mlx-serve's arg
+# accept every one of them — an unknown flag is REJECTED by sushi's arg
 # loop, so a drifted flag fails loudly instead of silently measuring a
 # different configuration. (It already caught one: a model root with a SPACE in
 # it — /Volumes/G Drive SSD — split a --drafter path into three words and the
@@ -127,7 +127,7 @@ bin_stamp() { stat -f "%Sm" -t "%Y-%m-%dT%H:%M" "$1" 2>/dev/null; }
 # The kill list and the wait list must name the SAME port, or every stop burns
 # the full timeout (11 min/run when this was last broken).
 stop_engine() {
-    pkill -f "mlx-serve --serve" 2>/dev/null
+    pkill -f "sushi --serve" 2>/dev/null
     for _ in $(seq 1 40); do
         lsof -ti tcp:"$PORT" >/dev/null 2>&1 || return 0
         sleep 1
@@ -181,7 +181,7 @@ run_unit() {
         return 1
     fi
 
-    # The id mlx-serve registered, straight from the horse's mouth — never
+    # The id sushi registered, straight from the horse's mouth — never
     # guessed from the path, so a discovery rename can't silently probe the
     # wrong model (or, worse, llmprobe's "first model" fallback).
     local mid
@@ -227,7 +227,7 @@ run_unit() {
 }
 
 # ── Drive ──
-echo "=== mlx-serve build A/B ==="
+echo "=== sushi build A/B ==="
 echo "  shipped: $SHIPPED_BIN  ($(bin_stamp "$SHIPPED_BIN"))"
 echo "  dev:     $DEV_BIN  ($(bin_stamp "$DEV_BIN"))"
 echo "  run dir: $RUN_DIR"
@@ -276,7 +276,7 @@ python3 "$SCRIPT_DIR/bench_csv.py" "$JSON_DIR" --out "$CSV" \
     --engines "shipped=$(bin_stamp "$SHIPPED_BIN") dev=$(bin_stamp "$DEV_BIN")" \
     || { echo -e "${RED}CSV fold failed${NC}" >&2; exit 1; }
 
-PNG="$RUN_DIR/mlx-serve-build-ab-$TAG.png"
+PNG="$RUN_DIR/sushi-build-ab-$TAG.png"
 python3 "$SCRIPT_DIR/plot_version_ab.py" "$CSV" "$PNG" || echo -e "${YEL}chart failed (CSV is still good)${NC}" >&2
 
 echo

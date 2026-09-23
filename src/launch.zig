@@ -1,7 +1,7 @@
-//! `mlx-serve launch <agent>` — configure and launch a third-party coding
+//! `sushi launch <agent>` — configure and launch a third-party coding
 //! agent against the local server, ollama-style (issue #188).
 //!
-//! Configs go to dedicated dirs (`~/.mlx-serve/<agent>/`, NEVER a user's real
+//! Configs go to dedicated dirs (`~/.sushi/<agent>/`, NEVER a user's real
 //! agent config); the tests here and `tests/test_launch_cmd.sh` pin them.
 //!
 //! Flow: probe the server; if it's down, print how to start one. Then read
@@ -50,7 +50,7 @@ pub const AgentKind = enum {
     aider,
 
     pub fn fromName(name: []const u8) ?AgentKind {
-        // The codex rebrand: issue #188 asks for `mlx-serve launch chatgpt`.
+        // The codex rebrand: issue #188 asks for `sushi launch chatgpt`.
         if (std.mem.eql(u8, name, "chatgpt")) return .codex;
         inline for (@typeInfo(AgentKind).@"enum".field_names, 0..) |f, i| {
             if (std.mem.eql(u8, name, f)) return @fromBackingInt(@intCast(i));
@@ -71,10 +71,10 @@ pub fn piModelsJson(allocator: std.mem.Allocator, base_url: []const u8, entries:
     try out.print(allocator,
         \\{{
         \\  "providers": {{
-        \\    "mlx": {{
+        \\    "sushi": {{
         \\      "baseUrl": "{s}/v1",
         \\      "api": "openai-completions",
-        \\      "apiKey": "mlx-serve",
+        \\      "apiKey": "sushi",
         \\      "compat": {{
         \\        "supportsDeveloperRole": false,
         \\        "supportsReasoningEffort": true,
@@ -86,7 +86,7 @@ pub fn piModelsJson(allocator: std.mem.Allocator, base_url: []const u8, entries:
     for (entries, 0..) |e, i| {
         try out.print(allocator,
             \\{s}
-            \\        {{"id": "{s}", "name": "{s} (mlx-serve)", "input": [{s}],
+            \\        {{"id": "{s}", "name": "{s} (sushi)", "input": [{s}],
             \\         "contextWindow": {d}, "maxTokens": {d}, "reasoning": true}}
         , .{
             if (i == 0) "" else ",",
@@ -114,13 +114,13 @@ pub fn ompModelsYml(allocator: std.mem.Allocator, base_url: []const u8, entries:
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     try out.print(allocator,
-        \\# written by mlx-serve — custom `mlx` provider for oh-my-pi (omp).
+        \\# written by sushi — custom `sushi` provider for oh-my-pi (omp).
         \\# Regenerated at each launch; edits here are overwritten.
         \\providers:
-        \\  mlx:
+        \\  sushi:
         \\    baseUrl: {s}/v1
         \\    api: openai-completions
-        \\    apiKey: mlx-serve
+        \\    apiKey: sushi
         \\    compat:
         \\      supportsDeveloperRole: false
         \\      supportsReasoningEffort: true
@@ -132,7 +132,7 @@ pub fn ompModelsYml(allocator: std.mem.Allocator, base_url: []const u8, entries:
     for (entries) |e| {
         try out.print(allocator,
             \\      - id: "{s}"
-            \\        name: "{s} (mlx-serve)"
+            \\        name: "{s} (sushi)"
             \\        reasoning: true
             \\        input: [{s}]
             \\        cost:
@@ -158,10 +158,10 @@ pub fn opencodeJson(allocator: std.mem.Allocator, base_url: []const u8, entries:
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "{\"$schema\": \"https://opencode.ai/config.json\", ");
     try out.print(allocator,
-        \\"provider": {{"mlx": {{"npm": "@ai-sdk/openai-compatible", "name": "MLX Serve (local)", "options": {{"baseURL": "{s}/v1"}}, "models": {{
+        \\"provider": {{"sushi": {{"npm": "@ai-sdk/openai-compatible", "name": "sushi (local)", "options": {{"baseURL": "{s}/v1"}}, "models": {{
     , .{base_url});
     for (entries, 0..) |e, i| {
-        try out.print(allocator, "{s}\"{s}\": {{\"name\": \"{s} (mlx-serve)\",{s} \"limit\": {{\"context\": {d}, \"output\": {d}}}}}", .{
+        try out.print(allocator, "{s}\"{s}\": {{\"name\": \"{s} (sushi)\",{s} \"limit\": {{\"context\": {d}, \"output\": {d}}}}}", .{
             if (i == 0) "" else ", ",
             e.id,
             e.id,
@@ -211,13 +211,13 @@ pub fn mergePiSettingsJson(allocator: std.mem.Allocator, existing: []const u8, c
 /// ignores keys anyway.
 pub fn codexConfigToml(allocator: std.mem.Allocator, base_url: []const u8, model: []const u8, budget: Budget) ![]u8 {
     return std.fmt.allocPrint(allocator,
-        \\# written by mlx-serve — dedicated CODEX_HOME, regenerated at each launch.
+        \\# written by sushi — dedicated CODEX_HOME, regenerated at each launch.
         \\model = "{s}"
-        \\model_provider = "mlx"
+        \\model_provider = "sushi"
         \\model_context_window = {d}
         \\
-        \\[model_providers.mlx]
-        \\name = "MLX Serve (local)"
+        \\[model_providers.sushi]
+        \\name = "sushi (local)"
         \\base_url = "{s}/v1"
         \\wire_api = "responses"
         \\
@@ -230,19 +230,19 @@ pub fn hermesConfigYaml(allocator: std.mem.Allocator, base_url: []const u8, mode
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     try out.print(allocator,
-        \\# written by mlx-serve — regenerated at each launch. Mirrors what
+        \\# written by sushi — regenerated at each launch. Mirrors what
         \\# `hermes setup`'s custom-endpoint flow saves, so the first run starts
         \\# configured instead of launching the wizard.
         \\model:
         \\  default: "{s}"
         \\  provider: custom
         \\  base_url: "{s}/v1"
-        \\  api_key: "mlx-serve"
+        \\  api_key: "sushi"
         \\  api_mode: chat_completions
         \\custom_providers:
-        \\  - name: mlx-serve
+        \\  - name: sushi
         \\    base_url: "{s}/v1"
-        \\    api_key: "mlx-serve"
+        \\    api_key: "sushi"
         \\    model: "{s}"
         \\    api_mode: chat_completions
         \\    models:
@@ -258,10 +258,10 @@ pub fn hermesConfigYaml(allocator: std.mem.Allocator, base_url: []const u8, mode
 /// marks a provider as configured. Lives under HERMES_HOME like config.yaml.
 pub fn hermesEnvFile(allocator: std.mem.Allocator, base_url: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator,
-        \\# written by mlx-serve — OPENAI_BASE_URL marks a provider as configured,
+        \\# written by sushi — OPENAI_BASE_URL marks a provider as configured,
         \\# which is what keeps the first-run setup wizard out of the session.
         \\OPENAI_BASE_URL={s}/v1
-        \\OPENAI_API_KEY=mlx-serve
+        \\OPENAI_API_KEY=sushi
         \\
     , .{base_url});
 }
@@ -325,14 +325,14 @@ pub fn scriptFor(allocator: std.mem.Allocator, kind: AgentKind, base_url: []cons
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     if (budget.context > 0 and budget.context < contextFloor(kind)) {
-        try out.print(allocator, "echo 'mlx-serve: the model advertises a {d}-token context; {s} needs {d}+ to work well (raise --ctx-size or Settings > Server > Context size).' >&2\n", .{ budget.context, @tagName(kind), contextFloor(kind) });
+        try out.print(allocator, "echo 'sushi: the model advertises a {d}-token context; {s} needs {d}+ to work well (raise --ctx-size or Settings > Server > Context size).' >&2\n", .{ budget.context, @tagName(kind), contextFloor(kind) });
     }
     switch (kind) {
         .claude => {
             try out.print(allocator,
                 \\export ANTHROPIC_BASE_URL='{s}'
                 \\export ANTHROPIC_API_KEY=
-                \\export ANTHROPIC_AUTH_TOKEN=mlx-serve
+                \\export ANTHROPIC_AUTH_TOKEN=sushi
                 \\export CLAUDE_CODE_ATTRIBUTION_HEADER=0
                 \\export ANTHROPIC_DEFAULT_OPUS_MODEL={s}
                 \\export ANTHROPIC_DEFAULT_SONNET_MODEL={s}
@@ -349,23 +349,23 @@ pub fn scriptFor(allocator: std.mem.Allocator, kind: AgentKind, base_url: []cons
         },
         .pi => {
             try out.print(allocator,
-                \\export PI_CODING_AGENT_DIR="$HOME/.mlx-serve/pi"
-                \\pi --provider mlx --model {s}
+                \\export PI_CODING_AGENT_DIR="$HOME/.sushi/pi"
+                \\pi --provider sushi --model {s}
             , .{model});
         },
         .omp => {
             // omp still reads pi's env spelling (measured on v17 — the OMP_
             // rename reached only its help text); export both.
             try out.print(allocator,
-                \\export PI_CODING_AGENT_DIR="$HOME/.mlx-serve/omp"
-                \\export OMP_CODING_AGENT_DIR="$HOME/.mlx-serve/omp"
-                \\omp --model mlx/{s}
+                \\export PI_CODING_AGENT_DIR="$HOME/.sushi/omp"
+                \\export OMP_CODING_AGENT_DIR="$HOME/.sushi/omp"
+                \\omp --model sushi/{s}
             , .{model});
         },
         .opencode => {
             try out.print(allocator,
                 \\export OPENCODE_CONFIG_CONTENT='{s}'
-                \\opencode --model mlx/{s}
+                \\opencode --model sushi/{s}
             , .{ opencode_config.?, model });
         },
         .codex => {
@@ -374,7 +374,7 @@ pub fn scriptFor(allocator: std.mem.Allocator, kind: AgentKind, base_url: []cons
             // com.openai.codex, CLI at Contents/Resources/codex) — a
             // desktop-app-only user has no codex on PATH.
             try out.appendSlice(allocator,
-                \\export CODEX_HOME="$HOME/.mlx-serve/codex"
+                \\export CODEX_HOME="$HOME/.sushi/codex"
                 \\CODEX_BIN="$(command -v codex)"
                 \\if [ -z "$CODEX_BIN" ]; then
                 \\  for app in "/Applications/ChatGPT.app" "/Applications/Codex.app" "$HOME/Applications/ChatGPT.app" "$HOME/Applications/Codex.app"; do
@@ -387,15 +387,15 @@ pub fn scriptFor(allocator: std.mem.Allocator, kind: AgentKind, base_url: []cons
         },
         .hermes => {
             try out.appendSlice(allocator,
-                \\export HERMES_HOME="$HOME/.mlx-serve/hermes"
+                \\export HERMES_HOME="$HOME/.sushi/hermes"
                 \\hermes
             );
         },
         .aider => {
             try out.print(allocator,
                 \\export OPENAI_API_BASE='{s}/v1'
-                \\export OPENAI_API_KEY=mlx-serve
-                \\aider --model openai/{s} --weak-model openai/{s} --model-metadata-file ~/.mlx-serve/aider/model-metadata.json
+                \\export OPENAI_API_KEY=sushi
+                \\aider --model openai/{s} --weak-model openai/{s} --model-metadata-file ~/.sushi/aider/model-metadata.json
             , .{ base_url, model, model });
         },
     }
@@ -514,7 +514,7 @@ fn fetchChatEntries(allocator: std.mem.Allocator, io: std.Io, base_url: []const 
 // ── Config writes ───────────────────────────────────────────────────────
 
 fn writeAgentFile(allocator: std.mem.Allocator, io: std.Io, subdir: []const u8, name: []const u8, content: []const u8) !void {
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/.mlx-serve/{s}", .{ homeDir(), subdir });
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/.sushi/{s}", .{ homeDir(), subdir });
     defer allocator.free(dir_path);
     try std.Io.Dir.cwd().createDirPath(io, dir_path);
     var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
@@ -531,7 +531,7 @@ fn writeConfigs(allocator: std.mem.Allocator, io: std.Io, kind: AgentKind, base_
             const json = try piModelsJson(allocator, base_url, entries);
             defer allocator.free(json);
             try writeAgentFile(allocator, io, "pi", "models.json", json);
-            const settings_path = try std.fmt.allocPrint(allocator, "{s}/.mlx-serve/pi/settings.json", .{homeDir()});
+            const settings_path = try std.fmt.allocPrint(allocator, "{s}/.sushi/pi/settings.json", .{homeDir()});
             defer allocator.free(settings_path);
             const existing = std.Io.Dir.cwd().readFileAlloc(io, settings_path, allocator, .limited(1 << 20)) catch
                 try allocator.dupe(u8, "{}");
@@ -614,7 +614,7 @@ fn parseLaunchArgs(args: []const []const u8) !LaunchArgs {
 
 fn printLaunchUsage() void {
     log.err(
-        \\usage: mlx-serve launch <agent> [options] [-- <extra agent args>]
+        \\usage: sushi launch <agent> [options] [-- <extra agent args>]
         \\
         \\agents: {s}
         \\
@@ -626,7 +626,7 @@ fn printLaunchUsage() void {
         \\                 instead of running the agent
         \\
         \\Anything after `--` is passed to the agent, e.g.:
-        \\  mlx-serve launch codex -- resume
+        \\  sushi launch codex -- resume
         \\
     , .{AgentKind.names});
 }
@@ -645,8 +645,8 @@ pub fn cmdLaunch(allocator: std.mem.Allocator, io: std.Io, args: []const []const
     const base_url = parsed.url orelse std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}", .{parsed.port}) catch unreachable;
 
     if (!serverUp(allocator, io, base_url)) {
-        log.err("no mlx-serve server at {s}.\n", .{base_url});
-        log.err("start one first:  mlx-serve serve   (or: mlx-serve run <model>)\n", .{});
+        log.err("no sushi server at {s}.\n", .{base_url});
+        log.err("start one first:  sushi serve   (or: sushi run <model>)\n", .{});
         std.process.exit(1);
     }
 
@@ -663,7 +663,7 @@ pub fn cmdLaunch(allocator: std.mem.Allocator, io: std.Io, args: []const []const
         if (models.entries.len > 0) break;
         models.deinit();
         if (polls >= 30) {
-            log.err("no chat-capable model on {s} — pull one first (mlx-serve pull <model>)\n", .{base_url});
+            log.err("no chat-capable model on {s} — pull one first (sushi pull <model>)\n", .{base_url});
             std.process.exit(1);
         }
         std.Io.sleep(io, .fromMilliseconds(1000), .real) catch {};
@@ -801,7 +801,7 @@ test "compactionReserve: a quarter of the window, capped where the agents' own d
 
 test "pi settings.json merge scales compaction to the window and keeps the rest" {
     const existing =
-        \\{"theme":"dark","defaultProvider":"mlx","compaction":{"enabled":false,"reserveTokens":1}}
+        \\{"theme":"dark","defaultProvider":"sushi","compaction":{"enabled":false,"reserveTokens":1}}
     ;
     const json = try mergePiSettingsJson(t.allocator, existing, 24576);
     defer t.allocator.free(json);
@@ -835,7 +835,7 @@ test "opencode config: limit.output is the compaction reserve" {
     defer t.allocator.free(v1);
     const p1 = try std.json.parseFromSlice(std.json.Value, t.allocator, v1, .{});
     defer p1.deinit();
-    const limit = p1.value.object.get("provider").?.object.get("mlx").?.object.get("models").?.object.get("m1").?.object.get("limit").?.object;
+    const limit = p1.value.object.get("provider").?.object.get("sushi").?.object.get("models").?.object.get("m1").?.object.get("limit").?.object;
     try t.expectEqual(@as(i64, 6144), limit.get("output").?.integer);
     try t.expect(p1.value.object.get("compaction") == null);
     try t.expect(p1.value.object.get("model") == null);
@@ -870,7 +870,7 @@ test "script assembly: extras are shell-quoted onto the invocation line" {
     const script = try scriptFor(t.allocator, .codex, "http://x:1", "m1", .{ .context = 4096, .output = 1024 }, null, &.{ "resume", "it's" });
     defer t.allocator.free(script);
     try t.expect(std.mem.indexOf(u8, script, "\"$CODEX_BIN\" 'resume' 'it'\\''s'") != null);
-    try t.expect(std.mem.indexOf(u8, script, "export CODEX_HOME=\"$HOME/.mlx-serve/codex\"") != null);
+    try t.expect(std.mem.indexOf(u8, script, "export CODEX_HOME=\"$HOME/.sushi/codex\"") != null);
 }
 
 test "codex script falls back to the desktop app's bundled CLI (ChatGPT.app rebrand)" {

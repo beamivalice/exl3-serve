@@ -688,7 +688,7 @@ pub fn maxRecommendedWorkingSet() usize {
 /// model load or unload completes (and from the offline run path after load)
 /// so `fit` capacity tracks the live set. The caller logs the result.
 pub fn applyWiredPolicy() WiredPolicyResult {
-    const mode = WiredMode.fromEnv(if (std.c.getenv("MLX_SERVE_WIRED")) |p| std.mem.span(p) else null);
+    const mode = WiredMode.fromEnv(if (std.c.getenv("SUSHI_WIRED")) |p| std.mem.span(p) else null);
     if (noGpuBackend()) return .{ .mode = mode, .target = null };
     var prev: usize = 0;
     switch (mode) {
@@ -710,7 +710,7 @@ pub fn applyWiredPolicy() WiredPolicyResult {
             var active: usize = 0;
             _ = mlx_get_active_memory(&active);
             const slack_mb: usize = blk: {
-                const raw_c = std.c.getenv("MLX_SERVE_WIRED_SLACK_MB") orelse break :blk 64;
+                const raw_c = std.c.getenv("SUSHI_WIRED_SLACK_MB") orelse break :blk 64;
                 const raw = std.mem.span(raw_c);
                 break :blk std.fmt.parseInt(usize, raw, 10) catch 64;
             };
@@ -799,10 +799,10 @@ fn latchMlxError(msg: [*:0]const u8, data: ?*anyopaque) callconv(.c) void {
     log.err("[mlx] {s}\n", .{span});
 }
 
-/// Install the latching handler. Called once from `main()`. `MLX_SERVE_MLX_ERROR_LATCH=0`
+/// Install the latching handler. Called once from `main()`. `SUSHI_MLX_ERROR_LATCH=0`
 /// restores mlx-c's `exit(-1)` handler.
 pub fn installErrorHandler() void {
-    if (std.c.getenv("MLX_SERVE_MLX_ERROR_LATCH")) |p| {
+    if (std.c.getenv("SUSHI_MLX_ERROR_LATCH")) |p| {
         if (std.mem.eql(u8, std.mem.span(p), "0")) {
             log.info("[mlx] error latch disabled — an MLX error will exit the process\n", .{});
             return;
@@ -849,10 +849,10 @@ pub fn dropLatchedErrorUnless(had_error: bool) void {
     }
 }
 
-/// Release-build fault injection: `MLX_SERVE_MLX_FAULT_CHUNK=<n>` latches a synthetic Metal
+/// Release-build fault injection: `SUSHI_MLX_FAULT_CHUNK=<n>` latches a synthetic Metal
 /// OOM at the n-th `checkError` of the process, then disarms (`tests/test_mlx_error_recovery.sh`).
-const FAULT_CHUNK_MSG = "[METAL] Command buffer execution failed: Insufficient Memory (injected by MLX_SERVE_MLX_FAULT_CHUNK). at transforms.cpp:15";
-const FAULT_STEP_MSG = "[METAL] Command buffer execution failed: Insufficient Memory (injected by MLX_SERVE_MLX_FAULT_STEP). at transforms.cpp:15";
+const FAULT_CHUNK_MSG = "[METAL] Command buffer execution failed: Insufficient Memory (injected by SUSHI_MLX_FAULT_CHUNK). at transforms.cpp:15";
+const FAULT_STEP_MSG = "[METAL] Command buffer execution failed: Insufficient Memory (injected by SUSHI_MLX_FAULT_STEP). at transforms.cpp:15";
 
 /// One armed, self-disarming injector; prefill and decode checkpoints count separately.
 const FaultSite = struct {
@@ -887,8 +887,8 @@ const FaultSite = struct {
     }
 };
 
-var fault_chunk = FaultSite{ .env = "MLX_SERVE_MLX_FAULT_CHUNK", .msg = FAULT_CHUNK_MSG };
-var fault_step = FaultSite{ .env = "MLX_SERVE_MLX_FAULT_STEP", .msg = FAULT_STEP_MSG };
+var fault_chunk = FaultSite{ .env = "SUSHI_MLX_FAULT_CHUNK", .msg = FAULT_CHUNK_MSG };
+var fault_step = FaultSite{ .env = "SUSHI_MLX_FAULT_STEP", .msg = FAULT_STEP_MSG };
 
 /// Consume a latched failure: `error.OutOfMemory` for the memory class, else `error.MlxFailure`.
 fn consumeLatch() !void {

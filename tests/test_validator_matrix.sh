@@ -11,7 +11,7 @@
 #      its own server lifecycle and appends audit_format leak markers.
 #
 # One model loaded at a time; missing weights skip cleanly. Both models are
-# too large to coexist — this script pkills ALL serving mlx-serve instances
+# too large to coexist — this script pkills ALL serving sushi instances
 # up front.
 #
 # Usage:
@@ -28,7 +28,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 REPO="$(pwd)"
-BINARY="${BINARY:-$REPO/zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-$REPO/zig-out/bin/sushi}"
 PORT="${PORT:-11298}"
 LLMPROBE_DIR="${LLMPROBE_DIR:-$HOME/projects/agents/llmprobe}"
 LLMPROBE_MJS="$LLMPROBE_DIR/bin/dist/llmprobe.mjs"
@@ -68,9 +68,9 @@ if [[ -z "${SKIP_PROBE:-}" && ! -f "$LLMPROBE_MJS" ]]; then
 fi
 
 kill_servers() {
-    pkill -f 'mlx-serve.*--serve' 2>/dev/null || true
+    pkill -f 'sushi.*--serve' 2>/dev/null || true
     for _ in $(seq 1 10); do
-        pgrep -f 'mlx-serve.*--serve' >/dev/null || return 0
+        pgrep -f 'sushi.*--serve' >/dev/null || return 0
         sleep 0.5
     done
 }

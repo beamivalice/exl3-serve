@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 
 MODEL_PATH="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11305}"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'; NC='\033[0m'
 
@@ -30,7 +30,7 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-pkill -f "mlx-serve --serve --port $PORT" >/dev/null 2>&1 || true
+pkill -f "sushi --serve --port $PORT" >/dev/null 2>&1 || true
 sleep 1
 
 LOG=$(mktemp)
@@ -73,7 +73,7 @@ assert_tool_call() {
     payload=$(SYS="$system" USR="$user" python3 -c '
 import json, os
 print(json.dumps({
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
         {"role": "system", "content": os.environ["SYS"]},
         {"role": "user",   "content": os.environ["USR"]},

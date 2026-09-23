@@ -49,7 +49,7 @@ if [ ! -f "$MODEL/config.json" ]; then
     exit 1
 fi
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first with 'zig build -Doptimize=ReleaseFast'."
     exit 1
@@ -61,7 +61,7 @@ PROMPT='Recite the first paragraph of "A Tale of Two Cities" by Charles Dickens.
 JSON_PAYLOAD=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '''$PROMPT'''}],
     'max_tokens': 200,
     'temperature': 0.0,
@@ -81,7 +81,7 @@ run_and_tokenize() {
     logfile=$(mktemp)
     # MIN_TK=1: the per-layer kv floor is a PERF gate; this test's short
     # prompt must still exercise the fused read paths for correctness.
-    MLX_SERVE_KV_ATTN_MIN_TK=1 "$BINARY" --model "$MODEL" --serve --port "$PORT" --kv-quant 4 $extra ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$logfile" 2>&1 &
+    SUSHI_KV_ATTN_MIN_TK=1 "$BINARY" --model "$MODEL" --serve --port "$PORT" --kv-quant 4 $extra ${SUSHI_TEST_EXTRA_ARGS:-} > "$logfile" 2>&1 &
     local pid=$!
     local up=0 i
     for i in $(seq 1 60); do
@@ -157,7 +157,7 @@ echo "  model: $MODEL"
 echo "  --kv-quant 4, comparing dense vs fused attention path"
 echo
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 DENSE_COMPL=""
@@ -229,7 +229,7 @@ EOF
 SPEC_PAYLOAD=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '''$SPEC_PROMPT'''}],
     'max_tokens': 96,
     'temperature': 0.0,
@@ -317,7 +317,7 @@ print(next(i for i,(x,y) in enumerate(zip(a,b)) if x!=y))")
     MODEL="$VERIFY_MODEL"
     LP_PAYLOAD=$(echo "$SPEC_PAYLOAD" | python3 -c "import sys,json; d=json.load(sys.stdin); d.update(max_tokens=$IDX+1, logprobs=True, top_logprobs=2); print(json.dumps(d))")
     echo "  starting server (verify tie probe)..." >&2
-    MLX_SERVE_KV_ATTN_MIN_TK=1 "$BINARY" --model "$MODEL" --serve --port "$PORT" --kv-quant 4 --kv-attn-mode dense --no-pld > /dev/null 2>&1 &
+    SUSHI_KV_ATTN_MIN_TK=1 "$BINARY" --model "$MODEL" --serve --port "$PORT" --kv-quant 4 --kv-attn-mode dense --no-pld > /dev/null 2>&1 &
     TP_PID=$!
     for i in $(seq 1 60); do curl -s -f "$BASE/health" > /dev/null 2>&1 && break; sleep 1; done
     GAP=$(echo "$LP_PAYLOAD" | curl -s -X POST -H "Content-Type: application/json" -d @- "$BASE/v1/chat/completions" | python3 -c "

@@ -33,7 +33,7 @@ cd "$(dirname "$0")/.."
 
 PORT="${PORT:-11297}"
 BASE="http://127.0.0.1:$PORT"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 PASS=0
 FAIL=0
 MODEL_FAIL=0
@@ -156,15 +156,15 @@ run_model() {
     echo -e "${BLUE}=== [$logical] $display ===${NC}"
 
     # The table's path is one PLACE the checkpoint may live, not the only one:
-    # the same model is equally at home under ~/.mlx-serve/models (the app's
+    # the same model is equally at home under ~/.sushi/models (the app's
     # single download root) or ~/.lmstudio/models. A matrix arm that skips
     # because a model sits in the other root is silently missing coverage —
     # the gemma4-e4b arm skipped for exactly that reason while the checkpoint
     # was present (2026-08-04). Try the sibling root before giving up.
     if [ ! -e "$path" ]; then
         case "$path" in
-            "$HOME/.lmstudio/models/"*) alt="$HOME/.mlx-serve/models/${path#$HOME/.lmstudio/models/}" ;;
-            "$HOME/.mlx-serve/models/"*) alt="$HOME/.lmstudio/models/${path#$HOME/.mlx-serve/models/}" ;;
+            "$HOME/.lmstudio/models/"*) alt="$HOME/.sushi/models/${path#$HOME/.lmstudio/models/}" ;;
+            "$HOME/.sushi/models/"*) alt="$HOME/.lmstudio/models/${path#$HOME/.sushi/models/}" ;;
             *) alt="" ;;
         esac
         if [ -n "$alt" ] && [ -e "$alt" ]; then
@@ -183,7 +183,7 @@ run_model() {
     fi
 
     local log="/tmp/test_format_matrix_$logical.log"
-    pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+    pkill -f "sushi.*--port $PORT" 2>/dev/null
     sleep 1
     # shellcheck disable=SC2086 # extra is a flag list
     "$BINARY" --model "$path" --serve --port "$PORT" --ctx-size 8192 \
@@ -355,12 +355,12 @@ print(f"{name_ok}|{int(json_ok)}|{path_ok}|{leak}")')
     return 0
 }
 
-trap 'pkill -f "mlx-serve.*--port $PORT" 2>/dev/null' EXIT
+trap 'pkill -f "sushi.*--port $PORT" 2>/dev/null' EXIT
 
 for entry in "${MODELS[@]}"; do
     IFS='|' read -r logical display path engine has_thinking extra <<< "$entry"
     run_model "$logical" "$display" "$path" "$engine" "$has_thinking" "$extra"
-    pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+    pkill -f "sushi.*--port $PORT" 2>/dev/null
     sleep 2
 done
 

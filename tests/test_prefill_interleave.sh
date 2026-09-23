@@ -9,7 +9,7 @@
 # --prefill-chunk 1024 on E2B). Greedy output must be byte-identical either
 # way — interleaving reorders ticks, never math.
 #
-# Two arms, same binary: MLX_SERVE_PREFILL_INTERLEAVE=0 vs default-on.
+# Two arms, same binary: SUSHI_PREFILL_INTERLEAVE=0 vs default-on.
 # Asserts: [1] the on arm logs "[interleave] engaged" and the off arm doesn't;
 # [2] the on arm's max inter-token gap is under half the off arm's;
 # [3] stream A's output hash matches across arms.
@@ -20,7 +20,7 @@
 set -u
 
 PORT="${1:-11487}"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 MODEL="${INTERLEAVE_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 WORK="$(mktemp -d)"
 SERVER_PID=""
@@ -62,10 +62,10 @@ def stream(payload, stamps, parts):
                         parts.append(d)
 
 a_st, a_tx, b_st = [], [], []
-a = {"model": "mlx-serve", "temperature": 0.0, "max_tokens": 500, "stream": True,
+a = {"model": "sushi", "temperature": 0.0, "max_tokens": 500, "stream": True,
      "messages": [{"role": "user", "content": "Count from 1 to 200, one number per line."}]}
 words = " ".join(f"w{i}" for i in range(1200))
-b = {"model": "mlx-serve", "temperature": 0.0, "max_tokens": 4, "stream": True,
+b = {"model": "sushi", "temperature": 0.0, "max_tokens": 4, "stream": True,
      "messages": [{"role": "user", "content": f"Summarize in one word. {words}"}]}
 ta = threading.Thread(target=stream, args=(a, a_st, a_tx))
 ta.start()
@@ -83,7 +83,7 @@ PYEOF
 run_arm() {
     local arm="$1" env_val="$2"
     local log="$WORK/$arm.log"
-    MLX_SERVE_PREFILL_INTERLEAVE="$env_val" "$BINARY" --serve --model "$MODEL" \
+    SUSHI_PREFILL_INTERLEAVE="$env_val" "$BINARY" --serve --model "$MODEL" \
         --host 127.0.0.1 --port "$PORT" --prefix-cache-entries 0 \
         --prefill-chunk 1024 --log-level debug --log-file "$log" \
         >"$WORK/$arm.stdout" 2>&1 &

@@ -17,7 +17,7 @@ MODEL_A=${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}
 MODEL_B=${2:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}
 PORT=${3:-8121}
 BASE="http://127.0.0.1:$PORT"
-LOG=/tmp/mlx-serve-json-multi-model.log
+LOG=/tmp/sushi-json-multi-model.log
 PASS=0
 FAIL=0
 TOTAL=0
@@ -32,8 +32,8 @@ for d in "$MODEL_A" "$MODEL_B"; do
     fi
 done
 
-if [ ! -x "./zig-out/bin/mlx-serve" ]; then
-    echo "FAIL: mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+if [ ! -x "./zig-out/bin/sushi" ]; then
+    echo "FAIL: sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required"; exit 1; }
@@ -47,7 +47,7 @@ echo "A: $ID_A"
 echo "B: $ID_B"
 echo ""
 
-./zig-out/bin/mlx-serve \
+./zig-out/bin/sushi \
     --model "$MODEL_A" --serve --port $PORT --host 127.0.0.1 --log-level info \
     --model-dir "$(dirname "$(dirname "$MODEL_A")")" \
     --model-dir "$(dirname "$(dirname "$MODEL_B")")" \

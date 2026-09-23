@@ -9,7 +9,7 @@
 # a stray `linkSystemLibrary("llama")` re-links silently.
 #
 # Checks:
-#   1. zig-out/bin/mlx-serve exists (build it first)
+#   1. zig-out/bin/sushi exists (build it first)
 #   2. otool -L lists no libllama
 #   3. lib/llama_shim (the tracked C bridge) is gone
 #   4. the staged MLX is still linked (the contract is "no llama", not "no deps")
@@ -24,7 +24,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-BIN="zig-out/bin/mlx-serve"
+BIN="zig-out/bin/sushi"
 PASS=0
 FAIL=0
 

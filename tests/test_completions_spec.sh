@@ -31,7 +31,7 @@ if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_completions_spec: model directory not found."
     exit 0
 fi
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build with 'zig build -Doptimize=ReleaseFast'."
     exit 1
@@ -94,13 +94,13 @@ trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 nonstream_text() {
     local extra="$1"
     curl -s -m 120 "$BASE/v1/completions" -H 'Content-Type: application/json' \
-      -d "{\"model\":\"mlx-serve\",\"temperature\":0,\"max_tokens\":48,$extra\"prompt\":\"$PROMPT\"}" \
+      -d "{\"model\":\"sushi\",\"temperature\":0,\"max_tokens\":48,$extra\"prompt\":\"$PROMPT\"}" \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['text'], end='')"
 }
 stream_text() {
     local extra="$1"
     curl -s -N -m 120 "$BASE/v1/completions" -H 'Content-Type: application/json' \
-      -d "{\"model\":\"mlx-serve\",\"temperature\":0,\"max_tokens\":48,\"stream\":true,$extra\"prompt\":\"$PROMPT\"}" \
+      -d "{\"model\":\"sushi\",\"temperature\":0,\"max_tokens\":48,\"stream\":true,$extra\"prompt\":\"$PROMPT\"}" \
     | python3 -c "
 import sys, json
 out = []

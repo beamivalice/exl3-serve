@@ -34,7 +34,7 @@ if [ ! -f "$MODEL/config.json" ]; then
     echo -e "${RED}FAIL${NC} $MODEL/config.json missing."
     exit 1
 fi
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first."
     exit 1
@@ -57,7 +57,7 @@ echo "  model:   $MODEL  (model_type=$TARGET_TYPE)"
 echo "  drafter: $([ "$USE_DRAFTER" = "1" ] && echo "$DRAFTER" || echo "(none)")"
 echo
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 LOGFILE=$(mktemp)
@@ -95,7 +95,7 @@ run_stream_toolcall() {
 import json
 extra = json.loads('''$extra_flags_json''')
 body = {
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [
         {'role': 'system', 'content': 'You are a helpful assistant. Use tools to answer factual questions about system state.'},
         {'role': 'user', 'content': 'Run \"date\" using the shell tool.'}

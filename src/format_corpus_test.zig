@@ -17,7 +17,7 @@
 //!        raw generated text before tool parse (NNNb): <text>
 //!    (two sites in src/server.zig — streaming and non-streaming). The inline
 //!    dump caps at 4KB; for mega-tool-calls also set
-//!    MLX_SERVE_RAW_DUMP_FILE=<abs path> to write the FULL pre-parse buffer
+//!    SUSHI_RAW_DUMP_FILE=<abs path> to write the FULL pre-parse buffer
 //!    of the last streamed tools request (how the 2026-07-03 timeout-guillotine
 //!    class was captured).
 //! 2. Grep the server log for that line (or for the misbehaving output).
@@ -834,7 +834,7 @@ const corpus = [_]Expect{
     // the universal declared-type invariant below. Reverting the coercion turns
     // both entries red.
     .{
-        // VERBATIM capture, 2026-07-09 (~/.mlx-serve/logs/mlx-serve-11234.log:109471):
+        // VERBATIM capture, 2026-07-09 (~/.sushi/logs/sushi-11234.log:109471):
         // Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled via Claude Code.
         // The model writes Python's `False` for a boolean param. isJsonLiteral
         // only knows lowercase `false`, so the arg shipped as the STRING
@@ -1008,7 +1008,7 @@ const corpus = [_]Expect{
     // ── Hy3 / Hunyuan 3 (hy_v3): suffixed think tags + arg_key/arg_value tool
     // format. Entries are template-spec-shaped (chat_template.jinja, HYTK
     // ":opensource"); replace/extend with harvested live bytes once the 295B
-    // runs locally (MLX_SERVE_RAW_DUMP_FILE workflow above). Thinking is
+    // runs locally (SUSHI_RAW_DUMP_FILE workflow above). Thinking is
     // template-opened by default (generation prompt ends with the opener when
     // reasoning_effort is high/low). ─────────────────────────────────────────
     .{
@@ -1282,7 +1282,7 @@ const corpus = [_]Expect{
         .tool_bool_value = true,
     },
     .{
-        // LIVE capture 2026-07-16 (pipenetwork/Hy3-REAP62 via MLX_SERVE_RAW_DUMP_FILE,
+        // LIVE capture 2026-07-16 (pipenetwork/Hy3-REAP62 via SUSHI_RAW_DUMP_FILE,
         // the soak): the pruned model emitted the PLURAL wrapper
         // <tool_calls:opensource> and jumped STRAIGHT to the NAME, dropping the
         // singular per-call <tool_call:opensource> opener the parser keys on — so
@@ -1312,7 +1312,7 @@ const corpus = [_]Expect{
     // a BARE <tool_call> opener, the NAME, then arg_key/arg_value pairs, no
     // plural wrapper. Entries are template-spec shaped (chat_template.jinja);
     // replace with harvested live bytes once the 117.6B runs on GPU
-    // (MLX_SERVE_RAW_DUMP_FILE workflow above). ────────────────────────────
+    // (SUSHI_RAW_DUMP_FILE workflow above). ────────────────────────────
     .{
         .family = "laguna",
         .name = "full think round, template-opened, plain close tag",
@@ -1483,15 +1483,15 @@ const corpus = [_]Expect{
         .family = "inkling",
         .name = "back-to-back invokes without end_message keep both calls' args",
         .raw =
-        \\<|message_model|><|content_text|>write<|content_invoke_tool_json|>{"name":"write","args":{"content":"import * as T from 'three';\nconst s=new T.Scene(),c=new T.PerspectiveCamera(75,innerWidth/innerHeight,.1,1e3);\nc.position.set(0,1.6,4);s.background=new T.Color(0x111111);\nconst r=new T.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});\nr.setSize(innerWidth,innerHeight);\nexport{T,s,c,r};\n","path":"/Users/david/.mlx-serve/workspace/ink-quake/src/init.js"}}write<|content_invoke_tool_json|>{"name":"write","args":{"content":"import * as T from 'three';\nconst s=new T.Scene(),c=new T.PerspectiveCamera(75,innerWidth/innerHeight,.1,1e3);\nc.position.set(0,1.6,4);s.background=new T.Color(0x111111);\nconst r=new T.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});\nr.setSize(innerWidth,innerHeight);\nexport{T,s,c,r};\n","path":"/Users/david/.mlx-serve/workspace/ink-quake/src/init.js"}}<|end_message|>
+        \\<|message_model|><|content_text|>write<|content_invoke_tool_json|>{"name":"write","args":{"content":"import * as T from 'three';\nconst s=new T.Scene(),c=new T.PerspectiveCamera(75,innerWidth/innerHeight,.1,1e3);\nc.position.set(0,1.6,4);s.background=new T.Color(0x111111);\nconst r=new T.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});\nr.setSize(innerWidth,innerHeight);\nexport{T,s,c,r};\n","path":"/Users/david/.sushi/workspace/ink-quake/src/init.js"}}write<|content_invoke_tool_json|>{"name":"write","args":{"content":"import * as T from 'three';\nconst s=new T.Scene(),c=new T.PerspectiveCamera(75,innerWidth/innerHeight,.1,1e3);\nc.position.set(0,1.6,4);s.background=new T.Color(0x111111);\nconst r=new T.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});\nr.setSize(innerWidth,innerHeight);\nexport{T,s,c,r};\n","path":"/Users/david/.sushi/workspace/ink-quake/src/init.js"}}<|end_message|>
         ,
         .tools_json = write_read_tools_schema,
         .tool_count = 2,
         .tool_name = "write",
         .last_tool_name = "write",
         .tool_arg_key = "path",
-        .tool_arg_value = "/Users/david/.mlx-serve/workspace/ink-quake/src/init.js",
-        .last_tool_arg_value = "/Users/david/.mlx-serve/workspace/ink-quake/src/init.js",
+        .tool_arg_value = "/Users/david/.sushi/workspace/ink-quake/src/init.js",
+        .last_tool_arg_value = "/Users/david/.sushi/workspace/ink-quake/src/init.js",
     },
     .{
         // The marker-echo stage of the loop: the model copied pi's garbage
@@ -1720,7 +1720,7 @@ const corpus = [_]Expect{
         .tool_arg_value = "pwd",
     },
     // ---- LIVE captures: mlx-community/MiniCPM5-1B-OptiQ-4bit, verbatim raw
-    // model output via MLX_SERVE_RAW_DUMP_FILE. The hand-written fixtures above
+    // model output via SUSHI_RAW_DUMP_FILE. The hand-written fixtures above
     // use a multi-line layout; the model actually emits VALUE-ADJACENT, so
     // these pin the real shape rather than our formatting of it.
     .{

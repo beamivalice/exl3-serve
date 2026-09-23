@@ -49,7 +49,7 @@ if [ ! -f "$MODEL/config.json" ]; then
     exit 1
 fi
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first."
     exit 1
@@ -73,7 +73,7 @@ echo "  drafter: $([ "$USE_DRAFTER" = "1" ] && echo "$DRAFTER" || echo "(none)")
 echo "  turns:   $N_TURNS"
 echo
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 LOGFILE=$(mktemp)
@@ -125,7 +125,7 @@ import json, sys
 hist = json.load(open('$TRANSCRIPT'))
 hist.append({'role': 'user', 'content': '''$USER_MSG'''})
 out = {
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': hist,
     'max_tokens': 64,
     'temperature': 0.0,

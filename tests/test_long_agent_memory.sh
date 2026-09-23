@@ -62,8 +62,8 @@ fi
 OWN_SERVER=0
 LOG=""
 if ! curl -sf "$BASE/health" > /dev/null 2>&1; then
-    if [ ! -x ./zig-out/bin/mlx-serve ]; then
-        echo -e "${RED}FAIL${NC} mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+    if [ ! -x ./zig-out/bin/sushi ]; then
+        echo -e "${RED}FAIL${NC} sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
         exit 1
     fi
     LOG=$(mktemp)
@@ -71,9 +71,9 @@ if ! curl -sf "$BASE/health" > /dev/null 2>&1; then
     if [ -d "$DRAFTER" ]; then
         DRAFTER_ARGS=(--drafter "$DRAFTER")
     fi
-    echo "Starting mlx-serve on port $PORT (log: $LOG)..."
-    ./zig-out/bin/mlx-serve --model "$MODEL" --serve --port "$PORT" --log-level info \
-        ${DRAFTER_ARGS[@]+"${DRAFTER_ARGS[@]}"} ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$LOG" 2>&1 &
+    echo "Starting sushi on port $PORT (log: $LOG)..."
+    ./zig-out/bin/sushi --model "$MODEL" --serve --port "$PORT" --log-level info \
+        ${DRAFTER_ARGS[@]+"${DRAFTER_ARGS[@]}"} ${SUSHI_TEST_EXTRA_ARGS:-} > "$LOG" 2>&1 &
     SERVER_PID=$!
     OWN_SERVER=1
     trap 'if [ "$OWN_SERVER" = "1" ]; then kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; fi' EXIT

@@ -29,7 +29,7 @@ echo "--- Test 1: non-stream chat.completion carries a top-level 'timings' objec
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [{"role":"user","content":"Say hi in five words."}],
     "max_tokens": 16,
     "temperature": 0.0,
@@ -84,7 +84,7 @@ echo "--- Test 2: streaming final SSE chunk carries 'timings' alongside 'usage' 
 STREAM=$(curl -sN "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [{"role":"user","content":"Say hi in five words."}],
     "max_tokens": 16,
     "temperature": 0.0,

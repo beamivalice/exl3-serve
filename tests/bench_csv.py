@@ -119,7 +119,7 @@ def main() -> None:
     p.add_argument(
         "--engines", default="",
         help="engine versions for the charts, e.g. "
-             "'mlx-serve=26.8.3 omlx=0.5.2 mtplx=2.5.3 lmstudio=0.4.19+2'. "
+             "'sushi=26.8.3 omlx=0.5.2 mtplx=2.5.3 lmstudio=0.4.19+2'. "
              "Written as a SECOND '#' line; readers take the run note from the "
              "first '#' only, so this is additive and old CSVs still parse.")
     args = p.parse_args()

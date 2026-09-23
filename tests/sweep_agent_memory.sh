@@ -1,7 +1,7 @@
 #!/bin/bash
 # sweep_agent_memory.sh — run the 11-turn agent memory test against each
 # listed checkpoint. For each:
-#   1. Boot mlx-serve on a free port.
+#   1. Boot sushi on a free port.
 #   2. Invoke tests/test_long_agent_memory.py against it.
 #   3. Count PASS/FAIL lines and the final "tests passed" line.
 #   4. Tear the server down.
@@ -14,7 +14,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 PORT="${PORT:-11296}"
 RESULTS="${RESULTS:-AGENT_MEMORY_RESULTS.md}"
 
@@ -41,7 +41,7 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-pkill -f 'mlx-serve --serve' >/dev/null 2>&1 || true
+pkill -f 'sushi --serve' >/dev/null 2>&1 || true
 sleep 1
 
 echo "# 11-turn agent memory sweep — $(date '+%Y-%m-%d %H:%M')" > "$RESULTS"
@@ -144,12 +144,12 @@ run_one() {
     return 0
 }
 
-trap 'pkill -f "mlx-serve --serve" 2>/dev/null || true' EXIT
+trap 'pkill -f "sushi --serve" 2>/dev/null || true' EXIT
 
 for entry in "${MODELS[@]}"; do
     IFS='|' read -r name display path type <<< "$entry"
     run_one "$name" "$display" "$path" "$type" || true
-    pkill -f "mlx-serve --serve" 2>/dev/null || true
+    pkill -f "sushi --serve" 2>/dev/null || true
     sleep 3
 done
 

@@ -17,7 +17,7 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | grep -q LISTEN; then
     echo "port $PORT is already in use" >&2
     exit 1
 fi
-BIN="$ROOT/zig-out/bin/mlx-serve"
+BIN="$ROOT/zig-out/bin/sushi"
 [[ -x "$BIN" ]] || { echo "Build ReleaseFast first" >&2; exit 1; }
 mkdir -p "$ROOT/.zig-cache"
 OUT=$(mktemp -d "$ROOT/.zig-cache/mimo-http.XXXXXX")

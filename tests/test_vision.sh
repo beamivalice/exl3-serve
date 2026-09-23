@@ -1,6 +1,6 @@
 #!/bin/bash
-# Vision recognition test for mlx-serve
-# Requires: running mlx-serve with a vision model (the Flash-Next pack), Python 3 with PIL
+# Vision recognition test for sushi
+# Requires: running sushi with a vision model (the Flash-Next pack), Python 3 with PIL
 # Usage: ./tests/test_vision.sh [port]
 set -euo pipefail
 
@@ -53,7 +53,7 @@ print(json.loads(resp.read())['choices'][0]['message']['content'].strip())
 }
 
 echo "═══════════════════════════════════════════════════════════"
-echo " Vision Recognition Test — mlx-serve (port $PORT)"
+echo " Vision Recognition Test — sushi (port $PORT)"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 echo "── house.jpeg ──"

@@ -37,7 +37,7 @@ import sys
 
 
 DEFAULT_DIR_GLOBS = [
-    "~/.mlx-serve/models/meta-models/Muse-Glimmer-30B-assistant",
+    "~/.sushi/models/meta-models/Muse-Glimmer-30B-assistant",
     "~/.cache/huggingface/hub/models--meta-models--Muse-Glimmer-30B-assistant/snapshots/*",
 ]
 

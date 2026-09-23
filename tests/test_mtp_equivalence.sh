@@ -35,8 +35,8 @@
 set -u
 MODEL="${MTP_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${1:-11313}"
-BIN="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
-EXTRA_ARGS="${MLX_SERVE_TEST_EXTRA_ARGS:-}"
+BIN="${SUSHI_BINARY:-./zig-out/bin/sushi}"
+EXTRA_ARGS="${SUSHI_TEST_EXTRA_ARGS:-}"
 MAX_TOKENS=120
 PROMPT="Write a short story about a robot learning to paint."
 EXPECT_AUTO_PROFILE="${MTP_EXPECT_AUTO_PROFILE:-}"
@@ -342,11 +342,11 @@ if [ -n "$EXPECT_AUTO_DEPTH" ]; then
 fi
 stop_server
 
-echo "── fixed-depth server (MLX_SERVE_MTP_ADAPTIVE=0) ──"
+echo "── fixed-depth server (SUSHI_MTP_ADAPTIVE=0) ──"
 # The env kill switch must fully revert: legacy cap 3 (not the adaptive auto
 # cap) and zero chunk-B extensions on the same echo workload.
 BOOT=$((BOOT+1))
-MLX_SERVE_MTP_ADAPTIVE=0 "$BIN" --model "$MODEL" --serve --port "$PORT" --no-pld --no-drafter --prefix-cache-entries 0 --log-level info $EXTRA_ARGS >"$LOG" 2>&1 &
+SUSHI_MTP_ADAPTIVE=0 "$BIN" --model "$MODEL" --serve --port "$PORT" --no-pld --no-drafter --prefix-cache-entries 0 --log-level info $EXTRA_ARGS >"$LOG" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 120); do
     curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
@@ -367,7 +367,7 @@ FIXED_STATS=$(grep -o '\[spec-stats\] mode=mtp.*' "$LOG" | tail -1)
 FIXED_EXT=$(echo "$FIXED_STATS" | grep -o 'ext_rounds=[0-9]*' | cut -d= -f2)
 FIXED_DEPTH=$(echo "$FIXED_STATS" | grep -o ' depth=[0-9]*' | grep -o '[0-9]*')
 if [ "${FIXED_EXT:-1}" = "0" ] && [ "${FIXED_DEPTH:-0}" = "3" ]; then
-    echo "PASS [MLX_SERVE_MTP_ADAPTIVE=0 reverts to fixed depth 3, no extension]"; PASS=$((PASS+1))
+    echo "PASS [SUSHI_MTP_ADAPTIVE=0 reverts to fixed depth 3, no extension]"; PASS=$((PASS+1))
 else
     echo "FAIL [adaptive kill switch]: depth=${FIXED_DEPTH:-none} ext_rounds=${FIXED_EXT:-none} (want depth=3 ext_rounds=0)"
     FAIL=$((FAIL+1))

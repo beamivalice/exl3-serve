@@ -24,9 +24,9 @@ def main():
     (root / ".zig-cache").mkdir(exist_ok=True)
     out = pathlib.Path(tempfile.mkdtemp(prefix="mimo-cli-", dir=root / ".zig-cache"))
     home = pathlib.Path(os.environ.get("MIMO_CLI_TEST_HOME", str(out / "home")))
-    (home / ".mlx-serve" / "models").mkdir(parents=True, exist_ok=True)
+    (home / ".sushi" / "models").mkdir(parents=True, exist_ok=True)
     command = [
-        str(root / "zig-out/bin/mlx-serve"), "run", str(pathlib.Path(model).resolve()),
+        str(root / "zig-out/bin/sushi"), "run", str(pathlib.Path(model).resolve()),
         "--host", "127.0.0.1", "--port", str(port),
         "--ssd-budget-gb", os.environ.get("MIMO_SSD_BUDGET_GB", "100"),
         "--kv-quant", "8", "--ctx-size", "4096", "--prefill-chunk", "512",

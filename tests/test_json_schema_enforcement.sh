@@ -3,7 +3,7 @@
 #
 # Background: bench runs (#6, #8) showed Gemma producing ```json``` code-fences
 # and additionalProperties violations on /v1/responses/json-schema/person_record.
-# Probing mlx-serve confirmed:
+# Probing sushi confirmed:
 #   • flat `text.format.schema` is enforced
 #   • nested `text.format.json_schema.schema` is silently dropped (no grammar log)
 #   • top-level `response_format` is silently dropped on /v1/responses
@@ -27,8 +27,8 @@ if [ ! -d "$MODEL_DIR" ]; then
     exit 0
 fi
 
-if [ ! -x "./zig-out/bin/mlx-serve" ]; then
-    echo "FAIL: mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+if [ ! -x "./zig-out/bin/sushi" ]; then
+    echo "FAIL: sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 
@@ -43,9 +43,9 @@ echo "Port: $PORT"
 echo ""
 
 echo "Starting server..."
-./zig-out/bin/mlx-serve \
+./zig-out/bin/sushi \
     --model "$MODEL_DIR" --serve --port $PORT --log-level info \
-    >/tmp/mlx-serve-schema-test.log 2>&1 &
+    >/tmp/sushi-schema-test.log 2>&1 &
 SERVER_PID=$!
 sleep 2
 
@@ -142,7 +142,7 @@ print("ok")
 # ── Case A: /v1/responses + flat text.format.schema (baseline) ──
 echo "--- Case A: /v1/responses + flat text.format.schema ---"
 BODY=$(jq -n --arg input "$ADV_INPUT" --argjson schema "$SCHEMA" '{
-    model:"mlx-serve",
+    model:"sushi",
     instructions:"Reply with only the JSON object, no commentary.",
     input:$input,
     text:{format:{type:"json_schema",name:"person",schema:$schema,strict:true}},
@@ -156,7 +156,7 @@ echo ""
 # ── Case B: /v1/responses + nested text.format.json_schema.schema ──
 echo "--- Case B: /v1/responses + nested text.format.json_schema.schema ---"
 BODY=$(jq -n --arg input "$ADV_INPUT" --argjson schema "$SCHEMA" '{
-    model:"mlx-serve",
+    model:"sushi",
     instructions:"Reply with only the JSON object, no commentary.",
     input:$input,
     text:{format:{type:"json_schema",json_schema:{name:"person",schema:$schema,strict:true}}},
@@ -170,7 +170,7 @@ echo ""
 # ── Case C: /v1/responses + top-level response_format (chat-style alias) ──
 echo "--- Case C: /v1/responses + top-level response_format alias ---"
 BODY=$(jq -n --arg input "$ADV_INPUT" --argjson schema "$SCHEMA" '{
-    model:"mlx-serve",
+    model:"sushi",
     instructions:"Reply with only the JSON object, no commentary.",
     input:$input,
     response_format:{type:"json_schema",json_schema:{name:"person",schema:$schema,strict:true}},
@@ -184,7 +184,7 @@ echo ""
 # ── Case D: /v1/responses streaming + flat schema ──
 echo "--- Case D: /v1/responses streaming + flat schema ---"
 BODY=$(jq -n --arg input "$ADV_INPUT" --argjson schema "$SCHEMA" '{
-    model:"mlx-serve",
+    model:"sushi",
     instructions:"Reply with only the JSON object, no commentary.",
     input:$input,
     text:{format:{type:"json_schema",name:"person",schema:$schema,strict:true}},
@@ -213,7 +213,7 @@ echo ""
 # ── Case E: /v1/chat/completions + response_format ──
 echo "--- Case E: /v1/chat/completions + response_format ---"
 BODY=$(jq -n --arg input "$ADV_INPUT" --argjson schema "$SCHEMA" '{
-    model:"mlx-serve",
+    model:"sushi",
     messages:[
         {role:"system",content:"Reply with only the JSON object, no commentary."},
         {role:"user",content:$input}
@@ -229,7 +229,7 @@ echo ""
 # ── Case F: /v1/chat/completions + tools + tool_choice:"none" + schema ──
 echo "--- Case F: /v1/chat/completions + tools + tool_choice:none + schema ---"
 BODY=$(jq -n --arg input "$ADV_INPUT" --argjson schema "$SCHEMA" '{
-    model:"mlx-serve",
+    model:"sushi",
     messages:[
         {role:"system",content:"Reply with only the JSON object."},
         {role:"user",content:$input}

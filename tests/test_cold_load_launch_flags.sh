@@ -24,15 +24,15 @@ TOTAL=0
 
 MODEL=$(eval echo "$MODEL")
 if [ ! -d "$MODEL" ]; then echo "SKIP: model not found at $MODEL"; exit 0; fi
-if [ ! -x "./zig-out/bin/mlx-serve" ]; then
-    echo "FAIL: mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+if [ ! -x "./zig-out/bin/sushi" ]; then
+    echo "FAIL: sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 
 # Scratch root holding a symlink clone of $MODEL plus an in-dir drafter the
 # probe will accept. Symlinks so the clone costs nothing (every size scan in
 # the server stats THROUGH symlinks — that is its own guard).
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/mlxserve-coldflags.XXXXXX")
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sushi-coldflags.XXXXXX")
 CLONE="$ROOT/scratch-org/cold-load-probe"
 mkdir -p "$CLONE/drafter"
 for f in "$MODEL"/*; do ln -s "$f" "$CLONE/$(basename "$f")"; done
@@ -53,7 +53,7 @@ run_test() {
 # Boots with $MODEL as the primary, then COLD-loads the clone by name. Prints
 # the clone's load log.
 cold_load_with() { # $1 = extra launch flags, $2 = log path
-    ./zig-out/bin/mlx-serve --model "$MODEL" --serve --port $PORT --host 127.0.0.1 \
+    ./zig-out/bin/sushi --model "$MODEL" --serve --port $PORT --host 127.0.0.1 \
         --log-level info --model-dir "$ROOT" $1 >"$2" 2>&1 &
     SERVER_PID=$!
     for i in $(seq 1 60); do

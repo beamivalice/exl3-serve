@@ -1,5 +1,5 @@
 #!/bin/bash
-# bench.sh — the performance bench. llmprobe measures; this drives mlx-serve.
+# bench.sh — the performance bench. llmprobe measures; this drives sushi.
 #
 # One `llmprobe --bench-only` run per model gives the decode/prefill/TTFT
 # medians AND the context ladder. The numbers go into benchmarks.md by hand —
@@ -10,7 +10,7 @@
 #   ./tests/bench.sh --url 127.0.0.1:1234 -m <id>   # a server someone else started
 #   ./tests/bench.sh --full                         # median of 3 per rung, to 64k
 #
-# Each cell is mlx-serve at its FASTEST: speculation is forced on where the
+# Each cell is sushi at its FASTEST: speculation is forced on where the
 # checkpoint carries an MTP head (it is default-off on MoE targets). The mode
 # that actually engaged is printed beside the number, from the server's own
 # log — a mode that silently stops engaging shows up as a bare cell.
@@ -19,7 +19,7 @@
 # llama-server, whatever), then point --url at it. Same protocol, same probe,
 # one less thing in this script to keep in sync.
 #
-# Requirements: node (npx), curl, mlx-serve built ReleaseFast (Debug is 2-4x
+# Requirements: node (npx), curl, sushi built ReleaseFast (Debug is 2-4x
 # slower = a fake regression).
 set -u
 
@@ -33,7 +33,7 @@ URL_MODEL=""
 TAG="$(date +%Y%m%d-%H%M%S)"
 SETTLE="${SETTLE:-20}"
 
-BINARY="${BINARY:-$ROOT/zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-$ROOT/zig-out/bin/sushi}"
 LLMPROBE="${LLMPROBE:-npx -y llmprobe@latest}"
 PORT=11250
 
@@ -59,7 +59,7 @@ mkdir -p "$OUT"
 # ── Model matrix: logical|path ──
 # A missing path skips the row silently — a bench you can't run on this box
 # isn't an error on the box that can.
-MD="$HOME/.mlx-serve/models"
+MD="$HOME/.sushi/models"
 # ANE=1 adds --ane-prefill to every boot
 # (a named refusal on non-qwen3_5-dense models, so it is safe matrix-wide);
 # ane-on cells are their own column, never diffed against ane-off ones.
@@ -68,9 +68,9 @@ TARGETS=(
 )
 
 # Only ever called on the path that STARTED a server: --url may be pointed at
-# a local mlx-serve someone else is using, and a bench must not kill it.
+# a local sushi someone else is using, and a bench must not kill it.
 stop_server() {
-    pkill -f "mlx-serve --serve" 2>/dev/null
+    pkill -f "sushi --serve" 2>/dev/null
     for _ in $(seq 1 30); do
         lsof -ti tcp:"$PORT" >/dev/null 2>&1 || return 0
         sleep 1
@@ -106,7 +106,7 @@ if [[ -n "$URL" ]]; then
     probe "$(echo "$URL_MODEL" | tr '/ ' '__')" "$URL" "$URL_MODEL"
 else
     [[ -x "$BINARY" ]] || { echo "no $BINARY — build ReleaseFast first" >&2; exit 1; }
-    echo "=== bench: mlx-serve, tag=$TAG, reports → $OUT ==="
+    echo "=== bench: sushi, tag=$TAG, reports → $OUT ==="
     trap 'stop_server' EXIT
     stop_server
     for row in "${TARGETS[@]}"; do
@@ -125,7 +125,7 @@ else
         if curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
             probe "$logical" "localhost:$PORT" "$(basename "$path")"
         else
-            echo "  mlx-serve never came up for $logical" >&2
+            echo "  sushi never came up for $logical" >&2
         fi
         kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
         stop_server

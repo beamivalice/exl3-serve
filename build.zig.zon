@@ -1,7 +1,7 @@
 .{
-    .name = .mlx_serve,
+    .name = .sushi,
     .version = "0.1.0",
-    .fingerprint = 0x4f7c897092edeafd,
+    .fingerprint = 0xeb4cd3f692edeafd,
     .minimum_zig_version = "0.17.0-dev.1422+e863bf3be",
     .paths = .{
         "build.zig",

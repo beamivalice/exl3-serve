@@ -1,4 +1,4 @@
-# EXL3-serve
+# sushi
 
 A fork from ddalcu's MLX-serve, focus only to support selected EXL3 models in Apple Silicon.
 

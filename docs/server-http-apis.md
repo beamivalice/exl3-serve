@@ -72,10 +72,10 @@ thought is delivered. Guard: `tests/test_reasoning_budget_stream.sh`. Effort bud
   WARNS.
 - `--metrics`: zero cost off; TTFT at prefill completion; live tok/s via ONE atomic per tick; `/metrics(.json)`.
 
-## Agent launcher (`mlx-serve launch <agent>`)
+## Agent launcher (`sushi launch <agent>`)
 
 - `src/launch.zig` (claude/pi/omp/opencode/codex/hermes/aider): reads `/v1/models`, writes agent configs into
-  `~/.mlx-serve/<agent>/`. Launcher env: `ANTHROPIC_BASE_URL` + dummy keys + `ANTHROPIC_DEFAULT_*_MODEL=mlx-serve`.
+  `~/.sushi/<agent>/`. Launcher env: `ANTHROPIC_BASE_URL` + dummy keys + `ANTHROPIC_DEFAULT_*_MODEL=sushi`.
 - Agent budgets (`launch.budgetForContext` + `compactionReserve`): output share ctx/2, compaction reserve ctx/4
   capped at 20000, carried into pi's `settings.json` and opencode's `compaction` + `limit.output`. A launch below the
   agent's context floor WARNS (claude 64k, opencode 32k, others 16k).

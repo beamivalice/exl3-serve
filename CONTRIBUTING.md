@@ -14,7 +14,7 @@ Open an issue with:
 - What you expected vs what happened
 - Model name and quantization (e.g. `Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`)
 - macOS version and chip (e.g. macOS 26.6, M4 Max)
-- Server log output (`--log-level debug`, `~/.mlx-serve/logs/mlx-serve-<port>.log`)
+- Server log output (`--log-level debug`, `~/.sushi/logs/sushi-<port>.log`)
 
 ## Pull requests
 

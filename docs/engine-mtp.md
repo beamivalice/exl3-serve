@@ -44,32 +44,32 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
   serial forwards and prose accepts ~1.0. On the MCG K3 pack this no longer holds cleanly: verify rows cost
   ~4.6 ms each (28.2 / ~33.5 / ~37.5 ms at 2/3/4 rows) because routed experts are a minority of the bytes; measure
   before relying on either reading.
-- Acceptance is a PROMPT-TYPE property (code ≫ prose; `MLX_SERVE_MTP_FORCE_DEPTH=n` + `acc_idx=` on `[mtp-trace]`),
+- Acceptance is a PROMPT-TYPE property (code ≫ prose; `SUSHI_MTP_FORCE_DEPTH=n` + `acc_idx=` on `[mtp-trace]`),
   so MTP stays opt-in.
-- Rounds stay solo; two interleave, three or more go plain (`mtpRoundsStaySolo`; `MLX_SERVE_MTP_BATCHED_QWEN4` opts
+- Rounds stay solo; two interleave, three or more go plain (`mtpRoundsStaySolo`; `SUSHI_MTP_BATCHED_QWEN4` opts
   in; `mergedVerifyDeclineReason` names the decline). Four MTP streams on MCG K3 aggregate ~85 tok/s today; a linear
   model of the measured verify-row cost predicts ~95-125 with merged verify at depth 2-3. Measure before any code.
 - **Drafts shortlist on a coarse lm_head copy and re-score exactly** from the MIXER output
-  (`buildRerankCoarse`/`rerankShortlist`/`fullReadoutArgmax`, `StepWant.mixed`; `MLX_SERVE_MTP_DRAFT_RERANK=0`
+  (`buildRerankCoarse`/`rerankShortlist`/`fullReadoutArgmax`, `StepWant.mixed`; `SUSHI_MTP_DRAFT_RERANK=0`
   restores the full readout). A greedy target drafts the argmax (byte-identity contract); a sampled target draws
   from the re-scored top-32 (`mtpDraftStepPath`); draft temperature is per family.
 
 ## Round cost table
 
 - **Round cost is MEASURED** per model/width/KV bucket from live single-chunk rounds (`round_cost.zig`;
-  `MLX_SERVE_MTP_COST_TABLE=0` = prior only); width trials m_lo then m_lo+1 never m_lo−1; the silicon depth row is a
+  `SUSHI_MTP_COST_TABLE=0` = prior only); width trials m_lo then m_lo+1 never m_lo−1; the silicon depth row is a
   COLD-START cap.
-- Persistence is OPT-IN (`MLX_SERVE_ROUND_COST_PERSIST=1`); an A/B with the table live measures the TABLE, so set
+- Persistence is OPT-IN (`SUSHI_ROUND_COST_PERSIST=1`); an A/B with the table live measures the TABLE, so set
   `=0` on BOTH arms. A round's wall is between round ENDS, so an interleaved prefill chunk drops the round clock too.
 - **The EV seed lives on `Qwen4Mtp`** (`ev_seed_accept`/`ev_seed_m_lo`), per loaded model; publish AND consume
-  decline under `MLX_SERVE_MTP_FORCE_DEPTH`. `MtpCostProfile` comes from the runtime fingerprint
-  (`g17_nax_qwen4_q4_gs64`; `MLX_SERVE_MTP_QWEN4_PROFILE=0` revokes it); unmeasured = generic/cap-6.
+  decline under `SUSHI_MTP_FORCE_DEPTH`. `MtpCostProfile` comes from the runtime fingerprint
+  (`g17_nax_qwen4_q4_gs64`; `SUSHI_MTP_QWEN4_PROFILE=0` revokes it); unmeasured = generic/cap-6.
 - EXL3 cold-start depth cap 2 on M5 Max binds the auto path only.
 
 ## Reproducibility
 
 - **Auto-mode MTP output is NOT byte-reproducible** (round times pick depths → widths → kernels → greedy near-tie
-  flips); byte bar = `MLX_SERVE_MTP_FORCE_DEPTH`.
+  flips); byte bar = `SUSHI_MTP_FORCE_DEPTH`.
 - `test_mtp_equivalence.sh` acquits divergences at serial top-2 gap ≤ 0.15 nats and boots
   `--prefix-cache-entries 0`.
 - Forced-depth outputs are byte-equal to the pack's own no-MTP greedy (48/48 on MCG and MUL1 K3).
@@ -83,7 +83,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
 - **Norms**: delta-encoded head norms AUTO-FOLD at load (raw-HF heads get the `+1` repair, `mtpNormNeedsRepair` reads
   the norm's OWN negative fraction, whole-head 5% bar); publish packs FOLDED (the converter folds them).
   Quant re-solved PER WEIGHT; a sidecar's mode is solved from GEOMETRY (`quantParamsFromGeometry`); dense bf16 head
-  trunks requantize at load (`MLX_SERVE_MTP_HEAD_QUANT_BITS` 4/g64).
+  trunks requantize at load (`SUSHI_MTP_HEAD_QUANT_BITS` 4/g64).
 
 <a id="ple-defer"></a>
 ## The deferred PLE leaf

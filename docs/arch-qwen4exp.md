@@ -35,7 +35,7 @@ hidden 2560, expert intermediate 640.
   streamed loads.
 - **The deferred PLE leaf is filled before anything evaluates the build**: see [engine-mtp](engine-mtp.md#ple-defer).
   A host token read inside the graph build serialized the build with the GPU.
-- **Decode kernels**: the fused hc read is LATENCY-bound (`MLX_SERVE_HC_FUSED=0`; `hcWrite` DEFERS into the next
+- **Decode kernels**: the fused hc read is LATENCY-bound (`SUSHI_HC_FUSED=0`; `hcWrite` DEFERS into the next
   read); HC + GDN prefill fusions take the chunk WIDTH as a scalar input. Details in
   [engine-kernels](engine-kernels.md).
 - **A GDN trunk's `KVCache.step` is 0 forever**: see [engine-kv-cache](engine-kv-cache.md#gdn).
@@ -45,9 +45,9 @@ hidden 2560, expert intermediate 640.
 - `mx.quantize` packs DENSELY (element i at bit offset `i*bits`, straddling words at 3/5/6 bits; `dequantRow` tested
   at every width) or raw bf16 (bits-16 arm).
 - A random read into a cold 32 GB mmap is a serial SSD fault, so `gather` rides a `PrefetchPool`
-  (`QWEN4_PLE_PREFETCH=0` disables) and `startWarm` preads the table at load (`MLX_SERVE_NGRAM_WARM=0`).
+  (`QWEN4_PLE_PREFETCH=0` disables) and `startWarm` preads the table at load (`SUSHI_NGRAM_WARM=0`).
 - The n-gram hash's eos is the TEXT config's (`ngram_eos`).
-- `MLX_SERVE_NGRAM_BF16_DIR=<hf checkpoint>` serves any pack with the ORIGINAL bf16 n-gram table, so `kld compare`
+- `SUSHI_NGRAM_BF16_DIR=<hf checkpoint>` serves any pack with the ORIGINAL bf16 n-gram table, so `kld compare`
   isolates the PLE table's cost.
 
 ## Oracle and fixtures

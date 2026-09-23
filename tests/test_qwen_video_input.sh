@@ -28,8 +28,8 @@ for f in "$F1" "$F2" "$F3" "$F4"; do
 done
 
 LOG=$(mktemp)
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null; sleep 1
-./zig-out/bin/mlx-serve --model "$MODEL" --serve --port "$PORT" --log-level info > "$LOG" 2>&1 &
+pkill -f "sushi.*--port $PORT" 2>/dev/null; sleep 1
+./zig-out/bin/sushi --model "$MODEL" --serve --port "$PORT" --log-level info > "$LOG" 2>&1 &
 SRV=$!
 cleanup() { kill "$SRV" 2>/dev/null; }
 trap cleanup EXIT

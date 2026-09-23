@@ -35,7 +35,7 @@ if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_prefix_inherit_qsa: $MODEL not found."
     exit 0
 fi
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first with 'zig build -Doptimize=ReleaseFast'."
     exit 1
@@ -102,7 +102,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 wait_port_closed || true
 
 BASELINE_FREE_MB=$(free_mb)
@@ -113,7 +113,7 @@ start_server() {
     shift
     echo "  starting server $*..."
     "$BINARY" --model "$MODEL" --serve --port "$PORT" --host 127.0.0.1 \
-        "$@" --log-level info ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$log" 2>&1 &
+        "$@" --log-level info ${SUSHI_TEST_EXTRA_ARGS:-} > "$log" 2>&1 &
     SERVER_PID=$!
     local up=0
     local i

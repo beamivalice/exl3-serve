@@ -31,7 +31,7 @@
 
 set -u
 
-ROOT="${1:-$HOME/.mlx-serve/models}"
+ROOT="${1:-$HOME/.sushi/models}"
 PORT="${2:-8134}"
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; DIM='\033[2m'; NC='\033[0m'
@@ -41,11 +41,11 @@ ok()  { echo -e "  ${GREEN}PASS${NC} $1"; PASS=$((PASS+1)); }
 bad() { echo -e "  ${RED}FAIL${NC} $1"; shift; for l in "$@"; do echo "        $l"; done; FAIL=$((FAIL+1)); }
 
 [ -d "$ROOT" ] || { echo "SKIP: no model root at $ROOT"; exit 0; }
-[ -x ./zig-out/bin/mlx-serve ] || { echo "FAIL: build first (zig build -Doptimize=ReleaseFast)"; exit 1; }
+[ -x ./zig-out/bin/sushi ] || { echo "FAIL: build first (zig build -Doptimize=ReleaseFast)"; exit 1; }
 
 LOG=$(mktemp /tmp/hot_switch.XXXXXX)
-pkill -f "bin/mlx-serve" 2>/dev/null; sleep 1
-./zig-out/bin/mlx-serve serve --port "$PORT" --host 127.0.0.1 --model-dir "$ROOT" \
+pkill -f "bin/sushi" 2>/dev/null; sleep 1
+./zig-out/bin/sushi serve --port "$PORT" --host 127.0.0.1 --model-dir "$ROOT" \
     --log-level debug > "$LOG" 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; rm -f "$LOG" "${TOKCOUNT_FILE:-}"; }

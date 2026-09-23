@@ -40,7 +40,7 @@ send_request() {
 
 # Request A: Simple tool response that should always work
 REQUEST_A='{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
         {"role": "system", "content": "You are helpful. Be brief."},
         {"role": "user", "content": "What day is today?"},
@@ -53,7 +53,7 @@ REQUEST_A='{
 
 # Request B: Long noisy tool response that may cause pad-only generation on small models
 REQUEST_B='{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
         {"role": "system", "content": "You are a helpful macOS assistant. Use tools for tasks. Answer directly when no tools needed. For web search use webSearch tool."},
         {"role": "user", "content": "search the web for finance news and give me the headlines"},

@@ -28,7 +28,7 @@
 set -u
 
 PORT="${1:-11266}"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 MODEL="${LOOP_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PASS=0
 FAIL=0
@@ -51,12 +51,12 @@ check() {
 
 LOG="$(mktemp)"
 cleanup() {
-    pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+    pkill -f "sushi.*--port $PORT" 2>/dev/null
     rm -f "$LOG"
 }
 trap cleanup EXIT
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+pkill -f "sushi.*--port $PORT" 2>/dev/null
 sleep 0.5
 "$BINARY" --model "$MODEL" --serve --port "$PORT" --log-file off --log-level info > "$LOG" 2>&1 &
 SRV=$!
@@ -182,10 +182,10 @@ curl -s "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: applicati
 # Without this the trim assertion above could pass because the model happened
 # to be terse. Same server, same prompt, trim disabled: the loop must come
 # back. Needs its own boot — the switch is read server-side, once.
-echo "[6/6] MLX_SERVE_LOOP_TRIM=0 restores the untrimmed body"
+echo "[6/6] SUSHI_LOOP_TRIM=0 restores the untrimmed body"
 kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
 sleep 1
-MLX_SERVE_LOOP_TRIM=0 "$BINARY" --model "$MODEL" --serve --port "$PORT" --log-file off > "$LOG.off" 2>&1 &
+SUSHI_LOOP_TRIM=0 "$BINARY" --model "$MODEL" --serve --port "$PORT" --log-file off > "$LOG.off" 2>&1 &
 SRV=$!
 for _ in $(seq 1 240); do
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break

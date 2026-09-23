@@ -17,8 +17,8 @@ if [ ! -f "$MODEL/config.json" ]; then echo "SKIP: model not found at $MODEL"; e
 if [ ! -f "$IMAGE" ]; then echo "SKIP: fixture $IMAGE missing"; exit 0; fi
 
 LOG=$(mktemp)
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null; sleep 1
-./zig-out/bin/mlx-serve --model "$MODEL" --serve --port "$PORT" --log-level info > "$LOG" 2>&1 &
+pkill -f "sushi.*--port $PORT" 2>/dev/null; sleep 1
+./zig-out/bin/sushi --model "$MODEL" --serve --port "$PORT" --log-level info > "$LOG" 2>&1 &
 SRV=$!
 cleanup() { kill "$SRV" 2>/dev/null; }
 trap cleanup EXIT

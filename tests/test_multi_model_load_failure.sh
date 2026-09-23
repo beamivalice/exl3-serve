@@ -16,7 +16,7 @@
 # The second case used to be this script's only case, asserting a 500 for it.
 # It cannot produce one: an id the registry does not hold falls back to the
 # default model, deliberately — Claude Code launches with
-# ANTHROPIC_DEFAULT_*_MODEL=mlx-serve, and clients hardcode ids like gpt-4o.
+# ANTHROPIC_DEFAULT_*_MODEL=sushi, and clients hardcode ids like gpt-4o.
 # Asserting 500 there would break that fallback, so the assertion is now that
 # it is skipped, which is the real behaviour and was previously unpinned.
 #
@@ -62,12 +62,12 @@ EOF
 
 cleanup_root() { rm -rf "$TMPROOT"; }
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 LOGFILE=$(mktemp)
 "$BINARY" --model-dir "$TMPROOT" --model "$TMPROOT/$VALID_ID" --serve --port "$PORT" \
-    ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
+    ${SUSHI_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
 SERVER_PID=$!
 cleanup() {
     kill $SERVER_PID 2>/dev/null || true

@@ -40,18 +40,18 @@ if [ ! -f "$MODEL/config.json" ]; then
     exit 1
 fi
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first with 'zig build -Doptimize=ReleaseFast'."
     exit 1
 fi
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 LOGFILE=$(mktemp)
 echo "  starting server (--kv-quant off, --prefix-cache-entries 4)..."
-"$BINARY" --model "$MODEL" --serve --port "$PORT" --kv-quant off --prefix-cache-entries 4 ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
+"$BINARY" --model "$MODEL" --serve --port "$PORT" --kv-quant off --prefix-cache-entries 4 ${SUSHI_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
 SERVER_PID=$!
 
 cleanup() {
@@ -85,7 +85,7 @@ fire() {
     fi
     local body
     body=$(curl -s -X POST -H "Content-Type: application/json" \
-        -d "{\"model\":\"mlx-serve\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one short sentence.\"}],\"max_tokens\":32,\"temperature\":0.0,\"stream\":false${extra}}" \
+        -d "{\"model\":\"sushi\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one short sentence.\"}],\"max_tokens\":32,\"temperature\":0.0,\"stream\":false${extra}}" \
         "$BASE/v1/chat/completions")
     local content
     content=$(echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('choices',[{}])[0].get('message',{}).get('content',''))" 2>/dev/null || echo "")

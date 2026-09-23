@@ -25,7 +25,7 @@ echo ""
 
 # Start server
 echo "Starting server..."
-./zig-out/bin/mlx-serve --model "$MODEL_DIR" --serve --port $PORT --log-level debug 2>/tmp/mlx-serve-test-tool-args.log &
+./zig-out/bin/sushi --model "$MODEL_DIR" --serve --port $PORT --log-level debug 2>/tmp/sushi-test-tool-args.log &
 SERVER_PID=$!
 sleep 2
 
@@ -71,7 +71,7 @@ echo "--- Test 1: Non-streaming — model generates tool call with arguments ---
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "You MUST use the shell tool for every request. Always call the shell tool. Never respond with text alone."},
       {"role": "user", "content": "Run the ls command to list files"}
@@ -110,7 +110,7 @@ echo "--- Test 2: Streaming — tool call arguments arrive correctly ---"
 EVENTS=$(curl -sf -N "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "You MUST use the shell tool for every request. Always call the shell tool. Never respond with text alone."},
       {"role": "user", "content": "List files using ls -la"}
@@ -167,7 +167,7 @@ for i in $(seq 1 5); do
     RESULT=$(curl -sf "$BASE/v1/chat/completions" \
       -H "Content-Type: application/json" \
       -d '{
-        "model": "mlx-serve",
+        "model": "sushi",
         "messages": [
           {"role": "system", "content": "Always use the shell tool. You must call shell for every request."},
           {"role": "user", "content": "Check disk usage with df -h"}
@@ -213,7 +213,7 @@ echo "--- Test 4: Full round-trip — tool call then tool result then response -
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "You are helpful. Be brief."},
       {"role": "user", "content": "What files are in the current directory?"},
@@ -242,7 +242,7 @@ if [ "$FAIL" -gt 0 ]; then
     echo "Failed: $FAIL"
     echo ""
     echo "Server log (last 50 lines):"
-    tail -50 /tmp/mlx-serve-test-tool-args.log
+    tail -50 /tmp/sushi-test-tool-args.log
     exit 1
 else
     echo "All tests passed!"

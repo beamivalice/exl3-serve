@@ -159,13 +159,13 @@ jobs:
           git tag v${{ steps.version.outputs.version }}
           git push origin v${{ steps.version.outputs.version }}
 
-      - name: Build mlx-serve (Zig)
+      - name: Build sushi (Zig)
         run: zig build -Doptimize=ReleaseFast -Dversion=${{ steps.version.outputs.version }} -Dgit-sha=${{ github.sha }}
 
-      - name: Smoke test mlx-serve binary
+      - name: Smoke test sushi binary
         run: |
-          ./zig-out/bin/mlx-serve --version
-          ./zig-out/bin/mlx-serve --help > /dev/null
+          ./zig-out/bin/sushi --version
+          ./zig-out/bin/sushi --help > /dev/null
 
       # Static guard: the staged metallib contains the *_nax kernels, minos
       # >= 26.2, and the built binary links no leftover brew mlx/mlx-c. ci.yml
@@ -185,10 +185,10 @@ jobs:
         env:
           SIGNING_IDENTITY: "Developer ID Application: David Dalcu (${{ secrets.APPLE_TEAM_ID }})"
         run: |
-          STAGING="mlx-serve-macos-arm64"
+          STAGING="sushi-macos-arm64"
           mkdir -p "$STAGING/lib"
 
-          cp zig-out/bin/mlx-serve "$STAGING/"
+          cp zig-out/bin/sushi "$STAGING/"
 
           # License + third-party attributions. The tarball links Apache-2.0
           # code (MTPLX/dflash/oMLX kernels, jinja.cpp) whose section 4 wants
@@ -211,7 +211,7 @@ jobs:
           install_name_tool -change \
             @rpath/libmlxc.dylib \
             @executable_path/lib/libmlxc.dylib \
-            "$STAGING/mlx-serve"
+            "$STAGING/sushi"
 
           install_name_tool -change \
             @rpath/libmlx.dylib \
@@ -225,9 +225,9 @@ jobs:
           # Fix webp rpaths
           if [ -f "$STAGING/lib/libwebp.dylib" ]; then
             install_name_tool -change \
-              "$(otool -L "$STAGING/mlx-serve" | grep libwebp | awk '{print $1}')" \
+              "$(otool -L "$STAGING/sushi" | grep libwebp | awk '{print $1}')" \
               @executable_path/lib/libwebp.dylib \
-              "$STAGING/mlx-serve" 2>/dev/null || true
+              "$STAGING/sushi" 2>/dev/null || true
             install_name_tool -change \
               "$(otool -L "$STAGING/lib/libwebp.dylib" | grep libsharpyuv | awk '{print $1}')" \
               @loader_path/libsharpyuv.dylib \
@@ -237,15 +237,15 @@ jobs:
           for lib in "$STAGING/lib/"*.dylib; do
             [ -f "$lib" ] && codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$lib"
           done
-          codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$STAGING/mlx-serve"
+          codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$STAGING/sushi"
 
-          codesign --verify --deep --strict --verbose=2 "$STAGING/mlx-serve"
+          codesign --verify --deep --strict --verbose=2 "$STAGING/sushi"
 
           # Smoke test the install_name_tool-rewired binary so missing-dylib
           # errors surface here rather than after notarization.
-          "./$STAGING/mlx-serve" --version
+          "./$STAGING/sushi" --version
 
-          ditto -c -k --keepParent "$STAGING" "mlx-serve-cli.zip"
+          ditto -c -k --keepParent "$STAGING" "sushi-cli.zip"
 
       - name: Notarize CLI
         if: ${{ !inputs.dry_run }}
@@ -254,7 +254,7 @@ jobs:
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          xcrun notarytool submit "mlx-serve-cli.zip" \
+          xcrun notarytool submit "sushi-cli.zip" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
@@ -262,7 +262,7 @@ jobs:
 
       # ── Package final artifacts ──
       - name: Package CLI tarball
-        run: tar -czf "mlx-serve-bin-macos-arm64.tar.gz" "mlx-serve-macos-arm64"
+        run: tar -czf "sushi-bin-macos-arm64.tar.gz" "sushi-macos-arm64"
 
       - name: Cleanup keychain
         if: always()
@@ -294,11 +294,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: mlx-serve v${{ steps.version.outputs.version }}
+          name: sushi v${{ steps.version.outputs.version }}
           body: ${{ steps.changelog.outputs.notes }}
           draft: true
           files: |
-            mlx-serve-bin-macos-arm64.tar.gz
+            sushi-bin-macos-arm64.tar.gz
 
       - name: Upload PR / dry-run artifacts
         if: ${{ inputs.dry_run || github.event_name == 'pull_request' }}
@@ -308,5 +308,5 @@ jobs:
           # either way (e.g. package-26.7.0-pr12.abc1234 / package-26.7.11).
           name: package-${{ steps.version.outputs.version }}
           path: |
-            mlx-serve-bin-macos-arm64.tar.gz
+            sushi-bin-macos-arm64.tar.gz
           retention-days: 7

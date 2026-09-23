@@ -16,7 +16,7 @@ class Exl3LauncherTests(unittest.TestCase):
     def test_both_launchers_preserve_flags_and_forward_arguments(self):
         with tempfile.TemporaryDirectory(prefix="exl3 launcher ") as td:
             home = Path(td)
-            binary = home / "llm/exl3-serve/zig-out/bin/mlx-serve"
+            binary = home / "llm/sushi/zig-out/bin/sushi"
             binary.parent.mkdir(parents=True)
             binary.write_text("#!/usr/bin/env bash\nprintf '%s\\0' \"$@\"\n")
             binary.chmod(0o755)

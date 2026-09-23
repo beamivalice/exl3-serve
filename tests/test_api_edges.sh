@@ -16,13 +16,13 @@ cd "$(dirname "$0")/.."
 MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11512}"
 BASE="http://127.0.0.1:$PORT"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 [[ -d "$MODEL" ]] || { echo "SKIP: model dir not found: $MODEL"; exit 0; }
 [[ -x "$BINARY" ]] || { echo "SKIP: $BINARY missing"; exit 0; }
 
 WORK=$(mktemp -d "$HOME/claude-tmp/api-edges.XXXXXX" 2>/dev/null || mktemp -d)
 mkdir -p "$WORK/home"
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null; sleep 0.5
+pkill -f "sushi.*--port $PORT" 2>/dev/null; sleep 0.5
 HOME="$WORK/home" "$BINARY" --serve --host 127.0.0.1 --port "$PORT" --model "$MODEL" \
     --log-level debug --max-concurrent 4 > "$WORK/server.log" 2>&1 &
 SERVER_PID=$!

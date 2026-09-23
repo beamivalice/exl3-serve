@@ -1,11 +1,11 @@
 ---
 name: bench
-description: mlx-serve benchmarking methodology — bench.sh/llmprobe usage, comparison-trap rules (same-methodology cells only, spec-decode variance, thermal lies, engine naming), perf-claim etiquette. Use before running benchmarks or making any performance claim.
+description: sushi benchmarking methodology — bench.sh/llmprobe usage, comparison-trap rules (same-methodology cells only, spec-decode variance, thermal lies, engine naming), perf-claim etiquette. Use before running benchmarks or making any performance claim.
 ---
 
 ## Benchmarking
 
-**llmprobe is the measurement layer.** `tests/bench.sh` boots mlx-serve (one model at a time: boot, probe, kill, settle) and llmprobe takes every number via `--bench-only`. We do not hand-roll timing loops — llmprobe discards a warmup per scenario, reports median-of-3 as `median (min-max)`, refuses to fabricate a number when usage is missing, records the machine it ran on, and applies the same protocol to every engine.
+**llmprobe is the measurement layer.** `tests/bench.sh` boots sushi (one model at a time: boot, probe, kill, settle) and llmprobe takes every number via `--bench-only`. We do not hand-roll timing loops — llmprobe discards a warmup per scenario, reports median-of-3 as `median (min-max)`, refuses to fabricate a number when usage is missing, records the machine it ran on, and applies the same protocol to every engine.
 
 ```
 ./tests/bench.sh                                # every model (~did we regress)
@@ -14,7 +14,7 @@ description: mlx-serve benchmarking methodology — bench.sh/llmprobe usage, com
 ./tests/bench.sh --full                         # median of 3 per rung, to 64k
 ```
 
-**Each cell is mlx-serve at its FASTEST.** `--mtp` is forced wherever the checkpoint ships an MTP head, because it is default-OFF on MoE targets and that is where it pays most (35B-A3B reads 157 without and 191 with). Everything else is already on by default. The mode that actually engaged is read off the server's own `[spec-stats] mode=` lines and named beside the number — a mode that silently stops engaging shows up as a bare cell, which is the regression signal.
+**Each cell is sushi at its FASTEST.** `--mtp` is forced wherever the checkpoint ships an MTP head, because it is default-OFF on MoE targets and that is where it pays most (35B-A3B reads 157 without and 191 with). Everything else is already on by default. The mode that actually engaged is read off the server's own `[spec-stats] mode=` lines and named beside the number — a mode that silently stops engaging shows up as a bare cell, which is the regression signal.
 
 **Another engine = another URL.** Start LM Studio / oMLX / MTPLX / llama-server yourself, then `--url host:port -m <id>`. Same script, same probe, nothing about their binaries, ports or version strings lives in the bench.
 

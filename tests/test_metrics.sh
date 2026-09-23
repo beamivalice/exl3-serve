@@ -19,7 +19,7 @@ set -u
 MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11291}"
 BASE="http://127.0.0.1:$PORT"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 LOG=/tmp/test_metrics.log
 PASS=0
 FAIL=0
@@ -42,7 +42,7 @@ if [ ! -d "$MODEL" ]; then
     exit 0
 fi
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 wait_health() {
@@ -75,7 +75,7 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/metrics.json")
 check "GET /metrics.json without --metrics → 503" "$([ "$STATUS" = "503" ] && echo 1 || echo 0)"
 
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true; sleep 1
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true; sleep 1
 
 # ════════════════════════════════════════════════════════════════════════════
 # Phase 2: With --metrics, both endpoints answer
@@ -110,12 +110,12 @@ check "TTFT +Inf bucket present" \
     "$(echo "$BODY" | grep -q 'vllm:time_to_first_token_seconds_bucket{le="+Inf"}' && echo 1 || echo 0)"
 check "vllm:num_requests_running gauge present" \
     "$(echo "$BODY" | grep -q "# TYPE vllm:num_requests_running gauge" && echo 1 || echo 0)"
-check "mlx_serve:gpu_utilization_pct gauge present" \
-    "$(echo "$BODY" | grep -q "mlx_serve:gpu_utilization_pct" && echo 1 || echo 0)"
-check "mlx_serve:memory_mb gauge present (TYPE line)" \
-    "$(echo "$BODY" | grep -q "# TYPE mlx_serve:memory_mb gauge" && echo 1 || echo 0)"
-check "mlx_serve:generation_tokens_live gauge present (TYPE line)" \
-    "$(echo "$BODY" | grep -q "# TYPE mlx_serve:generation_tokens_live gauge" && echo 1 || echo 0)"
+check "sushi:gpu_utilization_pct gauge present" \
+    "$(echo "$BODY" | grep -q "sushi:gpu_utilization_pct" && echo 1 || echo 0)"
+check "sushi:memory_mb gauge present (TYPE line)" \
+    "$(echo "$BODY" | grep -q "# TYPE sushi:memory_mb gauge" && echo 1 || echo 0)"
+check "sushi:generation_tokens_live gauge present (TYPE line)" \
+    "$(echo "$BODY" | grep -q "# TYPE sushi:generation_tokens_live gauge" && echo 1 || echo 0)"
 
 check "request_success_total is 0 before any requests" \
     "$(echo "$BODY" | grep "^vllm:request_success_total " | grep -q " 0$" && echo 1 || echo 0)"
@@ -145,7 +145,7 @@ echo "── Phase 3: after one chat completion ──"
 
 CHAT=$(curl -s -X POST "$BASE/v1/chat/completions" \
     -H "Content-Type: application/json" \
-    -d '{"model":"mlx-serve","messages":[{"role":"user","content":"Reply with one word: OK"}],"max_tokens":5,"temperature":0}')
+    -d '{"model":"sushi","messages":[{"role":"user","content":"Reply with one word: OK"}],"max_tokens":5,"temperature":0}')
 
 check "chat completion returned a response" \
     "$(echo "$CHAT" | grep -q '"choices"' && echo 1 || echo 0)"
@@ -174,8 +174,8 @@ check "request_cancelled_total == 0" \
 
 # memory_mb must reflect the loaded model footprint (phys_footprint, not
 # resident_size). Any loaded model footprints >500 MB.
-MEM=$(echo "$BODY2" | grep "^mlx_serve:memory_mb " | awk '{print $2}')
-check "mlx_serve:memory_mb > 500 (phys_footprint, not resident_size)" \
+MEM=$(echo "$BODY2" | grep "^sushi:memory_mb " | awk '{print $2}')
+check "sushi:memory_mb > 500 (phys_footprint, not resident_size)" \
     "$([ -n "$MEM" ] && [ "$MEM" -gt 500 ] 2>/dev/null && echo 1 || echo 0)"
 
 # generation_tokens_live (live tok/s source) = completed + in-flight. The gauge
@@ -184,7 +184,7 @@ check "mlx_serve:memory_mb > 500 (phys_footprint, not resident_size)" \
 sleep 3
 BODY3=$(curl -s "$BASE/metrics")
 GEN=$(echo "$BODY3" | grep "^vllm:generation_tokens_total " | awk '{print $2}')
-LIVE=$(echo "$BODY3" | grep "^mlx_serve:generation_tokens_live " | awk '{print $2}')
+LIVE=$(echo "$BODY3" | grep "^sushi:generation_tokens_live " | awk '{print $2}')
 check "generation_tokens_live > 0 after one request (sampler ticked)" \
     "$([ -n "$LIVE" ] && [ "$LIVE" -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
 check "generation_tokens_live == generation_tokens_total at rest (no slots decoding)" \
@@ -196,13 +196,13 @@ check "generation_tokens_live == generation_tokens_total at rest (no slots decod
 # at request completion, and generated tokens only accrue during decode. So a
 # multi-minute prefill pinned the GPU while the panel showed 0 tok/s decode and
 # "—" prefill — the user could not tell a long prefill from a hung server.
-# `mlx_serve:prefill_tokens_live` is the missing signal.
+# `sushi:prefill_tokens_live` is the missing signal.
 echo ""
 echo "── Phase 4: live prefill gauge ──"
 
 # At rest, no prefill is in flight.
 sleep 3
-IDLE_PRE=$(curl -s "$BASE/metrics" | grep "^mlx_serve:prefill_tokens_live " | awk '{print $2}')
+IDLE_PRE=$(curl -s "$BASE/metrics" | grep "^sushi:prefill_tokens_live " | awk '{print $2}')
 check "prefill_tokens_live == 0 at rest" \
     "$([ "$IDLE_PRE" = "0" ] && echo 1 || echo 0)"
 
@@ -211,7 +211,7 @@ check "prefill_tokens_live == 0 at rest" \
 BIG=$(python3 -c "print(('The quick brown fox jumps over the lazy dog. ' * 2600).strip())")
 REQ=$(python3 -c "
 import json,sys
-print(json.dumps({'model':'mlx-serve','stream':False,'max_tokens':1,'temperature':0,
+print(json.dumps({'model':'sushi','stream':False,'max_tokens':1,'temperature':0,
                   'messages':[{'role':'user','content':sys.stdin.read()}]}))" <<< "$BIG")
 
 curl -s -m 300 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "$REQ" >/dev/null &
@@ -240,8 +240,8 @@ check "requests_prefilling was 1 during the prefill (phase visible before the fi
 
 # ...and it returns to 0 once the prefill is done.
 sleep 3
-DONE_PRE=$(curl -s "$BASE/metrics" | grep "^mlx_serve:prefill_tokens_live " | awk '{print $2}')
-DONE_PHASE=$(curl -s "$BASE/metrics" | grep "^mlx_serve:requests_prefilling " | awk '{print $2}')
+DONE_PRE=$(curl -s "$BASE/metrics" | grep "^sushi:prefill_tokens_live " | awk '{print $2}')
+DONE_PHASE=$(curl -s "$BASE/metrics" | grep "^sushi:requests_prefilling " | awk '{print $2}')
 check "prefill_tokens_live back to 0 after the request completes" \
     "$([ "$DONE_PRE" = "0" ] && echo 1 || echo 0)"
 check "requests_prefilling back to 0 after the request completes" \
@@ -259,15 +259,15 @@ echo "── Phase 5: prefill tok/s excludes cached tokens ──"
 read_counter() { curl -s "$BASE/metrics" | grep "^$1 " | awk '{print $2}'; }
 
 # Same prompt twice: the second request must hit the hot prefix cache.
-WARM='{"model":"mlx-serve","max_tokens":1,"temperature":0,"messages":[{"role":"user","content":"Count slowly and describe each number in one clause: one two three four five six seven eight nine ten eleven twelve."}]}'
+WARM='{"model":"sushi","max_tokens":1,"temperature":0,"messages":[{"role":"user","content":"Count slowly and describe each number in one clause: one two three four five six seven eight nine ten eleven twelve."}]}'
 curl -s -m 120 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "$WARM" >/dev/null
 P1=$(read_counter "vllm:prompt_tokens_total")
-F1=$(read_counter "mlx_serve:prefill_tokens_total")
+F1=$(read_counter "sushi:prefill_tokens_total")
 
 curl -s -m 120 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "$WARM" >/dev/null
 P2=$(read_counter "vllm:prompt_tokens_total")
-F2=$(read_counter "mlx_serve:prefill_tokens_total")
-C2=$(read_counter "mlx_serve:prefix_cache_tokens_total")
+F2=$(read_counter "sushi:prefill_tokens_total")
+C2=$(read_counter "sushi:prefix_cache_tokens_total")
 
 DP=$((P2 - P1))   # billed prompt tokens of the warm request
 DF=$((F2 - F1))   # tokens it actually forwarded

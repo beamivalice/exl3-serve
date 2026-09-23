@@ -1,6 +1,6 @@
 ---
 name: release
-description: mlx-serve pre-release validation checklist, CalVer versioning, release steps, and CHANGELOG style. Use when preparing or cutting a release, running pre-release validation, or writing CHANGELOG entries.
+description: sushi pre-release validation checklist, CalVer versioning, release steps, and CHANGELOG style. Use when preparing or cutting a release, running pre-release validation, or writing CHANGELOG entries.
 ---
 
 ## Pre-release validation — ALWAYS run this, same process every time
@@ -10,16 +10,16 @@ Timings measured 2026-07-16 on the M4 Max 128 GB, AFTER the `stop_all_engines` p
 | # | Step | Command | Time |
 |---|---|---|---|
 | 1 | Hermetic suite | `zig build test` (**must** be 6/6 steps, 0 fail) | ~1 min |
-| 2 | ReleaseFast binary | `zig build -Doptimize=ReleaseFast` → `du -h zig-out/bin/mlx-serve` ≈ **7 MB** (Debug ≈ 2× = fake regression) | ~10 s |
-| 3 | **Perf gate** (did WE regress?) | `./tests/bench.sh` (mlx-serve only, llmprobe) → diff vs the previous column in `benchmarks.md` → append this release's column | ~15 min |
+| 2 | ReleaseFast binary | `zig build -Doptimize=ReleaseFast` → `du -h zig-out/bin/sushi` ≈ **7 MB** (Debug ≈ 2× = fake regression) | ~10 s |
+| 3 | **Perf gate** (did WE regress?) | `./tests/bench.sh` (sushi only, llmprobe) → diff vs the previous column in `benchmarks.md` → append this release's column | ~15 min |
 | 4 | Tool-call correctness | `zig build test -Dtest-filter="format corpus"` + `-Dtest-filter="tool traffic"`; live: `./tests/test_format_matrix.sh` | ~3 min |
 | 5 | API conformance | `npx llmprobe@latest http://127.0.0.1:<port>/v1 --quick` → expect **100%** engine conformance | ~10 s/model |
 | 6 | Regression scripts | `integration_test.sh`, `test_anthropic_api.sh`, `test_stream_keepalive.sh`, `test_disconnect_cancel.sh`, `test_pld_equivalence.sh`, `test_mtp_equivalence.sh` | ~15 min |
 | 7 | Soak (bigger releases) | `SOAK_DURATION_HOURS=1 ./tests/test_soak_24h.sh` — RSS drift < 10% | 1 h |
-| 8 | **Cross-engine check** (only before a public claim) | start each engine yourself, `./tests/bench.sh --url <host:port> -m <id> --full` per engine; record in `~/claude-tmp/bench-<tag>/`, name the engine in every win — `benchmarks.md` carries mlx-serve only | ~90 min |
+| 8 | **Cross-engine check** (only before a public claim) | start each engine yourself, `./tests/bench.sh --url <host:port> -m <id> --full` per engine; record in `~/claude-tmp/bench-<tag>/`, name the engine in every win — `benchmarks.md` carries sushi only | ~90 min |
 
 **Rules:**
-- **Steps 3 and 8 are different questions.** 3 = "did our code regress" — mlx-serve only, the ONLY one needed every release. 8 = the public comparison; LM Studio/oMLX/MTPLX numbers cannot move when only OUR code changes, so re-run 8 only when an engine version bumps.
+- **Steps 3 and 8 are different questions.** 3 = "did our code regress" — sushi only, the ONLY one needed every release. 8 = the public comparison; LM Studio/oMLX/MTPLX numbers cannot move when only OUR code changes, so re-run 8 only when an engine version bumps.
 - **Diff step 3 against llmprobe columns only.** Columns through 26.7.12 are the pre-2026-08 hand-rolled bench, a DIFFERENT methodology — frozen history, never a diff target. See /bench.
 - **`--only <substr>`** runs a single model row for tight dev loops.
 - **Depth**: default `--bench-only` is one run per ladder rung to 16k. `--full` takes median-of-3 per rung and climbs to 32k/64k — that's the release artifact depth (step 8). For a regression CLAIM on a spec-decode cell, sample across runs and boot orders regardless of depth: "reproducible ≠ not variance".

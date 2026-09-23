@@ -14,7 +14,7 @@
 
 set -e
 
-ROOT="${1:-$HOME/.mlx-serve/models}"
+ROOT="${1:-$HOME/.sushi/models}"
 PORT="${2:-8098}"
 BASE="http://127.0.0.1:$PORT"
 CYCLES="${IDLE_EVICT_CYCLES:-6}"
@@ -40,14 +40,14 @@ fi
 M="${MODELS[0]}"
 echo "  using $M"
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 LOGFILE=$(mktemp)
 # 2s window: idleEvictTickMs floors the sweep at 1s, so eviction lands ~3s after
 # the last request instead of making the test wait out a realistic window.
 "$BINARY" --model-dir "$ROOT" --serve --port "$PORT" --idle-evict-secs 2 \
-    ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
+    ${SUSHI_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
 SERVER_PID=$!
 cleanup() {
     kill $SERVER_PID 2>/dev/null || true
@@ -151,9 +151,9 @@ if [ "$FAIL" = "0" ] && [ -n "$BASE_RSS" ]; then
 fi
 
 # Default off: the same binary with no flag must keep the model resident.
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 wait $SERVER_PID 2>/dev/null || true
-"$BINARY" --model-dir "$ROOT" --serve --port "$PORT" ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
+"$BINARY" --model-dir "$ROOT" --serve --port "$PORT" ${SUSHI_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 30); do curl -fs "$BASE/health" >/dev/null 2>&1 && break; sleep 1; done
 [ "$(chat)" = "200" ] || { echo -e "${RED}FAIL${NC} control server did not serve"; FAIL=1; }

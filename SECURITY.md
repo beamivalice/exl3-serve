@@ -9,7 +9,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in mlx-serve, please report it responsibly:
+If you discover a security vulnerability in sushi, please report it responsibly:
 
 1. **Do not** open a public issue
 2. Email **security@dalcu.com** with:
@@ -22,7 +22,7 @@ You should receive a response within 48 hours. We will work with you to understa
 
 ## Security Model
 
-mlx-serve is designed as a **local development tool** running on a single machine. It is not designed for production deployment or untrusted network exposure.
+sushi is designed as a **local development tool** running on a single machine. It is not designed for production deployment or untrusted network exposure.
 
 ### By Design
 - **No authentication**: The HTTP API has no auth — it's intended for localhost use only

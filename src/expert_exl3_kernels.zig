@@ -35,7 +35,7 @@ pub fn setPairSplitsForTest(n: ?u32) void {
 fn exl3UbenchOn() bool {
     if (ubench_mute) return false;
     if (ubench_env) |v| return v;
-    const v = diagEnvValueOn(std.c.getenv("MLX_SERVE_EXL3_LAYER_UBENCH"));
+    const v = diagEnvValueOn(std.c.getenv("SUSHI_EXL3_LAYER_UBENCH"));
     ubench_env = v;
     return v;
 }
@@ -57,7 +57,7 @@ fn ubenchEval(a: mlx.mlx_array, name: []const u8) !void {
 
 fn swigluMaxabsOn() bool {
     if (swiglu_maxabs_env) |v| return v;
-    const v = diagEnvValueOn(std.c.getenv("MLX_SERVE_EXL3_SWIGLU_MAXABS"));
+    const v = diagEnvValueOn(std.c.getenv("SUSHI_EXL3_SWIGLU_MAXABS"));
     swiglu_maxabs_env = v;
     return v;
 }
@@ -117,7 +117,7 @@ var union_hist_env: ?bool = null;
 
 fn unionHistOn() bool {
     if (union_hist_env) |v| return v;
-    const v = diagEnvValueOn(std.c.getenv("MLX_SERVE_EXL3_UNION_HIST"));
+    const v = diagEnvValueOn(std.c.getenv("SUSHI_EXL3_UNION_HIST"));
     union_hist_env = v;
     return v;
 }
@@ -889,10 +889,10 @@ fn resolveGemmWindowRows(raw: ?[]const u8) ?c_int {
 fn gemmWindowRows() c_int {
     if (gemm_win_cached) |v| return v;
     const v = blk: {
-        const p = std.c.getenv("MLX_SERVE_EXL3_GEMM_WIN") orelse break :blk GEMM_WINDOW_ROWS;
+        const p = std.c.getenv("SUSHI_EXL3_GEMM_WIN") orelse break :blk GEMM_WINDOW_ROWS;
         const raw = std.mem.span(p);
         if (resolveGemmWindowRows(raw)) |n| break :blk n;
-        log.warn("[exl3] MLX_SERVE_EXL3_GEMM_WIN={s} is not a window in 1..{d}; keeping {d}\n", .{ raw, GEMM_WINDOW_MAX_ROWS, GEMM_WINDOW_ROWS });
+        log.warn("[exl3] SUSHI_EXL3_GEMM_WIN={s} is not a window in 1..{d}; keeping {d}\n", .{ raw, GEMM_WINDOW_MAX_ROWS, GEMM_WINDOW_ROWS });
         break :blk GEMM_WINDOW_ROWS;
     };
     gemm_win_cached = v;
@@ -902,7 +902,7 @@ fn gemmWindowRows() c_int {
 fn gemmWindowAligned() bool {
     if (gemm_align_cached) |v| return v;
     var on = true;
-    if (std.c.getenv("MLX_SERVE_EXL3_WIN_ALIGN")) |p| {
+    if (std.c.getenv("SUSHI_EXL3_WIN_ALIGN")) |p| {
         const v = std.mem.span(p);
         if (v.len > 0 and v[0] == '0') on = false;
     }
@@ -946,7 +946,7 @@ var apply_ubench_env: ?bool = null;
 
 fn applyUbenchOn() bool {
     if (apply_ubench_env) |v| return v;
-    const v = diagEnvValueOn(std.c.getenv("MLX_SERVE_DECODE_TICK_UBENCH"));
+    const v = diagEnvValueOn(std.c.getenv("SUSHI_DECODE_TICK_UBENCH"));
     apply_ubench_env = v;
     return v;
 }
@@ -975,7 +975,7 @@ fn gpuArch(buf: []u8) ?[]const u8 {
 
 fn gemmNaxOn() bool {
     if (gemm_nax_failed) return false;
-    if (std.c.getenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK")) |p| {
+    if (std.c.getenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK")) |p| {
         const v = std.mem.span(p);
         if (v.len > 0 and v[0] == '1') return false;
     }
@@ -1003,7 +1003,7 @@ fn getGemmNaxKernel() !mlx.mlx_fast_metal_kernel {
         inline else => |cb| switch (active_decode.window) {
             inline else => |win| {
                 if (gemm_nax_kernel[cbIndex(cb)][win.index()]) |k| return k;
-                const kernel = buildNaxGemmKernel(GEMM_NAX_SOURCE, naxHeader(cb, win), comptime "mlxserve_exl3_k4_gemm_nax" ++ cbSuffix(cb) ++ winSuffix(win)) orelse {
+                const kernel = buildNaxGemmKernel(GEMM_NAX_SOURCE, naxHeader(cb, win), comptime "sushi_exl3_k4_gemm_nax" ++ cbSuffix(cb) ++ winSuffix(win)) orelse {
                     gemm_nax_failed = true;
                     log.info("[exl3-gemm] NAX arm declined (kernel probe failed); the sorted GEMM serves prefill\n", .{});
                     return error.MetalKernelCompileFailed;
@@ -1078,7 +1078,7 @@ fn probeNaxGemm(kernel: mlx.mlx_fast_metal_kernel) bool {
 fn getGemmSortedKernel() !mlx.mlx_fast_metal_kernel {
     const ins = [_][*:0]const u8{ "x", "trellis", "eids", "wstarts", "wnlive" };
     const outs = [_][*:0]const u8{"y"};
-    return codebookKernel(&gemm_sorted_kernel, "mlxserve_exl3_k4_gemm_sorted", &ins, &outs, GEMM_SORTED_SOURCE);
+    return codebookKernel(&gemm_sorted_kernel, "sushi_exl3_k4_gemm_sorted", &ins, &outs, GEMM_SORTED_SOURCE);
 }
 
 const WindowTable = struct { starts: mlx.mlx_array, nlives: mlx.mlx_array, nwin: c_int };
@@ -1367,7 +1367,7 @@ fn getPrepareKernel() !mlx.mlx_fast_metal_kernel {
     const out_vec = mlx.mlx_vector_string_new_data(&output_names, output_names.len);
     defer _ = mlx.mlx_vector_string_free(out_vec);
     const kernel = mlx.mlx_fast_metal_kernel_new(
-        "mlxserve_exl3_prepare_h128",
+        "sushi_exl3_prepare_h128",
         in_vec,
         out_vec,
         PREPARE_SOURCE,
@@ -1389,7 +1389,7 @@ fn getFinishKernel() !mlx.mlx_fast_metal_kernel {
     const out_vec = mlx.mlx_vector_string_new_data(&output_names, output_names.len);
     defer _ = mlx.mlx_vector_string_free(out_vec);
     const kernel = mlx.mlx_fast_metal_kernel_new(
-        "mlxserve_exl3_finish_h128",
+        "sushi_exl3_finish_h128",
         in_vec,
         out_vec,
         FINISH_SOURCE,
@@ -1477,7 +1477,7 @@ pub fn finishIndexed(s: mlx.mlx_stream, inner: mlx.mlx_array, svh: mlx.mlx_array
 fn getGemvKernel() !mlx.mlx_fast_metal_kernel {
     const ins = [_][*:0]const u8{ "x", "trellis" };
     const outs = [_][*:0]const u8{"y"};
-    return codebookKernel(&gemv_kernel, "mlxserve_exl3_k4_mcg_gemv", &ins, &outs, GEMV_SOURCE);
+    return codebookKernel(&gemv_kernel, "sushi_exl3_k4_mcg_gemv", &ins, &outs, GEMV_SOURCE);
 }
 
 var inner_gemv_cfgs: CfgCache(GemvKey, 8) = .{};
@@ -1605,7 +1605,7 @@ var indexed_coop_kernel: KernelSlots = no_kernels;
 fn getIndexedCoopKernel() !mlx.mlx_fast_metal_kernel {
     const ins = [_][*:0]const u8{ "x", "trellis", "slots" };
     const outs = [_][*:0]const u8{"y"};
-    return codebookKernel(&indexed_coop_kernel, "mlxserve_exl3_k4_mul1_gemv_indexed", &ins, &outs, INDEXED_COOP_SOURCE);
+    return codebookKernel(&indexed_coop_kernel, "sushi_exl3_k4_mul1_gemv_indexed", &ins, &outs, INDEXED_COOP_SOURCE);
 }
 
 pub fn indexedGemvCoopF16(s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, slots: mlx.mlx_array) !mlx.mlx_array {
@@ -1886,7 +1886,7 @@ fn downGemvFusedMid(
     };
     const ins = [_][*:0]const u8{ "ig", "iu", "trellis", "svhg", "svhu", "suhd", "slots" };
     const outs = [_][*:0]const u8{"y"};
-    const kernel = try codebookKernel(&down_fused_kernel, "mlxserve_exl3_k4_down_fused", &ins, &outs, DOWN_FUSED_SOURCE);
+    const kernel = try codebookKernel(&down_fused_kernel, "sushi_exl3_k4_down_fused", &ins, &outs, DOWN_FUSED_SOURCE);
     const ov = try applyOuts(s, kernel, &.{ ig, iu, trellis, svhg, svhu, suhd, slots }, cfg, 1);
     logN48Funnel(rate.n, .fused_mid_down, mlx.mlx_array_dtype(ig));
     defer _ = mlx.mlx_vector_array_free(ov);
@@ -2279,7 +2279,7 @@ fn pairGemv(s: mlx.mlx_stream, x: mlx.mlx_array, suhg: mlx.mlx_array, suhu: mlx.
     };
     const ins = [_][*:0]const u8{ "x", "suhg", "suhu", "tg", "tu", "slots" };
     const outs = [_][*:0]const u8{ "yg", "yu" };
-    const kernel = try codebookKernel(&pair_gemv_kernel, "mlxserve_exl3_pair_gemv", &ins, &outs, PAIR_GEMV_SOURCE);
+    const kernel = try codebookKernel(&pair_gemv_kernel, "sushi_exl3_pair_gemv", &ins, &outs, PAIR_GEMV_SOURCE);
     const ov = try applyOuts(s, kernel, &.{ x, suhg, suhu, tg, tu, slots }, cfg, 2);
     logN48Funnel(rate.n, .pair, mlx.mlx_array_dtype(x));
     if (rate.n == 40 and !n40_decode_engaged) {
@@ -2312,7 +2312,7 @@ fn midSwigluPrep(s: mlx.mlx_stream, ig: mlx.mlx_array, iu: mlx.mlx_array, svhg: 
     };
     const ins = [_][*:0]const u8{ "ig", "iu", "svhg", "svhu", "suhd", "slots" };
     const outs = [_][*:0]const u8{"yd"};
-    const kernel = try getNamedKernel(&mid_kernel, "mlxserve_exl3_mid_swiglu", &ins, &outs, MID_SOURCE, "");
+    const kernel = try getNamedKernel(&mid_kernel, "sushi_exl3_mid_swiglu", &ins, &outs, MID_SOURCE, "");
     const ov = try applyOuts(s, kernel, &.{ ig, iu, svhg, svhu, suhd, slots }, cfg, 1);
     defer _ = mlx.mlx_vector_array_free(ov);
     var a = mlx.mlx_array_new();
@@ -2345,7 +2345,7 @@ fn downFinishReduce(s: mlx.mlx_stream, inner: mlx.mlx_array, svh: mlx.mlx_array,
     };
     const ins = [_][*:0]const u8{ "inner", "svh", "slots", "sc" };
     const outs = [_][*:0]const u8{"y"};
-    const kernel = try getNamedKernel(&reduce_kernel, "mlxserve_exl3_down_reduce", &ins, &outs, REDUCE_SOURCE, "");
+    const kernel = try getNamedKernel(&reduce_kernel, "sushi_exl3_down_reduce", &ins, &outs, REDUCE_SOURCE, "");
     const ov = try applyOuts(s, kernel, &.{ inner, svh, slots, scores }, cfg, 1);
     defer _ = mlx.mlx_vector_array_free(ov);
     var a = mlx.mlx_array_new();
@@ -2371,7 +2371,7 @@ fn prepareFromTokens(s: mlx.mlx_stream, x: mlx.mlx_array, suh: mlx.mlx_array, sl
     };
     const ins = [_][*:0]const u8{ "x", "suh", "slots", "order" };
     const outs = [_][*:0]const u8{"y"};
-    const kernel = try getNamedKernel(&token_prepare_kernel, "mlxserve_exl3_token_prepare", &ins, &outs, TOKEN_PREPARE_SOURCE, "");
+    const kernel = try getNamedKernel(&token_prepare_kernel, "sushi_exl3_token_prepare", &ins, &outs, TOKEN_PREPARE_SOURCE, "");
     const ov = try applyOuts(s, kernel, &.{ x, suh, slots, order }, cfg, 1);
     defer _ = mlx.mlx_vector_array_free(ov);
     var a = mlx.mlx_array_new();
@@ -2396,7 +2396,7 @@ fn tokenReduce(s: mlx.mlx_stream, d: mlx.mlx_array, inv: mlx.mlx_array, scores: 
     };
     const ins = [_][*:0]const u8{ "d", "inv", "sc" };
     const outs = [_][*:0]const u8{"y"};
-    const kernel = try getNamedKernel(&token_reduce_kernel, "mlxserve_exl3_token_reduce", &ins, &outs, TOKEN_REDUCE_SOURCE, "");
+    const kernel = try getNamedKernel(&token_reduce_kernel, "sushi_exl3_token_reduce", &ins, &outs, TOKEN_REDUCE_SOURCE, "");
     const ov = try applyOuts(s, kernel, &.{ d, inv, scores }, cfg, 1);
     defer _ = mlx.mlx_vector_array_free(ov);
     var a = mlx.mlx_array_new();
@@ -2423,7 +2423,7 @@ fn pairPrepareFromTokens(s: mlx.mlx_stream, x: mlx.mlx_array, suhg: mlx.mlx_arra
     };
     const ins = [_][*:0]const u8{ "x", "suhg", "suhu", "slots", "order" };
     const outs = [_][*:0]const u8{ "yg", "yu" };
-    const kernel = try getNamedKernel(&token_pair_prepare_kernel, "mlxserve_exl3_token_pair_prepare", &ins, &outs, TOKEN_PAIR_PREPARE_SOURCE, "");
+    const kernel = try getNamedKernel(&token_pair_prepare_kernel, "sushi_exl3_token_pair_prepare", &ins, &outs, TOKEN_PAIR_PREPARE_SOURCE, "");
     const ov = try applyOuts(s, kernel, &.{ x, suhg, suhu, slots, order }, cfg, 2);
     defer _ = mlx.mlx_vector_array_free(ov);
     var a = mlx.mlx_array_new();
@@ -2450,7 +2450,7 @@ fn scatterSorted(s: mlx.mlx_stream, x: mlx.mlx_array, order: mlx.mlx_array, dim:
     };
     const ins = [_][*:0]const u8{ "x", "order" };
     const outs = [_][*:0]const u8{"y"};
-    const kernel = try getNamedKernel(&token_scatter_kernel, "mlxserve_exl3_token_scatter", &ins, &outs, TOKEN_SCATTER_SOURCE, "");
+    const kernel = try getNamedKernel(&token_scatter_kernel, "sushi_exl3_token_scatter", &ins, &outs, TOKEN_SCATTER_SOURCE, "");
     const ov = try applyOuts(s, kernel, &.{ x, order }, cfg, 1);
     defer _ = mlx.mlx_vector_array_free(ov);
     var a = mlx.mlx_array_new();
@@ -4432,9 +4432,9 @@ test "exl3 a NAX GEMM source the Metal toolchain rejects is declined at the prob
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     mlx.installErrorHandler();
     try t.expect(!mlx.errorPending());
-    try t.expect(buildNaxGemmKernel("this is not metal;", "", "mlxserve_exl3_probe_bad") == null);
+    try t.expect(buildNaxGemmKernel("this is not metal;", "", "sushi_exl3_probe_bad") == null);
     try t.expect(!mlx.errorPending());
-    const real = buildNaxGemmKernel(GEMM_NAX_SOURCE, naxHeader(.mul1, .w16), "mlxserve_exl3_k4_gemm_nax") orelse return error.TestUnexpectedResult;
+    const real = buildNaxGemmKernel(GEMM_NAX_SOURCE, naxHeader(.mul1, .w16), "sushi_exl3_k4_gemm_nax") orelse return error.TestUnexpectedResult;
     _ = mlx.mlx_fast_metal_kernel_free(real);
     try t.expect(!mlx.errorPending());
 }
@@ -4586,8 +4586,8 @@ test "exl3 sorted GEMM matches host MUL1 with the NAX arm forced off" {
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     if (!gemmNaxOn()) return error.SkipZigTest;
-    _ = setenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
-    defer _ = unsetenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK");
+    _ = setenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
+    defer _ = unsetenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK");
     try t.expect(!gemmNaxOn());
     const fixture = exl3.fixtures.k4;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
@@ -5793,8 +5793,8 @@ test "exl3 sorted GEMM matches the host tile decode at a fractional rate with th
     const t = std.testing;
     if (!mlx.streamIsGpu(mlx.gpuStream())) return error.SkipZigTest;
     if (!gemmNaxOn()) return error.SkipZigTest;
-    _ = setenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
-    defer _ = unsetenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK");
+    _ = setenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
+    defer _ = unsetenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK");
     try t.expect(!gemmNaxOn());
     for (0..PARITY_SEEDS) |i| {
         try sortedGemmParity(.{ .n = 40 }, .mcg, 32, 401 + i);
@@ -5829,8 +5829,8 @@ test "exl3 sorted GEMM matches the host tile decode at a narrowed window with th
     const t = std.testing;
     if (!mlx.streamIsGpu(mlx.gpuStream())) return error.SkipZigTest;
     if (!gemmNaxOn()) return error.SkipZigTest;
-    _ = setenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
-    defer _ = unsetenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK");
+    _ = setenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
+    defer _ = unsetenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK");
     try t.expect(!gemmNaxOn());
     for (0..PARITY_SEEDS) |i| {
         try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 }, 32, 1001 + i);
@@ -6401,13 +6401,13 @@ fn withGemmWindow(win: ?[*:0]const u8, aligned: bool, c: MimoMoeCase) !void {
     defer {
         gemm_win_cached = prev_win;
         gemm_align_cached = prev_align;
-        _ = unsetenv("MLX_SERVE_EXL3_GEMM_WIN");
-        _ = unsetenv("MLX_SERVE_EXL3_WIN_ALIGN");
+        _ = unsetenv("SUSHI_EXL3_GEMM_WIN");
+        _ = unsetenv("SUSHI_EXL3_WIN_ALIGN");
     }
     gemm_win_cached = null;
     gemm_align_cached = null;
-    if (win) |w| _ = setenv("MLX_SERVE_EXL3_GEMM_WIN", w, 1) else _ = unsetenv("MLX_SERVE_EXL3_GEMM_WIN");
-    _ = setenv("MLX_SERVE_EXL3_WIN_ALIGN", if (aligned) "1" else "0", 1);
+    if (win) |w| _ = setenv("SUSHI_EXL3_GEMM_WIN", w, 1) else _ = unsetenv("SUSHI_EXL3_GEMM_WIN");
+    _ = setenv("SUSHI_EXL3_WIN_ALIGN", if (aligned) "1" else "0", 1);
     try mimoArmsAgree(c);
 }
 
@@ -6425,10 +6425,10 @@ test "mimo_v2 EXL3 prefill rows match the fused decode arm on every GEMM arm" {
     for ([_]bool{ true, false }) |nax_off| {
         if (nax_off) {
             if (!gemmNaxOn()) continue;
-            _ = setenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
+            _ = setenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
         }
         defer if (nax_off) {
-            _ = unsetenv("MLX_SERVE_FORCE_GPU_FAMILY_FALLBACK");
+            _ = unsetenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK");
         };
         for ([_]?[*:0]const u8{ null, "16" }) |win| {
             for ([_]bool{ true, false }) |aligned| try withGemmWindow(win, aligned, base);
@@ -6822,9 +6822,9 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 // Codebook A/B at production expert shape: ITER forwards per arm built lazily
 // and timed as ONE eval, arms alternated over rounds, medians reported.
-// Prints only under MLX_SERVE_EXL3_CODEBOOK_AB (a diagnostic, never a test).
+// Prints only under SUSHI_EXL3_CODEBOOK_AB (a diagnostic, never a test).
 test "exl3 codebook A/B at production shape" {
-    if (!diagEnvValueOn(std.c.getenv("MLX_SERVE_EXL3_CODEBOOK_AB"))) return error.SkipZigTest;
+    if (!diagEnvValueOn(std.c.getenv("SUSHI_EXL3_CODEBOOK_AB"))) return error.SkipZigTest;
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -7143,7 +7143,7 @@ fn buildMimoWindowTable(s: mlx.mlx_stream, eids: mlx.mlx_array, order: mlx.mlx_a
     const nn: u32 = @intCast(n);
     const count = mlx.mlx_array_new_data(&nn, &.{1}, 1, .uint32);
     defer _ = mlx.mlx_array_free(count);
-    const kernel = try getNamedKernel(&mimo_window_kernel, "mlxserve_exl3_mimo_windows", &.{ "eids", "order", "count" }, &.{ "starts", "nlives", "inverse" }, MIMO_WINDOW_SOURCE, "");
+    const kernel = try getNamedKernel(&mimo_window_kernel, "sushi_exl3_mimo_windows", &.{ "eids", "order", "count" }, &.{ "starts", "nlives", "inverse" }, MIMO_WINDOW_SOURCE, "");
     const outputs = try applyOuts(s, kernel, &.{ eids, order, count }, cfg, 3);
     defer _ = mlx.mlx_vector_array_free(outputs);
     var starts = mlx.mlx_array_new();
@@ -7228,7 +7228,7 @@ fn finishMimoSorted(s: mlx.mlx_stream, inner: mlx.mlx_array, inverse: mlx.mlx_ar
         mimo_reduce_cfgs.put(key, c);
         break :blk c;
     };
-    const kernel = try getNamedKernel(&mimo_reduce_kernel, "mlxserve_exl3_mimo_sorted_reduce", &.{ "inner", "inverse", "svh", "slots", "sc" }, &.{"y"}, MIMO_REDUCE_SOURCE, "");
+    const kernel = try getNamedKernel(&mimo_reduce_kernel, "sushi_exl3_mimo_sorted_reduce", &.{ "inner", "inverse", "svh", "slots", "sc" }, &.{"y"}, MIMO_REDUCE_SOURCE, "");
     const outputs = try applyOuts(s, kernel, &.{ inner, inverse, svh, slots, scores }, cfg, 1);
     defer _ = mlx.mlx_vector_array_free(outputs);
     var y = mlx.mlx_array_new();
@@ -7402,7 +7402,7 @@ fn prepareDecodeMid(s: mlx.mlx_stream, ig: mlx.mlx_array, iu: mlx.mlx_array, svh
         decode_mid_cfgs.put(key, c);
         break :blk c;
     };
-    const kernel = try getNamedKernel(&decode_mid_kernel, "mlxserve_exl3_decode_mid", &.{ "ig", "iu", "svhg", "svhu", "suhd", "slots" }, &.{"prepared"}, DECODE_MID_SOURCE, "");
+    const kernel = try getNamedKernel(&decode_mid_kernel, "sushi_exl3_decode_mid", &.{ "ig", "iu", "svhg", "svhu", "suhd", "slots" }, &.{"prepared"}, DECODE_MID_SOURCE, "");
     const outputs = try applyOuts(s, kernel, &.{ ig, iu, svhg, svhu, suhd, slots }, cfg, 1);
     defer _ = mlx.mlx_vector_array_free(outputs);
     var middle = mlx.mlx_array_new();
@@ -7430,7 +7430,7 @@ fn downGemvPreparedMid(s: mlx.mlx_stream, ig: mlx.mlx_array, iu: mlx.mlx_array, 
         down_prepared_cfgs.put(key, c);
         break :blk c;
     };
-    const kernel = try codebookKernel(&down_prepared_kernel, "mlxserve_exl3_down_prepared", &.{ "middle", "trellis", "slots" }, &.{"y"}, DOWN_PREPARED_SOURCE);
+    const kernel = try codebookKernel(&down_prepared_kernel, "sushi_exl3_down_prepared", &.{ "middle", "trellis", "slots" }, &.{"y"}, DOWN_PREPARED_SOURCE);
     const outputs = try applyOuts(s, kernel, &.{ middle, trellis, slots }, cfg, 1);
     logN48Funnel(rate.n, .prepared_down, mlx.mlx_array_dtype(middle));
     defer _ = mlx.mlx_vector_array_free(outputs);

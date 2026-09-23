@@ -368,14 +368,14 @@ fn qwen4MixedModelPacksMatch(target: *const Transformer) bool {
     return true;
 }
 
-/// Profile-only revocation (MLX_SERVE_MTP_QWEN4_PROFILE=0): planning falls
+/// Profile-only revocation (SUSHI_MTP_QWEN4_PROFILE=0): planning falls
 /// back to `generic` while every compute lane stays exactly as shipped —
 /// the isolation arm for cost-surface A/Bs, where killing the vqmm NAX lane
 /// would change the very costs under test.
 fn qwen4G17EnvEnabled() bool {
     if (qwen4_g17_env_cache) |v| return v;
     var on = true;
-    if (std.c.getenv("MLX_SERVE_MTP_QWEN4_PROFILE")) |p| {
+    if (std.c.getenv("SUSHI_MTP_QWEN4_PROFILE")) |p| {
         const val = std.mem.span(p);
         if (val.len > 0 and val[0] == '0') on = false;
     }
@@ -386,7 +386,7 @@ fn qwen4G17EnvEnabled() bool {
 /// Live resolver for the qwen4_exp head: validates the runtime fingerprint
 /// the G17 surface was measured on — uniform affine-4/gs-64 config and both
 /// head fc packs at that width (K derived from the scales, so no input-dim
-/// formula is assumed). Revoked by MLX_SERVE_VERIFY_QMM_NAX=0 like the
+/// formula is assumed). Revoked by SUSHI_VERIFY_QMM_NAX=0 like the
 /// sidecar profiles: auto depth never assumes a lane the environment
 /// disabled.
 pub fn qwen4G17CostProfile(target: *const Transformer) MtpCostProfile {
@@ -437,7 +437,7 @@ pub fn qwen4G17CostProfileForKv(target: *const Transformer, kv: transformer_mod.
     );
     if (profile != .generic and !qwen4_g17_profile_logged) {
         qwen4_g17_profile_logged = true;
-        log.info("[mtp] cost profile g17-nax-qwen4-q4-gs64 engaged (MLX_SERVE_VERIFY_QMM_NAX=0 restores generic)\n", .{});
+        log.info("[mtp] cost profile g17-nax-qwen4-q4-gs64 engaged (SUSHI_VERIFY_QMM_NAX=0 restores generic)\n", .{});
     }
     return profile;
 }
@@ -651,7 +651,7 @@ pub const MtpModel = struct {
     mlp: MtpMlp,
 
     /// Optional DRAFT-ONLY low-bit lm_head, requantized from the trunk's at
-    /// bind time (MLX_SERVE_MTP_DRAFT_HEAD_BITS, default 3, 0 disables).
+    /// bind time (SUSHI_MTP_DRAFT_HEAD_BITS, default 3, 0 disables).
     /// Only draft steps project through it — VERIFICATION always uses the
     /// trunk head, so the output distribution is untouched; drafts just read
     /// ~40% fewer bytes per full-vocab projection (the dominant draft cost).
@@ -659,7 +659,7 @@ pub const MtpModel = struct {
     draft_head_bits: u32 = 0,
     draft_head_group: u32 = 0,
 
-    /// Draft-rerank scheme (MLX_SERVE_MTP_DRAFT_RERANK): a coarse 2-bit/gs64
+    /// Draft-rerank scheme (SUSHI_MTP_DRAFT_RERANK): a coarse 2-bit/gs64
     /// requant of the trunk lm_head; greedy drafts shortlist its top-32 and
     /// re-score them through the trunk head's own rows (`draftSelect`). When
     /// built, the 3-bit draft head is dropped — non-greedy draft paths fall
@@ -674,7 +674,7 @@ pub const MtpModel = struct {
     /// ~10 legacy-warmup rounds plus a +1/round base climb per request —
     /// a third of a short protocol-style generation; seeding restores the
     /// learned surface from round 1. Never written by disabled/short runs;
-    /// set MLX_SERVE_MTP_EV_SEED=0 to opt into request isolation.
+    /// set SUSHI_MTP_EV_SEED=0 to opt into request isolation.
     ev_seed_accept: ?[MAX_DEPTH]f32 = null,
     ev_seed_m_lo: u32 = 1,
 
@@ -853,10 +853,10 @@ pub const MtpModel = struct {
         // step's halves factored if a future backend changes the calculus.
     }
 
-    /// MLX_SERVE_MTP_DRAFT_HEAD_BITS: absent → 3 (default on)
+    /// SUSHI_MTP_DRAFT_HEAD_BITS: absent → 3 (default on)
     /// a supported bit width → that; anything else ("0", "off") → disabled.
     fn draftHeadBitsFromEnv() u32 {
-        const p = std.c.getenv("MLX_SERVE_MTP_DRAFT_HEAD_BITS") orelse return 3;
+        const p = std.c.getenv("SUSHI_MTP_DRAFT_HEAD_BITS") orelse return 3;
         const raw = std.mem.span(p);
         const v = std.fmt.parseInt(u32, raw, 10) catch return 0;
         return switch (v) {
@@ -906,11 +906,11 @@ pub const MtpModel = struct {
         log.info("[mtp] draft-only lm_head requantized to {d}-bit/gs{d}\n", .{ bits, group });
     }
 
-    /// MLX_SERVE_MTP_DRAFT_RERANK: "0" off, "1" force-on, absent/other →
+    /// SUSHI_MTP_DRAFT_RERANK: "0" off, "1" force-on, absent/other →
     /// auto (on where the cost surface is generic; the calibrated G17 NAX
     /// surfaces keep the 3-bit draft head they were measured with).
     pub fn draftRerankMode() enum { auto, on, off } {
-        const p = std.c.getenv("MLX_SERVE_MTP_DRAFT_RERANK") orelse return .auto;
+        const p = std.c.getenv("SUSHI_MTP_DRAFT_RERANK") orelse return .auto;
         const raw = std.mem.span(p);
         if (std.mem.eql(u8, raw, "0")) return .off;
         if (std.mem.eql(u8, raw, "1")) return .on;
@@ -1010,7 +1010,7 @@ pub const MtpModel = struct {
 // `hidden_next`.
 
 /// Coarse-head width AT BUILD TIME. The default is `draftHeadBitsFromEnv` (3),
-/// so MLX_SERVE_MTP_DRAFT_HEAD_BITS retunes it and "0"/"off" disables the build
+/// so SUSHI_MTP_DRAFT_HEAD_BITS retunes it and "0"/"off" disables the build
 /// entirely. 2 is what the sidecar scheme was measured at and is the obvious
 /// second A/B arm; a coarser head is fewer bytes and a longer tail of
 /// shortlist misses, and a miss costs acceptance, never output.
@@ -1466,7 +1466,7 @@ pub fn rerankSelectBatched(
 /// Root-level names are what others publish (mutual compat: their
 /// loader accepts our `mtp/weights.safetensors` too).
 pub const sidecar_rel_paths = [_][]const u8{
-    "mtp/weights.safetensors", // mlx-serve native (ddalcu repos, serve_convert mtp-sidecar)
+    "mtp/weights.safetensors", // sushi native (ddalcu repos, serve_convert mtp-sidecar)
     "mtp.safetensors", // others
     "model-mtp.safetensors", // others
     "optiq/mtp.safetensors", // oMLX OptiQ (delta-encoded norms — folded at load)
@@ -1672,7 +1672,7 @@ fn negFraction(arr: mlx.mlx_array, s: mlx.mlx_stream) !f32 {
 
 /// Fold `+1` into a delta-encoded RMSNorm weight, preserving its dtype. Mirrors
 /// the sidecar builder (upcast f32 → add 1 → cast back), so a folded
-/// bf16 head is byte-identical to a natively-folded mlx-serve sidecar.
+/// bf16 head is byte-identical to a natively-folded sushi sidecar.
 fn foldNormPlusOne(arr: mlx.mlx_array, s: mlx.mlx_stream) !mlx.mlx_array {
     const dt = mlx.mlx_array_dtype(arr);
     var f = mlx.mlx_array_new();
@@ -1692,7 +1692,7 @@ fn foldNormPlusOne(arr: mlx.mlx_array, s: mlx.mlx_stream) !mlx.mlx_array {
 /// Whether the head's RMSNorm weights are stored DELTA-encoded (the layer
 /// computes `1 + w`, so `w` clusters near 0 with a large NEGATIVE fraction) vs
 /// pre-folded (`1 + w` baked in → strictly positive weights, which is what
-/// mlx-serve's runtime `rmsnorm(x) * w` and the sidecar builder expect). The
+/// sushi's runtime `rmsnorm(x) * w` and the sidecar builder expect). The
 /// Qwen original checkpoints and oMLX's OptiQ export ship delta norms; a naive
 /// copy of such a head loads but accepts ~0% (docs/engine-mtp.md, Norms), so we
 /// detect and fold at load. Folded RMSNorm scales are positive by construction;
@@ -1824,7 +1824,7 @@ fn ownAndTranspose2D(w: *const Weights, key: []const u8, s: mlx.mlx_stream) !mlx
     return t;
 }
 
-/// Head-trunk requantization width (`MLX_SERVE_MTP_HEAD_QUANT_BITS`): dense
+/// Head-trunk requantization width (`SUSHI_MTP_HEAD_QUANT_BITS`): dense
 /// bf16 trunk weights (q/k/v/o, gate/up/down) are affine-quantized to this
 /// width at group 64 during load — the head only PROPOSES tokens (verify
 /// corrects), so the cost is acceptance, never output. 0 disables. Idea from
@@ -1835,7 +1835,7 @@ pub const HEAD_QUANT_GROUP: u32 = 64;
 pub var head_quant_override: ?u32 = null;
 fn headQuantBits() u32 {
     if (head_quant_override) |v| return v;
-    const p = std.c.getenv("MLX_SERVE_MTP_HEAD_QUANT_BITS") orelse return DEFAULT_HEAD_QUANT_BITS;
+    const p = std.c.getenv("SUSHI_MTP_HEAD_QUANT_BITS") orelse return DEFAULT_HEAD_QUANT_BITS;
     const v = std.fmt.parseInt(u32, std.mem.sliceTo(p, 0), 10) catch return DEFAULT_HEAD_QUANT_BITS;
     return switch (v) {
         0, 2, 3, 4, 5, 6, 8 => v,
@@ -2075,7 +2075,7 @@ fn sidecarQuantMode(q: *const QLinear, hidden: u32) model_mod.QuantMode {
     return qp.mode;
 }
 
-/// Root prefix the sidecar's keys carry: mlx-serve-native sidecars use bare
+/// Root prefix the sidecar's keys carry: sushi-native sidecars use bare
 /// `mtp.*`, mlx-lm-exported ones (the 35B-A3B artifacts) `language_model.mtp.*`.
 fn mtpKeyPrefix(weights: *const Weights) []const u8 {
     if (weights.get("language_model.mtp.fc.weight") != null) return "language_model.";
@@ -2192,7 +2192,7 @@ pub fn loadMtp(
 
     // Delta-encoded norms (Qwen original layout, oMLX OptiQ) need `+1` folded
     // in at load so the runtime `rmsnorm(x) * w` matches; a natively-folded
-    // mlx-serve sidecar has strictly-positive norms and is left untouched.
+    // sushi sidecar has strictly-positive norms and is left untouched.
     const fold_norms = mtpNormsAreDeltaEncoded(&weights, p, s);
     if (fold_norms) log.info("[mtp] delta-encoded norms detected; folding +1 at load\n", .{});
 
@@ -2906,11 +2906,11 @@ var mtp_kv_only_env: ?bool = null;
 /// class): a committed-history row's layer OUTPUT has no consumer — only its
 /// K/V entries matter — so the q(+gate) projection, the attention, and the
 /// whole post-attention half are dead work for every row but the last.
-/// MLX_SERVE_MTP_KV_ONLY=0 restores the full-forward history path.
+/// SUSHI_MTP_KV_ONLY=0 restores the full-forward history path.
 fn mtpKvOnlyEnabled() bool {
     if (mtp_kv_only_override) |v| return v;
     if (mtp_kv_only_env) |v| return v;
-    const raw = std.c.getenv("MLX_SERVE_MTP_KV_ONLY");
+    const raw = std.c.getenv("SUSHI_MTP_KV_ONLY");
     const enabled = raw == null or !std.mem.eql(u8, std.mem.sliceTo(raw.?, 0), "0");
     mtp_kv_only_env = enabled;
     return enabled;
@@ -3213,7 +3213,7 @@ pub fn stepArrWithMrope(
 // zero-initialized empty slots below can never be selected while a
 // simdgroup still has real candidates (guaranteed by rows >= TILES*TG).
 const TOP32_ORDINAL_HEADER =
-    \\inline uint msv_top32_ordinal(float v) {
+    \\inline uint sushi_top32_ordinal(float v) {
     \\    if (isnan(v))  { return 0xFFFFFFFFu; }
     \\    if (v == 0.0f) { return 0x80000000u; }
     \\    uint u = as_type<uint>(v);
@@ -3248,7 +3248,7 @@ const TOP32_PARTIAL_SRC =
     \\for (uint t = 0; t < PER_THREAD; ++t) { ord[t] = 0u; idx[t] = 0u; }
     \\uint n = 0;
     \\for (uint i = tile * TG_SIZE + tid; i < REAL_COUNT; i += STRIDE) {
-    \\    ord[n] = msv_top32_ordinal(float(logits[i]));
+    \\    ord[n] = sushi_top32_ordinal(float(logits[i]));
     \\    idx[n] = i;
     \\    n++;
     \\}
@@ -3400,7 +3400,7 @@ fn getTop32Partial() !mlx.mlx_fast_metal_kernel {
     const out_vec = mlx.mlx_vector_string_new_data(&output_names, output_names.len);
     defer _ = mlx.mlx_vector_string_free(out_vec);
     const kernel = mlx.mlx_fast_metal_kernel_new(
-        "msv_mtp_top32_partial",
+        "sushi_mtp_top32_partial",
         in_vec,
         out_vec,
         TOP32_PARTIAL_SRC,
@@ -3422,7 +3422,7 @@ fn getTop32Final() !mlx.mlx_fast_metal_kernel {
     const out_vec = mlx.mlx_vector_string_new_data(&output_names, output_names.len);
     defer _ = mlx.mlx_vector_string_free(out_vec);
     const kernel = mlx.mlx_fast_metal_kernel_new(
-        "msv_mtp_top32_finalize",
+        "sushi_mtp_top32_finalize",
         in_vec,
         out_vec,
         TOP32_FINAL_SRC,
@@ -3731,7 +3731,7 @@ test "mtp: sidecar resolution accepts native and Forge layouts in priority order
     try writeFakeSidecar(io, tmp.dir, "mtp.safetensors", "mtp.eh_proj.weight");
     try testing.expectEqualStrings("mtp.safetensors", resolveMtpSidecarInDir(io, allocator, tmp.dir).?);
 
-    // Native mlx-serve layout outranks both Forge names.
+    // Native sushi layout outranks both Forge names.
     try tmp.dir.createDirPath(io, "mtp");
     try writeFakeSidecar(io, tmp.dir, "mtp/weights.safetensors", "mtp.fc.weight");
     try testing.expectEqualStrings("mtp/weights.safetensors", resolveMtpSidecarInDir(io, allocator, tmp.dir).?);
@@ -3771,7 +3771,7 @@ test "mtp: delta-encoded norms are detected and folded +1; folded norms untouche
 
     // A delta-encoded RMSNorm weight (the layer computes `1 + w`) clusters at 0
     // with a large negative fraction; the pre-folded form is delta + 1 and is
-    // strictly positive. This is exactly the mlx-serve-vs-OptiQ +1.0 offset.
+    // strictly positive. This is exactly the sushi-vs-OptiQ +1.0 offset.
     var delta_buf = [_]f32{ -0.5, -0.2, 0.0, 0.3, 0.8, -0.1 };
     const delta = mlx.mlx_array_new_data(&delta_buf, &shape, 1, .float32);
     defer _ = mlx.mlx_array_free(delta);
@@ -5329,8 +5329,8 @@ test "mtp: the coarse rerank head drafts at its BUILT width, not the env's curre
 
     // ...while the environment now says 2. Every draft below must still be
     // dispatched at 3.
-    _ = setenv("MLX_SERVE_MTP_DRAFT_HEAD_BITS", "2", 1);
-    defer _ = unsetenv("MLX_SERVE_MTP_DRAFT_HEAD_BITS");
+    _ = setenv("SUSHI_MTP_DRAFT_HEAD_BITS", "2", 1);
+    defer _ = unsetenv("SUSHI_MTP_DRAFT_HEAD_BITS");
     try testing.expectEqual(@as(u32, 2), rerankCoarseBits());
 
     var logged = false;

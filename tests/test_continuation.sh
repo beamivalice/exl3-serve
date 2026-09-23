@@ -30,14 +30,14 @@ TOTAL=0
 
 MODEL=$(eval echo "$MODEL")
 if [ ! -d "$MODEL" ]; then echo "SKIP: model not found at $MODEL"; exit 0; fi
-if [ ! -x "./zig-out/bin/mlx-serve" ]; then
-    echo "FAIL: mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+if [ ! -x "./zig-out/bin/sushi" ]; then
+    echo "FAIL: sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required"; exit 1; }
 
-./zig-out/bin/mlx-serve serve --port $PORT --host 127.0.0.1 --log-level info \
-    --model "$MODEL" >/tmp/mlx-serve-continuation.log 2>&1 &
+./zig-out/bin/sushi serve --port $PORT --host 127.0.0.1 --log-level info \
+    --model "$MODEL" >/tmp/sushi-continuation.log 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; }
 trap cleanup EXIT
@@ -58,7 +58,7 @@ PARTIAL="The three primary colors are red, blue, and"
 
 echo "=== /v1/chat/completions: continue_final_message ==="
 BODY=$(curl -s -m 300 "$BASE/v1/chat/completions" -H "Content-Type: application/json" -d "{
-    \"model\": \"mlx-serve\",
+    \"model\": \"sushi\",
     \"messages\": [
         {\"role\": \"user\", \"content\": \"Name the three primary colors in one sentence.\"},
         {\"role\": \"assistant\", \"content\": \"$PARTIAL\"}
@@ -93,7 +93,7 @@ echo "=== /v1/chat/completions: WITHOUT the flag, the prompt is a full turn ==="
 # header. Structural, and true of every checkpoint.
 TOKENS_CONT=$(echo "$BODY" | jq -r '.usage.prompt_tokens // 0')
 TOKENS_PLAIN=$(curl -s -m 300 "$BASE/v1/chat/completions" -H "Content-Type: application/json" -d "{
-    \"model\": \"mlx-serve\",
+    \"model\": \"sushi\",
     \"messages\": [
         {\"role\": \"user\", \"content\": \"Name the three primary colors in one sentence.\"},
         {\"role\": \"assistant\", \"content\": \"$PARTIAL\"}
@@ -112,7 +112,7 @@ fi
 echo "=== /v1/messages: a trailing assistant message IS the request ==="
 ABODY=$(curl -s -m 300 "$BASE/v1/messages" -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" -d "{
-    \"model\": \"mlx-serve\",
+    \"model\": \"sushi\",
     \"messages\": [
         {\"role\": \"user\", \"content\": \"Name the three primary colors in one sentence.\"},
         {\"role\": \"assistant\", \"content\": \"$PARTIAL\"}

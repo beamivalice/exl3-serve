@@ -13,7 +13,7 @@
 set -u
 MODEL="${VISION_CACHE_MODEL:-${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
 PORT="${2:-11419}"
-BIN="${MLX_SERVE_BIN:-./zig-out/bin/mlx-serve}"
+BIN="${SUSHI_BIN:-./zig-out/bin/sushi}"
 LOG="$HOME/claude-tmp/vision-cache/server-$PORT.log"
 mkdir -p "$(dirname "$LOG")"
 [ -f "$MODEL/config.json" ] || { echo "SKIP: no model at $MODEL"; exit 0; }
@@ -32,7 +32,7 @@ for _ in $(seq 1 600); do curl -s "$U/health" >/dev/null 2>&1 && grep -q "ready"
 
 mime_for() { case "$1" in *.jpeg|*.jpg) echo image/jpeg;; *.png) echo image/png;; *.webp) echo image/webp;; esac; }
 body() { # $1 image, $2 question
-  printf '{"model":"mlx-serve","max_tokens":48,"temperature":0,"enable_thinking":false,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:%s;base64,%s"}},{"type":"text","text":"%s"}]}]}' "$(mime_for "$1")" "$(base64 -i "$1")" "$2"
+  printf '{"model":"sushi","max_tokens":48,"temperature":0,"enable_thinking":false,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:%s;base64,%s"}},{"type":"text","text":"%s"}]}]}' "$(mime_for "$1")" "$(base64 -i "$1")" "$2"
 }
 ask() { curl -s -m 600 "$U/v1/chat/completions" -H 'content-type: application/json' -d @- | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['usage']['prompt_tokens_details']['cached_tokens'], '|', d['choices'][0]['message']['content'].replace(chr(10),' '))"; }
 ask_prompt_tokens() { curl -s -m 600 "$U/v1/chat/completions" -H 'content-type: application/json' -d @- | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['usage']['prompt_tokens'])"; }
@@ -64,7 +64,7 @@ if mode == "continuation":
 elif mode == "assistant-prefix":
     messages = [human, {"role": "assistant", "content": "The green street signs read "}]
 payload = {
-    "model": "mlx-serve", "max_tokens": 48, "temperature": 0,
+    "model": "sushi", "max_tokens": 48, "temperature": 0,
     "enable_thinking": False, "messages": messages,
 }
 if mode == "assistant-prefix":
@@ -134,7 +134,7 @@ for i in range(count):
     ])
 messages.append({"role": "user", "content": "Reply with CURRENT only."})
 print(json.dumps({
-    "model": "mlx-serve", "max_tokens": 8, "temperature": 0,
+    "model": "sushi", "max_tokens": 8, "temperature": 0,
     "enable_thinking": False, "messages": messages,
 }))
 PY
@@ -147,7 +147,7 @@ import base64, json, sys
 with open(sys.argv[1], "rb") as f:
     image_data = base64.b64encode(f.read()).decode()
 print(json.dumps({
-    "model": "mlx-serve", "max_tokens": 8, "temperature": 0,
+    "model": "sushi", "max_tokens": 8, "temperature": 0,
     "messages": [
         {"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
@@ -170,7 +170,7 @@ with open(path, "rb") as f:
 first_content = ([{"type": "image_url", "image_url": {"url": image_url}}]
                  if mode == "image" else "")
 print(json.dumps({
-    "model": "mlx-serve", "max_tokens": 4, "temperature": 0,
+    "model": "sushi", "max_tokens": 4, "temperature": 0,
     "enable_thinking": False,
     "messages": [
         {"role": "user", "content": first_content},
@@ -226,7 +226,7 @@ if mode == "empty-assistant":
 else:
     messages = [human, {"role": "assistant", "content": "The green street signs read "}, {"role": "user", "content": ""}]
 payload = {
-    "model": "mlx-serve", "max_tokens": 48, "temperature": 0,
+    "model": "sushi", "max_tokens": 48, "temperature": 0,
     "enable_thinking": False, "messages": messages,
 }
 if mode == "trailing-empty-user":
@@ -274,7 +274,7 @@ for turn in range(1, turns + 1):
     if turn < turns:
         messages.append({"role": "assistant", "content": "OK"})
 print(json.dumps({
-    "model": "mlx-serve", "max_tokens": 4, "temperature": 0,
+    "model": "sushi", "max_tokens": 4, "temperature": 0,
     "enable_thinking": False, "enable_mtp": False, "messages": messages,
 }))
 PY
@@ -295,7 +295,7 @@ import base64, json, sys
 with open(sys.argv[1], "rb") as f:
     image_url = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
 print(json.dumps({
-    "model": "mlx-serve", "max_tokens": 4, "temperature": 0,
+    "model": "sushi", "max_tokens": 4, "temperature": 0,
     "enable_thinking": False,
     "messages": [
         {"role": "system", "content": "beta " * 2600},

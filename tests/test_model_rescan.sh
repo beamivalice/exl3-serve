@@ -16,7 +16,7 @@
 set -u
 
 PORT="${1:-11267}"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 PASS=0
 FAIL=0
 
@@ -43,12 +43,12 @@ LOG="$(mktemp)"
 SERVER_PID=""
 cleanup() {
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
-    pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+    pkill -f "sushi.*--port $PORT" 2>/dev/null
     rm -rf "$ROOT_DIR" "$LOG"
 }
 trap cleanup EXIT
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+pkill -f "sushi.*--port $PORT" 2>/dev/null
 sleep 0.5
 "$BINARY" --serve --model-dir "$ROOT_DIR" --port "$PORT" --log-file off > "$LOG" 2>&1 &
 SERVER_PID=$!

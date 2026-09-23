@@ -1,5 +1,5 @@
 #!/bin/bash
-# Integration tests for mlx-serve API endpoints.
+# Integration tests for sushi API endpoints.
 # Usage: ./tests/integration_test.sh [model_dir] [port]
 #
 # Requires a model to be available. Defaults to the Flash-Next EXL3 pack.
@@ -7,10 +7,10 @@
 
 set -euo pipefail
 
-MODEL_DIR="${1:-${MLX_SERVE_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
+MODEL_DIR="${1:-${SUSHI_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
 PORT="${2:-8095}"
 BASE="http://localhost:$PORT"
-BINARY="./zig-out/bin/mlx-serve"
+BINARY="./zig-out/bin/sushi"
 PASS=0
 FAIL=0
 TOTAL=0
@@ -87,7 +87,7 @@ trap cleanup EXIT
 
 # ── Build ──
 # ReleaseFast, never bare `zig build`: a Debug binary is 2-4x slower AND it
-# overwrites zig-out/bin/mlx-serve, so a later perf run silently measures Debug.
+# overwrites zig-out/bin/sushi, so a later perf run silently measures Debug.
 # Prefer the pinned toolchain — brew's 0.16.0 cannot build this tree at all.
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
     echo -e "${YELLOW}Building (ReleaseFast)...${NC}"
@@ -105,7 +105,7 @@ fi
 
 # ── Start server ──
 echo -e "${YELLOW}Starting server on port $PORT...${NC}"
-"$BINARY" --model "$MODEL_DIR" --serve --port "$PORT" --log-level warn --ctx-size 4096 ${MLX_SERVE_TEST_EXTRA_ARGS:-} &
+"$BINARY" --model "$MODEL_DIR" --serve --port "$PORT" --log-level warn --ctx-size 4096 ${SUSHI_TEST_EXTRA_ARGS:-} &
 SERVER_PID=$!
 
 # Wait for health

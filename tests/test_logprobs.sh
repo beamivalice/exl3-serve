@@ -22,15 +22,15 @@ set -uo pipefail
 
 MODEL="${LOGPROBS_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${1:-11293}"
-BIN="${BINARY:-./zig-out/bin/mlx-serve}"
+BIN="${BINARY:-./zig-out/bin/sushi}"
 BASE="http://127.0.0.1:$PORT"
 
 [ -d "$MODEL" ] || { echo "SKIP: no model at $MODEL"; exit 0; }
-[ -x "$BIN" ]   || { echo "fail: build mlx-serve first"; exit 1; }
+[ -x "$BIN" ]   || { echo "fail: build sushi first"; exit 1; }
 
 ID="$(basename "$MODEL")"
 LOG="$(mktemp)"
-pkill -f "mlx-serve --serve.*port $PORT" 2>/dev/null; sleep 1
+pkill -f "sushi --serve.*port $PORT" 2>/dev/null; sleep 1
 "$BIN" --serve --model "$MODEL" --port "$PORT" >"$LOG" 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null; rm -f "$LOG"' EXIT

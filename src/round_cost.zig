@@ -756,10 +756,10 @@ pub const WidthChooser = struct {
 //
 // Knowledge is per (chip, model, quant, OS build, engine build): the same
 // binary across boots shares a table, a different binary never does.
-// Stored under ~/.mlx-serve/round-cost/<key>.txt, restored at load, written
+// Stored under ~/.sushi/round-cost/<key>.txt, restored at load, written
 // at request end unless a barrier diagnostic is armed. Stale version or
 // unreadable content is a QUIET miss (the kv_disk_cache discipline).
-// `MLX_SERVE_ROUND_COST_PERSIST=0` disables both directions.
+// `SUSHI_ROUND_COST_PERSIST=0` disables both directions.
 
 /// v2 added the `serial` row; v3 split the top bucket (edges 64k/128k/256k). Bucket indices
 /// are the file's only spelling of "which context", so a stale version is a quiet miss.
@@ -785,7 +785,7 @@ pub fn persistEnabledFrom(raw: ?[]const u8) bool {
 }
 
 pub fn persistEnabled() bool {
-    const raw = std.c.getenv("MLX_SERVE_ROUND_COST_PERSIST");
+    const raw = std.c.getenv("SUSHI_ROUND_COST_PERSIST");
     return persistEnabledFrom(if (raw) |r| std.mem.span(r) else null);
 }
 
@@ -810,8 +810,8 @@ fn qwen4ProfileArmed() bool {
 pub fn persistDiagArmed() bool {
     return qwen4ProfileArmed() or
         persistDiagArmedFrom(&.{
-            std.c.getenv("MLX_SERVE_MTP_TRACE"),
-            std.c.getenv("MLX_SERVE_MTP_FORCE_DEPTH"),
+            std.c.getenv("SUSHI_MTP_TRACE"),
+            std.c.getenv("SUSHI_MTP_FORCE_DEPTH"),
         });
 }
 
@@ -1027,7 +1027,7 @@ fn homeDir() []const u8 {
 }
 
 fn cachePath(buf: []u8, key: []const u8) ?[]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/.mlx-serve/round-cost/{s}.txt", .{ homeDir(), key }) catch null;
+    return std.fmt.bufPrint(buf, "{s}/.sushi/round-cost/{s}.txt", .{ homeDir(), key }) catch null;
 }
 
 /// Read one table file at `key`, parsed under `layout`. Null on anything at all.
@@ -1076,7 +1076,7 @@ pub fn loadCached(allocator: std.mem.Allocator, io: std.Io, key: []const u8, lay
 pub fn storeCached(io: std.Io, key: []const u8, t: *const Table) void {
     if (!storeShouldWrite(persistEnabled(), persistDiagArmed(), key.len)) return;
     var dir_buf: [512]u8 = undefined;
-    const dir = std.fmt.bufPrint(&dir_buf, "{s}/.mlx-serve/round-cost", .{homeDir()}) catch return;
+    const dir = std.fmt.bufPrint(&dir_buf, "{s}/.sushi/round-cost", .{homeDir()}) catch return;
     std.Io.Dir.cwd().createDirPath(io, dir) catch return;
     var path_buf: [512]u8 = undefined;
     const path = cachePath(&path_buf, key) orelse return;

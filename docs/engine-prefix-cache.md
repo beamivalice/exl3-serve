@@ -59,7 +59,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
 - **A checkout is a PROMISE until the append DONATES** (`donateCheckout` right before `Generator.initWithOptions`,
   below every refusal; `releaseCheckout` hands an undonated entry back intact). Disk checkpoints come off the TOP of
   the flush budget; the disk tier serves the pre-media text prefix only.
-- **"Free disk" is what the OS will GRANT** (`msv_volume_free_for_use`, statfs fallback): purgeable space is released
+- **"Free disk" is what the OS will GRANT** (`sushi_volume_free_for_use`, statfs fallback): purgeable space is released
   on demand. The `volumeSpace` test must not race the OS's purgeable answer.
 
 <a id="spec-state"></a>

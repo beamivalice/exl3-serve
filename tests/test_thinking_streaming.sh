@@ -9,14 +9,14 @@
 # Usage: ./tests/test_thinking_streaming.sh [model_dir] [port]
 # Starts its own server, runs tests, kills it.
 
-MODEL_DIR=${1:-${MLX_SERVE_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}
+MODEL_DIR=${1:-${SUSHI_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}
 PORT=${2:-8099}
 BASE="http://127.0.0.1:$PORT"
-BINARY="./zig-out/bin/mlx-serve"
+BINARY="./zig-out/bin/sushi"
 PASS=0
 FAIL=0
 TOTAL=0
-LOG="/tmp/mlx-serve-thinking-test.log"
+LOG="/tmp/sushi-thinking-test.log"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -112,7 +112,7 @@ print(f'{prefix}_tool_calls={len(tool_calls)}')
 echo -e "${YELLOW}Test 1: non-streaming + thinking${NC}"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","messages":[{"role":"user","content":"What is 17 * 23? Briefly."}],"max_tokens":1500,"temperature":0.3,"stream":false,"enable_thinking":true}')
+  -d '{"model":"sushi","messages":[{"role":"user","content":"What is 17 * 23? Briefly."}],"max_tokens":1500,"temperature":0.3,"stream":false,"enable_thinking":true}')
 CONTENT=$(echo "$RESULT" | python3 -c "import json,sys; m=json.load(sys.stdin)['choices'][0]['message']; print((m.get('content') or '')[:400])")
 REASONING=$(echo "$RESULT" | python3 -c "import json,sys; m=json.load(sys.stdin)['choices'][0]['message']; print(len(m.get('reasoning_content') or ''))")
 CONTENT_HAS_TAG=$(echo "$CONTENT" | python3 -c "import sys; t=sys.stdin.read(); print('true' if any(x in t for x in ('<think','</think','<|channel','<channel|')) else 'false')")
@@ -126,7 +126,7 @@ echo ""
 echo -e "${YELLOW}Test 2: streaming + thinking, no tools${NC}"
 curl -sN "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","messages":[{"role":"user","content":"What is 17 * 23? Just the number after thinking."}],"max_tokens":1500,"temperature":0.3,"stream":true,"enable_thinking":true}' \
+  -d '{"model":"sushi","messages":[{"role":"user","content":"What is 17 * 23? Just the number after thinking."}],"max_tokens":1500,"temperature":0.3,"stream":true,"enable_thinking":true}' \
   > /tmp/think_stream_2.txt 2>&1
 eval "$(analyze_stream /tmp/think_stream_2.txt t2)"
 # Whether the model thinks at all is a MODEL choice on families whose template
@@ -155,7 +155,7 @@ echo ""
 echo -e "${YELLOW}Test 3: streaming + thinking + tools${NC}"
 curl -sN "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","messages":[{"role":"user","content":"What time is it? Use the shell tool."}],"max_tokens":800,"temperature":0.3,"stream":true,"enable_thinking":true,"tools":[{"type":"function","function":{"name":"shell","description":"Run a shell command","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}]}' \
+  -d '{"model":"sushi","messages":[{"role":"user","content":"What time is it? Use the shell tool."}],"max_tokens":800,"temperature":0.3,"stream":true,"enable_thinking":true,"tools":[{"type":"function","function":{"name":"shell","description":"Run a shell command","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}]}' \
   > /tmp/think_stream_3.txt 2>&1
 eval "$(analyze_stream /tmp/think_stream_3.txt t3)"
 check "thinking+tools: emitted at least one tool_call" "$([ ${t3_tool_calls:-0} -ge 1 ] && echo true || echo false)" "tool_calls=$t3_tool_calls"
@@ -169,7 +169,7 @@ check "thinking+tools: reasoning_content has no tag leak" "$([ "$t3_reasoning_ha
 echo ""
 echo -e "${YELLOW}Test 4: non-streaming + thinking + tool round-trip${NC}"
 RT_BODY='{
-  "model":"mlx-serve",
+  "model":"sushi",
   "messages":[
     {"role":"user","content":"What time is it? Use the shell tool."},
     {"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"date\"}"}}]},

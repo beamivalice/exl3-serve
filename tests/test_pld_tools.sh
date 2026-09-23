@@ -16,7 +16,7 @@
 #   4. a streaming /v1/messages tools request still parses the tool call
 #
 # Requires:
-#   - A built mlx-serve binary (zig build -Doptimize=ReleaseFast)
+#   - A built sushi binary (zig build -Doptimize=ReleaseFast)
 #   - PLD_TEST_MODEL or /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
 #
 # Usage: ./tests/test_pld_tools.sh [port]
@@ -35,7 +35,7 @@ if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_pld_tools: model directory not found."
     exit 0
 fi
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build with 'zig build -Doptimize=ReleaseFast'."
     exit 1
@@ -86,7 +86,7 @@ trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 tool_request() {
     local extra="$1"
     curl -s -m 120 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "{
-      \"model\":\"mlx-serve\",\"temperature\":0,\"max_tokens\":128,$extra
+      \"model\":\"sushi\",\"temperature\":0,\"max_tokens\":128,$extra
       \"tools\":$TOOLS_CC,
       \"messages\":[{\"role\":\"user\",\"content\":\"$TOOL_PROMPT\"}]}"
 }
@@ -103,7 +103,7 @@ print(tc['function']['name'] + '|' + json.dumps(args, sort_keys=True))"
 echo_request() {
     local extra="$1"
     curl -s -m 120 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "{
-      \"model\":\"mlx-serve\",\"temperature\":0,\"max_tokens\":96,$extra
+      \"model\":\"sushi\",\"temperature\":0,\"max_tokens\":96,$extra
       \"tools\":$TOOLS_CC,
       \"messages\":[{\"role\":\"user\",\"content\":\"$ECHO_PROMPT\"}]}" \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message'].get('content') or '')"
@@ -128,7 +128,7 @@ PLD_ECHO=$(echo_request "\"enable_pld\":true,")
 
 # Streaming /v1/messages (the Claude Code shape) with tools + PLD.
 STREAM_TOOL=$(curl -s -N -m 120 "$BASE/v1/messages" -H 'Content-Type: application/json' -d "{
-  \"model\":\"mlx-serve\",\"temperature\":0,\"max_tokens\":128,\"stream\":true,\"enable_pld\":true,
+  \"model\":\"sushi\",\"temperature\":0,\"max_tokens\":128,\"stream\":true,\"enable_pld\":true,
   \"tools\":[{\"name\":\"write_file\",\"description\":\"Write content to a file.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}],
   \"messages\":[{\"role\":\"user\",\"content\":\"$TOOL_PROMPT\"}]}" \
 | python3 -c "

@@ -10,7 +10,7 @@
 # than ~1 spec-block of extra tokens flags a regression.
 #
 # Requires:
-#   - A built mlx-serve binary
+#   - A built sushi binary
 #   - A model directory
 #
 # Usage:
@@ -34,14 +34,14 @@ if [ ! -d "$MODEL" ]; then
     exit 0
 fi
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found or not executable."
     exit 1
 fi
 
 LOGFILE=$(mktemp)
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 "$BINARY" --model "$MODEL" --serve --port "$PORT" > "$LOGFILE" 2>&1 &
 SERVER_PID=$!
@@ -76,7 +76,7 @@ kill_after = float(sys.argv[2])
 logfile = sys.argv[3]
 
 body = json.dumps({
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [{"role": "user", "content": "Tell me a long story about a robot."}],
     "max_tokens": 2000,
     "temperature": 0.8,

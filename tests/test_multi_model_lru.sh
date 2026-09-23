@@ -9,7 +9,7 @@
 
 set -e
 
-ROOT="${1:-$HOME/.mlx-serve/models}"
+ROOT="${1:-$HOME/.sushi/models}"
 PORT="${2:-8096}"
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
@@ -30,12 +30,12 @@ fi
 M1="${MODELS[0]}"; M2="${MODELS[1]}"; M3="${MODELS[2]}"
 echo "  using models: $M1, $M2, $M3 (cap=2)"
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 LOGFILE=$(mktemp)
 "$BINARY" --model-dir "$ROOT" --model "$ROOT/$M1" --serve --port "$PORT" \
-    --max-resident-models 2 ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
+    --max-resident-models 2 ${SUSHI_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
 SERVER_PID=$!
 cleanup() {
     kill $SERVER_PID 2>/dev/null || true

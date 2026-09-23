@@ -14,7 +14,7 @@
 # is available.
 #
 # Requires:
-#   - A built mlx-serve binary (run `zig build -Doptimize=ReleaseFast` first)
+#   - A built sushi binary (run `zig build -Doptimize=ReleaseFast` first)
 #   - Either:
 #       PLD_TEST_MODEL set to a model directory, OR
 #       a default MLX checkpoint at /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
@@ -51,7 +51,7 @@ if [ ! -f "$MODEL/config.json" ]; then
 fi
 
 # Find binary
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found or not executable. Build first with 'zig build -Doptimize=ReleaseFast'."
     exit 1
@@ -74,7 +74,7 @@ EOF
 JSON_PAYLOAD=$(python3 -c "
 import json, sys
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '''$PROMPT'''}],
     'max_tokens': 96,
     'temperature': 0.0,
@@ -93,7 +93,7 @@ LONG_PROMPT='Recite the first paragraph of "A Tale of Two Cities" by Charles Dic
 LONG_JSON_PAYLOAD=$(python3 -c "
 import json, sys
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '''$LONG_PROMPT'''}],
     'max_tokens': 200,
     'temperature': 0.0,
@@ -113,7 +113,7 @@ run_request() {
     echo "  starting server ($label)..." >&2
     local logfile
     logfile=$(mktemp)
-    "$BINARY" --model "$MODEL" --serve --port "$PORT" $pld_flag ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$logfile" 2>&1 &
+    "$BINARY" --model "$MODEL" --serve --port "$PORT" $pld_flag ${SUSHI_TEST_EXTRA_ARGS:-} > "$logfile" 2>&1 &
     local pid=$!
     local up=0
     for i in $(seq 1 60); do
@@ -146,7 +146,7 @@ run_and_tokenize() {
     echo "  starting server ($label)..." >&2
     local logfile
     logfile=$(mktemp)
-    "$BINARY" --model "$MODEL" --serve --port "$PORT" $pld_flag ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$logfile" 2>&1 &
+    "$BINARY" --model "$MODEL" --serve --port "$PORT" $pld_flag ${SUSHI_TEST_EXTRA_ARGS:-} > "$logfile" 2>&1 &
     local pid=$!
     local up=0
     for i in $(seq 1 60); do
@@ -185,7 +185,7 @@ echo "  prompt: <echo-heavy code rename>"
 echo
 
 # Pre-emptively kill any stale server on the test port.
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 OUT_NOPLD=$(run_request "without --pld" "--no-pld") || exit 1

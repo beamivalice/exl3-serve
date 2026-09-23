@@ -210,7 +210,7 @@ fn getGateUpKernel() !mlx.mlx_fast_metal_kernel {
     const out_vec = mlx.mlx_vector_string_new_data(&output_names, output_names.len);
     defer _ = mlx.mlx_vector_string_free(out_vec);
     const kernel = mlx.mlx_fast_metal_kernel_new(
-        "mlxserve_expert_bf16_gateup_swiglu",
+        "sushi_expert_bf16_gateup_swiglu",
         in_vec,
         out_vec,
         GATEUP_SOURCE,
@@ -232,7 +232,7 @@ fn getDownReduceKernel() !mlx.mlx_fast_metal_kernel {
     const out_vec = mlx.mlx_vector_string_new_data(&output_names, output_names.len);
     defer _ = mlx.mlx_vector_string_free(out_vec);
     const kernel = mlx.mlx_fast_metal_kernel_new(
-        "mlxserve_expert_bf16_down_reduce",
+        "sushi_expert_bf16_down_reduce",
         in_vec,
         out_vec,
         DOWNRED_SOURCE,

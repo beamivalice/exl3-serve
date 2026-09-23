@@ -6,15 +6,15 @@
 # Usage: ./tests/test_thinking_tools.sh [model_dir] [port]
 # Starts its own server, runs tests, kills it.
 
-MODEL_DIR=${1:-${MLX_SERVE_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}
+MODEL_DIR=${1:-${SUSHI_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}
 PORT=${2:-8099}
 BASE="http://127.0.0.1:$PORT"
-BINARY="./zig-out/bin/mlx-serve"
+BINARY="./zig-out/bin/sushi"
 PASS=0
 FAIL=0
 SKIP=0
 TOTAL=0
-LOG="/tmp/mlx-serve-test-thinking-tools.log"
+LOG="/tmp/sushi-test-thinking-tools.log"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -68,7 +68,7 @@ TOOLS_JSON='[{"type":"function","function":{"name":"shell","description":"Run a 
 echo -e "${YELLOW}Test 1: No thinking, no tools, non-streaming${NC}"
 # ─────────────────────────────────────────────────────
 RESP=$(curl -sf "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","messages":[{"role":"user","content":"What is 2+2? Answer in one word."}],"max_tokens":50,"temperature":0.1,"stream":false}')
+  -d '{"model":"sushi","messages":[{"role":"user","content":"What is 2+2? Answer in one word."}],"max_tokens":50,"temperature":0.1,"stream":false}')
 CONTENT=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);m=d["choices"][0]["message"];print(m.get("content",""))' 2>/dev/null)
 HAS_RC=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);m=d["choices"][0]["message"];print("yes" if m.get("reasoning_content") else "no")' 2>/dev/null)
 run_test "Has content" "$([ -n "$CONTENT" ] && echo PASS || echo FAIL)" "content='$CONTENT'"
@@ -79,7 +79,7 @@ echo ""
 echo -e "${YELLOW}Test 2: Thinking enabled, no tools, non-streaming${NC}"
 # ─────────────────────────────────────────────────────
 RESP=$(curl -sf "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","messages":[{"role":"user","content":"What is 15 times 17?"}],"max_tokens":500,"temperature":0.1,"stream":false,"enable_thinking":true}')
+  -d '{"model":"sushi","messages":[{"role":"user","content":"What is 15 times 17?"}],"max_tokens":500,"temperature":0.1,"stream":false,"enable_thinking":true}')
 CONTENT=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);m=d["choices"][0]["message"];print(m.get("content",""))' 2>/dev/null)
 RC=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);m=d["choices"][0]["message"];rc=m.get("reasoning_content","");print(rc[:100] if rc else "NONE")' 2>/dev/null)
 FR2=$(echo "$RESP" | python3 -c 'import json,sys;print(json.load(sys.stdin)["choices"][0].get("finish_reason","?"))' 2>/dev/null)
@@ -99,7 +99,7 @@ echo ""
 echo -e "${YELLOW}Test 3: No thinking, tools enabled, non-streaming${NC}"
 # ─────────────────────────────────────────────────────
 RESP=$(curl -sf "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
-  -d "{\"model\":\"mlx-serve\",\"messages\":[{\"role\":\"user\",\"content\":\"Run the command: echo hello\"}],\"tools\":$TOOLS_JSON,\"max_tokens\":100,\"temperature\":0.1,\"stream\":false}")
+  -d "{\"model\":\"sushi\",\"messages\":[{\"role\":\"user\",\"content\":\"Run the command: echo hello\"}],\"tools\":$TOOLS_JSON,\"max_tokens\":100,\"temperature\":0.1,\"stream\":false}")
 FR=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["choices"][0].get("finish_reason","?"))' 2>/dev/null)
 TC_NAME=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);tcs=d["choices"][0]["message"].get("tool_calls",[]);print(tcs[0]["function"]["name"] if tcs else "NONE")' 2>/dev/null)
 HAS_RC=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);m=d["choices"][0]["message"];print("yes" if m.get("reasoning_content") else "no")' 2>/dev/null)
@@ -112,7 +112,7 @@ echo ""
 echo -e "${YELLOW}Test 4: Thinking + tools, non-streaming${NC}"
 # ─────────────────────────────────────────────────────
 RESP=$(curl -sf "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
-  -d "{\"model\":\"mlx-serve\",\"messages\":[{\"role\":\"user\",\"content\":\"Run the command: echo hello\"}],\"tools\":$TOOLS_JSON,\"max_tokens\":500,\"temperature\":0.1,\"stream\":false,\"enable_thinking\":true}")
+  -d "{\"model\":\"sushi\",\"messages\":[{\"role\":\"user\",\"content\":\"Run the command: echo hello\"}],\"tools\":$TOOLS_JSON,\"max_tokens\":500,\"temperature\":0.1,\"stream\":false,\"enable_thinking\":true}")
 FR=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["choices"][0].get("finish_reason","?"))' 2>/dev/null)
 TC_NAME=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);tcs=d["choices"][0]["message"].get("tool_calls",[]);print(tcs[0]["function"]["name"] if tcs else "NONE")' 2>/dev/null)
 RC=$(echo "$RESP" | python3 -c 'import json,sys;d=json.load(sys.stdin);m=d["choices"][0]["message"];rc=m.get("reasoning_content","");print(rc[:100] if rc else "NONE")' 2>/dev/null)
@@ -133,7 +133,7 @@ echo ""
 echo -e "${YELLOW}Test 5: No thinking, no tools, streaming${NC}"
 # ─────────────────────────────────────────────────────
 STREAM=$(curl -sf "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","messages":[{"role":"user","content":"What is 2+2? One word."}],"max_tokens":50,"temperature":0.1,"stream":true}')
+  -d '{"model":"sushi","messages":[{"role":"user","content":"What is 2+2? One word."}],"max_tokens":50,"temperature":0.1,"stream":true}')
 HAS_CONTENT=$(echo "$STREAM" | grep -c '"content"' ; true)
 HAS_RC=$(echo "$STREAM" | grep -c '"reasoning_content"' ; true)
 HAS_DONE=$(echo "$STREAM" | grep -c '\[DONE\]' ; true)
@@ -146,7 +146,7 @@ echo ""
 echo -e "${YELLOW}Test 6: Thinking enabled, no tools, streaming${NC}"
 # ─────────────────────────────────────────────────────
 STREAM=$(curl -sf "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","messages":[{"role":"user","content":"What is 15 times 17?"}],"max_tokens":500,"temperature":0.1,"stream":true,"enable_thinking":true}')
+  -d '{"model":"sushi","messages":[{"role":"user","content":"What is 15 times 17?"}],"max_tokens":500,"temperature":0.1,"stream":true,"enable_thinking":true}')
 HAS_CONTENT=$(echo "$STREAM" | grep -c '"content"' ; true)
 HAS_RC=$(echo "$STREAM" | grep -c '"reasoning_content"' ; true)
 NO_TAGS=$(echo "$STREAM" | grep '"content"' | grep -cE '<think>|<\|channel>thought' ; true)
@@ -160,7 +160,7 @@ echo -e "${YELLOW}Test 6b: the same request streamed and not must split the SAME
 # Gemma 4 opens its own thought channel mid-stream; the bar is the split, not a
 # tag grep: at temp 0 both surfaces must agree byte for byte.
 # ─────────────────────────────────────────────────────
-REQ='{"model":"mlx-serve","messages":[{"role":"user","content":"What is 15 times 17?"}],"max_tokens":500,"temperature":0,"enable_thinking":true}'
+REQ='{"model":"sushi","messages":[{"role":"user","content":"What is 15 times 17?"}],"max_tokens":500,"temperature":0,"enable_thinking":true}'
 NS=$(curl -sf "$BASE/v1/chat/completions" -H "Content-Type: application/json" -d "$REQ" \
   | python3 -c 'import json,sys;m=json.load(sys.stdin)["choices"][0]["message"];print(((m.get("reasoning_content") or "").strip()+"\x1e"+(m.get("content") or "").strip()))')
 ST=$(curl -sfN "$BASE/v1/chat/completions" -H "Content-Type: application/json" -d "${REQ%\}},\"stream\":true}" \
@@ -180,7 +180,7 @@ echo ""
 echo -e "${YELLOW}Test 7: No thinking, tools enabled, streaming${NC}"
 # ─────────────────────────────────────────────────────
 STREAM=$(curl -sf "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
-  -d "{\"model\":\"mlx-serve\",\"messages\":[{\"role\":\"user\",\"content\":\"Run the command: echo hello\"}],\"tools\":$TOOLS_JSON,\"max_tokens\":100,\"temperature\":0.1,\"stream\":true}")
+  -d "{\"model\":\"sushi\",\"messages\":[{\"role\":\"user\",\"content\":\"Run the command: echo hello\"}],\"tools\":$TOOLS_JSON,\"max_tokens\":100,\"temperature\":0.1,\"stream\":true}")
 HAS_TC=$(echo "$STREAM" | grep -c '"tool_calls"' ; true)
 HAS_RC=$(echo "$STREAM" | grep -c '"reasoning_content"' ; true)
 FR=$(echo "$STREAM" | grep 'finish_reason' | grep -o '"tool_calls"\|"stop"' | head -1)
@@ -195,7 +195,7 @@ echo ""
 echo -e "${YELLOW}Test 8: Thinking + tools, streaming (THE FIX)${NC}"
 # ─────────────────────────────────────────────────────
 STREAM=$(curl -sf "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
-  -d "{\"model\":\"mlx-serve\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 15 times 17? Think step by step then use shell to verify with: echo \$((15*17))\"}],\"tools\":$TOOLS_JSON,\"max_tokens\":500,\"temperature\":0.1,\"stream\":true,\"enable_thinking\":true}")
+  -d "{\"model\":\"sushi\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 15 times 17? Think step by step then use shell to verify with: echo \$((15*17))\"}],\"tools\":$TOOLS_JSON,\"max_tokens\":500,\"temperature\":0.1,\"stream\":true,\"enable_thinking\":true}")
 HAS_RC=$(echo "$STREAM" | grep -c '"reasoning_content"' ; true)
 # Count delta lines whose `"content"` value is non-empty. The earlier filter
 # (`grep '"content"' | grep -v '""' | grep -vc 'null'`) accidentally dropped
@@ -247,7 +247,7 @@ echo ""
 echo -e "${YELLOW}Test 9: Thinking + tools, streaming, model may text or tool-call${NC}"
 # ─────────────────────────────────────────────────────
 STREAM=$(curl -sf "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
-  -d "{\"model\":\"mlx-serve\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in French. Do not use any tools.\"}],\"tools\":$TOOLS_JSON,\"max_tokens\":500,\"temperature\":0.1,\"stream\":true,\"enable_thinking\":true}")
+  -d "{\"model\":\"sushi\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in French. Do not use any tools.\"}],\"tools\":$TOOLS_JSON,\"max_tokens\":500,\"temperature\":0.1,\"stream\":true,\"enable_thinking\":true}")
 HAS_RC=$(echo "$STREAM" | grep -c '"reasoning_content"' ; true)
 # Count delta lines whose `"content"` value is non-empty. The earlier filter
 # (`grep '"content"' | grep -v '""' | grep -vc 'null'`) accidentally dropped

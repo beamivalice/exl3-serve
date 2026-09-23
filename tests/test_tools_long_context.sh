@@ -31,12 +31,12 @@ bad() { echo -e "  ${RED}FAIL${NC} $1"; shift; for l in "$@"; do echo "        $
 
 [ -n "$MODEL" ] || { echo "SKIP: LONGCTX_TEST_MODEL not set"; exit 0; }
 [ -f "$MODEL/config.json" ] || { echo "SKIP: no config.json at $MODEL"; exit 0; }
-[ -x ./zig-out/bin/mlx-serve ] || { echo "FAIL: build first"; exit 1; }
+[ -x ./zig-out/bin/sushi ] || { echo "FAIL: build first"; exit 1; }
 
 RUNGS="${LONGCTX_RUNGS:-16000,32000,64000}"
 LOG=$(mktemp /tmp/tools_longctx.XXXXXX)
-pkill -f "bin/mlx-serve" 2>/dev/null; sleep 1
-./zig-out/bin/mlx-serve --model "$MODEL" --serve --port "$PORT" --ctx-size 131072 \
+pkill -f "bin/sushi" 2>/dev/null; sleep 1
+./zig-out/bin/sushi --model "$MODEL" --serve --port "$PORT" --ctx-size 131072 \
     --log-level debug > "$LOG" 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; rm -f "$LOG"; }
@@ -64,7 +64,7 @@ prompt = (filler
           + "Now call the write_file tool exactly once to save the archive identifier "
             "to notes.txt. Put the identifier in the content argument.")
 print(json.dumps({
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [{"role": "user", "content": prompt}],
     "tools": [{"type": "function", "function": {
         "name": "write_file", "description": "Write a file",

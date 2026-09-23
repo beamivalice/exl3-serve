@@ -164,7 +164,7 @@ pub const LoadParams = struct {
     prefix_cache_mem_resolver: ?*const fn (*model_mod.ModelConfig, u64, BudgetRevise, *u64) u64 = null,
     /// SSD tier byte budget for the hot prefix cache (`--prefix-cache-disk`).
     /// 0 disables persistence. Attached per model at load for pure-attention
-    /// archs; entries live under `~/.mlx-serve/kv-cache/<fingerprint>`.
+    /// archs; entries live under `~/.sushi/kv-cache/<fingerprint>`.
     prefix_cache_disk_bytes: u64 = 0,
     expert_cache_bytes: u64 = 0,
     ssd_budget_bytes: u64 = 0,
@@ -1227,7 +1227,7 @@ pub const Scheduler = struct {
 
     max_concurrent: u32,
     /// Phase A7 test hook: when true, `runDecodeTick` forces the batched
-    /// kernel even at `active.len == 1`. Set via the `MLX_SERVE_FORCE_BATCHED`
+    /// kernel even at `active.len == 1`. Set via the `SUSHI_FORCE_BATCHED`
     /// environment variable (`=1` to enable). Test-only — production uses
     /// the auto-gate that drops to `runSingleDecodeTick` for single-slot
     /// requests because that path is bit-identical to legacy and supports
@@ -1322,17 +1322,17 @@ pub const Scheduler = struct {
 
         const cap = if (max_concurrent == 0) 1 else max_concurrent;
         // Phase A7: force-batched test hook. The byte-equivalence test sets
-        // `MLX_SERVE_FORCE_BATCHED=1` to verify that the batched-kernel
+        // `SUSHI_FORCE_BATCHED=1` to verify that the batched-kernel
         // output matches the single-slot path token-for-token at temp=0,
         // single client. Uses libc getenv to stay allocator-free.
         const force_batched = blk: {
-            const raw = std.c.getenv("MLX_SERVE_FORCE_BATCHED");
+            const raw = std.c.getenv("SUSHI_FORCE_BATCHED");
             if (raw == null) break :blk false;
             const slice = std.mem.sliceTo(raw.?, 0);
             break :blk std.mem.eql(u8, slice, "1");
         };
         if (force_batched) {
-            log.info("[scheduler] force_batched=on (MLX_SERVE_FORCE_BATCHED=1) — single-slot ticks will route through batched kernel\n", .{});
+            log.info("[scheduler] force_batched=on (SUSHI_FORCE_BATCHED=1) — single-slot ticks will route through batched kernel\n", .{});
         }
         self.* = .{
             .allocator = allocator,
@@ -1620,7 +1620,7 @@ pub const Scheduler = struct {
         for (self.decoding.items) |slot| slot.cancel();
     }
 
-    /// Plan 05 Phase D: resolve `id_or_empty` ("" / "mlx-serve" → default)
+    /// Plan 05 Phase D: resolve `id_or_empty` ("" / "sushi" → default)
     /// to a refcounted, ready `*LoadedModel`. Cold-loads on demand: if the
     /// entry is `.unloaded`, parses CPU state, picks an LRU victim if
     /// over caps, and posts a `LoadRequest` to the inference thread,
@@ -2606,7 +2606,7 @@ test "modelDiskBytes bills only the shards the index names (issue #274)" {
 /// Set by `--skip-mem-preflight` (main.zig) to bypass the model-load memory
 /// pre-flight below. A module global, not a `LoadParams` field, so it applies
 /// uniformly to startup loads AND later hot-loads — matching the env var
-/// (`MLX_SERVE_SKIP_MEM_PREFLIGHT`) it replaced.
+/// (`SUSHI_SKIP_MEM_PREFLIGHT`) it replaced.
 pub var skip_mem_preflight: bool = false;
 
 /// Process-wide vision opt-out (`--no-vision` / the iPhone app, which has no
@@ -3072,7 +3072,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         });
         if (memInsufficientForLoad(weights_bytes, avail_bytes)) {
             const gb = 1024.0 * 1024.0 * 1024.0;
-            log.err("Insufficient memory to load model: needs ~{d:.1} GB free ({d:.1} GB of weights plus headroom for warmup buffers and a baseline KV cache) but only {d:.1} GB is available. Close other models/apps (or wait for a prior mlx-serve to fully exit) and retry; pass --skip-mem-preflight to override.\n", .{
+            log.err("Insufficient memory to load model: needs ~{d:.1} GB free ({d:.1} GB of weights plus headroom for warmup buffers and a baseline KV cache) but only {d:.1} GB is available. Close other models/apps (or wait for a prior sushi to fully exit) and retry; pass --skip-mem-preflight to override.\n", .{
                 @as(f64, @floatFromInt(loadRequirementBytes(weights_bytes))) / gb,
                 @as(f64, @floatFromInt(weights_bytes)) / gb,
                 @as(f64, @floatFromInt(avail_bytes)) / gb,
@@ -3165,7 +3165,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     }
 
     // Phase 2 experiment: opt-in full-forward Metal fusion via
-    // MLX_SERVE_COMPILE_FORWARD=1. This wraps the entire forward pass in
+    // SUSHI_COMPILE_FORWARD=1. This wraps the entire forward pass in
     // mlx_compile so the chunked-prefill loop dispatches a fused graph
     // instead of ~hundreds of separate ops per chunk. Gated because
     // (a) the compiled closure captures `xfm.cache` / `xfm.ssm_entries`
@@ -3174,36 +3174,36 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // compiled call; (b) mlx_compile with shapeless=false recompiles
     // per unique input shape, which thrashes if the prefill loop sees
     // many different chunk sizes.
-    if (std.c.getenv("MLX_SERVE_COMPILE_FORWARD") != null) {
-        const raw = std.c.getenv("MLX_SERVE_COMPILE_FORWARD").?;
+    if (std.c.getenv("SUSHI_COMPILE_FORWARD") != null) {
+        const raw = std.c.getenv("SUSHI_COMPILE_FORWARD").?;
         const slice = std.mem.sliceTo(raw, 0);
         if (std.mem.eql(u8, slice, "1")) {
             xfm_ptr.compileForward();
         }
     }
 
-    // DIAGNOSTIC (MLX_SERVE_DECODE_FWD_UBENCH=N): time N decode-width forward
+    // DIAGNOSTIC (SUSHI_DECODE_FWD_UBENCH=N): time N decode-width forward
     // passes back to back, with NO sampling, detokenization, stop-checking or
     // cache bookkeeping around them. The server reports `predicted_ms` around
     // the whole decode LOOP, so this is the only way to say how much of a
     // token is the model and how much is everything else. Resets the KV cache
     // afterwards so the probe cannot pollute real requests.
-    if (std.c.getenv("MLX_SERVE_DECODE_FWD_UBENCH")) |raw| {
+    if (std.c.getenv("SUSHI_DECODE_FWD_UBENCH")) |raw| {
         const n = std.fmt.parseInt(usize, std.mem.sliceTo(raw, 0), 10) catch 0;
         if (n > 0) {
             const io_u = @import("io_util.zig");
             const tio = std.Io.Threaded.global_single_threaded.io();
             var ctx = xfm_ptr.defaultCtx();
-            // MLX_SERVE_DECODE_FWD_UBENCH_S=<rows>: verify-width forwards
+            // SUSHI_DECODE_FWD_UBENCH_S=<rows>: verify-width forwards
             // (per-position SSM capture on, as spec verify runs them).
-            // MLX_SERVE_DECODE_FWD_UBENCH_KV=<tokens>: prefill that many
+            // SUSHI_DECODE_FWD_UBENCH_KV=<tokens>: prefill that many
             // tokens first so the meter runs at a real context length.
             const rows: usize = blk: {
-                const r = std.c.getenv("MLX_SERVE_DECODE_FWD_UBENCH_S") orelse break :blk 1;
+                const r = std.c.getenv("SUSHI_DECODE_FWD_UBENCH_S") orelse break :blk 1;
                 break :blk @max(1, std.fmt.parseInt(usize, std.mem.sliceTo(r, 0), 10) catch 1);
             };
             const kv_pre: usize = blk: {
-                const r = std.c.getenv("MLX_SERVE_DECODE_FWD_UBENCH_KV") orelse break :blk 0;
+                const r = std.c.getenv("SUSHI_DECODE_FWD_UBENCH_KV") orelse break :blk 0;
                 break :blk std.fmt.parseInt(usize, std.mem.sliceTo(r, 0), 10) catch 0;
             };
             const tok_slice = try sch.allocator.alloc(i32, @min(rows, 4096));
@@ -3374,9 +3374,9 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     else
         in_dir_drafter orelse "";
     if (drafter_dir.len > 0 and dflash_mod.probeIsDflash(sch.io, sch.allocator, drafter_dir)) {
-        const env_off = if (std.c.getenv("MLX_SERVE_DFLASH")) |v| v[0] == '0' else false;
+        const env_off = if (std.c.getenv("SUSHI_DFLASH")) |v| v[0] == '0' else false;
         if (env_off) {
-            log.info("[dflash] sidecar at {s} skipped (MLX_SERVE_DFLASH=0)\n", .{drafter_dir});
+            log.info("[dflash] sidecar at {s} skipped (SUSHI_DFLASH=0)\n", .{drafter_dir});
         } else {
             const d = try sch.allocator.create(DflashModel);
             d.* = dflash_mod.loadDflash(sch.io, sch.allocator, mlx.gpuStream(), drafter_dir) catch |err| {
@@ -3546,13 +3546,13 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // pin (idempotent — the later pinAutoContext keeps this value), so the
     // compiled fixed-shape tile matches the width the forward will run.
     if (params.ane_prefill) {
-        const ane_force: ?[]const u8 = if (std.c.getenv("MLX_SERVE_ANE_FORCE")) |p| std.mem.span(p) else null;
+        const ane_force: ?[]const u8 = if (std.c.getenv("SUSHI_ANE_FORCE")) |p| std.mem.span(p) else null;
         if (!ane_mod.anePrefillAllowed(transformer_mod.verifyQmmNaxAvailable(), ane_force)) {
             // ANE prefill is M4-and-below: on NAX machines it measured a
             // loss (M5 Max, PR #223). `/props` ane stays absent, as off.
             log.info(
                 "[ane] --ane-prefill disabled: NAX-class GPU prefill already outruns the ANE seam " ++
-                    "(measured a loss on M5 Max, PR #223); MLX_SERVE_ANE_FORCE=1 overrides\n",
+                    "(measured a loss on M5 Max, PR #223); SUSHI_ANE_FORCE=1 overrides\n",
                 .{},
             );
         } else if (params.ane_chunk_resolver) |resolve| {
@@ -4732,12 +4732,12 @@ pub fn loopStopDecision(generated_ids: []const u32) ?LoopStop {
 }
 
 var loop_trim_env: ?bool = null;
-/// `MLX_SERVE_LOOP_TRIM=0` keeps the whole degenerate tail in the response —
+/// `SUSHI_LOOP_TRIM=0` keeps the whole degenerate tail in the response —
 /// the A/B arm, and the escape hatch for anyone who needs to see exactly what
 /// the model emitted. The cut itself is unaffected either way.
 pub fn loopTrimEnabled() bool {
     if (loop_trim_env) |v| return v;
-    const raw = std.c.getenv("MLX_SERVE_LOOP_TRIM");
+    const raw = std.c.getenv("SUSHI_LOOP_TRIM");
     const enabled = raw == null or !std.mem.eql(u8, std.mem.sliceTo(raw.?, 0), "0");
     loop_trim_env = enabled;
     return enabled;
@@ -4990,14 +4990,14 @@ fn dflashGateMinimum(block_size: u32, enable_thinking: bool, moe_target: bool) f
 /// the per-slot Generator via `Generator.initWithOptions(.{ .ctx = slot.ctx,
 /// .skip_lazy_preforward = true_for_regular, ... })`, and store it on the
 /// slot. After return, the slot is ready for decode ticks.
-/// Kill switch for prefill-side interleaving (MLX_SERVE_PREFILL_INTERLEAVE=0
+/// Kill switch for prefill-side interleaving (SUSHI_PREFILL_INTERLEAVE=0
 /// restores whole-prefill-then-decode scheduling). Default ON: the hook
 /// no-ops when nothing is decoding, so an idle or single-stream server never
 /// pays for it.
 var prefill_interleave_cached: ?bool = null;
 pub fn prefillInterleaveEnabled() bool {
     if (prefill_interleave_cached) |v| return v;
-    const raw = std.c.getenv("MLX_SERVE_PREFILL_INTERLEAVE");
+    const raw = std.c.getenv("SUSHI_PREFILL_INTERLEAVE");
     const on = raw == null or !std.mem.eql(u8, std.mem.sliceTo(raw.?, 0), "0");
     prefill_interleave_cached = on;
     return on;
@@ -5057,7 +5057,7 @@ var write_through_span_declined_logged = std.atomic.Value(bool).init(false);
 var write_through_off_logged = std.atomic.Value(bool).init(false);
 var write_through_env_cached: ?bool = null;
 
-/// `MLX_SERVE_SSD_WRITE_THROUGH=0` takes the write-through out of the prefill loop; the
+/// `SUSHI_SSD_WRITE_THROUGH=0` takes the write-through out of the prefill loop; the
 /// end-of-request commit then persists the whole turn. A real two-arm tradeoff (crash-safe
 /// prefix vs TTFT) and the only way to A/B its cost.
 pub fn writeThroughEnabledFromEnv(raw: ?[]const u8) bool {
@@ -5069,7 +5069,7 @@ pub fn writeThroughEnabledFromEnv(raw: ?[]const u8) bool {
 fn writeThroughEnabled() bool {
     if (write_through_env_cached) |v| return v;
     const v = blk: {
-        const raw = std.c.getenv("MLX_SERVE_SSD_WRITE_THROUGH") orelse break :blk writeThroughEnabledFromEnv(null);
+        const raw = std.c.getenv("SUSHI_SSD_WRITE_THROUGH") orelse break :blk writeThroughEnabledFromEnv(null);
         break :blk writeThroughEnabledFromEnv(std.mem.sliceTo(raw, 0));
     };
     write_through_env_cached = v;
@@ -5082,7 +5082,7 @@ fn writeThroughArmed(slot: *Slot, new_span: usize) bool {
     const hc: *prefix_cache_mod.HotPrefixCache = if (slot.model.prefix_cache) |*p| p else return false;
     if (!writeThroughEnabled()) {
         if (hc.ssd_first and !write_through_off_logged.swap(true, .monotonic)) {
-            log.info("  [disk-cache] prefill write-through disabled by MLX_SERVE_SSD_WRITE_THROUGH=0 — the end-of-request commit persists every turn\n", .{});
+            log.info("  [disk-cache] prefill write-through disabled by SUSHI_SSD_WRITE_THROUGH=0 — the end-of-request commit persists every turn\n", .{});
         }
         return false;
     }
@@ -5655,7 +5655,7 @@ fn runDecodeTick(sch: *Scheduler, active: []*Slot) !void {
 
     // Phase 3 gate: at len==1, route to legacy single-slot path. Bit-identical
     // to pre-Phase-2 behavior including PLD/drafter speculative decoding.
-    // Phase A7 test hook: `MLX_SERVE_FORCE_BATCHED=1` bypasses the gate so the
+    // Phase A7 test hook: `SUSHI_FORCE_BATCHED=1` bypasses the gate so the
     // byte-equivalence test can run the batched kernel at active.len==1 and
     // assert it matches the single-slot path token-for-token.
     if (active.len == 1 and !sch.force_batched) {
@@ -6923,7 +6923,7 @@ fn tryPlannerTick(sch: *Scheduler, active: []*Slot) anyerror!bool {
 var mtp_group_env: ?bool = null;
 fn mtpGroupEnabled() bool {
     if (mtp_group_env) |v| return v;
-    const on = if (std.c.getenv("MLX_SERVE_MTP_BATCHED")) |p| !std.mem.eql(u8, std.mem.span(p), "0") else true;
+    const on = if (std.c.getenv("SUSHI_MTP_BATCHED")) |p| !std.mem.eql(u8, std.mem.span(p), "0") else true;
     mtp_group_env = on;
     return on;
 }
@@ -6933,7 +6933,7 @@ fn mtpGroupEnabled() bool {
 var mtp_batched_qwen4_env: ?bool = null;
 fn mtpBatchedQwen4Enabled() bool {
     if (mtp_batched_qwen4_env) |v| return v;
-    const on = if (std.c.getenv("MLX_SERVE_MTP_BATCHED_QWEN4")) |p| !std.mem.eql(u8, std.mem.span(p), "0") else false;
+    const on = if (std.c.getenv("SUSHI_MTP_BATCHED_QWEN4")) |p| !std.mem.eql(u8, std.mem.span(p), "0") else false;
     mtp_batched_qwen4_env = on;
     return on;
 }
@@ -8660,7 +8660,7 @@ test "the qwen4 coarse rerank head is built at LOAD, on both load paths" {
     try testing.expect(boot != cold);
 }
 
-test "MLX_SERVE_SSD_WRITE_THROUGH=0 takes mechanism 3 out of the prefill, and only that" {
+test "SUSHI_SSD_WRITE_THROUGH=0 takes mechanism 3 out of the prefill, and only that" {
     try testing.expect(writeThroughEnabledFromEnv(null));
     try testing.expect(writeThroughEnabledFromEnv(""));
     try testing.expect(writeThroughEnabledFromEnv("1"));

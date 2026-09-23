@@ -13,7 +13,7 @@ def main():
         print("SKIP: set MIMO_V2_SOURCE to the original HF checkpoint", file=sys.stderr)
         return 2
     root = Path(__file__).resolve().parent.parent
-    binary = root / "zig-out/bin/mlx-serve"
+    binary = root / "zig-out/bin/sushi"
     with tempfile.TemporaryDirectory(prefix="mimo-refusals-", dir=root / ".zig-cache") as home:
         env = dict(os.environ, HOME=home)
         args = [

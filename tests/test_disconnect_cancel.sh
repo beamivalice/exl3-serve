@@ -26,7 +26,7 @@ set -u
 MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11264}"
 BASE="http://127.0.0.1:$PORT"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 LOG=/tmp/test_disconnect_cancel.log
 PASS=0
 FAIL=0
@@ -49,7 +49,7 @@ if [ ! -d "$MODEL" ]; then
     exit 0
 fi
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+pkill -f "sushi.*--port $PORT" 2>/dev/null
 sleep 1
 # --no-pld for predictable prefill timing; big ctx for the long prompt.
 "$BINARY" --model "$MODEL" --serve --port "$PORT" --ctx-size 32768 --no-pld --log-level debug > "$LOG" 2>&1 &

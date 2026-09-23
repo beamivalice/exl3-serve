@@ -26,7 +26,7 @@ echo "Port: $PORT"
 echo ""
 
 echo "Starting server..."
-./zig-out/bin/mlx-serve --model "$MODEL_DIR" --serve --port $PORT --log-level info 2>/tmp/mlx-serve-test-json-schema.log &
+./zig-out/bin/sushi --model "$MODEL_DIR" --serve --port $PORT --log-level info 2>/tmp/sushi-test-json-schema.log &
 SERVER_PID=$!
 sleep 2
 
@@ -71,7 +71,7 @@ echo "--- Test 1: Object with required string + integer ---"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "user", "content": "Make up a person record."}
     ],
@@ -124,7 +124,7 @@ echo "--- Test 2: Enum string ---"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "user", "content": "Pick a color."}
     ],
@@ -163,7 +163,7 @@ echo "--- Test 3: Nested object with array of strings ---"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "user", "content": "Make a recipe with name and 3 short ingredients."}
     ],
@@ -215,7 +215,7 @@ echo "--- Test 4: Streaming with json_schema produces valid JSON ---"
 EVENTS=$(curl -sf -N "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "user", "content": "Make up a book record."}
     ],
@@ -280,7 +280,7 @@ if [ "$FAIL" -gt 0 ]; then
     echo "Failed: $FAIL"
     echo ""
     echo "Server log (last 50 lines):"
-    tail -50 /tmp/mlx-serve-test-json-schema.log
+    tail -50 /tmp/sushi-test-json-schema.log
     exit 1
 else
     echo "All tests passed!"

@@ -29,14 +29,14 @@ TOTAL=0
 
 MODEL=$(eval echo "$MODEL")
 if [ ! -d "$MODEL" ]; then echo "SKIP: model not found at $MODEL"; exit 0; fi
-if [ ! -x "./zig-out/bin/mlx-serve" ]; then
-    echo "FAIL: mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+if [ ! -x "./zig-out/bin/sushi" ]; then
+    echo "FAIL: sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required"; exit 1; }
 
-./zig-out/bin/mlx-serve serve --port $PORT --host 127.0.0.1 --log-level info \
-    --model "$MODEL" >/tmp/mlx-serve-output-config.log 2>&1 &
+./zig-out/bin/sushi serve --port $PORT --host 127.0.0.1 --log-level info \
+    --model "$MODEL" >/tmp/sushi-output-config.log 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; }
 trap cleanup EXIT
@@ -62,7 +62,7 @@ TOOLS='[{"name":"get_weather","description":"Get weather","input_schema":{"type"
 
 echo "=== effort \"none\" turns thinking OFF (tools present, where the arch defaults on) ==="
 TYPES=$(msg "{
-    \"model\": \"mlx-serve\", \"max_tokens\": 512, \"temperature\": 0, \"stream\": false,
+    \"model\": \"sushi\", \"max_tokens\": 512, \"temperature\": 0, \"stream\": false,
     \"output_config\": {\"effort\": \"none\"},
     \"tools\": $TOOLS,
     \"messages\": [{\"role\": \"user\", \"content\": \"Why is the sky blue? One sentence, no tools needed.\"}]
@@ -75,7 +75,7 @@ fi
 
 echo "=== effort \"high\" turns thinking ON ==="
 TYPES=$(msg '{
-    "model": "mlx-serve", "max_tokens": 1024, "temperature": 0, "stream": false,
+    "model": "sushi", "max_tokens": 1024, "temperature": 0, "stream": false,
     "output_config": {"effort": "high"},
     "messages": [{"role": "user", "content": "Why is the sky blue? One sentence."}]
 }' | jq -r '[.content[].type] | join(",")')
@@ -87,7 +87,7 @@ fi
 
 echo "=== format json_schema is ENFORCED, and lands in content ==="
 BODY=$(msg '{
-    "model": "mlx-serve", "max_tokens": 512, "temperature": 0, "stream": false,
+    "model": "sushi", "max_tokens": 512, "temperature": 0, "stream": false,
     "output_config": {"effort": "high", "format": {"type": "json_schema", "schema": {
         "type": "object",
         "properties": {"title": {"type": "string"}, "summary": {"type": "string"}},

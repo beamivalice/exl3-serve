@@ -33,18 +33,18 @@ if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_prefix_cache_workloads: $MODEL not found."
     exit 0
 fi
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first with 'zig build -Doptimize=ReleaseFast'."
     exit 1
 fi
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 LOGFILE=$(mktemp)
 echo "  starting server (--prefix-cache-entries 4)..."
-"$BINARY" --model "$MODEL" --serve --port "$PORT" --host 127.0.0.1 --prefix-cache-entries 4 --prefix-cache-disk off --log-level info ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
+"$BINARY" --model "$MODEL" --serve --port "$PORT" --host 127.0.0.1 --prefix-cache-entries 4 --prefix-cache-disk off --log-level info ${SUSHI_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
 SERVER_PID=$!
 cleanup() {
     kill $SERVER_PID 2>/dev/null || true

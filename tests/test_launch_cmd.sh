@@ -1,5 +1,5 @@
 #!/bin/bash
-# Integration test: `mlx-serve launch <agent>` (issue #188) — configures and
+# Integration test: `sushi launch <agent>` (issue #188) — configures and
 # launches a third-party coding agent against the local server, ollama-style.
 #
 # Pins:
@@ -16,7 +16,7 @@
 #       budget
 #   [6] extra args after -- ride the agent invocation line
 #
-# The configs land in dedicated ~/.mlx-serve/<agent>/ dirs (never a user's
+# The configs land in dedicated ~/.sushi/<agent>/ dirs (never a user's
 # real agent config) — asserted per agent.
 
 set -u
@@ -24,7 +24,7 @@ set -u
 MODEL_DIR=${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}
 PORT=${2:-8097}
 BASE="http://127.0.0.1:$PORT"
-BIN=./zig-out/bin/mlx-serve
+BIN=./zig-out/bin/sushi
 PASS=0
 FAIL=0
 TOTAL=0
@@ -34,7 +34,7 @@ if [ ! -d "$MODEL_DIR" ]; then
     exit 0
 fi
 if [ ! -x "$BIN" ]; then
-    echo "FAIL: mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+    echo "FAIL: sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 
@@ -54,14 +54,14 @@ fi
 
 # ── [2] no server, --no-start ──
 OUT=$("$BIN" launch omp --no-start --url http://127.0.0.1:59999 2>&1)
-if [ $? -ne 0 ] && echo "$OUT" | grep -qi "mlx-serve serve"; then
+if [ $? -ne 0 ] && echo "$OUT" | grep -qi "sushi serve"; then
     run_test "dead server + --no-start instructs how to start one" PASS
 else
     run_test "dead server + --no-start instructs how to start one" FAIL "$OUT"
 fi
 
 echo "Starting server..."
-"$BIN" --model "$MODEL_DIR" --serve --port "$PORT" >/tmp/mlx-serve-launch-test.log 2>&1 &
+"$BIN" --model "$MODEL_DIR" --serve --port "$PORT" >/tmp/sushi-launch-test.log 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; }
 trap cleanup EXIT
@@ -81,10 +81,10 @@ print((r["data"][0].get("meta") or {}).get("context_length") or 0)
 # ── [3] omp --print ──
 OUT=$("$BIN" launch omp --print --url "$BASE" 2>&1)
 OK=1
-echo "$OUT" | grep -q 'export PI_CODING_AGENT_DIR="$HOME/.mlx-serve/omp"' || OK=0
-echo "$OUT" | grep -q "omp --model mlx/$MODEL_ID" || OK=0
-grep -q "contextWindow: $ADV_CTX" ~/.mlx-serve/omp/models.yml || OK=0
-grep -q "baseUrl: $BASE/v1" ~/.mlx-serve/omp/models.yml || OK=0
+echo "$OUT" | grep -q 'export PI_CODING_AGENT_DIR="$HOME/.sushi/omp"' || OK=0
+echo "$OUT" | grep -q "omp --model sushi/$MODEL_ID" || OK=0
+grep -q "contextWindow: $ADV_CTX" ~/.sushi/omp/models.yml || OK=0
+grep -q "baseUrl: $BASE/v1" ~/.sushi/omp/models.yml || OK=0
 if [ "$OK" = 1 ]; then
     run_test "omp script + models.yml carry the advertised context" PASS
 else
@@ -94,13 +94,13 @@ fi
 # ── [4] codex --print ──
 OUT=$("$BIN" launch codex --print --url "$BASE" 2>&1)
 OK=1
-echo "$OUT" | grep -q 'export CODEX_HOME="$HOME/.mlx-serve/codex"' || OK=0
+echo "$OUT" | grep -q 'export CODEX_HOME="$HOME/.sushi/codex"' || OK=0
 # desktop-app fallback: the ChatGPT/Codex app bundles the CLI off PATH
 echo "$OUT" | grep -q '/Applications/ChatGPT.app' || OK=0
 echo "$OUT" | grep -q 'Contents/Resources/codex' || OK=0
-grep -q 'wire_api = "responses"' ~/.mlx-serve/codex/config.toml || OK=0
-grep -q "model_context_window = $ADV_CTX" ~/.mlx-serve/codex/config.toml || OK=0
-grep -q "base_url = \"$BASE/v1\"" ~/.mlx-serve/codex/config.toml || OK=0
+grep -q 'wire_api = "responses"' ~/.sushi/codex/config.toml || OK=0
+grep -q "model_context_window = $ADV_CTX" ~/.sushi/codex/config.toml || OK=0
+grep -q "base_url = \"$BASE/v1\"" ~/.sushi/codex/config.toml || OK=0
 if [ "$OK" = 1 ]; then
     run_test "codex config targets /v1/responses with the advertised context" PASS
 else

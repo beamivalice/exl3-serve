@@ -34,7 +34,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [pack-format](pack-format.
 - **The codebook follows the MODEL at every dispatch**: `moeExl3` calls `expert_exl3_kernels.setDecodeParams`
   (codebook + window) before each dispatch because several EXL3 packs can be resident at once; every weight kernel
   inlines `exl3_pairh` from `codebookHelpers`, built per (codebook, window). A pack declaring the retired `tiny` codebook (config or shard stamp) is refused as `Exl3CodebookUnsupported`. A/B lever:
-  `MLX_SERVE_EXL3_CODEBOOK_AB=1` on the `codebook A/B` test.
+  `SUSHI_EXL3_CODEBOOK_AB=1` on the `codebook A/B` test.
 - **A shard's `__metadata__` stamp is CHECKED against `expert_quant` before upload**
   (`mimo_source.validateShardStamps`): see [pack-format](pack-format.md#the-shard-stamp).
 - `num_experts_per_tok` above 32 refuses by name (`Exl3TopKExceedsReduceBank`).
@@ -63,12 +63,12 @@ source FP8→bf16 loader (`usesMimoSourceTrunk`), billed dense by `mimoSourceRes
 - **The shared-expert add must free the routed output it consumed**: it once retained 1920 MiB per 8192-token chunk
   (the 48k prefill cliff). Owned-copy hidden captures at the chunk boundary; kernel configs dropped on their error
   paths.
-- **Levers**: `MLX_SERVE_EXL3_GEMM_WIN`, `MLX_SERVE_EXL3_WIN_ALIGN` (window geometry A/B); diagnostics
-  `MLX_SERVE_EXL3_LAYER_UBENCH`, `MLX_SERVE_EXL3_UNION_HIST`, `MLX_SERVE_EXL3_SWIGLU_MAXABS`.
+- **Levers**: `SUSHI_EXL3_GEMM_WIN`, `SUSHI_EXL3_WIN_ALIGN` (window geometry A/B); diagnostics
+  `SUSHI_EXL3_LAYER_UBENCH`, `SUSHI_EXL3_UNION_HIST`, `SUSHI_EXL3_SWIGLU_MAXABS`.
 
 ## Parity bars
 
-- **Quality bar**: KLD vs the bf16 teacher (`mlx-serve kld capture|compare`), never bytes against the affine pack.
+- **Quality bar**: KLD vs the bf16 teacher (`sushi kld capture|compare`), never bytes against the affine pack.
   The EXL3 kernel arms are not byte-identical to any composite (they round once). MTP: EXL3 cold-start depth cap 2
   on M5 Max, binding the auto path only (it measured 2.7-3.7 drafts/round, so it binds nothing on MCG K3).
 - **A GEMM/GEMV parity bar is relative to the SUMMANDS, never the result** (`Exl3GemmParity`): a trellis dot product

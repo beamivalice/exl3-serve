@@ -12,7 +12,7 @@
 #include <string.h>
 #include <unistd.h>
 
-struct msv_ane_model {
+struct sushi_ane_model {
     void *model;
     void *requests; /* NSArray<_ANERequest *>, one per procedure */
     void *options;  /* NSDictionary passed at compile/load/eval */
@@ -47,7 +47,7 @@ static double bridge_seconds(void) {
     return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
 }
 
-int msv_ane_bridge_available(void) {
+int sushi_ane_bridge_available(void) {
     static int state = -1;
     if (state >= 0) return state;
     dlopen("/System/Library/PrivateFrameworks/AppleNeuralEngine.framework/"
@@ -59,7 +59,7 @@ int msv_ane_bridge_available(void) {
     return state;
 }
 
-IOSurfaceRef msv_ane_bridge_surface(size_t bytes) {
+IOSurfaceRef sushi_ane_bridge_surface(size_t bytes) {
     size_t aligned = (bytes + 16383u) & ~(size_t)16383u;
     return IOSurfaceCreate((__bridge CFDictionaryRef)@{
         (id)kIOSurfaceWidth: @(aligned),
@@ -71,16 +71,16 @@ IOSurfaceRef msv_ane_bridge_surface(size_t bytes) {
 }
 
 static NSString *bridge_cache_root(void) {
-    const char *override = getenv("MLX_SERVE_ANE_CACHE_DIR");
+    const char *override = getenv("SUSHI_ANE_CACHE_DIR");
     NSString *root = override ? @(override) :
-        [NSHomeDirectory() stringByAppendingPathComponent:@".mlx-serve/ane-cache"];
+        [NSHomeDirectory() stringByAppendingPathComponent:@".sushi/ane-cache"];
     [[NSFileManager defaultManager] createDirectoryAtPath:root
         withIntermediateDirectories:YES attributes:nil error:nil];
     return root;
 }
 
-bool msv_ane_cache_enabled(void) {
-    const char *env = getenv("MLX_SERVE_ANE_CACHE");
+bool sushi_ane_cache_enabled(void) {
+    const char *env = getenv("SUSHI_ANE_CACHE");
     return !env || atoi(env) != 0;
 }
 
@@ -142,7 +142,7 @@ static bool bridge_cache_restore(NSString *identifier, NSString *directory) {
  *     variant go first — a share sweep replaces its predecessors rather than
  *     stacking one program set per value (7.9 GB for five shares observed).
  *  2. BYTES: oldest-first past the cap. The cap is the LESSER of the
- *     configured ceiling (MLX_SERVE_ANE_CACHE_CAP_GB, default 40) and what
+ *     configured ceiling (SUSHI_ANE_CACHE_CAP_GB, default 40) and what
  *     the volume can hold while keeping CACHE_DISK_RESERVE free for the
  *     build's own staging burst — a cap above free space is not a cap, and
  *     that is how two small-disk boxes shipped `ready: N/M` on 2026-09-10.
@@ -153,7 +153,7 @@ static bool bridge_cache_restore(NSString *identifier, NSString *directory) {
 static char lineage_group[128];
 static char lineage_variant[32];
 
-void msv_ane_cache_lineage(const char *group, const char *variant) {
+void sushi_ane_cache_lineage(const char *group, const char *variant) {
     snprintf(lineage_group, sizeof lineage_group, "%s", group ? group : "");
     snprintf(lineage_variant, sizeof lineage_variant, "%s", variant ? variant : "");
 }
@@ -169,7 +169,7 @@ static void bridge_cache_tag(NSString *entry) {
 }
 
 static unsigned long long bridge_cache_cap_bytes(void) {
-    const char *env = getenv("MLX_SERVE_ANE_CACHE_CAP_GB");
+    const char *env = getenv("SUSHI_ANE_CACHE_CAP_GB");
     long gb = env ? atol(env) : 40;
     if (gb <= 0) gb = 40;
     return (unsigned long long)gb << 30;
@@ -192,7 +192,7 @@ static NSArray<NSString *> *bridge_entry_lineage(NSString *path) {
     return parts.count >= 2 ? parts : nil;
 }
 
-void msv_ane_cache_variant(const char *group, char *out, int out_len) {
+void sushi_ane_cache_variant(const char *group, char *out, int out_len) {
     @autoreleasepool {
         out[0] = 0;
         NSString *root = [bridge_cache_root() stringByAppendingPathComponent:@"entries"];
@@ -330,20 +330,20 @@ static bool bridge_has_symbol_api(id in_memory_model) {
         [model respondsToSelector:@selector(procedureInfoForProcedureIndex:)];
 }
 
-msv_ane_model *msv_ane_model_create(const char *name, const char *mil,
+sushi_ane_model *sushi_ane_model_create(const char *name, const char *mil,
                                   void *weight_bytes_owned, size_t weight_bytes,
                                   IOSurfaceRef *input_surfaces,
                                   uint32_t input_count, IOSurfaceRef output,
                                   uint32_t procedure_count, int ane_instance,
                                   char *error, size_t error_size) {
     if (!procedure_count) procedure_count = 1;
-    if (!msv_ane_bridge_available()) {
+    if (!sushi_ane_bridge_available()) {
         free(weight_bytes_owned);
         bridge_fail(error, error_size, "the Neural Engine bridge is "
                     "unavailable");
         return NULL;
     }
-    msv_ane_model *handle = calloc(1, sizeof(*handle));
+    sushi_ane_model *handle = calloc(1, sizeof(*handle));
     if (!handle) {
         free(weight_bytes_owned);
         bridge_fail(error, error_size, "out of memory creating ANE %s", name);
@@ -380,9 +380,9 @@ msv_ane_model *msv_ane_model_create(const char *name, const char *mil,
             model, @selector(hexStringIdentifier));
         // Staging MUST stay in $TMPDIR: the compile/load runs in aned, a
         // separate daemon that cannot read this user's home directory
-        // (ANECCompile() fails bare on a ~/.mlx-serve staging path —
+        // (ANECCompile() fails bare on a ~/.sushi staging path —
         // measured 2026-08-17). Only the persistent cache entries live
-        // under ~/.mlx-serve/ane-cache; $TMPDIR and home share the APFS
+        // under ~/.sushi/ane-cache; $TMPDIR and home share the APFS
         // Data volume, so the hardlink mirror stays free.
         //
         // The staging LOCATION is the framework's contract, not ours:
@@ -422,7 +422,7 @@ msv_ane_model *msv_ane_model_create(const char *name, const char *mil,
         NSString *directory = [NSTemporaryDirectory()
             stringByAppendingPathComponent:identifier];
         NSFileManager *files = [NSFileManager defaultManager];
-        bool cache = msv_ane_cache_enabled();
+        bool cache = sushi_ane_cache_enabled();
         bool cached = cache && bridge_cache_restore(identifier, directory);
         if (cached) bridge_cache_tag(bridge_cache_entry(identifier));
         if (!cached) bridge_write_sources(directory, program, weights);
@@ -503,7 +503,7 @@ msv_ane_model *msv_ane_model_create(const char *name, const char *mil,
                         "exposes no per-procedure symbol indices, so a bank "
                         "of %u cannot be dispatched", name, procedure_count);
             handle->model = (__bridge_retained void *)model;
-            msv_ane_model_free(handle);
+            sushi_ane_model_free(handle);
             return NULL;
         }
         NSMutableArray *requests = [NSMutableArray array];
@@ -524,7 +524,7 @@ msv_ane_model *msv_ane_model_create(const char *name, const char *mil,
                             "ANE %s request rejected for procedure %u", name,
                             proc);
                 handle->model = (__bridge_retained void *)model;
-                msv_ane_model_free(handle);
+                sushi_ane_model_free(handle);
                 return NULL;
             }
             [requests addObject:request];
@@ -536,7 +536,7 @@ msv_ane_model *msv_ane_model_create(const char *name, const char *mil,
     return handle;
 }
 
-int msv_ane_model_eval(msv_ane_model *handle, uint32_t procedure, char *error,
+int sushi_ane_model_eval(sushi_ane_model *handle, uint32_t procedure, char *error,
                        size_t error_size) {
     if (!handle || !handle->model || !handle->requests) {
         bridge_fail(error, error_size, "the ANE model is not loaded");
@@ -565,7 +565,7 @@ int msv_ane_model_eval(msv_ane_model *handle, uint32_t procedure, char *error,
     return ok;
 }
 
-int msv_ane_model_unload(msv_ane_model *handle, char *error, size_t error_size) {
+int sushi_ane_model_unload(sushi_ane_model *handle, char *error, size_t error_size) {
     if (!handle || !handle->model) {
         bridge_fail(error, error_size, "no ANE model to unload");
         return 0;
@@ -584,7 +584,7 @@ int msv_ane_model_unload(msv_ane_model *handle, char *error, size_t error_size) 
     return 1;
 }
 
-int msv_ane_model_reload(msv_ane_model *handle, char *error, size_t error_size) {
+int sushi_ane_model_reload(sushi_ane_model *handle, char *error, size_t error_size) {
     if (!handle || !handle->model || !handle->staging_directory) {
         bridge_fail(error, error_size, "no ANE model to reload");
         return 0;
@@ -607,7 +607,7 @@ int msv_ane_model_reload(msv_ane_model *handle, char *error, size_t error_size) 
     return 1;
 }
 
-void msv_ane_model_free(msv_ane_model *handle) {
+void sushi_ane_model_free(sushi_ane_model *handle) {
     if (!handle) return;
     @autoreleasepool {
         if (handle->model) {
@@ -627,7 +627,7 @@ void msv_ane_model_free(msv_ane_model *handle) {
         if (handle->staging_directory) {
             [[NSFileManager defaultManager]
                 removeItemAtPath:@(handle->staging_directory) error:nil];
-            if (!msv_ane_cache_enabled())
+            if (!sushi_ane_cache_enabled())
                 bridge_cache_evict(strrchr(handle->staging_directory, '/') ?
                     strrchr(handle->staging_directory, '/') + 1 :
                     handle->staging_directory);
@@ -637,10 +637,10 @@ void msv_ane_model_free(msv_ane_model *handle) {
     free(handle);
 }
 
-double msv_ane_model_compile_seconds(const msv_ane_model *handle) {
+double sushi_ane_model_compile_seconds(const sushi_ane_model *handle) {
     return handle ? handle->compile_seconds : 0.0;
 }
 
-bool msv_ane_model_cache_hit(const msv_ane_model *handle) {
+bool sushi_ane_model_cache_hit(const sushi_ane_model *handle) {
     return handle ? handle->cache_hit : false;
 }

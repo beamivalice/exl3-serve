@@ -15,7 +15,7 @@ body:
       label: Priority
       description: How badly this affects you
       options:
-        - high (blocks my use of mlx-serve)
+        - high (blocks my use of sushi)
         - medium (workaround exists)
         - low (minor annoyance)
     validations:
@@ -35,8 +35,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: mlx-serve version
-      description: From `mlx-serve --version`
+      label: sushi version
+      description: From `sushi --version`
       placeholder: "26.8.10"
     validations:
       required: true
@@ -74,5 +74,5 @@ body:
     id: log
     attributes:
       label: Server log tail
-      description: "`~/.mlx-serve/logs/mlx-serve-<port>.log` — last ~50 lines around the failure (relaunch with `--log-level debug` if possible). For crashes, attach the macOS crash report (.ips) too."
+      description: "`~/.sushi/logs/sushi-<port>.log` — last ~50 lines around the failure (relaunch with `--log-level debug` if possible). For crashes, attach the macOS crash report (.ips) too."
       render: text

@@ -59,9 +59,9 @@ pub fn mtpAcceptanceFor(setting: ?mtp_acceptance.Mode) model_settings.Pick(mtp_a
     return model_settings.pick(mtp_acceptance.Mode, model_settings.launchFlag(mtp_acceptance.Mode, mtp_acceptance_default, mtp_acceptance_explicit), setting, mtp_acceptance_default);
 }
 
-/// The width `MLX_SERVE_PREFILL_CHUNK` asked for, or 0. A pinned width also turns the per-chunk adaptive width off.
+/// The width `SUSHI_PREFILL_CHUNK` asked for, or 0. A pinned width also turns the per-chunk adaptive width off.
 pub fn envPrefillChunk() usize {
-    return readEnvUsize("MLX_SERVE_PREFILL_CHUNK", 0);
+    return readEnvUsize("SUSHI_PREFILL_CHUNK", 0);
 }
 
 pub fn tickUbenchN(raw: ?[*:0]const u8) u32 {
@@ -74,7 +74,7 @@ var tick_ubench_left: ?u32 = null;
 
 pub fn tickUbenchArmed() bool {
     if (tick_ubench_left == null) {
-        tick_ubench_left = tickUbenchN(std.c.getenv("MLX_SERVE_DECODE_TICK_UBENCH"));
+        tick_ubench_left = tickUbenchN(std.c.getenv("SUSHI_DECODE_TICK_UBENCH"));
     }
     return tick_ubench_left.? > 0;
 }
@@ -214,7 +214,7 @@ pub const PREFILL_CHUNK_FLOOR: usize = 512;
 /// keeps full prefill throughput; the cap only bites when heads × total_ctx
 /// actually outgrows the budget. Never raises a caller-lowered base.
 ///
-/// DELIBERATELY ignores the msv_attn_p256 fused kernel (unlike
+/// DELIBERATELY ignores the sushi_attn_p256 fused kernel (unlike
 /// prefillEvalCadence / prefillMemoryNeeded, which drop their score term via
 /// transformer.prefillHeadDimFused): the fused kernel removes the SCORE
 /// transient, but a big chunk still scales the OTHER per-chunk transients
@@ -239,7 +239,7 @@ pub const PREFILL_CHUNK_FLOOR: usize = 512;
 pub fn boundedPrefillChunk(base_chunk: usize, score_head_dim: u32, n_heads: u32, total_ctx: usize, sliding_band_arch: bool, is_moe: bool, long_ctx_gated: bool) usize {
     const head_dim = score_head_dim;
     if (head_dim <= 128 or n_heads == 0 or total_ctx == 0) return base_chunk;
-    // qk 192 (mimo_v2 global layers, MLA): `msv_attn_pd` builds no score
+    // qk 192 (mimo_v2 global layers, MLA): `sushi_attn_pd` builds no score
     // tensor, so the budget formula below — which would pin the floor 512 at
     // any context past ~256k — measures nothing. What still scales with the
     // chunk is the MoE gather and the ringed-SWA staging, and those are what
@@ -264,7 +264,7 @@ pub fn boundedPrefillChunk(base_chunk: usize, score_head_dim: u32, n_heads: u32,
         // (+8% prefill for +3 GB peak here); every other MoE keeps the measured 4096 cap.
         return @min(base_chunk, if (is_moe and !long_ctx_gated) @as(usize, 4096) else @as(usize, 8192));
     }
-    // Composed-causal fallback (MLX_SERVE_FUSED_256_CAUSAL=0): SMALL chunks
+    // Composed-causal fallback (SUSHI_FUSED_256_CAUSAL=0): SMALL chunks
     // measured strictly faster AND lighter on the 27B (2026-07-12 ladder,
     // M4 Max): 8K 225 -> 235.8 tok/s and peak 28.9 -> 19.8 GB at chunk
     // 2048; 32K 205.4 -> 209.3. Chunk boundaries ARE block-level causal
@@ -284,13 +284,13 @@ pub fn boundedPrefillChunk(base_chunk: usize, score_head_dim: u32, n_heads: u32,
 }
 
 /// The prefill chunk `initWithOptions` will actually use for a request:
-/// MLX_SERVE_PREFILL_CHUNK env (explicit tuning knob — honored verbatim,
+/// SUSHI_PREFILL_CHUNK env (explicit tuning knob — honored verbatim,
 /// never safety-capped) > --prefill-chunk / default, capped by
 /// boundedPrefillChunk. Exported so server.zig's admission guard
 /// (checkAttentionMemory) models the SAME chunk the prefill will run with —
 /// the guard and the real prefill must not drift.
 pub fn effectivePrefillChunk(head_dim: u32, n_heads: u32, total_ctx: usize, sliding_band_arch: bool, is_moe: bool, long_ctx_gated: bool, pinned_chunk: usize) usize {
-    const env_chunk = readEnvUsize("MLX_SERVE_PREFILL_CHUNK", 0);
+    const env_chunk = readEnvUsize("SUSHI_PREFILL_CHUNK", 0);
     if (env_chunk > 0) return env_chunk;
     // `pinned_chunk` is the machine-sized cap frozen at load
     // (`ModelConfig.pinned_prefill_chunk`, from `server.resolvePrefillChunk`):
@@ -529,7 +529,7 @@ pub const MtpHeadRef = union(enum) {
     }
 };
 
-/// `MLX_SERVE_MTP_HEAD_PERSIST=0`: the qwen4_exp head's committed history is neither
+/// `SUSHI_MTP_HEAD_PERSIST=0`: the qwen4_exp head's committed history is neither
 /// snapshotted into a prefix-cache entry nor restored from one.
 var mtp_head_persist_env: ?bool = null;
 /// Only a literal "0" turns persistence off.
@@ -539,7 +539,7 @@ pub fn mtpHeadPersistFromEnv(raw: ?[]const u8) bool {
 }
 pub fn mtpHeadPersistEnabled() bool {
     if (mtp_head_persist_env) |v| return v;
-    const raw = std.c.getenv("MLX_SERVE_MTP_HEAD_PERSIST");
+    const raw = std.c.getenv("SUSHI_MTP_HEAD_PERSIST");
     const on = mtpHeadPersistFromEnv(if (raw) |r| std.mem.sliceTo(r, 0) else null);
     mtp_head_persist_env = on;
     return on;
@@ -868,11 +868,11 @@ pub fn fillSuppressMask(buf: []bool, ids: []const u32, defined_vocab: usize) voi
 /// Transformer (both the serve load path and the CLI run path call this).
 /// The id set is `tokenizer.reservedOutputIds`: `special: true` added tokens
 /// minus EOS/stop ids minus template-emitted markers. Kill switch
-/// `MLX_SERVE_SUPPRESS_RESERVED=0`. Never fails a load — any error logs and
+/// `SUSHI_SUPPRESS_RESERVED=0`. Never fails a load — any error logs and
 /// leaves the mask null (suppression off), and engagement is one-shot-logged
 /// so a silent no-op is visible (the silent-fallback class).
 pub fn installSuppressMask(xfm: *Transformer, tok: *const Tokenizer, chat_template: []const u8, eos_ids: []const u32) void {
-    if (std.c.getenv("MLX_SERVE_SUPPRESS_RESERVED")) |v| {
+    if (std.c.getenv("SUSHI_SUPPRESS_RESERVED")) |v| {
         if (v[0] == '0') {
             log.info("[suppress] reserved-token suppression disabled by env\n", .{});
             return;
@@ -1177,7 +1177,7 @@ pub fn effectiveSsmCheckpointStride(base: usize, prefill_chunk: usize) usize {
 /// Tokens of KV capacity this prefill reserves up front (#353): removes the grow transient a
 /// long prefill pays, at the price of allocating generation headroom early. Gated on
 /// `longCtxGated`; every other arch keeps proportional growth (`reserve_tokens` stays 0).
-/// `MLX_SERVE_KV_RESERVE=0` turns it off inside the gate. `server.prefillRequestTerms` bills it.
+/// `SUSHI_KV_RESERVE=0` turns it off inside the gate. `server.prefillRequestTerms` bills it.
 pub fn reservedPrefillTokens(
     config: *const model_mod.ModelConfig,
     seq: u64,
@@ -1206,12 +1206,12 @@ pub fn shouldCheckpointSsmPrefill(stride: u32, has_ssm: bool, has_vision: bool) 
 /// Chunked vision prefill (issue #197). Default ON: the splice resumes its
 /// row index across chunk boundaries via `ForwardCtx.vision_splice_offset`,
 /// so an image-bearing prompt prefills under the same chunk-bounded memory
-/// envelope as text. MLX_SERVE_VISION_CHUNKED=0 restores the whole-prompt
+/// envelope as text. SUSHI_VISION_CHUNKED=0 restores the whole-prompt
 /// single forward (and the memory guard's full-width bill with it).
 var vision_chunked_cached: ?bool = null;
 pub fn visionChunkedPrefillEnabled() bool {
     if (vision_chunked_cached) |v| return v;
-    const raw = std.c.getenv("MLX_SERVE_VISION_CHUNKED");
+    const raw = std.c.getenv("SUSHI_VISION_CHUNKED");
     const on = raw == null or !std.mem.eql(u8, std.mem.sliceTo(raw.?, 0), "0");
     vision_chunked_cached = on;
     return on;
@@ -1470,7 +1470,7 @@ pub const Generator = struct {
     /// because their less-predictable reasoning preamble pays back later.
     dflash_min_accepted_per_round: f32 = DFLASH_GATE_MIN_ACCEPTED_PER_ROUND,
     /// Per-round width chooser over the model's round-cost table (null =
-    /// MLX_SERVE_DFLASH_CHOOSER=0, the fixed block + sticky yield gate).
+    /// SUSHI_DFLASH_CHOOSER=0, the fixed block + sticky yield gate).
     dflash_chooser: ?round_cost.WidthChooser = null,
     /// Drafts this round ran (0 = serial), read by the table feed.
     dflash_round_width: u32 = 0,
@@ -1478,7 +1478,7 @@ pub const Generator = struct {
     dflash_attempted: u64 = 0,
     /// Stats: cumulative draft tokens accepted (excluding always-accepted t1).
     dflash_accepted_tokens: u64 = 0,
-    /// Per-phase wall-time trace (MLX_SERVE_DFLASH_TRACE=1; else untouched).
+    /// Per-phase wall-time trace (SUSHI_DFLASH_TRACE=1; else untouched).
     /// Unlike the MTP trace this one INSERTS eval barriers to attribute a
     /// fully-lazy round — a traced round is slower than a real one by
     /// whatever overlap the barriers destroy. Diagnostic only.
@@ -1608,7 +1608,7 @@ pub const Generator = struct {
     /// This slot's next `mtpRoundBegin` inits the chain and returns `.open` so the
     /// scheduler can run the head step for the group in one graph.
     mtp_batch_head: bool = false,
-    /// Per-phase wall-time trace (MLX_SERVE_MTP_TRACE=1; else untouched).
+    /// Per-phase wall-time trace (SUSHI_MTP_TRACE=1; else untouched).
     mtp_trace: MtpTrace = .{},
     /// Trace-only: stopwatch running across the scheduler gap (round return
     /// → next round entry); bills the `.gap` phase. Null when not tracing.
@@ -1750,12 +1750,12 @@ pub const Generator = struct {
     /// break-even acceptance is several times a dense trunk's.
     pub const DFLASH_MOE_GATE_MIN_ACCEPTED_PER_ROUND: f32 = 1.8;
 
-    /// Width chooser — OPT-IN (MLX_SERVE_DFLASH_CHOOSER=1) until measured on
+    /// Width chooser — OPT-IN (SUSHI_DFLASH_CHOOSER=1) until measured on
     /// the five peer cells; default is the fixed block + sticky yield gate.
     var dflash_chooser_cache: ?bool = null;
     fn dflashChooserEnabled() bool {
         if (dflash_chooser_cache) |v| return v;
-        const raw = std.c.getenv("MLX_SERVE_DFLASH_CHOOSER");
+        const raw = std.c.getenv("SUSHI_DFLASH_CHOOSER");
         const on = raw != null and std.mem.eql(u8, std.mem.span(raw.?), "1");
         dflash_chooser_cache = on;
         return on;
@@ -2215,7 +2215,7 @@ pub const Generator = struct {
         /// this seam, so a long cold prefill stalls them for at most one
         /// chunk-forward instead of its whole duration. Null = the prefill
         /// runs atomically (pre-interleave behavior, and the
-        /// MLX_SERVE_PREFILL_INTERLEAVE=0 kill switch).
+        /// SUSHI_PREFILL_INTERLEAVE=0 kill switch).
         interleave_hook: ?InterleaveHook = null,
         /// SSD-first write-through (qwen4_exp only; see `WriteThroughHook`).
         write_through_hook: ?WriteThroughHook = null,
@@ -2267,7 +2267,7 @@ pub const Generator = struct {
     /// top_k == 1) gets the raw argmax-equality accept; a clean SAMPLED
     /// request gets the stochastic arm (MTP one-hot Leviathan acceptance over
     /// filtered target probs) unless `stoch_enabled` is false — the
-    /// MLX_SERVE_DSV4_DSPARK_STOCH=0 kill switch, which restores greedy-only
+    /// SUSHI_DSV4_DSPARK_STOCH=0 kill switch, which restores greedy-only
     /// gating.
     pub fn dsparkArmFor(sampling: SamplingParams, logprobs_n: u32, stoch_enabled: bool) DsparkArm {
         const clean = sampling.repeat_penalty == 1.0 and
@@ -2280,7 +2280,7 @@ pub const Generator = struct {
         return if (stoch_enabled) .stochastic else .off;
     }
 
-    /// Stochastic-DSpark kill switch — MLX_SERVE_DSV4_DSPARK_STOCH=0
+    /// Stochastic-DSpark kill switch — SUSHI_DSV4_DSPARK_STOCH=0
     /// restores the greedy-only chokepoint gate for A/Bs.
     var dspark_stoch_cache: ?bool = null;
     pub fn dsparkStochEnabledFromEnv(raw: ?[]const u8) bool {
@@ -2290,7 +2290,7 @@ pub const Generator = struct {
 
     fn dsparkStochEnabled() bool {
         if (dspark_stoch_cache) |v| return v;
-        const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_DSV4_DSPARK_STOCH")) |p| std.mem.span(p) else null;
+        const raw: ?[]const u8 = if (std.c.getenv("SUSHI_DSV4_DSPARK_STOCH")) |p| std.mem.span(p) else null;
         const on = dsparkStochEnabledFromEnv(raw);
         dspark_stoch_cache = on;
         return on;
@@ -2336,11 +2336,11 @@ pub const Generator = struct {
             // stochastic arm (MTP one-hot Leviathan acceptance over the
             // request's own filtered probs — the agent-default temp 0.6
             // traffic that otherwise always ran serial), env-killable via
-            // MLX_SERVE_DSV4_DSPARK_STOCH=0. PLD / drafter / qwen-MTP
+            // SUSHI_DSV4_DSPARK_STOCH=0. PLD / drafter / qwen-MTP
             // remain hard-off regardless: their verify forwards go through
             // machinery this arch cannot roll back.
             const mdl_ds = xfm.dsv4.?;
-            const dspark_env_off = if (std.c.getenv("MLX_SERVE_DSV4_DSPARK")) |v| v[0] == '0' else false;
+            const dspark_env_off = if (std.c.getenv("SUSHI_DSV4_DSPARK")) |v| v[0] == '0' else false;
             const arm = dsparkArmFor(sampling, options.logprobs_n, dsparkStochEnabled());
             if (mdl_ds.n_mtp > 0 and !dspark_env_off and arm != .off) {
                 dspark_active = true;
@@ -2412,7 +2412,7 @@ pub const Generator = struct {
         // ~20 GB of activations alone on a 50k-token prompt, causing Metal OOM.
         // Vision requests skip chunking since image token positions must be visible
         // in a single forward pass for spliceVisionEmbeddings to work correctly.
-        // PREFILL_CHUNK overridable via env MLX_SERVE_PREFILL_CHUNK for tuning,
+        // PREFILL_CHUNK overridable via env SUSHI_PREFILL_CHUNK for tuning,
         // or via the module-level `prefill_chunk_override` (set by --prefill-chunk
         // CLI flag in main.zig). Env var wins if both are set (and skips the
         // safety cap below — it's the explicit escape hatch).
@@ -2434,10 +2434,10 @@ pub const Generator = struct {
             options.pinned_prefill_chunk,
         );
         // Phase-level prefill instrumentation. Enabled at debug level OR via
-        // MLX_SERVE_PREFILL_TRACE=1 (which forces the trace line at info).
+        // SUSHI_PREFILL_TRACE=1 (which forces the trace line at info).
         // Phase 0 of plan 04 — gives us a decomposed view of where cold prefill
         // time goes (chunked-forward vs eval vs last-token-forward).
-        const trace_force: bool = prefill_trace_force or readEnvBool("MLX_SERVE_PREFILL_TRACE");
+        const trace_force: bool = prefill_trace_force or readEnvBool("SUSHI_PREFILL_TRACE");
         const trace_enabled = log.isDebug() or trace_force;
         var prefill_sw = io_util.Stopwatch.init(io);
         var chunked_ns: u64 = 0;
@@ -2680,7 +2680,7 @@ pub const Generator = struct {
                 defer _ = mlx.mlx_array_free(chunk_input);
 
                 const chunk_start_ns = if (trace_enabled) prefill_sw.read() else 0;
-                // Phase 2 experiment: when MLX_SERVE_COMPILE_FORWARD=1 wired a
+                // Phase 2 experiment: when SUSHI_COMPILE_FORWARD=1 wired a
                 // compiled closure at load time, route this chunk through it.
                 // The compiled closure uses xfm.defaultCtx (xfm.cache + xfm.ssm_entries),
                 // which matches the prefill `ctx` when the scheduler has swapped
@@ -5067,7 +5067,7 @@ pub const Generator = struct {
         // selector draft only survives verify if it IS the trunk argmax);
         // stochastic requests sample the selector's own candidate softmax and
         // accept through min(1, p/q) with q read off the traced path —
-        // exact by construction. `MLX_SERVE_DFLASH_SELECTOR=0` forces the v1
+        // exact by construction. `SUSHI_DFLASH_SELECTOR=0` forces the v1
         // arms for A/Bs.
         const use_selector = model.selector != null and dflashSelectorEnabled();
         // DSpark: the block's base logits are position-parallel, but each
@@ -6547,7 +6547,7 @@ pub const Generator = struct {
         return .{ .corr_samples = corr_samples, .accept_p = accept_p, .accept_q = accept_q, .accept_defer = accept_defer };
     }
 
-    /// Batched-corrections kill switch — MLX_SERVE_MTP_BATCH_CORR=0
+    /// Batched-corrections kill switch — SUSHI_MTP_BATCH_CORR=0
     /// restores the per-position accept/correction graphs for A/Bs.
     var mtp_batch_corr_cache: ?bool = null;
     pub fn mtpBatchCorrEnabledFromEnv(raw: ?[]const u8) bool {
@@ -6557,7 +6557,7 @@ pub const Generator = struct {
 
     fn mtpBatchCorrEnabled() bool {
         if (mtp_batch_corr_cache) |v| return v;
-        const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_BATCH_CORR")) |p| std.mem.span(p) else null;
+        const raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_BATCH_CORR")) |p| std.mem.span(p) else null;
         const on = mtpBatchCorrEnabledFromEnv(raw);
         mtp_batch_corr_cache = on;
         return on;
@@ -6978,7 +6978,7 @@ pub const Generator = struct {
         // (~10 legacy rounds + a +1/round base climb — a third of a short
         // generation). Demotion stays instant (EMA decay + sticky disable are
         // per-request), so a workload change costs a few rounds, not the win.
-        // `MLX_SERVE_MTP_FORCE_DEPTH` is a measurement mode: every round drafts
+        // `SUSHI_MTP_FORCE_DEPTH` is a measurement mode: every round drafts
         // exactly n and the controller never plans, so a seed must not be
         // applied (nor, at deinit, published).
         if (self.mtp_ev_rounds == 0 and self.mtp_attempted == 0 and
@@ -7015,7 +7015,7 @@ pub const Generator = struct {
         // Either the PREVIOUS round built + dispatched chunk A at its tail
         // (cross-round pipelining, `mtpMaybePreDraft` — the drafts are
         // already materializing on the GPU) or we build it here (round 1,
-        // MLX_SERVE_MTP_PREDRAFT=0, or a round with no successor state).
+        // SUSHI_MTP_PREDRAFT=0, or a round with no successor state).
         //
         // No head-cache snapshot in either case: a snapshot refcount-shares
         // the head's KV buffer, which forces every draft append's
@@ -7199,10 +7199,10 @@ pub const Generator = struct {
         // sequential recurrence AND a full trunk weight read, and at depth > 1
         // MOST rounds are partial, so it dominated the round cost).
         self.ctx.capture_ssm_seq = self.ctx.ssm_entries != null;
-        // DIAGNOSTIC (MLX_SERVE_MTP_TRACE_SYNC=1): drain the GPU before the
+        // DIAGNOSTIC (SUSHI_MTP_TRACE_SYNC=1): drain the GPU before the
         // verify build so the `sync` lap shows the pending lazy work (draft
         // chain, rollback, commit) and `verify` the forward alone.
-        if (tracing and std.c.getenv("MLX_SERVE_MTP_TRACE_SYNC") != null) {
+        if (tracing and std.c.getenv("SUSHI_MTP_TRACE_SYNC") != null) {
             var sync_watch = io_util.Stopwatch.init(self.timer.io);
             try mlx.check(mlx.mlx_array_eval(st.verify_input));
             self.mtp_trace.add(.sync, sync_watch.read());
@@ -8003,14 +8003,14 @@ pub const Generator = struct {
     /// A greedy target keeps the argmax proposal (the temp-0 identity
     /// contract); a sampled target proposes from the draft sampler, where
     /// `min(1, p[argmax])` no longer collapses on a flat row.
-    /// MLX_SERVE_MTP_DRAFT_GREEDY overrides for A/Bs: 1 = always greedy,
+    /// SUSHI_MTP_DRAFT_GREEDY overrides for A/Bs: 1 = always greedy,
     /// 0 = always sampled, absent = the per-request rule.
     pub const DraftProposal = enum { greedy, sampled, per_request };
     var mtp_draft_proposal_cache: ?DraftProposal = null;
     fn mtpDraftProposalEnv() DraftProposal {
         if (mtp_draft_proposal_cache) |v| return v;
         var mode: DraftProposal = .per_request;
-        if (std.c.getenv("MLX_SERVE_MTP_DRAFT_GREEDY")) |p| {
+        if (std.c.getenv("SUSHI_MTP_DRAFT_GREEDY")) |p| {
             const val = std.mem.span(p);
             if (val.len > 0 and val[0] == '0') mode = .sampled;
             if (val.len > 0 and val[0] == '1') mode = .greedy;
@@ -8051,7 +8051,7 @@ pub const Generator = struct {
 
     /// Draft temperature is per FAMILY: the sidecar head's 0.6 does not carry
     /// over, and Flash Next drafts best at the target's own temperature.
-    /// MLX_SERVE_MTP_DRAFT_TEMP is the sweep lever for the next head.
+    /// SUSHI_MTP_DRAFT_TEMP is the sweep lever for the next head.
     pub const MTP_DRAFT_TEMP_QWEN4: f32 = 1.0;
 
     /// Only the ENV read is cached; the value is per loaded model.
@@ -8059,7 +8059,7 @@ pub const Generator = struct {
     fn mtpDraftTempEnv() ?f32 {
         if (mtp_draft_temp_env) |v| return v;
         var parsed: ?f32 = null;
-        if (std.c.getenv("MLX_SERVE_MTP_DRAFT_TEMP")) |p| {
+        if (std.c.getenv("SUSHI_MTP_DRAFT_TEMP")) |p| {
             if (std.fmt.parseFloat(f32, std.mem.span(p)) catch null) |v| {
                 if (v > 0.01 and v <= 4.0) parsed = v;
             }
@@ -8185,7 +8185,7 @@ pub const Generator = struct {
     // CONSIDER extension pay the one bounded chunk-A sync; when the plan
     // collapses to m_lo == m_hi the round is byte-identical in shape to the
     // fixed-depth path (no confidence graph, no sync).
-    // Disable via MLX_SERVE_MTP_ADAPTIVE=0 (reverts to the windowed
+    // Disable via SUSHI_MTP_ADAPTIVE=0 (reverts to the windowed
     // fixed-depth controller above).
 
     /// Default depth cap when `--mtp-depth` is not passed (0 = auto) and the
@@ -8237,7 +8237,7 @@ pub const Generator = struct {
     /// Round-cost model in units of the fixed round cost (verify-forward
     /// floor + round eval/read + commit ≈ 1.0 ≈ 32 ms on the 27B since the
     /// deferred history append). Ratios are machine-stable where absolute ms
-    /// are not. Refit via MLX_SERVE_MTP_TRACE on Qwen3.6-27B GDN (M4 Max,
+    /// are not. Refit via SUSHI_MTP_TRACE on Qwen3.6-27B GDN (M4 Max,
     /// 2026-07-13, saturated fixed depths, same-session sweep AFTER the
     /// deferred-append round shape landed): T(1)=42.0, T(3)=62.6,
     /// T(6)=111.6, T(7)=114.9 ms — the surface is PIECEWISE: ~10.3 ms
@@ -8245,7 +8245,7 @@ pub const Generator = struct {
     /// ms/pos for positions 4-6, and position 7 nearly free (+3.3 ms —
     /// verify seq 8 rides the same row tile as 5-7), averaged into
     /// per_pos_hi. ATTRIBUTION (the GDN-vs-qmm µbench in transformer.zig,
-    /// MLX_SERVE_GDN_UBENCH=1): the ladder is ~90% qmm ROW-COUNT cost — the
+    /// SUSHI_GDN_UBENCH=1): the ladder is ~90% qmm ROW-COUNT cost — the
     /// GDN recurrence kernel is nearly flat over verify widths (0.13→0.26 ms
     /// per dispatch, T 2→64) and contributes <1 ms/round; the earlier
     /// "GDN sequential width ramp" reading was a mis-attribution.
@@ -8255,7 +8255,7 @@ pub const Generator = struct {
     /// Override for live tuning (an explicit override selects the generic
     /// two-region surface even on M5, so all four values remain the
     /// complete backwards-compatible contract):
-    /// MLX_SERVE_MTP_EV_COSTS="draft,per_pos_lo,per_pos_hi,sync".
+    /// SUSHI_MTP_EV_COSTS="draft,per_pos_lo,per_pos_hi,sync".
     pub const MtpEvCosts = struct {
         draft: f32, // one sequential MTP-head step (fwd + draft lm_head)
         per_pos_lo: f32, // marginal verify+capture per position, flat region
@@ -8294,7 +8294,7 @@ pub const Generator = struct {
     /// (`splitCausalSdpa` — dense verify q 6..9 now rides the vector path,
     /// invalidating the ramp the old hi partially priced): same-session
     /// saturated ECHO sweep, Jundot oQ4e 27B @8K cold reps
-    /// (--prefix-cache-entries 0), M4 Max, MLX_SERVE_MTP_ADAPTIVE=0 forced
+    /// (--prefix-cache-entries 0), M4 Max, SUSHI_MTP_ADAPTIVE=0 forced
     /// depths, saturated (m_avg==N) trace windows only — T(1)=44.6,
     /// T(2)=51.0, T(3)=59.2, T(4)=68.2, T(6)=95.4, T(8)=142.3 ms → floor
     /// ≈ 38.2 ms. Composite marginals in floor units: k<=4 ≈ 0.20 (6.4-9.0
@@ -8533,13 +8533,13 @@ pub const Generator = struct {
         t.stored_at = folded;
     }
 
-    /// Round-cost table kill switch — MLX_SERVE_MTP_COST_TABLE=0 keeps the
+    /// Round-cost table kill switch — SUSHI_MTP_COST_TABLE=0 keeps the
     /// table OBSERVING (its `[spec-stats]` fields stay comparable across an
     /// A/B) but the plan reads only the fitted prior and no width trial runs.
     var mtp_cost_table_cache: ?bool = null;
     fn mtpCostTableEnabled() bool {
         if (mtp_cost_table_cache) |v| return v;
-        const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_COST_TABLE")) |p| std.mem.span(p) else null;
+        const raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_COST_TABLE")) |p| std.mem.span(p) else null;
         const on = mtpLiveCostEnabledFromEnv(raw);
         mtp_cost_table_cache = on;
         return on;
@@ -8885,7 +8885,7 @@ pub const Generator = struct {
         return sum;
     }
 
-    /// Per-phase wall-time accumulator behind MLX_SERVE_MTP_TRACE=1. Pure
+    /// Per-phase wall-time accumulator behind SUSHI_MTP_TRACE=1. Pure
     /// bookkeeping; `nextMtp` stamps phases with a Stopwatch and emits one
     /// summary line every LOG_EVERY rounds. Zero cost when the env is absent
     /// (every stamp is guarded on the cached env check).
@@ -8984,7 +8984,7 @@ pub const Generator = struct {
         }
     };
 
-    /// Per-phase wall-time accumulator behind MLX_SERVE_DFLASH_TRACE=1.
+    /// Per-phase wall-time accumulator behind SUSHI_DFLASH_TRACE=1.
     /// `nextDflash` stamps phases with a Stopwatch and emits one summary line
     /// every LOG_EVERY rounds. Zero cost when the env is absent.
     pub const DflashTrace = struct {
@@ -9027,7 +9027,7 @@ pub const Generator = struct {
     };
 
     /// Sampled DFlash drafts — DEFAULT OFF, measured negative.
-    /// `MLX_SERVE_DFLASH_SAMPLED_DRAFTS=1` draws each draft from the
+    /// `SUSHI_DFLASH_SAMPLED_DRAFTS=1` draws each draft from the
     /// request's own filtered distribution and accepts through the full
     /// Leviathan ratio; off keeps the argmax draft and its one-hot q.
     ///
@@ -9044,7 +9044,7 @@ pub const Generator = struct {
     fn dflashSampledDraftsEnabled() bool {
         if (dflash_sampled_drafts_cache) |v| return v;
         var on = false;
-        if (std.c.getenv("MLX_SERVE_DFLASH_SAMPLED_DRAFTS")) |p| {
+        if (std.c.getenv("SUSHI_DFLASH_SAMPLED_DRAFTS")) |p| {
             const val = std.mem.span(p);
             if (val.len > 0 and val[0] == '1') on = true;
         }
@@ -9052,22 +9052,22 @@ pub const Generator = struct {
         return on;
     }
 
-    /// `MLX_SERVE_DFLASH_SELECTOR`: default ON when the sidecar ships a
+    /// `SUSHI_DFLASH_SELECTOR`: default ON when the sidecar ships a
     /// selector (DFlash2). "0" forces the v1 draft arms (argmax / block
     /// sampling) for A/Bs — the conv layers stay, they are the checkpoint.
     var dflash_selector_cache: ?bool = null;
-    /// `MLX_SERVE_DFLASH_MARKOV=0` drafts a DSpark sidecar's block from its
+    /// `SUSHI_DFLASH_MARKOV=0` drafts a DSpark sidecar's block from its
     /// UNCORRECTED base logits (the v1 arm) — an A/B lever for measuring what
     /// the Markov chain is worth, never a default.
     fn dflashMarkovEnabled() bool {
-        const p = std.c.getenv("MLX_SERVE_DFLASH_MARKOV") orelse return true;
+        const p = std.c.getenv("SUSHI_DFLASH_MARKOV") orelse return true;
         return !std.mem.eql(u8, std.mem.span(p), "0");
     }
 
     fn dflashSelectorEnabled() bool {
         if (dflash_selector_cache) |v| return v;
         var on = true;
-        if (std.c.getenv("MLX_SERVE_DFLASH_SELECTOR")) |p| {
+        if (std.c.getenv("SUSHI_DFLASH_SELECTOR")) |p| {
             const val = std.mem.span(p);
             if (val.len > 0 and val[0] == '0') on = false;
         }
@@ -9078,7 +9078,7 @@ pub const Generator = struct {
     var dflash_trace_cache: ?bool = null;
     fn dflashTraceEnabled() bool {
         if (dflash_trace_cache) |v| return v;
-        const on = readEnvBool("MLX_SERVE_DFLASH_TRACE");
+        const on = readEnvBool("SUSHI_DFLASH_TRACE");
         dflash_trace_cache = on;
         return on;
     }
@@ -9104,7 +9104,7 @@ pub const Generator = struct {
         t.reset();
     }
 
-    /// Adaptive (EV) controller gate — DEFAULT ON. MLX_SERVE_MTP_ADAPTIVE=0
+    /// Adaptive (EV) controller gate — DEFAULT ON. SUSHI_MTP_ADAPTIVE=0
     /// reverts to the fixed-depth windowed controller for same-boot A/Bs.
     var mtp_adaptive_cache: ?bool = null;
     var mtp_force_depth_cache: ??u32 = null;
@@ -9112,7 +9112,7 @@ pub const Generator = struct {
     pub fn mtpAdaptiveEnabled() bool {
         if (mtp_adaptive_cache) |v| return v;
         var on = true;
-        if (std.c.getenv("MLX_SERVE_MTP_ADAPTIVE")) |p| {
+        if (std.c.getenv("SUSHI_MTP_ADAPTIVE")) |p| {
             const val = std.mem.span(p);
             if (val.len > 0 and val[0] == '0') on = false;
         }
@@ -9121,7 +9121,7 @@ pub const Generator = struct {
     }
 
     /// Cross-request EV seeding gate — default ON; set
-    /// MLX_SERVE_MTP_EV_SEED=0 to keep request planning independent.
+    /// SUSHI_MTP_EV_SEED=0 to keep request planning independent.
     var mtp_ev_seed_cache: ?bool = null;
     fn mtpEvSeedEnabledFromEnv(raw: ?[]const u8) bool {
         const value = raw orelse return true;
@@ -9130,7 +9130,7 @@ pub const Generator = struct {
 
     fn mtpEvSeedEnabled() bool {
         if (mtp_ev_seed_cache) |v| return v;
-        const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_EV_SEED")) |p| std.mem.span(p) else null;
+        const raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_EV_SEED")) |p| std.mem.span(p) else null;
         const on = mtpEvSeedEnabledFromEnv(raw);
         mtp_ev_seed_cache = on;
         return on;
@@ -9141,7 +9141,7 @@ pub const Generator = struct {
     /// so the head chain runs while the CPU builds the verify/accept graphs
     /// (~2 ms the GPU used to spend idle each round). Dispatch timing only —
     /// lazy sampling ops bind their PRNG key at graph BUILD time, so values
-    /// are identical. MLX_SERVE_MTP_EARLY_DISPATCH=0 restores the serial
+    /// are identical. SUSHI_MTP_EARLY_DISPATCH=0 restores the serial
     /// round shape for same-boot A/Bs.
     var mtp_early_dispatch_cache: ?bool = null;
     pub fn mtpEarlyDispatchEnabledFromEnv(raw: ?[]const u8) bool {
@@ -9151,7 +9151,7 @@ pub const Generator = struct {
 
     fn mtpEarlyDispatchEnabled() bool {
         if (mtp_early_dispatch_cache) |v| return v;
-        const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_EARLY_DISPATCH")) |p| std.mem.span(p) else null;
+        const raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_EARLY_DISPATCH")) |p| std.mem.span(p) else null;
         const on = mtpEarlyDispatchEnabledFromEnv(raw);
         mtp_early_dispatch_cache = on;
         return on;
@@ -9160,9 +9160,9 @@ pub const Generator = struct {
     /// Cross-round pre-draft (round pipelining) — DEFAULT ON. Builds and
     /// dispatches the next round's chunk-A draft chain at the current
     /// round's tail (see mtpMaybePreDraft) so the GPU drafts while the CPU
-    /// does emit/SSE bookkeeping. MLX_SERVE_MTP_PREDRAFT=0 reverts to
+    /// does emit/SSE bookkeeping. SUSHI_MTP_PREDRAFT=0 reverts to
     /// head-of-round drafting for same-boot A/Bs (combine with
-    /// MLX_SERVE_MTP_EARLY_DISPATCH=0 for the fully serial round shape).
+    /// SUSHI_MTP_EARLY_DISPATCH=0 for the fully serial round shape).
     var mtp_predraft_cache: ?bool = null;
     pub fn mtpPredraftEnabledFromEnv(raw: ?[]const u8) bool {
         const value = raw orelse return true;
@@ -9171,7 +9171,7 @@ pub const Generator = struct {
 
     fn mtpPredraftEnabled() bool {
         if (mtp_predraft_cache) |v| return v;
-        const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_PREDRAFT")) |p| std.mem.span(p) else null;
+        const raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_PREDRAFT")) |p| std.mem.span(p) else null;
         const on = mtpPredraftEnabledFromEnv(raw);
         mtp_predraft_cache = on;
         return on;
@@ -9189,7 +9189,7 @@ pub const Generator = struct {
     var mtp_trace_cache: ?bool = null;
     fn mtpTraceEnabled() bool {
         if (mtp_trace_cache) |v| return v;
-        const on = readEnvBool("MLX_SERVE_MTP_TRACE");
+        const on = readEnvBool("SUSHI_MTP_TRACE");
         mtp_trace_cache = on;
         return on;
     }
@@ -9250,7 +9250,7 @@ pub const Generator = struct {
     }
 
     fn mtpEvCosts(profile: mtp_mod.MtpCostProfile) MtpEvCosts {
-        return mtpEvCostsForProfile(profile, if (std.c.getenv("MLX_SERVE_MTP_EV_COSTS")) |p| std.mem.span(p) else null);
+        return mtpEvCostsForProfile(profile, if (std.c.getenv("SUSHI_MTP_EV_COSTS")) |p| std.mem.span(p) else null);
     }
 
     /// Extension dry-spell gate constants: after MTP_EXT_DRY_ROUNDS
@@ -9329,7 +9329,7 @@ pub const Generator = struct {
         return true;
     }
 
-    /// Dry-spell gate kill switch — MLX_SERVE_MTP_EXT_DRY=0 restores
+    /// Dry-spell gate kill switch — SUSHI_MTP_EXT_DRY=0 restores
     /// unconditional extension consideration for same-boot A/Bs.
     var mtp_ext_dry_cache: ?bool = null;
     pub fn mtpExtDryEnabledFromEnv(raw: ?[]const u8) bool {
@@ -9339,7 +9339,7 @@ pub const Generator = struct {
 
     fn mtpExtDryEnabled() bool {
         if (mtp_ext_dry_cache) |v| return v;
-        const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_EXT_DRY")) |p| std.mem.span(p) else null;
+        const raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_EXT_DRY")) |p| std.mem.span(p) else null;
         const on = mtpExtDryEnabledFromEnv(raw);
         mtp_ext_dry_cache = on;
         return on;
@@ -9536,18 +9536,18 @@ pub const Generator = struct {
         return majority;
     }
 
-    /// Regime gate kill switch — MLX_SERVE_MTP_REGIME=0 leaves every
+    /// Regime gate kill switch — SUSHI_MTP_REGIME=0 leaves every
     /// two-chunk plan as the EV horizon wrote it (same-boot A/B control arm).
     var mtp_regime_cache: ?bool = null;
     fn mtpRegimeGateEnabled() bool {
         if (mtp_regime_cache) |v| return v;
-        const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_REGIME")) |p| std.mem.span(p) else null;
+        const raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_REGIME")) |p| std.mem.span(p) else null;
         const on = mtpLiveCostEnabledFromEnv(raw);
         mtp_regime_cache = on;
         return on;
     }
 
-    /// Live-cost throttle kill switch — MLX_SERVE_MTP_LIVECOST=0 reverts the
+    /// Live-cost throttle kill switch — SUSHI_MTP_LIVECOST=0 reverts the
     /// dry-exploration threshold to the fixed MTP_EXT_DRY_ROUNDS (the
     /// pre-live-cost cadence) for same-boot A/Bs.
     var mtp_livecost_cache: ?bool = null;
@@ -9558,7 +9558,7 @@ pub const Generator = struct {
 
     fn mtpLiveCostEnabled() bool {
         if (mtp_livecost_cache) |v| return v;
-        const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_LIVECOST")) |p| std.mem.span(p) else null;
+        const raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_LIVECOST")) |p| std.mem.span(p) else null;
         const on = mtpLiveCostEnabledFromEnv(raw);
         mtp_livecost_cache = on;
         return on;
@@ -9569,12 +9569,12 @@ pub const Generator = struct {
     /// Post-warmup EV mode: the pure plan over the acceptance EMAs, with the
     /// base-depth climb damped to one step per round and two-chunk plans
     /// gated by the extension dry-spell policy.
-    /// DIAGNOSTIC (MLX_SERVE_MTP_FORCE_DEPTH=n): every round drafts exactly
+    /// DIAGNOSTIC (SUSHI_MTP_FORCE_DEPTH=n): every round drafts exactly
     /// n, the EV/windowed controllers never demote or disable — the
     /// per-index acceptance meter (`acc_idx=` on the trace line).
     pub fn mtpForcedDepth() ?u32 {
         if (mtp_force_depth_cache) |v| return v;
-        const n = readEnvUsize("MLX_SERVE_MTP_FORCE_DEPTH", 0);
+        const n = readEnvUsize("SUSHI_MTP_FORCE_DEPTH", 0);
         const v: ?u32 = if (n == 0) null else @intCast(@min(n, mtp_mod.MAX_DEPTH));
         mtp_force_depth_cache = v;
         return v;
@@ -9783,7 +9783,7 @@ pub const Generator = struct {
 
         /// Serial tokens after which the decision is re-opened inside the same bucket. Default
         /// OFF: a re-entry resumes a head whose history did not grow across the block.
-        /// `MLX_SERVE_MTP_ADAPTIVE_REENTRY_TOKENS` turns it on.
+        /// `SUSHI_MTP_ADAPTIVE_REENTRY_TOKENS` turns it on.
         pub const REDECIDE_SERIAL_TOKENS_DEFAULT: u32 = 0;
         /// The value the lever selects when it is enabled without a number.
         pub const REDECIDE_SERIAL_TOKENS_ON: u32 = 512;
@@ -9828,8 +9828,8 @@ pub const Generator = struct {
         }
     };
 
-    /// Whole-mechanism kill switch (`MLX_SERVE_MTP_ADAPTIVE_SERIAL=0`): no vote, no probe, no
-    /// serial fold. Independent of `MLX_SERVE_MTP_ADAPTIVE` (the depth controller's lever).
+    /// Whole-mechanism kill switch (`SUSHI_MTP_ADAPTIVE_SERIAL=0`): no vote, no probe, no
+    /// serial fold. Independent of `SUSHI_MTP_ADAPTIVE` (the depth controller's lever).
     var mtp_adaptive_serial_cache: ?bool = null;
     /// Default on; only an exact "0" turns it off.
     pub fn mtpAdaptiveSerialEnabledFromEnv(raw: ?[]const u8) bool {
@@ -9839,7 +9839,7 @@ pub const Generator = struct {
 
     fn mtpAdaptiveSerialEnabled() bool {
         if (mtp_adaptive_serial_cache) |v| return v;
-        const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_ADAPTIVE_SERIAL")) |p| std.mem.span(p) else null;
+        const raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_ADAPTIVE_SERIAL")) |p| std.mem.span(p) else null;
         const on = mtpAdaptiveSerialEnabledFromEnv(raw);
         mtp_adaptive_serial_cache = on;
         return on;
@@ -9848,16 +9848,16 @@ pub const Generator = struct {
     var mtp_adaptive_margin_cache: ?f32 = null;
     fn mtpAdaptiveMargin() f32 {
         if (mtp_adaptive_margin_cache) |v| return v;
-        const v = readEnvFloat("MLX_SERVE_MTP_ADAPTIVE_MARGIN", MTP_ADAPTIVE_MARGIN);
+        const v = readEnvFloat("SUSHI_MTP_ADAPTIVE_MARGIN", MTP_ADAPTIVE_MARGIN);
         mtp_adaptive_margin_cache = v;
         return v;
     }
 
     var mtp_reentry_tokens_cache: ?u32 = null;
-    /// `MLX_SERVE_MTP_ADAPTIVE_REENTRY_TOKENS`: 0 / unset = crossing-only; a bare `1` selects 512.
+    /// `SUSHI_MTP_ADAPTIVE_REENTRY_TOKENS`: 0 / unset = crossing-only; a bare `1` selects 512.
     fn mtpAdaptiveReentryTokens() u32 {
         if (mtp_reentry_tokens_cache) |v| return v;
-        const n = readEnvUsize("MLX_SERVE_MTP_ADAPTIVE_REENTRY_TOKENS", MtpAdaptive.REDECIDE_SERIAL_TOKENS_DEFAULT);
+        const n = readEnvUsize("SUSHI_MTP_ADAPTIVE_REENTRY_TOKENS", MtpAdaptive.REDECIDE_SERIAL_TOKENS_DEFAULT);
         const v: u32 = if (n == 1) MtpAdaptive.REDECIDE_SERIAL_TOKENS_ON else @intCast(@min(n, @as(usize, std.math.maxInt(u32))));
         mtp_reentry_tokens_cache = v;
         return v;
@@ -9866,7 +9866,7 @@ pub const Generator = struct {
     var mtp_adaptive_min_kv_cache: ?u32 = null;
     fn mtpAdaptiveMinKv() u32 {
         if (mtp_adaptive_min_kv_cache) |v| return v;
-        const n = readEnvUsize("MLX_SERVE_MTP_ADAPTIVE_MIN_KV", MTP_ADAPTIVE_MIN_KV);
+        const n = readEnvUsize("SUSHI_MTP_ADAPTIVE_MIN_KV", MTP_ADAPTIVE_MIN_KV);
         const v: u32 = @intCast(@min(n, @as(usize, std.math.maxInt(u32))));
         mtp_adaptive_min_kv_cache = v;
         return v;
@@ -9875,7 +9875,7 @@ pub const Generator = struct {
     var mtp_adaptive_confirm_cache: ?u32 = null;
     fn mtpAdaptiveConfirm() u32 {
         if (mtp_adaptive_confirm_cache) |v| return v;
-        const n = readEnvUsize("MLX_SERVE_MTP_ADAPTIVE_CONFIRM", MTP_ADAPTIVE_CONFIRM);
+        const n = readEnvUsize("SUSHI_MTP_ADAPTIVE_CONFIRM", MTP_ADAPTIVE_CONFIRM);
         const v: u32 = @intCast(@max(@as(usize, 1), @min(n, 64)));
         mtp_adaptive_confirm_cache = v;
         return v;
@@ -13141,7 +13141,7 @@ fn sliceLastAxis(res: *mlx.mlx_array, a: mlx.mlx_array, start: usize, stop: usiz
 ///
 /// mlx's merge sort is stable — `ThreadSort` swaps only on a strict less-than and
 /// the merge takes from B only when `b < a` — so an ascending argsort of the
-/// negated row is exactly that order, and it is the `msv_qsa_select` tie rule.
+/// negated row is exactly that order, and it is the `sushi_qsa_select` tie rule.
 /// Both filters and both of their routes rank through here, which is what makes a
 /// shortlist cutoff agree with the whole row's on a tie-heavy row. Pinned by
 /// `sampler ranks break ties by the lowest original index`.
@@ -14754,7 +14754,7 @@ test "boundedPrefillChunk: fused head dims and short contexts keep the base chun
 }
 
 test "boundedPrefillChunk: caps hd-256 long context even with the fused kernel active" {
-    // The msv_attn_p256 kernel removes the SCORE transient, but a big chunk
+    // The sushi_attn_p256 kernel removes the SCORE transient, but a big chunk
     // still scales the MoE-gather / KV-concat transients — measured +22 GB
     // peak for +3% speed at a 99K prompt. The cap deliberately ignores
     // prefillHeadDimFused (see the fn doc); pin that with the override ON.
@@ -14782,7 +14782,7 @@ test "boundedPrefillChunk: qk 192 is fused; the kill switch restores its score b
     // through the "fused SDPA covers it" early-out — while it scores at qk
     // width 192, the same width mimo_v2's global layers score at. 32 heads.
     //
-    // `msv_attn_pd` serves that width now: no score tensor, so the budget
+    // `sushi_attn_pd` serves that width now: no score tensor, so the budget
     // formula measures nothing and the chunk keeps the MoE ceiling at every
     // context. Without this the formula pins the 512 floor past ~256k.
     transformer_mod.fused256_override = true;
@@ -14794,7 +14794,7 @@ test "boundedPrefillChunk: qk 192 is fused; the kill switch restores its score b
     // A real hd-256 MoE keeps its own measured 4096 branch.
     try testing.expectEqual(@as(usize, 4096), boundedPrefillChunk(8192, 256, 32, 8192, false, true, false));
 
-    // MLX_SERVE_FUSED_256_CAUSAL=0: composed scores are back and so is the
+    // SUSHI_FUSED_256_CAUSAL=0: composed scores are back and so is the
     // budget, unchanged — guards and dispatch move on ONE switch.
     transformer_mod.fused256_override = false;
     defer transformer_mod.fused256_override = null;
@@ -14877,7 +14877,7 @@ test "boundedPrefillChunk: a long-context-gated MoE hd-256 arch offers the 8192 
 }
 
 test "boundedPrefillChunk: composed-causal (kill switch) keeps the 2048 cap + score formula" {
-    // MLX_SERVE_FUSED_256_CAUSAL=0 restores composed causal, where SMALLER
+    // SUSHI_FUSED_256_CAUSAL=0 restores composed causal, where SMALLER
     // chunks measured faster on the 27B ladder (2026-07-12, M4 Max): 8K
     // prompt 225 -> 235.8 tok/s at chunk 2048 (peak 28.9 -> 19.8 GB).
     // Chunking IS block-level causal skipping for composed attention, and
@@ -15141,7 +15141,7 @@ test "mtpDraftSamplingFor: sharpened fixed proposal for stochastic targets, gree
     const near_greedy = SamplingParams{ .temperature = 0.005 };
     try testing.expectEqual(@as(f32, 0.0), Generator.mtpDraftSamplingFor(near_greedy, false, Generator.MTP_DRAFT_TEMP).temperature);
 
-    // Explicit greedy override (MLX_SERVE_MTP_DRAFT_GREEDY=1) wins.
+    // Explicit greedy override (SUSHI_MTP_DRAFT_GREEDY=1) wins.
     try testing.expectEqual(@as(f32, 0.0), Generator.mtpDraftSamplingFor(target, true, Generator.MTP_DRAFT_TEMP).temperature);
 
     // The draft temperature is the FAMILY's, passed in, never a global.
@@ -15166,7 +15166,7 @@ test "mtpDraftGreedyFor: the proposal mode is a property of the REQUEST" {
     try testing.expect(Generator.mtpDraftGreedyFor(near_cold, .per_request));
     try testing.expect(Generator.mtpDraftGreedyFor(one_way, .per_request));
 
-    // MLX_SERVE_MTP_DRAFT_GREEDY=1 forces greedy for every request; =0 leaves
+    // SUSHI_MTP_DRAFT_GREEDY=1 forces greedy for every request; =0 leaves
     // the temp-0 guard in `mtpDraftSamplingFor` to keep a greedy target greedy.
     try testing.expect(Generator.mtpDraftGreedyFor(sampled, .greedy));
     try testing.expect(!Generator.mtpDraftGreedyFor(sampled, .sampled));
@@ -16956,7 +16956,7 @@ test "no decode path advances `step` outside advanceStep" {
 
 test "dsv4: nextPld on a chokepoint-disabled generator stays serial (DSV4_MINI)" {
     // DSpark is opt-in at load; the nextDspark arm below needs it armed.
-    _ = setenv("MLX_SERVE_DSV4_DSPARK", "1", 1);
+    _ = setenv("SUSHI_DSV4_DSPARK", "1", 1);
     // The live corruption path (2026-07-31, log 166348-166361): the scheduler
     // decode tick dispatched on `slot.enable_pld` alone, so it called
     // `nextPld` on a generator whose init the dsv4 guard had already flipped
@@ -17142,7 +17142,7 @@ test "dsv4: stochastic dspark engages at sampled temperature and keeps the exit 
     // filtered target probs) onto dsv4's own draft stages. Engagement is
     // COUNTED (dspark_attempted) — a silent serial fallback emits perfectly
     // plausible tokens.
-    _ = setenv("MLX_SERVE_DSV4_DSPARK", "1", 1);
+    _ = setenv("SUSHI_DSV4_DSPARK", "1", 1);
     const path_z = std.c.getenv("DSV4_MINI") orelse return;
     if (mlx.noGpuBackend()) return;
     const path = std.mem.span(path_z);
@@ -17173,9 +17173,9 @@ test "dsv4: stochastic dspark engages at sampled temperature and keeps the exit 
 
     // The kill-switch cache is process-global (set at first chokepoint use),
     // so honor whatever env this test binary was LAUNCHED with and assert
-    // the matching behavior — that makes the `MLX_SERVE_DSV4_DSPARK_STOCH=0`
+    // the matching behavior — that makes the `SUSHI_DSV4_DSPARK_STOCH=0`
     // run a real test of the fallback, not a skip.
-    const stoch_raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_DSV4_DSPARK_STOCH")) |p| std.mem.span(p) else null;
+    const stoch_raw: ?[]const u8 = if (std.c.getenv("SUSHI_DSV4_DSPARK_STOCH")) |p| std.mem.span(p) else null;
     const stoch_on = Generator.dsparkStochEnabledFromEnv(stoch_raw);
 
     var xfm = try Transformer.init(io, allocator, cfg, &weights);
@@ -17235,8 +17235,8 @@ test "dsv4: stochastic dspark engages at sampled temperature and keeps the exit 
     // row 0's filtered probs (the stochastic sibling of the greedy
     // confidence-gate test). The env is read at initModel, so this needs a
     // fresh Transformer; unset after — test order must not inherit the gate.
-    _ = setenv("MLX_SERVE_DSV4_DSPARK_CONF", "999999", 1);
-    defer _ = unsetenv("MLX_SERVE_DSV4_DSPARK_CONF");
+    _ = setenv("SUSHI_DSV4_DSPARK_CONF", "999999", 1);
+    defer _ = unsetenv("SUSHI_DSV4_DSPARK_CONF");
     var xfm2 = try Transformer.init(io, allocator, cfg, &weights);
     defer xfm2.deinit();
     var gen2 = try Generator.initWithOptions(io, allocator, &xfm2, &tok_dummy, &prompt, 64, sampled, &.{}, .{

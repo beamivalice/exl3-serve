@@ -14,11 +14,11 @@ OFFVAL="${3:?}"
 MAXTOK="${4:-200}"
 PROMPT="${5:-Explain how a B-tree index speeds up a database range scan, step by step.}"
 PORT="${PORT:-8098}"
-BIN="${BIN:-./zig-out/bin/mlx-serve}"
+BIN="${BIN:-./zig-out/bin/sushi}"
 
 run_arm() {
   local val="$1" out="$2"
-  pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+  pkill -f "sushi.*--port $PORT" 2>/dev/null
   sleep 2
   if [ -n "$val" ]; then
     env "$VAR=$val" "$BIN" --model "$MODEL" --serve --port "$PORT" >/tmp/greedy-ab-$PORT.log 2>&1 &

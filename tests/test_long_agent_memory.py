@@ -92,7 +92,7 @@ def chat(messages, *, enable_thinking=False, with_tools=True, max_tokens=512, te
     about *content correctness across many turns*, not stream framing.
     """
     body = {
-        "model": "mlx-serve",
+        "model": "sushi",
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,

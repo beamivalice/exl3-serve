@@ -21,7 +21,7 @@
 # and asserts every captured stream equals the baseline byte-for-byte.
 #
 # Requires:
-#   - A built mlx-serve binary (zig build -Doptimize=ReleaseFast)
+#   - A built sushi binary (zig build -Doptimize=ReleaseFast)
 #   - BATCH_TEST_MODEL or /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
 #
 # Usage:
@@ -44,7 +44,7 @@ if [ ! -d "$MODEL" ]; then
     exit 0
 fi
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build with 'zig build -Doptimize=ReleaseFast'."
     exit 1
@@ -56,7 +56,7 @@ OTHER_PROMPT="Name the largest ocean on Earth. Reply with just the name."
 STREAM_BODY=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '$PROMPT'}],
     'max_tokens': 64,
     'temperature': 0.0,
@@ -66,7 +66,7 @@ print(json.dumps({
 OTHER_BODY=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '$OTHER_PROMPT'}],
     'max_tokens': 16,
     'temperature': 0.0,

@@ -17,14 +17,14 @@ TOTAL=0
 
 MODEL=$(eval echo "$MODEL")
 if [ ! -d "$MODEL" ]; then echo "SKIP: model not found at $MODEL"; exit 0; fi
-if [ ! -x "./zig-out/bin/mlx-serve" ]; then
-    echo "FAIL: mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+if [ ! -x "./zig-out/bin/sushi" ]; then
+    echo "FAIL: sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required"; exit 1; }
 
-LOG=/tmp/mlx-serve-json-schema-thinking.log
-./zig-out/bin/mlx-serve serve --port $PORT --host 127.0.0.1 --log-level info \
+LOG=/tmp/sushi-json-schema-thinking.log
+./zig-out/bin/sushi serve --port $PORT --host 127.0.0.1 --log-level info \
     --model "$MODEL" >"$LOG" 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; }
@@ -47,7 +47,7 @@ PROMPT="A basket starts with 17 apples. Six are removed, then three groups of tw
 
 echo "=== /v1/chat/completions: reasoning_effort + json_schema, non-stream ==="
 BODY=$(curl -s -m 300 "$BASE/v1/chat/completions" -H "Content-Type: application/json" -d "{
-    \"model\": \"mlx-serve\", \"max_tokens\": 512, \"temperature\": 0, \"stream\": false,
+    \"model\": \"sushi\", \"max_tokens\": 512, \"temperature\": 0, \"stream\": false,
     \"reasoning_effort\": \"medium\",
     \"response_format\": {\"type\": \"json_schema\", \"json_schema\": {\"name\": \"answer\", \"strict\": true, \"schema\": $SCHEMA}},
     \"messages\": [{\"role\": \"user\", \"content\": \"$PROMPT\"}]
@@ -62,7 +62,7 @@ fi
 
 echo "=== /v1/chat/completions: same request, stream ==="
 STREAM=$(curl -s -m 300 -N "$BASE/v1/chat/completions" -H "Content-Type: application/json" -d "{
-    \"model\": \"mlx-serve\", \"max_tokens\": 512, \"temperature\": 0, \"stream\": true,
+    \"model\": \"sushi\", \"max_tokens\": 512, \"temperature\": 0, \"stream\": true,
     \"reasoning_effort\": \"low\",
     \"response_format\": {\"type\": \"json_schema\", \"json_schema\": {\"name\": \"answer\", \"strict\": true, \"schema\": $SCHEMA}},
     \"messages\": [{\"role\": \"user\", \"content\": \"$PROMPT\"}]
@@ -76,7 +76,7 @@ fi
 
 echo "=== /v1/responses: reasoning.effort + text.format json_schema ==="
 BODY=$(curl -s -m 300 "$BASE/v1/responses" -H "Content-Type: application/json" -d "{
-    \"model\": \"mlx-serve\", \"max_output_tokens\": 2048, \"temperature\": 0, \"stream\": false,
+    \"model\": \"sushi\", \"max_output_tokens\": 2048, \"temperature\": 0, \"stream\": false,
     \"reasoning\": {\"effort\": \"medium\"},
     \"text\": {\"format\": {\"type\": \"json_schema\", \"name\": \"answer\", \"strict\": true, \"schema\": $SCHEMA}},
     \"input\": \"$PROMPT\"
@@ -90,7 +90,7 @@ fi
 
 echo "=== /v1/messages: finite thinking budget + json_schema, stream ==="
 STREAM=$(curl -s -m 300 -N "$BASE/v1/messages" -H "Content-Type: application/json" -d "{
-    \"model\": \"mlx-serve\", \"max_tokens\": 512, \"temperature\": 0, \"stream\": true,
+    \"model\": \"sushi\", \"max_tokens\": 512, \"temperature\": 0, \"stream\": true,
     \"thinking\": {\"type\": \"enabled\", \"budget_tokens\": 256},
     \"output_config\": {\"format\": {\"type\": \"json_schema\", \"schema\": $SCHEMA}},
     \"messages\": [{\"role\": \"user\", \"content\": \"$PROMPT\"}]
@@ -109,7 +109,7 @@ fi
 for STREAMING in false true; do
     echo "=== /v1/chat/completions: reasoning exhausts max_tokens, stream=$STREAMING ==="
     BODY=$(curl -s -m 300 -N "$BASE/v1/chat/completions" -H "Content-Type: application/json" -d "{
-        \"model\": \"mlx-serve\", \"max_tokens\": 64, \"temperature\": 0, \"stream\": $STREAMING,
+        \"model\": \"sushi\", \"max_tokens\": 64, \"temperature\": 0, \"stream\": $STREAMING,
         \"enable_thinking\": true, \"reasoning_budget_tokens\": -1,
         \"stream_options\": {\"include_usage\": true},
         \"response_format\": {\"type\": \"json_schema\", \"json_schema\": {\"name\": \"answer\", \"strict\": true, \"schema\": $SCHEMA}},

@@ -137,7 +137,7 @@ def main():
                           left=0.20, right=0.975, top=0.82, bottom=0.135)
     ax = fig.add_subplot(gs[0, :])
 
-    fig.suptitle("mlx-serve — shipped build vs current tree",
+    fig.suptitle("sushi — shipped build vs current tree",
                  fontsize=16, fontweight="bold", color="#111827", y=0.982)
     fig.text(0.5, 0.912,
              "Same engine, same models, same flags — only the binary changes. "

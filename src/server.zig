@@ -792,7 +792,7 @@ pub fn clearResolvedPrefixCacheMem() void {
 
 /// SSD tier for the hot prefix cache (`--prefix-cache-disk`). Committed KV
 /// prefixes persist as chunked safetensors under
-/// `~/.mlx-serve/kv-cache/<model-fingerprint>` and are restored across RAM
+/// `~/.sushi/kv-cache/<model-fingerprint>` and are restored across RAM
 /// evictions AND server restarts instead of recomputed — a cold 30-50 s
 /// long-context TTFT becomes a bounded SSD read. LRU-evicted to this byte
 /// budget. v1 covers pure-attention archs; hybrid SSM state stays RAM-only.
@@ -1353,7 +1353,7 @@ fn loopTrimmedIds(ids: []const u32, start: ?usize) []const u32 {
     return ids[0..s];
 }
 
-/// Debug-only corpus-harvest aid (`MLX_SERVE_RAW_DUMP_FILE`). Appends ONE framed
+/// Debug-only corpus-harvest aid (`SUSHI_RAW_DUMP_FILE`). Appends ONE framed
 /// record per tools request: the DECLARED TOOLS SCHEMA and the raw pre-parse text
 /// together, written at the one site where both are in scope. Correlating them
 /// any other way is unsound — the debug log truncates lines at 16 KB (so a large
@@ -2039,7 +2039,7 @@ fn handleConnection(
         &model_id_buf,
         parseModelFromBody(request_body) orelse queryModel(&query_model_buf, raw_path) orelse "",
     );
-    if (requested_model_id.len > 0 and !std.mem.eql(u8, requested_model_id, "mlx-serve")) {
+    if (requested_model_id.len > 0 and !std.mem.eql(u8, requested_model_id, "sushi")) {
         if (registry.peek(requested_model_id) == null) {
             // Unknown id — fall back to the default model rather than 404,
             // so off-the-shelf SDK clients keep working. Multi-model
@@ -2494,7 +2494,7 @@ pub fn mlxCacheLimitBytes(total_ram: u64) u64 {
     return @max(2 * GB, @min(8 * GB, total_ram / 16));
 }
 
-/// PURE: resolve the cap from `MLX_SERVE_CACHE_LIMIT` (bytes) over the
+/// PURE: resolve the cap from `SUSHI_CACHE_LIMIT` (bytes) over the
 /// RAM-proportional default. `0` means "leave MLX's default alone" — the
 /// same-boot A/B off-switch. Anything unparseable falls through to the default
 /// rather than silently disabling the cap.
@@ -2513,7 +2513,7 @@ pub fn mlxCacheLimitFromEnv(raw: ?[]const u8, total_ram: u64) u64 {
 ///
 /// Never RAISES a tighter existing cap.
 pub fn applyMlxCacheLimit() void {
-    const env: ?[]const u8 = if (std.c.getenv("MLX_SERVE_CACHE_LIMIT")) |p|
+    const env: ?[]const u8 = if (std.c.getenv("SUSHI_CACHE_LIMIT")) |p|
         std.mem.span(p)
     else
         null;
@@ -2766,7 +2766,7 @@ pub fn prefillTransientReserveAtKv(
 }
 
 /// The composed score sheet a ringed arch's SLIDING layers build where
-/// `msv_attn_pd` does not serve their band + sink attention. Their attention
+/// `sushi_attn_pd` does not serve their band + sink attention. Their attention
 /// is a band, so one layer's sheet is `[heads, fwd, window + fwd - 1]` whatever
 /// the prompt length. Billed at `MOE_PREFILL_COEXIST` layers, the same
 /// coexistence the other per-layer prefill transients are billed at. Zero
@@ -2873,11 +2873,11 @@ pub fn aneGateHeadroom(config: *const model_mod.ModelConfig, chunk: u32) u64 {
 
 var ctx_bar_cached: ?bool = null;
 
-/// `MLX_SERVE_PREFILL_CHUNK_CTX_BAR=0` restores the share-only rung cap.
+/// `SUSHI_PREFILL_CHUNK_CTX_BAR=0` restores the share-only rung cap.
 pub fn ctxBarEnabled() bool {
     if (ctx_bar_cached) |v| return v;
     const v = blk: {
-        const raw = std.c.getenv("MLX_SERVE_PREFILL_CHUNK_CTX_BAR") orelse break :blk true;
+        const raw = std.c.getenv("SUSHI_PREFILL_CHUNK_CTX_BAR") orelse break :blk true;
         break :blk !std.mem.eql(u8, std.mem.sliceTo(raw, 0), "0");
     };
     ctx_bar_cached = v;
@@ -2921,7 +2921,7 @@ const HOT_CACHE_FLOOR_BYTES: u64 = 1024 * 1024 * 1024;
 /// is the KV a pinned context has already spoken for (0 under auto-context).
 /// The byte cap one prefill forward's transient may claim, and the one place the sizer's two
 /// changes (dropping the ask, adding the ctx bar) are gated by arch; every other arch keeps
-/// the previous arithmetic. `MLX_SERVE_PREFILL_CHUNK_CTX_BAR=0` drops the ctx bar inside the gate.
+/// the previous arithmetic. `SUSHI_PREFILL_CHUNK_CTX_BAR=0` drops the ctx bar inside the gate.
 pub fn prefillChunkCap(
     config: *const model_mod.ModelConfig,
     ceiling: u64,
@@ -2964,7 +2964,7 @@ pub fn resolvePrefillChunk(
 /// The width `--prefill-chunk` asked for, or 0. The bill must let it outrank the pin as the
 /// forward does: `--prefill-chunk 4096` used to run against a 512-token reserve.
 pub fn explicitPrefillChunk() u32 {
-    // `MLX_SERVE_PREFILL_CHUNK` outranks everything in `generate.effectivePrefillChunk`, so the
+    // `SUSHI_PREFILL_CHUNK` outranks everything in `generate.effectivePrefillChunk`, so the
     // bill must see it too. Clamped: the env value is unbounded at its source.
     const env_w: usize = @min(generate_mod.envPrefillChunk(), @as(usize, std.math.maxInt(u32)));
     if (env_w > 0) return @intCast(env_w);
@@ -3024,7 +3024,7 @@ pub fn pinPrefillChunk(config: *model_mod.ModelConfig) u32 {
         if (ctxBarEnabled() and config.longCtxGated() and explicitPrefillChunk() == 0) {
             const share_only = resolvePrefillChunk(config, kv_bits, currentGpuMemoryCeiling(config, active_mem), active_mem, 0, hot_cache_ask);
             if (share_only > config.pinned_prefill_chunk) {
-                log.info("[prefill] chunk {d} (ctx bar: the --ctx-size KV bill; share-only would allow {d}; MLX_SERVE_PREFILL_CHUNK_CTX_BAR=0 restores)\n", .{ config.pinned_prefill_chunk, share_only });
+                log.info("[prefill] chunk {d} (ctx bar: the --ctx-size KV bill; share-only would allow {d}; SUSHI_PREFILL_CHUNK_CTX_BAR=0 restores)\n", .{ config.pinned_prefill_chunk, share_only });
             }
         }
         // Say it once per model, wherever the model was pinned from (startup
@@ -4604,8 +4604,8 @@ fn ctxSizingCacheReserve(config: *const model_mod.ModelConfig) u64 {
 ///     hardcoded fp16.
 ///   - scores: the composed-SDPA scratch [heads, chunk, seq] — materialized
 ///     only for head_dims no fused kernel covers (transformer.
-///     prefillHeadDimFused: <= 128 via MLX, 256 via msv_attn_p256 — unfused
-///     only under the MLX_SERVE_FUSED_256=0 kill switch or an exotic dim).
+///     prefillHeadDimFused: <= 128 via MLX, 256 via sushi_attn_p256 — unfused
+///     only under the SUSHI_FUSED_256=0 kill switch or an exotic dim).
 ///     Bounded to ~one layer by the adaptive eval cadence
 ///     (transformer.prefillEvalCadence).
 ///   - dequant: dense-fp16 rebuild of the FULL quantized cache each layer
@@ -4792,7 +4792,7 @@ pub fn prefillMemoryNeeded(seq: u64, heads: u64, kv_heads: u64, kv_per_tok: u64,
     // The dequant+GEMM prefill route (transformer.prefillDqGemm) materializes
     // a bf16 copy of the weight it is about to multiply plus its transpose,
     // and only at forwards wide enough to take that route. Kill-switch A/B
-    // (MLX_SERVE_PREFILL_DQ_GEMM=0): +0.51 GB on the qwen3_5 27B at chunk
+    // (SUSHI_PREFILL_DQ_GEMM=0): +0.51 GB on the qwen3_5 27B at chunk
     // 2048, +0.17-0.21 on the lfm2 2.6B, ~0 at chunk 8192 where the envelope
     // already dominates.
     const dq_weights: u64 = if (fwd >= transformer_mod.PREFILL_DQ_GEMM_MIN_M) dequant_weights else 0;
@@ -4906,8 +4906,8 @@ fn prefillFfnWidth(config: *const model_mod.ModelConfig) u64 {
 /// `kv_override` is the per-request `kv_quant` body field where the surface
 /// parses one (chat/messages/responses); null falls back to the process default.
 /// Per-token bytes of the arch's out-of-cache request state as billed: the QSA indexer history
-/// at the copies a live slot holds (one by default; two with `MLX_SERVE_QSA_HISTORY_SHARE=0`
-/// or `MLX_SERVE_KV_RESERVE=0`), plus the f32 block-score bank the two-copy slack used to
+/// at the copies a live slot holds (one by default; two with `SUSHI_QSA_HISTORY_SHARE=0`
+/// or `SUSHI_KV_RESERVE=0`), plus the f32 block-score bank the two-copy slack used to
 /// hide. One helper because the auto-context sizer and the admission guard must agree.
 pub fn statePerTokenBilled(config: *const model_mod.ModelConfig) u64 {
     const one = config.qsaHistoryBytesPerToken();
@@ -5256,11 +5256,11 @@ pub const PREFILL_WIDE_RUNG_MARGIN_PCT: u64 = 22;
 /// Test hook for `perRequestPrefillChunkEnabled`'s kill switch.
 pub var per_request_chunk_override: ?bool = null;
 
-/// The arch capability AND the kill switch (`MLX_SERVE_PREFILL_CHUNK_PER_REQUEST=0` restores the load-time pin).
+/// The arch capability AND the kill switch (`SUSHI_PREFILL_CHUNK_PER_REQUEST=0` restores the load-time pin).
 pub fn perRequestPrefillChunkEnabled(config: *const model_mod.ModelConfig) bool {
     if (!config.perRequestPrefillChunk()) return false;
     if (per_request_chunk_override) |v| return v;
-    const raw = std.c.getenv("MLX_SERVE_PREFILL_CHUNK_PER_REQUEST") orelse return true;
+    const raw = std.c.getenv("SUSHI_PREFILL_CHUNK_PER_REQUEST") orelse return true;
     return !std.mem.eql(u8, std.mem.sliceTo(raw, 0), "0");
 }
 
@@ -5296,7 +5296,7 @@ pub fn chooseRequestPrefillChunk(
 /// The width one ladder rung forwards at. `long_ctx_gated = false` asks what the rung would be
 /// without the long-context gate, i.e. the width the load-time machine cap still bounds.
 fn rungWidth(config: *const model_mod.ModelConfig, seq: u64, rung: u32, long_ctx_gated: bool) u64 {
-    // `effectivePrefillChunk` can return `MLX_SERVE_PREFILL_CHUNK` verbatim; clamp before narrowing.
+    // `effectivePrefillChunk` can return `SUSHI_PREFILL_CHUNK` verbatim; clamp before narrowing.
     return @min(
         @as(u64, generate_mod.effectivePrefillChunk(
             config.prefillScoreHeadDim(),
@@ -5351,7 +5351,7 @@ pub fn requestPrefillChunkNow(
 pub var adaptive_chunk_override: ?bool = null;
 
 /// The per-chunk adaptive width: subordinate to the per-request gate, plus
-/// `MLX_SERVE_PREFILL_CHUNK_ADAPTIVE=0`, plus "no operator pinned a width".
+/// `SUSHI_PREFILL_CHUNK_ADAPTIVE=0`, plus "no operator pinned a width".
 pub fn adaptivePrefillChunkEnabled(config: *const model_mod.ModelConfig) bool {
     // Arch first: the cheapest and most selective, and this runs once per chunk boundary.
     if (!config.perRequestPrefillChunk()) return false;
@@ -5359,7 +5359,7 @@ pub fn adaptivePrefillChunkEnabled(config: *const model_mod.ModelConfig) bool {
     if (generate_mod.envPrefillChunk() > 0) return false;
     if (!perRequestPrefillChunkEnabled(config)) return false;
     if (adaptive_chunk_override) |v| return v;
-    const raw = std.c.getenv("MLX_SERVE_PREFILL_CHUNK_ADAPTIVE") orelse return true;
+    const raw = std.c.getenv("SUSHI_PREFILL_CHUNK_ADAPTIVE") orelse return true;
     return !std.mem.eql(u8, std.mem.sliceTo(raw, 0), "0");
 }
 
@@ -5369,7 +5369,7 @@ pub const PREFILL_WIDEN_PROBES: u8 = 2;
 
 /// What one chunk of `width` costs beyond what is already resident: its transient envelope
 /// plus the per-token state the chunk is about to write. The growth term is billed even under
-/// the default reservation (`MLX_SERVE_KV_RESERVE=0` and short prompts do grow per chunk).
+/// the default reservation (`SUSHI_KV_RESERVE=0` and short prompts do grow per chunk).
 pub fn prefillChunkCost(
     config: *const model_mod.ModelConfig,
     kv_bits: u64,
@@ -5516,7 +5516,7 @@ pub fn prefillAdmissionBill(config: *const model_mod.ModelConfig, prompt_len: us
 
     // A vision prefill chunks like text since issue #197 (the splice resumes
     // its row index across chunks), so it bills the chunk-bounded envelope —
-    // UNLESS the MLX_SERVE_VISION_CHUNKED=0 kill switch restored the
+    // UNLESS the SUSHI_VISION_CHUNKED=0 kill switch restored the
     // whole-prompt forward, in which case `unchunked_prefill` bills the real
     // width. Call sites pass generate_mod.visionPrefillUnchunked(has_vision)
     // so the guard and the prefill loop cannot disagree.
@@ -5994,7 +5994,7 @@ fn renderModelEntry(
         );
 
         return std.fmt.allocPrint(allocator,
-            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"mlx-serve","loaded":true,"state":"ready","bytes_resident":{d},"bytes_on_disk":{s},"context_length":{s},"max_model_len":{s}{s},"batched_decode":{s},"capabilities":{s},"input_modalities":{s},"meta":{{"architecture":"{s}","engine":"{s}","vocab_size":{d},"hidden_size":{d},"num_layers":{d},"quantization":"{d}-bit","context_length":{s},"model_max_tokens":{d},"embedding_max_length":{s},"is_moe":{s},"drafter_loaded":{s},"drafter_path":{s},"mtp_loaded":{s},"mtp_available":{s},"kv_quant":"{s}","kv_cache":{{"scheme":"{s}","source":"{s}"}},"gen_temperature":{s},"gen_top_p":{s},"gen_top_k":{s}}}}}
+            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"sushi","loaded":true,"state":"ready","bytes_resident":{d},"bytes_on_disk":{s},"context_length":{s},"max_model_len":{s}{s},"batched_decode":{s},"capabilities":{s},"input_modalities":{s},"meta":{{"architecture":"{s}","engine":"{s}","vocab_size":{d},"hidden_size":{d},"num_layers":{d},"quantization":"{d}-bit","context_length":{s},"model_max_tokens":{d},"embedding_max_length":{s},"is_moe":{s},"drafter_loaded":{s},"drafter_path":{s},"mtp_loaded":{s},"mtp_available":{s},"kv_quant":"{s}","kv_cache":{{"scheme":"{s}","source":"{s}"}},"gen_temperature":{s},"gen_top_p":{s},"gen_top_k":{s}}}}}
         , .{
             model_id,
             nowSecs(io),
@@ -6176,7 +6176,7 @@ fn renderModelEntry(
     defer if (dims_part.len > 0) allocator.free(dims_part);
 
     return std.fmt.allocPrint(allocator,
-        \\{{"id":"{s}","object":"model","created":0,"owned_by":"mlx-serve","loaded":false,"state":"{s}","bytes_resident":0,"bytes_on_disk":{s}{s}{s}{s}{s}{s},"meta":{{{s}{s}{s}"bytes_on_disk":{s}}}}}
+        \\{{"id":"{s}","object":"model","created":0,"owned_by":"sushi","loaded":false,"state":"{s}","bytes_resident":0,"bytes_on_disk":{s}{s}{s}{s}{s}{s},"meta":{{{s}{s}{s}"bytes_on_disk":{s}}}}}
     , .{ entry.id, state_str, bytes_on_disk_str, streaming_part, err_part, top_ctx_part, caps_part, mods_part, arch_part, engine_part, dims_part, bytes_on_disk_str });
 }
 
@@ -6269,7 +6269,7 @@ fn handleLoadModelStrict(allocator: std.mem.Allocator, stream: *Conn, request_bo
     // branch below and 404ing on the mangled id (live failure 2026-06-12).
     var requested_id: []const u8 = "";
     // `"default": true` — promote the loaded model to the server default
-    // (requests that omit `model` / the "mlx-serve" alias, and /v1/models'
+    // (requests that omit `model` / the "sushi" alias, and /v1/models'
     // default-first sort). Explicit opt-in: the app's model SWITCH sends it;
     // media-gen side-loads must never steal the chat default.
     var make_default = false;
@@ -6385,7 +6385,7 @@ fn handleLoadModelStrict(allocator: std.mem.Allocator, stream: *Conn, request_bo
 /// Does an unload body carry keys but no usable `"model"`? `{"model_id": id}`
 /// and `{"id": id}` parse fine, leave the id empty, and so resolve to the
 /// DEFAULT model — which, when that default is already unloaded, answers 200
-/// with `{"id":"mlx-serve","state":"unloaded"}`. That is a success-shaped
+/// with `{"id":"sushi","state":"unloaded"}`. That is a success-shaped
 /// payload for an unload that never happened, and no client can tell it apart
 /// from a real one (and on a server whose default IS resident, it unloads the
 /// wrong model). Same class as the context-overflow 400: an unload that did
@@ -6406,7 +6406,7 @@ test "an unload body naming an unrecognised key is a 400, not the default model"
         .{ .body = "{\"model\":\"/abs/path/org-repo\"}", .rejected = false },
         // The shorthand every other endpoint honours must keep working.
         .{ .body = "{}", .rejected = false },
-        // The live bug: 200 + "mlx-serve" with the named model still resident.
+        // The live bug: 200 + "sushi" with the named model still resident.
         .{ .body = "{\"model_id\":\"org/repo\"}", .rejected = true },
         .{ .body = "{\"id\":\"org/repo\"}", .rejected = true },
         // A present-but-unusable `model` took the same silent path.
@@ -6474,7 +6474,7 @@ fn handleUnloadModelStrict(allocator: std.mem.Allocator, stream: *Conn, request_
         },
     };
 
-    const id_for_body = if (requested_id.len > 0) requested_id else "mlx-serve";
+    const id_for_body = if (requested_id.len > 0) requested_id else "sushi";
     const body = try std.fmt.allocPrint(allocator,
         \\{{"model":{{"id":"{s}","object":"model","loaded":false,"state":"unloaded"}}}}
     , .{id_for_body});
@@ -8426,7 +8426,7 @@ fn handleNonStreamingCompletion(
     defer if (!std.mem.eql(u8, lp_json, "null")) allocator.free(lp_json);
 
     const response = try std.fmt.allocPrint(allocator,
-        \\{{"id":"cmpl-{d}","object":"text_completion","created":{d},"model":"{s}","system_fingerprint":"mlx-serve","choices":[{{"index":0,"text":{s},"logprobs":{s},"finish_reason":"{s}"{s}}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
+        \\{{"id":"cmpl-{d}","object":"text_completion","created":{d},"model":"{s}","system_fingerprint":"sushi","choices":[{{"index":0,"text":{s},"logprobs":{s},"finish_reason":"{s}"{s}}}],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
     , .{
         nowMs(stream.io),
         nowSecs(stream.io),
@@ -8607,7 +8607,7 @@ fn handleStreamingCompletion(
         // `null` on a chunk that has none, never an absent key.
         const lp_field = (try lps.take()) orelse "null";
         const chunk = try std.fmt.allocPrint(allocator,
-            \\{{"id":"cmpl-{d}","object":"text_completion.chunk","created":{d},"model":"{s}","system_fingerprint":"mlx-serve","choices":[{{"index":0,"text":{s},"logprobs":{s},"finish_reason":null}}]}}
+            \\{{"id":"cmpl-{d}","object":"text_completion.chunk","created":{d},"model":"{s}","system_fingerprint":"sushi","choices":[{{"index":0,"text":{s},"logprobs":{s},"finish_reason":null}}]}}
         , .{ cmpl_id, created_ts, model_name, escaped, lp_field });
         defer allocator.free(chunk);
 
@@ -8626,7 +8626,7 @@ fn handleStreamingCompletion(
     if (!client_gone) {
         const final_lp = (try lps.take()) orelse "null";
         const final_chunk = try std.fmt.allocPrint(allocator,
-            \\{{"id":"cmpl-{d}","object":"text_completion.chunk","created":{d},"model":"{s}","system_fingerprint":"mlx-serve","choices":[{{"index":0,"text":"","logprobs":{s},"finish_reason":"{s}"{s}}}]}}
+            \\{{"id":"cmpl-{d}","object":"text_completion.chunk","created":{d},"model":"{s}","system_fingerprint":"sushi","choices":[{{"index":0,"text":"","logprobs":{s},"finish_reason":"{s}"{s}}}]}}
         , .{ cmpl_id, created_ts, model_name, final_lp, finish_reason, finishDetailsField(finish_reason, ts.finish_details) });
         defer allocator.free(final_chunk);
 
@@ -8639,7 +8639,7 @@ fn handleStreamingCompletion(
         // shape) — never the finish chunk, so the ending is stated once.
         if (include_usage) {
             const usage_chunk = try std.fmt.allocPrint(allocator,
-                \\{{"id":"cmpl-{d}","object":"text_completion.chunk","created":{d},"model":"{s}","system_fingerprint":"mlx-serve","choices":[],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
+                \\{{"id":"cmpl-{d}","object":"text_completion.chunk","created":{d},"model":"{s}","system_fingerprint":"sushi","choices":[],"usage":{{"prompt_tokens":{d},"completion_tokens":{d},"total_tokens":{d}}}}}
             , .{ cmpl_id, created_ts, model_name, total_prompt, ts.completion_tokens, total_prompt + ts.completion_tokens });
             defer allocator.free(usage_chunk);
             logHttpSseData(usage_chunk);
@@ -9128,7 +9128,7 @@ fn handleNonStreamingGeneration(
             defer allocator.free(tc_usage_obj);
 
             const response = try std.fmt.allocPrint(allocator,
-                \\{{"id":"chatcmpl-{d}","object":"chat.completion","created":{d},"model":"{s}","system_fingerprint":"mlx-serve","choices":[{{"index":0,"message":{{"role":"assistant","content":{s}{s},"tool_calls":{s}}},"finish_reason":"{s}"{s}}}],"usage":{s}{s}}}
+                \\{{"id":"chatcmpl-{d}","object":"chat.completion","created":{d},"model":"{s}","system_fingerprint":"sushi","choices":[{{"index":0,"message":{{"role":"assistant","content":{s}{s},"tool_calls":{s}}},"finish_reason":"{s}"{s}}}],"usage":{s}{s}}}
             , .{
                 nowMs(stream.io),
                 nowSecs(stream.io),
@@ -9218,7 +9218,7 @@ fn handleNonStreamingGeneration(
     defer allocator.free(usage_obj);
 
     const response = try std.fmt.allocPrint(allocator,
-        \\{{"id":"chatcmpl-{d}","object":"chat.completion","created":{d},"model":"{s}","system_fingerprint":"mlx-serve","choices":[{{"index":0,"message":{{"role":"assistant","content":{s}{s}}},"logprobs":{s},"finish_reason":"{s}"{s}}}],"usage":{s}{s}}}
+        \\{{"id":"chatcmpl-{d}","object":"chat.completion","created":{d},"model":"{s}","system_fingerprint":"sushi","choices":[{{"index":0,"message":{{"role":"assistant","content":{s}{s}}},"logprobs":{s},"finish_reason":"{s}"{s}}}],"usage":{s}{s}}}
     , .{
         nowMs(stream.io),
         nowSecs(stream.io),
@@ -10351,11 +10351,11 @@ fn handleStreamingGeneration(
         if (log.isDebug() and text_buf.items.len > 0) {
             log.debug("  raw generated text before tool parse ({d}b): {s}\n", .{ text_buf.items.len, text_buf.items[0..@min(text_buf.items.len, 4000)] });
             // Corpus-harvest aid: the inline dump caps at 4KB, useless for
-            // >30KB mega-tool-calls. Set MLX_SERVE_RAW_DUMP_FILE=<abs path> to
+            // >30KB mega-tool-calls. Set SUSHI_RAW_DUMP_FILE=<abs path> to
             // APPEND the FULL pre-parse buffer of every tools request, framed so
             // a harvester can slice each record exactly (the text is arbitrary
             // bytes, so the byte count — not a delimiter — defines the record).
-            if (std.c.getenv("MLX_SERVE_RAW_DUMP_FILE")) |dump_path| {
+            if (std.c.getenv("SUSHI_RAW_DUMP_FILE")) |dump_path| {
                 appendRawToolDump(std.mem.span(dump_path), tools_json, text_buf.items);
             }
         }
@@ -10742,7 +10742,7 @@ fn sendSSEChunk(
 
     // Build the full SSE chunk
     const chunk = try std.fmt.allocPrint(allocator,
-        \\{{"id":"chatcmpl-{d}","object":"chat.completion.chunk","created":{d},"model":"{s}","system_fingerprint":"mlx-serve","choices":[{{"index":0,"delta":{s},"finish_reason":{s}{s}{s}}}],"usage":{s}{s}}}
+        \\{{"id":"chatcmpl-{d}","object":"chat.completion.chunk","created":{d},"model":"{s}","system_fingerprint":"sushi","choices":[{{"index":0,"delta":{s},"finish_reason":{s}{s}{s}}}],"usage":{s}{s}}}
     , .{ chat_id, nowSecs(stream.io), model_name, delta_buf.items, fr_str, fd_str, lp_buf.items, usage_str, timings_tail_buf.items });
     defer allocator.free(chunk);
 
@@ -10772,7 +10772,7 @@ fn sendSSEUsageChunk(
         try timings_tail_buf.appendSlice(allocator, t);
     }
     const chunk = try std.fmt.allocPrint(allocator,
-        \\{{"id":"chatcmpl-{d}","object":"chat.completion.chunk","created":{d},"model":"{s}","system_fingerprint":"mlx-serve","choices":[],"usage":{s}{s}}}
+        \\{{"id":"chatcmpl-{d}","object":"chat.completion.chunk","created":{d},"model":"{s}","system_fingerprint":"sushi","choices":[],"usage":{s}{s}}}
     , .{ chat_id, nowSecs(stream.io), model_name, usage_json, timings_tail_buf.items });
     defer allocator.free(chunk);
 
@@ -11225,7 +11225,7 @@ fn sendUnauthorized(stream: *Conn) !void {
         return;
     }
     var hdr_buf: [512]u8 = undefined;
-    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nWWW-Authenticate: Basic realm=\"mlx-serve\"\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, x-api-key\r\n\r\n", .{body.len}) catch return error.Overflow;
+    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nWWW-Authenticate: Basic realm=\"sushi\"\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, x-api-key\r\n\r\n", .{body.len}) catch return error.Overflow;
     try stream.writeAll(hdr);
     try stream.writeAll(body);
 }
@@ -14781,7 +14781,7 @@ fn handleAnthropicNonStreaming(
             const esc_r = try jsonEscape(allocator, truncated_reasoning);
             defer allocator.free(esc_r);
             const thinking_block = try std.fmt.allocPrint(allocator,
-                \\{{"type":"thinking","thinking":{s},"signature":"mlx-serve-local"}}
+                \\{{"type":"thinking","thinking":{s},"signature":"sushi-local"}}
             , .{esc_r});
             defer allocator.free(thinking_block);
             try content.appendSlice(allocator, thinking_block);
@@ -15558,7 +15558,7 @@ fn handleAnthropicStreaming(
     if (gated_stream and !client_gone) {
         if (log.isDebug() and text_buf.items.len > 0) {
             log.debug("  raw generated text before tool parse ({d}b): {s}\n", .{ text_buf.items.len, text_buf.items[0..@min(text_buf.items.len, 4000)] });
-            if (std.c.getenv("MLX_SERVE_RAW_DUMP_FILE")) |dump_path| {
+            if (std.c.getenv("SUSHI_RAW_DUMP_FILE")) |dump_path| {
                 appendRawToolDump(std.mem.span(dump_path), tools_json, text_buf.items);
             }
         }
@@ -15760,7 +15760,7 @@ fn openAnthropicThinkingBlock(allocator: std.mem.Allocator, stream: *Conn, block
 
 fn closeAnthropicThinkingBlock(allocator: std.mem.Allocator, stream: *Conn, index: u32) !void {
     const sig = try std.fmt.allocPrint(allocator,
-        \\{{"type":"content_block_delta","index":{d},"delta":{{"type":"signature_delta","signature":"mlx-serve-local"}}}}
+        \\{{"type":"content_block_delta","index":{d},"delta":{{"type":"signature_delta","signature":"sushi-local"}}}}
     , .{index});
     defer allocator.free(sig);
     try sendAnthropicEvent(stream, "content_block_delta", sig);
@@ -19068,7 +19068,7 @@ test "deinitGlobalResponseStore frees stored responses" {
     defer deinitGlobalResponseStore();
 
     const messages = [_]chat_mod.Message{.{ .role = "user", .content = "hi" }};
-    try storeResponse(testing.io, testing.allocator, "resp_test", "mlx-serve", "completed", "{}", &messages, "hello", null, null, null);
+    try storeResponse(testing.io, testing.allocator, "resp_test", "sushi", "completed", "{}", &messages, "hello", null, null, null);
 
     if (global_response_store) |*store| {
         try testing.expectEqual(@as(usize, 1), store.map.count());
@@ -19781,7 +19781,7 @@ test "mlxCacheLimitBytes: RAM-proportional cap, 2 GB floor, 8 GB ceiling" {
 
 test "mlxCacheLimitFromEnv: explicit bytes win, 0 disables, garbage falls through" {
     const GB: u64 = 1 << 30;
-    // The A/B off-switch: MLX_SERVE_CACHE_LIMIT=0 leaves MLX's default in
+    // The A/B off-switch: SUSHI_CACHE_LIMIT=0 leaves MLX's default in
     // place so the pre-#110 behavior stays reachable in a same-boot A/B.
     try testing.expectEqual(@as(u64, 0), mlxCacheLimitFromEnv("0", 128 * GB));
     try testing.expectEqual(@as(u64, 3 * GB), mlxCacheLimitFromEnv("3221225472", 128 * GB));
@@ -20727,7 +20727,7 @@ test "prefillMemoryNeeded: the SCORE width decides the score term, not the store
     const kv_per_tok: u64 = 6 * 16 * (192 + 128) * 2; // 6 caching layers of 24
     const stored: u64 = 128;
     const scored: u64 = 192;
-    // `msv_attn_pd` serves qk 192 now, so the composed sheet survives only
+    // `sushi_attn_pd` serves qk 192 now, so the composed sheet survives only
     // under the kill switch — which is precisely where confusing the two
     // widths would zero a sheet that is really there.
     transformer_mod.fused256_override = false;
@@ -20755,7 +20755,7 @@ test "prefillMemoryNeeded: the SCORE width decides the score term, not the store
 
 test "prefillMemoryNeeded: fused hd-256 kernel drops the score bill, keeps KV + dequant" {
     const t = std.testing;
-    // Default (msv_attn_p256 active): the composed score scratch never exists,
+    // Default (sushi_attn_p256 active): the composed score scratch never exists,
     // so hd 256 bills exactly the hd-256 KV + mlp — the unfused bill minus the
     // 1.6384 GB x1.25 score term from the test above.
     transformer_mod.fused256_override = true;
@@ -22728,7 +22728,7 @@ test "the warm KV credit fires ONLY where the restore checked its entry out" {
         (CheckoutCase{ .shared = 700_000 }).warm(matched, capacity),
         // (3) a non-qwen4 arch: a checkout can never be taken there.
         (CheckoutCase{ .ssd_first = false }).warm(matched, capacity),
-        // (4) `MLX_SERVE_RESTORE_MOVE=0`: the refcount share.
+        // (4) `SUSHI_RESTORE_MOVE=0`: the refcount share.
         (CheckoutCase{ .move_enabled = false }).warm(matched, capacity),
         // (5) a pending disk record shares the same buffers.
         (CheckoutCase{ .pending_disk = true }).warm(matched, capacity),

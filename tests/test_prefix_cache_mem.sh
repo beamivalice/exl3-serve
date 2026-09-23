@@ -46,20 +46,20 @@ if [ ! -f "$MODEL/config.json" ]; then
     echo -e "${RED}FAIL${NC} $MODEL/config.json missing — not a valid model directory."
     exit 1
 fi
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first."
     exit 1
 fi
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 LOGFILE=$(mktemp)
 echo "  starting server (--prefix-cache-entries 8 --prefix-cache-mem ${SHORT_BUDGET_MB}MB)..."
 "$BINARY" --model "$MODEL" --serve --port "$PORT" \
     --prefix-cache-entries 8 --prefix-cache-mem "${SHORT_BUDGET_MB}MB" \
-    ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
+    ${SUSHI_TEST_EXTRA_ARGS:-} > "$LOGFILE" 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null || true; wait $SERVER_PID 2>/dev/null || true; rm -f "$LOGFILE"; }
 trap cleanup EXIT
@@ -96,7 +96,7 @@ fire_one() {
     body=$(python3 -c "
 import json,sys
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role':'user','content': sys.argv[1]}],
     'max_tokens': 24,
     'temperature': 0.0,
@@ -184,7 +184,7 @@ msgs = [{"role": "system", "content": "You are a terse assistant."}]
 for t in range(1, turns + 1):
     filler = " ".join(f"entry {t}.{i} value {(i * 7) % 97}" for i in range(words // 4))
     msgs.append({"role": "user", "content": f"Turn {t} log:\n{filler}\nAcknowledge in one sentence."})
-    body = json.dumps({"model": "mlx-serve", "messages": msgs,
+    body = json.dumps({"model": "sushi", "messages": msgs,
                        "max_tokens": 16, "temperature": 0.0}).encode()
     req = urllib.request.Request(base + "/v1/chat/completions", data=body,
                                  headers={"Content-Type": "application/json"})

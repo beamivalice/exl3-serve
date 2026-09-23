@@ -29,11 +29,11 @@ bad() { echo -e "  ${RED}FAIL${NC} $1"; shift; for l in "$@"; do echo "        $
 
 [ -n "$MODEL" ] || { echo "SKIP: CANCEL_TEST_MODEL not set"; exit 0; }
 [ -f "$MODEL/config.json" ] || { echo "SKIP: no config.json at $MODEL"; exit 0; }
-[ -x ./zig-out/bin/mlx-serve ] || { echo "FAIL: build first"; exit 1; }
+[ -x ./zig-out/bin/sushi ] || { echo "FAIL: build first"; exit 1; }
 
 LOG=$(mktemp /tmp/cancel_toolbuf.XXXXXX)
-pkill -f "bin/mlx-serve" 2>/dev/null; sleep 1
-./zig-out/bin/mlx-serve --model "$MODEL" --serve --port "$PORT" --log-level debug > "$LOG" 2>&1 &
+pkill -f "bin/sushi" 2>/dev/null; sleep 1
+./zig-out/bin/sushi --model "$MODEL" --serve --port "$PORT" --log-level debug > "$LOG" 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; rm -f "$LOG"; }
 trap cleanup EXIT
@@ -47,7 +47,7 @@ mem_bytes() { curl -sf -m 10 "$BASE/props" 2>/dev/null \
 # thing for detection, so a disconnect lands mid-buffer with high probability.
 REQ=$(python3 <<'PY'
 import json
-print(json.dumps({"model": "mlx-serve",
+print(json.dumps({"model": "sushi",
  "messages": [{"role": "user", "content":
    "Use write_file RIGHT NOW to create a complete standalone HTML page saved as "
    "mars.html about Mars: full <!DOCTYPE html>, a <head> with a <title>, an "
@@ -112,7 +112,7 @@ fi
 
 # Not wedged: the next request must work, with tools and without.
 R=$(curl -sf -m 120 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
-    -d '{"model":"mlx-serve","messages":[{"role":"user","content":"Say OK."}],"max_tokens":8,"temperature":0}' 2>/dev/null \
+    -d '{"model":"sushi","messages":[{"role":"user","content":"Say OK."}],"max_tokens":8,"temperature":0}' 2>/dev/null \
     | python3 -c "import json,sys; print((json.load(sys.stdin)['choices'][0]['message'].get('content') or '').strip())" 2>/dev/null)
 [ -n "$R" ] && ok "plain request works after the cancels (${R:0:30})" || bad "server wedged: plain request returned nothing"
 

@@ -32,7 +32,7 @@ echo "Port: $PORT"
 echo ""
 
 echo "Starting server..."
-./zig-out/bin/mlx-serve --model "$MODEL_DIR" --serve --port $PORT --log-level info 2>/tmp/mlx-serve-test-responses.log &
+./zig-out/bin/sushi --model "$MODEL_DIR" --serve --port $PORT --log-level info 2>/tmp/sushi-test-responses.log &
 SERVER_PID=$!
 sleep 2
 
@@ -76,7 +76,7 @@ run_test() {
 echo "--- Test 1: simple text input ---"
 RESULT=$(curl -sf "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","input":"Reply with exactly the word OK and nothing else.","max_output_tokens":16,"temperature":0}')
+  -d '{"model":"sushi","input":"Reply with exactly the word OK and nothing else.","max_output_tokens":16,"temperature":0}')
 
 OK=$(echo "$RESULT" | python3 -c "
 import sys, json
@@ -102,7 +102,7 @@ echo ""
 echo "--- Test 2: instructions field ---"
 RESULT=$(curl -sf "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","instructions":"You always reply in ALL CAPS.","input":"say hi","max_output_tokens":24,"temperature":0}')
+  -d '{"model":"sushi","instructions":"You always reply in ALL CAPS.","input":"say hi","max_output_tokens":24,"temperature":0}')
 
 TEXT=$(echo "$RESULT" | python3 -c "
 import sys, json
@@ -125,7 +125,7 @@ echo "--- Test 4: function tool emits function_call output item ---"
 RESULT=$(curl -sf "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"mlx-serve",
+    "model":"sushi",
     "input":"What is the weather in Paris? Use the get_weather tool.",
     "tools":[{"type":"function","name":"get_weather","description":"Get the weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],
     "tool_choice":"required",
@@ -154,7 +154,7 @@ echo "--- Test 4b: function tool with json_schema emits function_call ---"
 RESULT=$(curl -sf "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"mlx-serve",
+    "model":"sushi",
     "input":"What is the weather in Miami? Use the get_weather tool.",
     "tools":[{"type":"function","name":"get_weather","description":"Get the weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],
     "tool_choice":"required",
@@ -184,7 +184,7 @@ echo "--- Test 4c: optional tools with json_schema formats direct answer ---"
 RESULT=$(curl -sf "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"mlx-serve",
+    "model":"sushi",
     "input":"Do not call any tools. Reply with a JSON object whose answer is beach.",
     "tools":[{"type":"function","name":"get_weather","description":"Get the weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],
     "text":{"format":{"type":"json_schema","name":"direct_answer","schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}}},
@@ -224,7 +224,7 @@ print(fc.get('call_id', ''))
     ROUNDTRIP=$(curl -sf "$BASE/v1/responses" \
       -H "Content-Type: application/json" \
       -d "{
-        \"model\":\"mlx-serve\",
+        \"model\":\"sushi\",
         \"previous_response_id\":\"$RESP_ID\",
         \"input\":[{\"type\":\"function_call_output\",\"call_id\":\"$CALL_ID\",\"output\":\"The weather in Paris is sunny and 21 C.\"}],
         \"max_output_tokens\":64,
@@ -253,7 +253,7 @@ echo "--- Test 6: text.format.json_schema strict ---"
 RESULT=$(curl -sf "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"mlx-serve",
+    "model":"sushi",
     "input":"Make up a person record.",
     "text":{"format":{"type":"json_schema","name":"person","schema":{"type":"object","properties":{"name":{"type":"string"},"age":{"type":"integer"}},"required":["name","age"],"additionalProperties":false}}},
     "max_output_tokens":128,
@@ -283,7 +283,7 @@ echo "--- Test 7: json_schema default max_output_tokens ---"
 RESULT=$(curl -sf "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"mlx-serve",
+    "model":"sushi",
     "input":"Say hello and ask one short cruise discovery question. Set every profile_update field to null.",
     "text":{"format":{"type":"json_schema","name":"cruise_response","schema":{
       "type":"object",
@@ -335,7 +335,7 @@ echo ""
 echo "--- Test 9: store + GET + DELETE round-trip ---"
 RESULT=$(curl -sf "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","input":"Reply with exactly the word OK and nothing else.","max_output_tokens":16,"temperature":0,"store":true}')
+  -d '{"model":"sushi","input":"Reply with exactly the word OK and nothing else.","max_output_tokens":16,"temperature":0,"store":true}')
 
 RESP_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
 echo "  stored id: $RESP_ID"
@@ -374,7 +374,7 @@ echo ""
 echo "--- Test 10: store=false skips persistence ---"
 RESULT=$(curl -sf "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","input":"Hi","max_output_tokens":8,"temperature":0,"store":false}')
+  -d '{"model":"sushi","input":"Hi","max_output_tokens":8,"temperature":0,"store":false}')
 
 RESP_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
 if [ -z "$RESP_ID" ]; then
@@ -393,7 +393,7 @@ echo ""
 echo "--- Test 3: streaming named events ---"
 EVENTS=$(curl -sf -N "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","input":"Reply with exactly the word OK and nothing else.","max_output_tokens":16,"temperature":0,"stream":true}' 2>/dev/null)
+  -d '{"model":"sushi","input":"Reply with exactly the word OK and nothing else.","max_output_tokens":16,"temperature":0,"stream":true}' 2>/dev/null)
 
 EVENT_ORDER=$(echo "$EVENTS" | grep -E "^event: " | awk '{print $2}' | tr '\n' ',')
 echo "  events: $EVENT_ORDER"
@@ -416,7 +416,7 @@ echo "--- Test 8: streaming function tool events ---"
 EVENTS=$(curl -sf -N "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"mlx-serve",
+    "model":"sushi",
     "input":"What is the weather in Tokyo? Use the get_weather tool.",
     "tools":[{"type":"function","name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}],
     "tool_choice":"required",
@@ -439,7 +439,7 @@ echo ""
 echo "--- Test 11: previous_response_id not found ---"
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/v1/responses" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mlx-serve","input":"hi","previous_response_id":"resp_does_not_exist","max_output_tokens":8}')
+  -d '{"model":"sushi","input":"hi","previous_response_id":"resp_does_not_exist","max_output_tokens":8}')
 if [ "$HTTP_CODE" = "404" ]; then
     run_test "previous_response_id not found returns 404" "PASS" ""
 else
@@ -453,7 +453,7 @@ if [ "$FAIL" -gt 0 ]; then
     echo "Failed: $FAIL"
     echo ""
     echo "Server log (last 40 lines):"
-    tail -40 /tmp/mlx-serve-test-responses.log
+    tail -40 /tmp/sushi-test-responses.log
     exit 1
 else
     echo "All tests passed!"

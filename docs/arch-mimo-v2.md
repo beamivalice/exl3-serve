@@ -101,19 +101,19 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 
 ## Attention kernels
 
-- **Every layer PREFILLS FUSED** (`msv_attn_pd`, qk 192 / v 128). A sliding layer's learned sink joins the online
+- **Every layer PREFILLS FUSED** (`sushi_attn_pd`, qk 192 / v 128). A sliding layer's learned sink joins the online
   max and sum with no value row (template flag `SINK`; `SINK=0` compiles the global layers' code unchanged, proven
   byte-identical); `slidingPrefillFused` gates the dispatch AND `server.slidingBandScoreBytes`, so the band sheet is
-  billed only where it still composes (chunks under 16 rows, `MLX_SERVE_FUSED_256=0`). A quantized cache is read one
+  billed only where it still composes (chunks under 16 rows, `SUSHI_FUSED_256=0`). A quantized cache is read one
   DISPATCH at a time (`fusedSdpaPrefillKv`; `kr` = {begin, end, koff, kL_abs} puts every causal comparison in CACHE
   coordinates), never rebuilt whole; the sliding ring view is window + chunk rows, dequantized per view.
   Landed 2026-09-23 (668278c): 39-layer band attention 39.5 -> 20.3 ms at chunk 512, 603 -> 95.5 at 2048, 2439 -> 181
   at 4096; live prefill (back-to-back pair) 886 -> 1059 tok/s at 4k and 526 -> 603 at 64k, chunk 2048; a 500k prompt
   admits at chunk 2048 (`needed=10262 MB available=17538 MB`); 16x512 KLD 0.07747 vs 0.07761.
 - **A packed-cache global-layer DECODE reads in place** (`mimoGlobalDecodeArm`): with matrix units (M5) the matmul2d
-  `msv_qkv_mpp` (`qkvMppDecodeServes`, from `QKV_MPP_DECODE_MIN_TK` = 4096 keys); without them (M4) the QSA split-K
+  `sushi_qkv_mpp` (`qkvMppDecodeServes`, from `QKV_MPP_DECODE_MIN_TK` = 4096 keys); without them (M4) the QSA split-K
   body over the whole causal range (`qkvAttnSplitKKernel`, from `QKV_SPLITK_DECODE_MIN_TK` = 4096 keys; 512 keys per
-  split, 64-128 splits, split count a runtime value); else the dense rebuild. `MLX_SERVE_KVQ_FORCE_SPLITK=1` takes
+  split, 64-128 splits, split count a runtime value); else the dense rebuild. `SUSHI_KVQ_FORCE_SPLITK=1` takes
   the split-K arm on an M5 for A/B. The older SIMD `qkvAttnDecodeKernel` cannot stage gqa 16 x qk 192.
   Attention-only microbench (9 layers, kv8) vs the per-call dequant+SDPA rebuild: split-K 0.62x at 4k, 0.50x at 16k,
   0.42x at 64k, 0.35-0.36x at 512k (M5 proxy for M4; split-K is compute-bound, the rebuild bandwidth-bound);

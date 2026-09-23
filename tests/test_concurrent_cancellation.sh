@@ -16,7 +16,7 @@
 # complete.
 #
 # Requires:
-#   - A built mlx-serve binary
+#   - A built sushi binary
 #   - A model directory (see PLD_TEST_MODEL fallback chain).
 #
 # Usage:
@@ -46,7 +46,7 @@ if [ ! -f "$MODEL/config.json" ]; then
     exit 1
 fi
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found or not executable."
     exit 1
@@ -60,7 +60,7 @@ PROMPT='Write a 500-word story about a robot that learns to paint.'
 JSON_PAYLOAD=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '''$PROMPT'''}],
     'max_tokens': 400,
     'temperature': 0.0,
@@ -73,7 +73,7 @@ print(json.dumps({
 FINAL_PAYLOAD=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': 'Reply with just the word OK.'}],
     'max_tokens': 8,
     'temperature': 0.0,
@@ -86,7 +86,7 @@ echo "  model: $MODEL"
 echo "  cycles: $CYCLES"
 echo
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 LOGFILE=$(mktemp)
@@ -123,7 +123,7 @@ for cycle in $(seq 1 "$CYCLES"); do
     SALTED=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '[c $cycle] $PROMPT'}],
     'max_tokens': 400,
     'temperature': 0.0,

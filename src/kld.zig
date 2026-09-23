@@ -13,7 +13,7 @@ const testing = std.testing;
 
 pub const SCHEMA = "mlx-serve-kld-baseline-v1";
 pub const COMPARE_SCHEMA = "mlx-serve-kld-compare-v1";
-pub const TOOL = "mlx-serve";
+pub const TOOL = "sushi";
 
 pub const Command = enum { capture, compare };
 
@@ -25,7 +25,7 @@ pub const Options = struct {
     out_dir: []const u8 = "",
     fixture: []const u8 = "",
     json_out: []const u8 = "",
-    label: []const u8 = "mlx-serve",
+    label: []const u8 = "sushi",
     tokens: u32 = 64,
     top_k: u32 = 10,
     limit: u32 = 0,
@@ -154,8 +154,8 @@ pub fn parseArgs(args: []const []const u8) ArgError!Options {
 
 pub const USAGE =
     \\usage:
-    \\  mlx-serve kld capture --model <dir> --prompts <src> --out <dir> [options]
-    \\  mlx-serve kld compare --model <dir> --fixture <dir> [options]
+    \\  sushi kld capture --model <dir> --prompts <src> --out <dir> [options]
+    \\  sushi kld compare --model <dir> --fixture <dir> [options]
     \\
     \\  <src> is a captured fixture dir (its prompts are reused), a directory of
     \\  *.txt files (one prompt each, sorted by name), or a .jsonl of
@@ -164,7 +164,7 @@ pub const USAGE =
     \\options:
     \\  --tokens <n>          greedy tokens per prompt to capture (default 64)
     \\  --top-k <n>           top_k recorded in baseline.json (default 10)
-    \\  --label <s>           label/run recorded in the output (default mlx-serve)
+    \\  --label <s>           label/run recorded in the output (default sushi)
     \\  --limit <n>           only the first n prompts (0 = all)
     \\  --no-template         feed the raw prompt text, no chat template
     \\  --json <file>         compare: write the numbers as JSON
@@ -1373,7 +1373,7 @@ pub fn runCompare(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
 pub fn cmdKld(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
     var out: Out = .{};
     const opts = parseArgs(args) catch |err| {
-        out.print("mlx-serve kld: {s}\n\n{s}", .{ @errorName(err), USAGE });
+        out.print("sushi kld: {s}\n\n{s}", .{ @errorName(err), USAGE });
         return err;
     };
     if (opts.help) {

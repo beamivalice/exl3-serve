@@ -26,8 +26,8 @@ if [ ! -d "$MODEL_DIR" ]; then
     exit 0
 fi
 
-if [ ! -x "./zig-out/bin/mlx-serve" ]; then
-    echo "FAIL: ./zig-out/bin/mlx-serve not built"
+if [ ! -x "./zig-out/bin/sushi" ]; then
+    echo "FAIL: ./zig-out/bin/sushi not built"
     exit 1
 fi
 
@@ -37,8 +37,8 @@ echo "Port: $PORT"
 echo ""
 
 echo "Starting server..."
-./zig-out/bin/mlx-serve --model "$MODEL_DIR" --serve --port $PORT --log-level info \
-    >/tmp/mlx-serve-stream-test.log 2>&1 &
+./zig-out/bin/sushi --model "$MODEL_DIR" --serve --port $PORT --log-level info \
+    >/tmp/sushi-stream-test.log 2>&1 &
 SERVER_PID=$!
 sleep 2
 
@@ -104,7 +104,7 @@ PY
 
 # ── Test A: text streaming emits multiple output_text.delta events ──
 echo "--- Test A: incremental output_text.delta events ---"
-BODY='{"model":"mlx-serve","input":"Count from 1 to 20 separated by commas.","max_output_tokens":80,"temperature":0,"stream":true}'
+BODY='{"model":"sushi","input":"Count from 1 to 20 separated by commas.","max_output_tokens":80,"temperature":0,"stream":true}'
 SSE=$(sse_with_timestamps "$BODY")
 
 DELTA_COUNT=$(echo "$SSE" | grep -c $'\tdata: {"type":"response.output_text.delta"' || true)
@@ -142,7 +142,7 @@ echo ""
 
 # ── Test B: reasoning streaming emits multiple summary_text.delta events ──
 echo "--- Test B: incremental reasoning_summary_text.delta events ---"
-BODY='{"model":"mlx-serve","input":"What is 12 + 34? Think step by step.","reasoning":{"effort":"medium"},"max_output_tokens":256,"temperature":0,"stream":true}'
+BODY='{"model":"sushi","input":"What is 12 + 34? Think step by step.","reasoning":{"effort":"medium"},"max_output_tokens":256,"temperature":0,"stream":true}'
 SSE=$(sse_with_timestamps "$BODY")
 
 R_DELTA_COUNT=$(echo "$SSE" | grep -c $'\tdata: {"type":"response.reasoning_summary_text.delta"' || true)
@@ -167,7 +167,7 @@ echo ""
 # The WebSocket transport must NOT get one (its terminator is the
 # response.completed event itself) — this test covers HTTP only.
 echo "--- Test C: terminal data: [DONE] sentinel (HTTP SSE) ---"
-BODY='{"model":"mlx-serve","input":"Say hi.","max_output_tokens":16,"temperature":0,"stream":true}'
+BODY='{"model":"sushi","input":"Say hi.","max_output_tokens":16,"temperature":0,"stream":true}'
 SSE=$(sse_with_timestamps "$BODY")
 
 LAST_DATA=$(echo "$SSE" | grep $'\tdata: ' | tail -1 | cut -f2-)
@@ -191,7 +191,7 @@ echo ""
 # expects to poll — a silent lie flagged by llmprobe. A clean 400 is the
 # honest answer (probes report it as "unsupported", not failed).
 echo "--- Test D: background:true returns 400 ---"
-BG_BODY='{"model":"mlx-serve","input":"Say hi.","max_output_tokens":16,"background":true}'
+BG_BODY='{"model":"sushi","input":"Say hi.","max_output_tokens":16,"background":true}'
 BG_CODE=$(curl -s -o /tmp/responses_bg_test.out -w '%{http_code}' \
     -X POST "$BASE/v1/responses" -H 'Content-Type: application/json' -d "$BG_BODY")
 BG_BODY_OUT=$(cat /tmp/responses_bg_test.out)
@@ -272,7 +272,7 @@ def run_turn(body):
         if ev.get("type") in ("response.failed", "response.incomplete"):
             raise RuntimeError(ev.get("type"))
 
-turn = {"type": "response.create", "model": "mlx-serve", "input": "Say hi.",
+turn = {"type": "response.create", "model": "sushi", "input": "Say hi.",
         "max_output_tokens": 16, "temperature": 0}
 id1, done1 = run_turn(turn)
 turn2 = dict(turn, input="Say bye.", previous_response_id=id1)

@@ -541,7 +541,7 @@ pub const ModelRegistry = struct {
     entries: std.StringHashMap(*LoadedModel),
 
     /// Default model id used when a request doesn't specify `model` (or
-    /// specifies the literal "mlx-serve"). Borrowed from the corresponding
+    /// specifies the literal "sushi"). Borrowed from the corresponding
     /// entry's `id`; valid for the registry's lifetime.
     default_id: []const u8,
     /// The default came from a headless load, not `--model` or an explicit
@@ -748,7 +748,7 @@ pub const ModelRegistry = struct {
     }
 
     /// Set the default model id used for requests that omit `model` or
-    /// pass the literal "mlx-serve". The id must already exist (via
+    /// pass the literal "sushi". The id must already exist (via
     /// `registerStub`); caller borrows the entry's own `id` slice so the
     /// pointer is stable for the registry's lifetime. Locked: besides the
     /// single-threaded boot callers, `/v1/load-model` `"default": true`
@@ -831,14 +831,14 @@ pub const ModelRegistry = struct {
         return self.entries.get(id);
     }
 
-    /// Resolve `id_or_empty` ("" or "mlx-serve" → default) to the entry.
+    /// Resolve `id_or_empty` ("" or "sushi" → default) to the entry.
     /// Pure ID resolution; does not touch state or refcounts. Returns
     /// `error.UnknownModelId` if the id isn't registered or
     /// `error.NoDefaultModel` if `id_or_empty` is empty AND no default is
     /// set. The returned pointer is borrowed; valid for the registry's
     /// lifetime.
     pub fn resolveEntry(self: *ModelRegistry, id_or_empty: []const u8) !*LoadedModel {
-        const id = if (id_or_empty.len == 0 or std.mem.eql(u8, id_or_empty, "mlx-serve"))
+        const id = if (id_or_empty.len == 0 or std.mem.eql(u8, id_or_empty, "sushi"))
             self.default_id
         else
             id_or_empty;
@@ -848,7 +848,7 @@ pub const ModelRegistry = struct {
         return self.entries.get(id) orelse error.UnknownModelId;
     }
 
-    /// Resolve `id` (or the default when `id` is null/empty/"mlx-serve")
+    /// Resolve `id` (or the default when `id` is null/empty/"sushi")
     /// to a refcounted `*LoadedModel`. Phase A skeleton: succeeds only on
     /// already-`.ready` entries and waits out `.loading`/`.evicting`
     /// transitions; returns `error.NotLoaded` for `.unloaded` and
@@ -859,7 +859,7 @@ pub const ModelRegistry = struct {
     ///
     /// Caller MUST call `release(lm)` once done with the returned pointer.
     pub fn ensureLoaded(self: *ModelRegistry, id_or_empty: []const u8) !*LoadedModel {
-        const id = if (id_or_empty.len == 0 or std.mem.eql(u8, id_or_empty, "mlx-serve"))
+        const id = if (id_or_empty.len == 0 or std.mem.eql(u8, id_or_empty, "sushi"))
             self.default_id
         else
             id_or_empty;
@@ -1070,7 +1070,7 @@ pub const ModelRegistry = struct {
         entry.last_used_ms.store(io_util.nowMsMonotonic(self.io), .release);
         self.current_resident_bytes += bytes_resident;
         // Headless default promotion: a server started without --model has no
-        // default, so requests addressing the "mlx-serve" alias (the app's
+        // default, so requests addressing the "sushi" alias (the app's
         // chat/avatar surfaces, Claude Code) 503 with no_model even after the
         // user loads a chat model via /v1/load-model — the live gen-first→
         // chat-later hole (2026-07-05). The LATEST chat-capable load is the
@@ -1254,11 +1254,11 @@ pub const ModelRegistry = struct {
         self.state_cond.broadcast(self.io);
     }
 
-    /// Duped copy of the stored load-failure name for `id` (empty/"mlx-serve"
+    /// Duped copy of the stored load-failure name for `id` (empty/"sushi"
     /// route to the default), or null when the entry isn't in `.error_state`.
     /// Caller frees. Feeds the HTTP "Model load failed: <name>" message (#144).
     pub fn loadErrorNameDupe(self: *ModelRegistry, alloc: std.mem.Allocator, id_or_empty: []const u8) ?[]u8 {
-        const id = if (id_or_empty.len == 0 or std.mem.eql(u8, id_or_empty, "mlx-serve"))
+        const id = if (id_or_empty.len == 0 or std.mem.eql(u8, id_or_empty, "sushi"))
             self.default_id
         else
             id_or_empty;
@@ -1636,7 +1636,7 @@ test "unloadResident resets the prefill-chunk pin but never the context pin" {
     try testing.expectEqual(@as(u32, 8192), cfg.pinned_context);
 }
 
-test "ModelRegistry: default routing on empty / mlx-serve" {
+test "ModelRegistry: default routing on empty / sushi" {
     var reg = try ModelRegistry.init(testing.allocator, std.Io.Threaded.global_single_threaded.io(), null, 3, 0, null);
     defer reg.deinit();
     const lm = try makeReadyStub(reg, "foo", 1024);
@@ -1646,7 +1646,7 @@ test "ModelRegistry: default routing on empty / mlx-serve" {
     try testing.expectEqual(lm, a);
     reg.release(a);
 
-    const b = try reg.ensureLoaded("mlx-serve");
+    const b = try reg.ensureLoaded("sushi");
     try testing.expectEqual(lm, b);
     reg.release(b);
 }
@@ -1954,7 +1954,7 @@ test "reservation: released back to zero on markReady / markUnloaded" {
 
 test "ModelRegistry: first chat-capable ready load becomes the default on a headless server" {
     // gen-first→chat-later hole (live 2026-07-05): a server started headless
-    // (no --model) has no default, so requests addressing the "mlx-serve"
+    // (no --model) has no default, so requests addressing the "sushi"
     // alias 503 with no_model even after the user loads a chat model via
     // /v1/load-model. The FIRST chat-capable load is promoted; embedding
     // encoders never qualify; an existing default is never stolen.
@@ -1983,7 +1983,7 @@ test "ModelRegistry: first chat-capable ready load becomes the default on a head
     try testing.expectEqualStrings("gemma", reg.default_id);
 
     // ...and the alias resolves to it now.
-    const via_alias = try reg.ensureLoaded("mlx-serve");
+    const via_alias = try reg.ensureLoaded("sushi");
     try testing.expectEqual(chat, via_alias);
     reg.release(via_alias);
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Interrupted-pull recovery (issue: Ctrl-C during `mlx-serve run gemma4`'s
+# Interrupted-pull recovery (issue: Ctrl-C during `sushi run gemma4`'s
 # download, rerun → SIGSEGV instead of resuming). Two bugs, two checks:
 #
 #   A. `modelPresent` used to return true on config.json alone, so a dir left
@@ -16,7 +16,7 @@
 #      signal death. No weights needed — the failure is at tokenizer load.
 set -u
 
-BIN="${MLX_SERVE_BIN:-./zig-out/bin/mlx-serve}"
+BIN="${SUSHI_BIN:-./zig-out/bin/sushi}"
 if [ ! -x "$BIN" ]; then
     echo "SKIP: $BIN not found — build first: zig build -Doptimize=ReleaseFast"
     exit 0
@@ -33,7 +33,7 @@ check() {
 
 # The exact state an interrupted `pull gemma4` leaves behind (live capture
 # 2026-07-03): small files complete, weights only .partial, no tokenizer.
-MODEL_DIR="$SCRATCH/home/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit"
+MODEL_DIR="$SCRATCH/home/.sushi/models/mlx-community/gemma-4-e4b-it-4bit"
 mkdir -p "$MODEL_DIR"
 printf '{"model_type": "gemma4"}\n' > "$MODEL_DIR/config.json"
 printf '{{ messages }}\n' > "$MODEL_DIR/chat_template.jinja"

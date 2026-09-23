@@ -24,7 +24,7 @@ echo "--- Test 1: Baseline chat (no tools) ---"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "You are helpful. Be brief."},
       {"role": "user", "content": "Say hello in one sentence."}
@@ -51,7 +51,7 @@ echo "--- Test 2: Chat with tools param (no tool history) ---"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "You are helpful. Be brief."},
       {"role": "user", "content": "What is 2+2? Answer directly, no tools needed."}
@@ -78,7 +78,7 @@ echo "--- Test 3: Tool call round-trip (THE BUG) ---"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "You are helpful. Be brief."},
       {"role": "user", "content": "What day is today?"},
@@ -116,7 +116,7 @@ echo "--- Test 4: Same messages but no tools param ---"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "You are helpful. Be brief."},
       {"role": "user", "content": "What day is today?"},
@@ -142,7 +142,7 @@ echo "--- Test 5: Tool response as role:assistant (Gemma-native format) ---"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "You are helpful. Be brief."},
       {"role": "user", "content": "What day is today?"},

@@ -6,7 +6,7 @@
 set -u
 MODEL="${BENCH_MODEL:?set BENCH_MODEL}"
 PORT=${1:-18820}; MAXTOK=${2:-256}; BASE="http://127.0.0.1:$PORT"
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 LOG=$(mktemp)
 "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld ${SPEC_FLAGS:---mtp} --max-concurrent 4 --prefix-cache-entries 0 > "$LOG" 2>&1 &
 PID=$!; trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -f "$LOG"' EXIT
@@ -17,7 +17,7 @@ PROMPTS=("Write a detailed essay about the history of quantum computing." "Expla
 req() { # $1 prompt idx, $2 enable_mtp (true|false)
     python3 -c "
 import json,sys
-print(json.dumps({'model':'mlx-serve','messages':[{'role':'user','content':sys.argv[1]}],'max_tokens':$MAXTOK,'temperature':0,'enable_mtp':sys.argv[2]=='true','enable_drafter':sys.argv[2]=='true','stream':False}))" "${PROMPTS[$1]}" "$2" |
+print(json.dumps({'model':'sushi','messages':[{'role':'user','content':sys.argv[1]}],'max_tokens':$MAXTOK,'temperature':0,'enable_mtp':sys.argv[2]=='true','enable_drafter':sys.argv[2]=='true','stream':False}))" "${PROMPTS[$1]}" "$2" |
     curl -s -m 600 -X POST -H "Content-Type: application/json" -d @- "$BASE/v1/chat/completions" 2>/dev/null |
     python3 -c "import sys,json; d=sys.stdin.read(); j=json.loads(d) if d else {}; t=j.get('timings'); print(f\"{t['predicted_n']} tok {t['predicted_per_second']:.1f} tok/s\" if t else 'ERR '+d[:200])"
 }

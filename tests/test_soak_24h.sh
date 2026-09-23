@@ -51,7 +51,7 @@ if [ ! -f "$MODEL/config.json" ]; then
     echo -e "${RED}FAIL${NC} $MODEL/config.json missing — not a valid model directory."
     exit 1
 fi
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first with 'zig build -Doptimize=ReleaseFast'."
     exit 1
@@ -75,14 +75,14 @@ echo "  health interval:    ${HEALTH_INTERVAL_SEC}s"
 echo "  log:                $SAMPLE_LOG"
 echo
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 2
 
 SERVER_LOG=$(mktemp)
 echo "  starting server (--max-concurrent 4 --kv-quant 4)..."
 "$BINARY" --model "$MODEL" --serve --port "$PORT" \
     --max-concurrent 4 --kv-quant 4 \
-    ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$SERVER_LOG" 2>&1 &
+    ${SUSHI_TEST_EXTRA_ARGS:-} > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 # Background-worker PIDs (recorded so cleanup can kill them).
@@ -122,7 +122,7 @@ workload_chat() {
     while true; do
         local mt=$(( 50 + (i % 10) * 50 ))
         curl -s -X POST -H "Content-Type: application/json" \
-            -d "{\"model\":\"mlx-serve\",\"messages\":[{\"role\":\"user\",\"content\":\"Briefly describe item ${i}.\"}],\"max_tokens\":${mt},\"temperature\":0.0,\"stream\":false}" \
+            -d "{\"model\":\"sushi\",\"messages\":[{\"role\":\"user\",\"content\":\"Briefly describe item ${i}.\"}],\"max_tokens\":${mt},\"temperature\":0.0,\"stream\":false}" \
             "$BASE/v1/chat/completions" > /dev/null 2>&1 || true
         i=$(( i + 1 ))
         sleep 0.5
@@ -135,7 +135,7 @@ workload_agent() {
     while true; do
         # Three-turn synthetic conversation with thinking enabled.
         curl -s -X POST -H "Content-Type: application/json" \
-            -d "{\"model\":\"mlx-serve\",\"messages\":[{\"role\":\"system\",\"content\":\"You are a helpful assistant.\"},{\"role\":\"user\",\"content\":\"Remember: my favorite color is #${i}.\"},{\"role\":\"assistant\",\"content\":\"Got it.\"},{\"role\":\"user\",\"content\":\"What did I just say?\"}],\"max_tokens\":80,\"temperature\":0.0,\"stream\":false}" \
+            -d "{\"model\":\"sushi\",\"messages\":[{\"role\":\"system\",\"content\":\"You are a helpful assistant.\"},{\"role\":\"user\",\"content\":\"Remember: my favorite color is #${i}.\"},{\"role\":\"assistant\",\"content\":\"Got it.\"},{\"role\":\"user\",\"content\":\"What did I just say?\"}],\"max_tokens\":80,\"temperature\":0.0,\"stream\":false}" \
             "$BASE/v1/chat/completions" > /dev/null 2>&1 || true
         i=$(( i + 1 ))
         sleep 1
@@ -147,7 +147,7 @@ workload_anthropic() {
     local i=0
     while true; do
         curl -s -X POST -H "Content-Type: application/json" -H "anthropic-version: 2023-06-01" \
-            -d "{\"model\":\"mlx-serve\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"List ${i} random colors.\"}]}" \
+            -d "{\"model\":\"sushi\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"List ${i} random colors.\"}]}" \
             "$BASE/v1/messages" > /dev/null 2>&1 || true
         i=$(( i + 1 ))
         sleep 1
@@ -159,7 +159,7 @@ workload_tools() {
     local i=0
     while true; do
         curl -s -X POST -H "Content-Type: application/json" \
-            -d "{\"model\":\"mlx-serve\",\"messages\":[{\"role\":\"user\",\"content\":\"What's the weather in city #${i}? Use the get_weather tool.\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Look up weather.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}],\"max_tokens\":64,\"temperature\":0.0,\"stream\":false}" \
+            -d "{\"model\":\"sushi\",\"messages\":[{\"role\":\"user\",\"content\":\"What's the weather in city #${i}? Use the get_weather tool.\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Look up weather.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}],\"max_tokens\":64,\"temperature\":0.0,\"stream\":false}" \
             "$BASE/v1/chat/completions" > /dev/null 2>&1 || true
         i=$(( i + 1 ))
         sleep 1

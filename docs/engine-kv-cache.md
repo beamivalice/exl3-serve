@@ -29,7 +29,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-prefix-cache](engi
   slot running `kv_quant=4` never restores from an entry committed at another width
   (`tests/test_kv_quant_per_request.sh`).
 - Packed reads are kernel-or-DENSE per WIDTH (`kvAttnFusedEligible` t_q==1, `kvAttnVerifyEligible` t_q 2..8; verify
-  kernel OFF on G17, `MLX_SERVE_KV_ATTN_VERIFY=1|0`; floor 2048). Guard: `tests/test_kv_quant_fused_equivalence.sh`.
+  kernel OFF on G17, `SUSHI_KV_ATTN_VERIFY=1|0`; floor 2048). Guard: `tests/test_kv_quant_fused_equivalence.sh`.
 - Arch-specific packed readers: QSA on qwen4_exp ([engine-qsa-long-context](engine-qsa-long-context.md)); the
   matmul2d decode kernel and the fused prefill on MiMo's global layers ([arch-mimo-v2](arch-mimo-v2.md#attention-kernels)).
 - `server.kvDequantScratchBytes` bills a dense rebuild as ONE layer at the rows that layer stores (per forward width

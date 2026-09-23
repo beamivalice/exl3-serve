@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Per-model settings (`~/.mlx-serve/model-settings.json`, issue #269): a model's
+# Per-model settings (`~/.sushi/model-settings.json`, issue #269): a model's
 # `ctx_size` / `kv_quant` / `mtp` / `mtp_acceptance` follow the MODEL, apply on its
 # load (boot AND cold load), and a second model in the same process keeps the
 # globals. An explicit launch flag outranks the file.
@@ -11,10 +11,10 @@
 set -uo pipefail
 PORT="${1:-11384}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/zig-out/bin/mlx-serve"
+BIN="$ROOT/zig-out/bin/sushi"
 [ -x "$BIN" ] || { echo "FAIL: build first (zig build -Doptimize=ReleaseFast)"; exit 1; }
 
-MODELS_ROOT="${MODELS_ROOT:-$HOME/.mlx-serve/models}"
+MODELS_ROOT="${MODELS_ROOT:-$HOME/.sushi/models}"
 MODEL_A="${MODEL_A:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 MODEL_B="${MODEL_B:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}"
 if [ ! -f "$MODEL_A/config.json" ] || [ ! -f "$MODEL_B/config.json" ]; then
@@ -30,17 +30,17 @@ check() {
 }
 
 FAKE_HOME="$(mktemp -d)"
-mkdir -p "$FAKE_HOME/.mlx-serve"
-SETTINGS="$FAKE_HOME/.mlx-serve/model-settings.json"
+mkdir -p "$FAKE_HOME/.sushi"
+SETTINGS="$FAKE_HOME/.sushi/model-settings.json"
 LOG="$FAKE_HOME/server.log"
 SRV=""
 cleanup() {
     [ -n "$SRV" ] && kill "$SRV" 2>/dev/null
-    pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+    pkill -f "sushi.*--port $PORT" 2>/dev/null
     rm -rf "$FAKE_HOME"
 }
 trap cleanup EXIT
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+pkill -f "sushi.*--port $PORT" 2>/dev/null
 sleep 0.5
 
 write_settings() { # write_settings <ctx> <kv>  — override for MODEL_A only

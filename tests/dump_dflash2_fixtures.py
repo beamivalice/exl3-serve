@@ -16,13 +16,13 @@ path ids must match EXACTLY while the hidden parity stays cos + rms_ratio.
 Run:
     uv run --with mlx --with mlx-lm --with numpy \
         python3 tests/dump_dflash2_fixtures.py \
-        [--assistant-dir ~/.mlx-serve/models/incoai/Qwen3.8-27B-DFlash2] \
+        [--assistant-dir ~/.sushi/models/incoai/Qwen3.8-27B-DFlash2] \
         [--dflash-repo ~/claude-tmp/dflash2/dflash] \
         [--out ~/claude-tmp/dflash2_fixtures.json]
 
 Then:
     DFLASH2_FIXTURES=~/claude-tmp/dflash2_fixtures.json \
-    DFLASH2_ASSISTANT_DIR=~/.mlx-serve/models/incoai/Qwen3.8-27B-DFlash2 \
+    DFLASH2_ASSISTANT_DIR=~/.sushi/models/incoai/Qwen3.8-27B-DFlash2 \
         zig build test -Doptimize=ReleaseFast -Dtest-filter="dflash2 fixture"
 """
 
@@ -36,7 +36,7 @@ import numpy as np
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--assistant-dir", default=os.path.expanduser("~/.mlx-serve/models/incoai/Qwen3.8-27B-DFlash2"))
+    ap.add_argument("--assistant-dir", default=os.path.expanduser("~/.sushi/models/incoai/Qwen3.8-27B-DFlash2"))
     ap.add_argument("--dflash-repo", default=os.path.expanduser("~/claude-tmp/dflash2/dflash"))
     ap.add_argument("--out", default=os.path.expanduser("~/claude-tmp/dflash2_fixtures.json"))
     ap.add_argument("--n-ctx", type=int, default=12)

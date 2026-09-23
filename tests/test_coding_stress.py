@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Coding agent stress test — pushes mlx-serve to its limits.
+Coding agent stress test — pushes sushi to its limits.
 
 Asks the model to build a complex Expedia-like travel booking site with
 fake data, multiple pages, search, booking, and account management.
@@ -112,7 +112,7 @@ def mock_tool_result(name: str, args: dict) -> str:
 def send_request(messages: list) -> dict:
     """Send a chat completion request and return the parsed response."""
     body = json.dumps({
-        "model": "mlx-serve",
+        "model": "sushi",
         "messages": messages,
         "tools": TOOLS,
         "max_tokens": 2048,

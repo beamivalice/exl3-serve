@@ -14,10 +14,10 @@
 set -uo pipefail
 PORT="${1:-11378}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/zig-out/bin/mlx-serve"
+BIN="$ROOT/zig-out/bin/sushi"
 [ -x "$BIN" ] || { echo "FAIL: build first (zig build -Doptimize=ReleaseFast)"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/mlxserve-roots.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/sushi-roots.XXXXXX")"
 SRV=""
 trap 'rm -rf "$TMP"; [ -n "$SRV" ] && kill "$SRV" 2>/dev/null' EXIT
 

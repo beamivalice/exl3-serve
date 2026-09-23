@@ -142,7 +142,7 @@ fn warmEnabled() bool {
     if (warm_override) |v| return v;
     if (warm_env_cached) |v| return v;
     const v = blk: {
-        const raw = std.c.getenv("MLX_SERVE_NGRAM_WARM") orelse break :blk true;
+        const raw = std.c.getenv("SUSHI_NGRAM_WARM") orelse break :blk true;
         break :blk raw[0] != '0';
     };
     warm_env_cached = v;
@@ -419,7 +419,7 @@ pub const NgramTable = struct {
         if (self.fd < 0 or self.warm_thread != null) return;
         // The off arm says so: a cold first request faults rows off the SSD (38k prompt: 174 s vs 55 s).
         if (!warmEnabled()) {
-            log.info("[qwen4] ngram table warm: disabled (MLX_SERVE_NGRAM_WARM=0) - the first long prompt faults the table in from SSD\n", .{});
+            log.info("[qwen4] ngram table warm: disabled (SUSHI_NGRAM_WARM=0) - the first long prompt faults the table in from SSD\n", .{});
             return;
         }
         if (self.bits == 16 and self.map.len > ngramCacheLimit()) {
@@ -430,7 +430,7 @@ pub const NgramTable = struct {
         self.warm_bytes.store(0, .release);
         live_warm_bytes.store(0, .release);
         live_warm_total.store(self.map.len, .release);
-        log.info("[qwen4] ngram table warm: started, {d:.1} GB in the background (page cache; MLX_SERVE_NGRAM_WARM=0 disables)\n", .{asGb(self.map.len)});
+        log.info("[qwen4] ngram table warm: started, {d:.1} GB in the background (page cache; SUSHI_NGRAM_WARM=0 disables)\n", .{asGb(self.map.len)});
         self.warm_thread = std.Thread.spawn(.{}, warmMain, .{self}) catch null;
     }
 
@@ -454,7 +454,7 @@ pub const NgramTable = struct {
             if (prog.should(off, el)) log.info("[qwen4] ngram table warm: {d:.1}/{d:.1} GB after {d:.0} s\n", .{ asGb(off), asGb(total), @as(f64, @floatFromInt(el)) / 1e9 });
         }
         const secs: f64 = @as(f64, @floatFromInt(t0.untilNow(wio, .boot).nanoseconds)) / 1e9;
-        log.info("[qwen4] ngram table warm: done, {d:.1} GB in {d:.1} s (page cache; MLX_SERVE_NGRAM_WARM=0 disables)\n", .{ asGb(total), secs });
+        log.info("[qwen4] ngram table warm: done, {d:.1} GB in {d:.1} s (page cache; SUSHI_NGRAM_WARM=0 disables)\n", .{ asGb(total), secs });
     }
 
     /// Dequantize one row into `out[0..dim]` (mx.quantize packing: element i

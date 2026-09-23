@@ -77,13 +77,13 @@ jobs:
             ~/.cache/zig
           key: zig-cache-${{ hashFiles('scripts/fetch-zig.sh', 'build.zig', 'build.zig.zon') }}-${{ steps.mlxpin.outputs.submodules }}-${{ steps.mlxpin.outputs.xcode }}
 
-      - name: Build mlx-serve (Zig, ReleaseFast)
+      - name: Build sushi (Zig, ReleaseFast)
         run: zig build -Doptimize=ReleaseFast
 
-      - name: Smoke test mlx-serve binary
+      - name: Smoke test sushi binary
         run: |
-          ./zig-out/bin/mlx-serve --version
-          ./zig-out/bin/mlx-serve --help > /dev/null
+          ./zig-out/bin/sushi --version
+          ./zig-out/bin/sushi --help > /dev/null
 
       # Static guard: staged metallib contains the *_nax kernels, minos >= 26.2,
       # and the built binary links no leftover brew mlx/mlx-c.

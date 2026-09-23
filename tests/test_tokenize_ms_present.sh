@@ -16,27 +16,27 @@
 #   MODEL    Path to any MLX model dir. Default: the Flash-Next EXL3 pack.
 #            Skipped if missing.
 #   PORT     Server port. Default 19101.
-#   BINARY   Path to mlx-serve. Default ./zig-out/bin/mlx-serve.
+#   BINARY   Path to sushi. Default ./zig-out/bin/sushi.
 
 set -uo pipefail
 
 PORT="${PORT:-19101}"
-BIN="${BINARY:-./zig-out/bin/mlx-serve}"
+BIN="${BINARY:-./zig-out/bin/sushi}"
 MODEL="${MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 BASE="http://127.0.0.1:$PORT"
 
 [ -d "$MODEL" ] || { echo "SKIP: model dir missing: $MODEL"; exit 0; }
-[ -x "$BIN" ]   || { echo "fail: build mlx-serve first ($BIN)"; exit 1; }
+[ -x "$BIN" ]   || { echo "fail: build sushi first ($BIN)"; exit 1; }
 command -v jq >/dev/null || { echo "needs jq"; exit 1; }
 
-pkill -9 -f "mlx-serve.*port $PORT" 2>/dev/null
+pkill -9 -f "sushi.*port $PORT" 2>/dev/null
 sleep 1
 
 LOG="$(mktemp)"
 SERVER_PID=""
 cleanup() {
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
-    pkill -9 -f "mlx-serve.*port $PORT" 2>/dev/null
+    pkill -9 -f "sushi.*port $PORT" 2>/dev/null
     rm -f "$LOG"
 }
 trap cleanup EXIT INT TERM
@@ -86,14 +86,14 @@ assert_tokenize_ms_in "chat-completions" "$RESP"
 echo "==> /v1/messages (non-streaming)"
 RESP="$(curl -sf --max-time 90 -X POST "$BASE/v1/messages" \
     -H 'Content-Type: application/json' \
-    -d '{"model":"mlx-serve","messages":[{"role":"user","content":"Say hi in one word."}],"max_tokens":5,"temperature":0,"stream":false}')"
+    -d '{"model":"sushi","messages":[{"role":"user","content":"Say hi in one word."}],"max_tokens":5,"temperature":0,"stream":false}')"
 assert_tokenize_ms_in "anthropic-messages" "$RESP"
 
 # --- /v1/responses ---
 echo "==> /v1/responses (non-streaming)"
 RESP="$(curl -sf --max-time 90 -X POST "$BASE/v1/responses" \
     -H 'Content-Type: application/json' \
-    -d '{"model":"mlx-serve","input":"Say hi in one word.","max_output_tokens":16,"temperature":0,"stream":false}')"
+    -d '{"model":"sushi","input":"Say hi in one word.","max_output_tokens":16,"temperature":0,"stream":false}')"
 assert_tokenize_ms_in "responses" "$RESP"
 
 cleanup

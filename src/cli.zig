@@ -1,15 +1,15 @@
-//! CLI subcommands — `mlx-serve run|pull|list <model>` — Ollama-grade
+//! CLI subcommands — `sushi run|pull|list <model>` — Ollama-grade
 //! ergonomics for the terminal.
 //!
-//!   mlx-serve run gemma4        # download if missing, serve, drop into a REPL
-//!   mlx-serve pull qwen3.6      # download only
-//!   mlx-serve list              # what's on disk
+//!   sushi run gemma4        # download if missing, serve, drop into a REPL
+//!   sushi pull qwen3.6      # download only
+//!   sushi list              # what's on disk
 //!
 //! Short names resolve through a curated alias table (mirroring the MLX
 //! Core app catalog in ChatModels.swift); anything containing '/' is
 //! treated as a HuggingFace repo id directly ("org/repo", with optional
 //! "hf.co/" prefix and ":tag" suffix). Downloads land in
-//! `~/.mlx-serve/models/<org>/<repo>` — the single source of truth shared
+//! `~/.sushi/models/<org>/<repo>` — the single source of truth shared
 //! with the app's DownloadManager and the server's media-dep resolution.
 //!
 //! Downloads use system curl for TLS and resume. The embedded REPL uses an
@@ -162,20 +162,20 @@ pub fn resolveShortName(name: []const u8) ?Resolved {
     return null;
 }
 
-/// `~/.mlx-serve/models/<org>/<repo>` — the single models root shared with
+/// `~/.sushi/models/<org>/<repo>` — the single models root shared with
 /// the app's DownloadManager.
 pub fn modelDestPath(allocator: std.mem.Allocator, home: []const u8, repo: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/.mlx-serve/models/{s}", .{ home, repo });
+    return std.fmt.allocPrint(allocator, "{s}/.sushi/models/{s}", .{ home, repo });
 }
 
 pub fn modelsRootPath(allocator: std.mem.Allocator, home: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/.mlx-serve/models", .{home});
+    return std.fmt.allocPrint(allocator, "{s}/.sushi/models", .{home});
 }
 
 /// Inputs to "which models should this boot discover?" — see
 /// `shouldDefaultModelsRoot`.
 pub const RootDefaulting = struct {
-    /// Invoked as `mlx-serve serve` / `mlx-serve run <model>` rather than flags.
+    /// Invoked as `sushi serve` / `sushi run <model>` rather than flags.
     subcommand: bool,
     /// The process will serve HTTP (subcommand, or the `--serve` flag).
     serve_mode: bool,
@@ -183,13 +183,13 @@ pub const RootDefaulting = struct {
     has_explicit_model: bool,
 };
 
-/// Should an unspecified `--model-dir` fall back to `~/.mlx-serve/models`?
+/// Should an unspecified `--model-dir` fall back to `~/.sushi/models`?
 ///
 /// That path is already the single source of truth everywhere else — `pull`
 /// writes there, `list` reads there, the app's DownloadManager and both
 /// resolvers agree on it — so a server told to serve, but given neither a model
 /// nor a directory, has exactly one sensible place to look. Without this a bare
-/// `mlx-serve --serve` discovered nothing and answered 503 to everything.
+/// `sushi --serve` discovered nothing and answered 503 to everything.
 ///
 /// The one case that must NOT default: `--model <path> --serve`, which asked
 /// for one specific model. Registering everything else on disk beside it is a
@@ -517,7 +517,7 @@ pub fn cmdPull(allocator: std.mem.Allocator, io: std.Io, name: []const u8) !void
     const dir = try ensureModelAvailable(allocator, io, name);
     defer allocator.free(dir);
     log.info("model at {s}\n", .{dir});
-    log.info("run it: mlx-serve run {s}\n", .{name});
+    log.info("run it: sushi run {s}\n", .{name});
 }
 
 fn printKnownAliases(io: std.Io) void {
@@ -532,7 +532,7 @@ fn printKnownAliases(io: std.Io) void {
     }
 }
 
-/// `mlx-serve list` — models on disk under ~/.mlx-serve/models.
+/// `sushi list` — models on disk under ~/.sushi/models.
 pub fn cmdList(allocator: std.mem.Allocator, io: std.Io) !void {
     const root = try modelsRootPath(allocator, homeDir());
     defer allocator.free(root);
@@ -543,7 +543,7 @@ pub fn cmdList(allocator: std.mem.Allocator, io: std.Io) !void {
     defer w.flush() catch {};
 
     var dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch {
-        try w.print("no models yet (looked in {s})\ntry: mlx-serve pull gemma4\n", .{root});
+        try w.print("no models yet (looked in {s})\ntry: sushi pull gemma4\n", .{root});
         return;
     };
     defer dir.close(io);
@@ -575,7 +575,7 @@ pub fn cmdList(allocator: std.mem.Allocator, io: std.Io) !void {
         }
     }
     if (count == 0) {
-        try w.print("(none) — try: mlx-serve pull gemma4\n", .{});
+        try w.print("(none) — try: sushi pull gemma4\n", .{});
     }
 }
 
@@ -659,7 +659,7 @@ pub fn formatSize(buf: []u8, bytes: u64) []const u8 {
     return std.fmt.bufPrint(buf, "{d} KB", .{bytes / 1024}) catch "?";
 }
 
-/// The post-load line `mlx-serve run` prints, from the status getters:
+/// The post-load line `sushi run` prints, from the status getters:
 /// `real_bytes` is THIS process's physical footprint (Activity Monitor's
 /// "Real Memory" — what the load just grew), `free_bytes` is what the system
 /// would grant a new large allocation, `total_bytes` is physical RAM.
@@ -674,7 +674,7 @@ pub fn formatMemorySummary(buf: []u8, real_bytes: u64, free_bytes: u64, total_by
     });
 }
 
-// ── REPL (mlx-serve run) ────────────────────────────────────────────────
+// ── REPL (sushi run) ────────────────────────────────────────────────
 //
 // The REPL is deliberately a real HTTP client against the server's own
 // /v1/chat/completions endpoint (streaming SSE) — it dogfoods the API on
@@ -689,7 +689,7 @@ pub const Turn = struct {
 pub fn buildReplChatBody(allocator: std.mem.Allocator, history: []const Turn) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "{\"model\":\"mlx-serve\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"messages\":[");
+    try out.appendSlice(allocator, "{\"model\":\"sushi\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"messages\":[");
     for (history, 0..) |turn, i| {
         if (i > 0) try out.append(allocator, ',');
         try out.appendSlice(allocator, "{\"role\":");
@@ -975,7 +975,7 @@ test "cli: modelDestPath layout" {
     const allocator = testing.allocator;
     const p = try modelDestPath(allocator, "/Users/x", "org/repo");
     defer allocator.free(p);
-    try testing.expectEqualStrings("/Users/x/.mlx-serve/models/org/repo", p);
+    try testing.expectEqualStrings("/Users/x/.sushi/models/org/repo", p);
 }
 
 test "cli: shouldDownload chat-default selection" {
@@ -1182,8 +1182,8 @@ test "cli: dirBytesOneLevel counts weight subdirs (FLUX bundle showed 6 KB)" {
 }
 
 test "cli: a serving boot with no model named falls back to the shared models root" {
-    // `mlx-serve serve` and `mlx-serve run <m>` already default the discovery
-    // root; the `--serve` FLAG form did not, so a bare `mlx-serve --serve`
+    // `sushi serve` and `sushi run <m>` already default the discovery
+    // root; the `--serve` FLAG form did not, so a bare `sushi --serve`
     // booted a server that had discovered nothing and could only answer 503 —
     // never what anyone meant by "serve".
     try testing.expect(shouldDefaultModelsRoot(.{ .subcommand = true, .serve_mode = true, .has_explicit_model = false }));
@@ -1192,7 +1192,7 @@ test "cli: a serving boot with no model named falls back to the shared models ro
     // `--model <path> --serve` asked for ONE model. Quietly registering the
     // other 28 on disk is a different server than the one requested.
     try testing.expect(!shouldDefaultModelsRoot(.{ .subcommand = false, .serve_mode = true, .has_explicit_model = true }));
-    // `mlx-serve run <model>` names a model AND wants the picker populated —
+    // `sushi run <model>` names a model AND wants the picker populated —
     // the subcommand's existing behavior, which this must not change.
     try testing.expect(shouldDefaultModelsRoot(.{ .subcommand = true, .serve_mode = true, .has_explicit_model = true }));
 

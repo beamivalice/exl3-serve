@@ -1,6 +1,6 @@
-//! Lock-free, zero-when-off instrumentation core for mlx-serve.
+//! Lock-free, zero-when-off instrumentation core for sushi.
 //!
-//! Design contract (the whole point — mlx-serve's pitch is best-in-class
+//! Design contract (the whole point — sushi's pitch is best-in-class
 //! serving performance, so observability must never touch that):
 //!
 //!   * OFF  — a single `?*Metrics` null-check per REQUEST (never per token).
@@ -44,7 +44,7 @@ const TOKEN_BOUNDS: [8]u64 = .{ 32, 128, 256, 512, 1024, 2048, 4096, 8192 };
 // Metrics — the single global struct allocated when --metrics is on
 // ---------------------------------------------------------------------------
 
-/// All instrumented metrics for one mlx-serve instance.
+/// All instrumented metrics for one sushi instance.
 /// Zero-allocation after init; every field is a lock-free primitive.
 pub const Metrics = struct {
     // Latency histograms (observe in nanoseconds; rendered as seconds)
@@ -248,8 +248,8 @@ pub fn renderPrometheus(m: *const Metrics, w: *std.Io.Writer) !void {
 
     // --- Counters ---
     try writeCounter(w, "vllm:prompt_tokens_total", "Total prompt tokens processed", m.prompt_tokens_total.load());
-    try writeCounter(w, "mlx_serve:prefill_tokens_total", "Prompt tokens actually forwarded through prefill (excludes prefix-cache restores) — the correct numerator for prefill tok/s", m.prefill_tokens_total.load());
-    try writeCounter(w, "mlx_serve:prefix_cache_tokens_total", "Prompt tokens restored from the hot prefix cache instead of being computed", m.prefix_cache_tokens_total.load());
+    try writeCounter(w, "sushi:prefill_tokens_total", "Prompt tokens actually forwarded through prefill (excludes prefix-cache restores) — the correct numerator for prefill tok/s", m.prefill_tokens_total.load());
+    try writeCounter(w, "sushi:prefix_cache_tokens_total", "Prompt tokens restored from the hot prefix cache instead of being computed", m.prefix_cache_tokens_total.load());
     try writeCounter(w, "vllm:generation_tokens_total", "Total generated tokens", m.generation_tokens_total.load());
     try writeCounter(w, "vllm:request_success_total", "Completed requests", m.requests_success_total.load());
     try writeCounter(w, "vllm:request_cancelled_total", "Requests cancelled by client disconnect", m.requests_cancelled_total.load());
@@ -259,22 +259,22 @@ pub fn renderPrometheus(m: *const Metrics, w: *std.Io.Writer) !void {
     // --- Gauges ---
     try writeGauge(w, "vllm:num_requests_running", "Number of requests currently being processed", m.requests_running.load());
     try writeGauge(w, "vllm:num_requests_waiting", "Number of requests waiting in the queue", m.requests_waiting.load());
-    try writeGauge(w, "mlx_serve:gpu_utilization_pct", "GPU utilization percentage (IOKit AGXAccelerator)", m.gpu_utilization_pct.load());
-    try writeGauge(w, "mlx_serve:memory_mb", "Server physical memory footprint in megabytes (phys_footprint)", m.memory_mb.load());
-    try writeGauge(w, "mlx_serve:generation_tokens_live", "Generation tokens completed plus generated-so-far by in-flight slots (real-time tok/s source)", m.generation_tokens_live.load());
-    try writeGauge(w, "mlx_serve:prefill_tokens_live", "Prompt tokens forwarded so far by the in-flight prefill (0 when idle; real-time prefill tok/s source)", m.prefill_tokens_live.load());
-    try writeGauge(w, "mlx_serve:prefill_tokens_expected", "Total tokens the in-flight prefill will forward, post-cache tail on the same scale as prefill_tokens_live (0 when idle; the bar's real target)", m.prefill_tokens_expected.load());
-    try writeGauge(w, "mlx_serve:requests_prefilling", "Requests currently in the prefill phase", m.requests_prefilling.load());
-    try writeGauge(w, "mlx_serve:mlx_active_bytes", "Bytes MLX's allocator currently has in use", m.mlx_active_bytes.load());
-    try writeGauge(w, "mlx_serve:mlx_cache_bytes", "Bytes parked in MLX's reclaimable buffer pool (held by the process, not in use)", m.mlx_cache_bytes.load());
-    try writeGauge(w, "mlx_serve:ane_int8_bytes", "Bytes of int8 weight copies held by the ANE prefill offload (0 when off)", m.ane_int8_bytes.load());
-    try writeGauge(w, "mlx_serve:ane_layers", "Layers covered by compiled ANE prefill programs, mlp + gdn (0 when off)", m.ane_layers.load());
-    try writeGauge(w, "mlx_serve:ngram_warm_bytes", "Bytes of the qwen4 n-gram table read so far by the background page-cache warm (0 when off or done with no table resident)", m.ngram_warm_bytes.load());
-    try writeGauge(w, "mlx_serve:batched_group_size", "Slots in the last batched decode group (0 when the last tick batched nothing)", m.batched_group_size.load());
-    try w.print("# HELP mlx_serve:decode_serial_total Slot-ticks that decoded serial beside other live slots, by reason\n# TYPE mlx_serve:decode_serial_total counter\n", .{});
+    try writeGauge(w, "sushi:gpu_utilization_pct", "GPU utilization percentage (IOKit AGXAccelerator)", m.gpu_utilization_pct.load());
+    try writeGauge(w, "sushi:memory_mb", "Server physical memory footprint in megabytes (phys_footprint)", m.memory_mb.load());
+    try writeGauge(w, "sushi:generation_tokens_live", "Generation tokens completed plus generated-so-far by in-flight slots (real-time tok/s source)", m.generation_tokens_live.load());
+    try writeGauge(w, "sushi:prefill_tokens_live", "Prompt tokens forwarded so far by the in-flight prefill (0 when idle; real-time prefill tok/s source)", m.prefill_tokens_live.load());
+    try writeGauge(w, "sushi:prefill_tokens_expected", "Total tokens the in-flight prefill will forward, post-cache tail on the same scale as prefill_tokens_live (0 when idle; the bar's real target)", m.prefill_tokens_expected.load());
+    try writeGauge(w, "sushi:requests_prefilling", "Requests currently in the prefill phase", m.requests_prefilling.load());
+    try writeGauge(w, "sushi:mlx_active_bytes", "Bytes MLX's allocator currently has in use", m.mlx_active_bytes.load());
+    try writeGauge(w, "sushi:mlx_cache_bytes", "Bytes parked in MLX's reclaimable buffer pool (held by the process, not in use)", m.mlx_cache_bytes.load());
+    try writeGauge(w, "sushi:ane_int8_bytes", "Bytes of int8 weight copies held by the ANE prefill offload (0 when off)", m.ane_int8_bytes.load());
+    try writeGauge(w, "sushi:ane_layers", "Layers covered by compiled ANE prefill programs, mlp + gdn (0 when off)", m.ane_layers.load());
+    try writeGauge(w, "sushi:ngram_warm_bytes", "Bytes of the qwen4 n-gram table read so far by the background page-cache warm (0 when off or done with no table resident)", m.ngram_warm_bytes.load());
+    try writeGauge(w, "sushi:batched_group_size", "Slots in the last batched decode group (0 when the last tick batched nothing)", m.batched_group_size.load());
+    try w.print("# HELP sushi:decode_serial_total Slot-ticks that decoded serial beside other live slots, by reason\n# TYPE sushi:decode_serial_total counter\n", .{});
     for (SERIAL_REASONS, 0..) |name, i| {
         if (name.len == 0) continue;
-        try w.print("mlx_serve:decode_serial_total{{reason=\"{s}\"}} {d}\n", .{ name, m.decode_serial_total[i].load() });
+        try w.print("sushi:decode_serial_total{{reason=\"{s}\"}} {d}\n", .{ name, m.decode_serial_total[i].load() });
     }
 
     // --- Latency histograms (nanoseconds → seconds) ---
@@ -598,8 +598,8 @@ test "prefill throughput must exclude cache-restored tokens" {
     var buf: [16384]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try renderPrometheus(&m, &w);
-    try testing.expect(std.mem.indexOf(u8, w.buffered(), "mlx_serve:prefill_tokens_total 500") != null);
-    try testing.expect(std.mem.indexOf(u8, w.buffered(), "mlx_serve:prefix_cache_tokens_total 910") != null);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "sushi:prefill_tokens_total 500") != null);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "sushi:prefix_cache_tokens_total 910") != null);
 
     // The index panel polls /metrics.json and divides by `prefill_tokens_total`.
     var jbuf: [8192]u8 = undefined;
@@ -625,9 +625,9 @@ test "prefill progress is exposed live, not only at request completion" {
     var w = std.Io.Writer.fixed(&buf);
     try renderPrometheus(&m, &w);
     const out = w.buffered();
-    try testing.expect(std.mem.indexOf(u8, out, "# TYPE mlx_serve:prefill_tokens_live gauge") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "mlx_serve:prefill_tokens_live 16384") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "mlx_serve:prefill_tokens_expected 48000") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "# TYPE sushi:prefill_tokens_live gauge") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "sushi:prefill_tokens_live 16384") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "sushi:prefill_tokens_expected 48000") != null);
 
     var jbuf: [8192]u8 = undefined;
     var jw = std.Io.Writer.fixed(&jbuf);
@@ -648,7 +648,7 @@ test "prefill progress is exposed live, not only at request completion" {
     var b2: [16384]u8 = undefined;
     var w2 = std.Io.Writer.fixed(&b2);
     try renderPrometheus(&m, &w2);
-    try testing.expect(std.mem.indexOf(u8, w2.buffered(), "mlx_serve:requests_prefilling 1") != null);
+    try testing.expect(std.mem.indexOf(u8, w2.buffered(), "sushi:requests_prefilling 1") != null);
 
     var j2: [8192]u8 = undefined;
     var jw2 = std.Io.Writer.fixed(&j2);
@@ -678,8 +678,8 @@ test "renderPrometheus emits well-formed Prometheus text" {
     try testing.expect(std.mem.indexOf(u8, out, "# TYPE vllm:num_requests_running gauge") != null);
     try testing.expect(std.mem.indexOf(u8, out, "vllm:num_requests_running 3") != null);
     // Real-time live-token gauge present (drives the panel's low-latency tok/s)
-    try testing.expect(std.mem.indexOf(u8, out, "# TYPE mlx_serve:generation_tokens_live gauge") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "mlx_serve:generation_tokens_live 137") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "# TYPE sushi:generation_tokens_live gauge") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "sushi:generation_tokens_live 137") != null);
     // Histogram has _bucket{le="+Inf"}, _sum, _count lines
     try testing.expect(std.mem.indexOf(u8, out, "vllm:time_to_first_token_seconds_bucket{le=\"+Inf\"}") != null);
     try testing.expect(std.mem.indexOf(u8, out, "vllm:time_to_first_token_seconds_sum ") != null);
@@ -850,7 +850,7 @@ test "ngram_warm_bytes is a zero-when-off gauge on both surfaces" {
     var pbuf: [64 * 1024]u8 = undefined;
     var pw: std.Io.Writer = .fixed(&pbuf);
     try renderPrometheus(&m, &pw);
-    try testing.expect(std.mem.indexOf(u8, pbuf[0..pw.end], "mlx_serve:ngram_warm_bytes 17179869184") != null);
+    try testing.expect(std.mem.indexOf(u8, pbuf[0..pw.end], "sushi:ngram_warm_bytes 17179869184") != null);
 }
 
 test "decode_serial_total carries one labelled series per serial reason, never ok" {
@@ -863,9 +863,9 @@ test "decode_serial_total carries one labelled series per serial reason, never o
     var w: std.Io.Writer = .fixed(&buf);
     try renderPrometheus(&m, &w);
     const out = buf[0..w.end];
-    try testing.expect(std.mem.indexOf(u8, out, "mlx_serve:decode_serial_total{reason=\"spec_active\"} 3\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "sushi:decode_serial_total{reason=\"spec_active\"} 3\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "reason=\"ok\"") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "mlx_serve:batched_group_size 2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "sushi:batched_group_size 2\n") != null);
 
     var jbuf: [64 * 1024]u8 = undefined;
     var jw: std.Io.Writer = .fixed(&jbuf);

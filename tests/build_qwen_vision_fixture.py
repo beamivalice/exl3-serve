@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a Qwen3-VL vision parity fixture for mlx-serve's QwenVision encoder.
+"""Build a Qwen3-VL vision parity fixture for sushi's QwenVision encoder.
 
 Runs the mlx-vlm reference vision tower on a fixture image and dumps:
   - pixel_values.bin   float32 [N, C*tps*ps*ps]   (the processor's patches)

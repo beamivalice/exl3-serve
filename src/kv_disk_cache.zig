@@ -115,7 +115,7 @@ const DarwinStatfs = extern struct {
     tail: [4096]u8,
 };
 extern "c" fn statfs(path: [*:0]const u8, buf: *DarwinStatfs) c_int;
-extern fn msv_volume_free_for_use(path: [*:0]const u8) u64;
+extern fn sushi_volume_free_for_use(path: [*:0]const u8) u64;
 
 pub const VolumeSpace = struct { free: u64, total: u64 };
 
@@ -133,7 +133,7 @@ pub fn volumeSpace(path: []const u8) ?VolumeSpace {
     if (st.f_blocks == 0 or st.f_bavail > st.f_blocks) return null;
     const total = bsize *| st.f_blocks;
     // statfs excludes purgeable space the OS releases on demand; ask what a write really gets.
-    const granted = msv_volume_free_for_use(buf[0..path.len :0].ptr);
+    const granted = sushi_volume_free_for_use(buf[0..path.len :0].ptr);
     return .{ .free = freeForUse(granted, total, bsize *| st.f_bavail), .total = total };
 }
 
@@ -2587,7 +2587,7 @@ pub const DiskTier = struct {
 
     /// The resident entry whose leading chunk files a new entry for `tokens` may hard-link:
     /// same tool flag and kv-quant config, most whole chunks below the common prefix. Null on
-    /// the legacy arm or under `MLX_SERVE_SSD_CHUNK_SHARE=0`.
+    /// the legacy arm or under `SUSHI_SSD_CHUNK_SHARE=0`.
     fn chunkShareDonor(self: *DiskTier, tokens: []const u32, kv_target: u32, has_tools: bool, config: kv_quant.KVQuantConfig) ?ChunkDonor {
         if (!self.ssd_first or !chunkShareEnabled()) return null;
         var best: ?ChunkDonor = null;
@@ -3301,10 +3301,10 @@ pub fn modelFingerprint(allocator: std.mem.Allocator, io: std.Io, model_dir: []c
     return std.fmt.allocPrint(allocator, "{x:0>16}", .{h.final()});
 }
 
-/// Default persistence root: `~/.mlx-serve/kv-cache`.
+/// Default persistence root: `~/.sushi/kv-cache`.
 pub fn defaultBaseDir(allocator: std.mem.Allocator) ![]u8 {
     const home = std.mem.span(std.c.getenv("HOME") orelse return error.NoHome);
-    return std.fmt.allocPrint(allocator, "{s}/.mlx-serve/kv-cache", .{home});
+    return std.fmt.allocPrint(allocator, "{s}/.sushi/kv-cache", .{home});
 }
 
 // ── Small fs helpers ──
@@ -3333,12 +3333,12 @@ pub fn commonPrefixLen(a: []const u32, b: []const u32) usize {
 var chunk_share_env_cached: ?bool = null;
 pub var chunk_share_override: ?bool = null;
 
-/// `MLX_SERVE_SSD_CHUNK_SHARE=0` restores the write-everything commit (SSD-first arm only).
+/// `SUSHI_SSD_CHUNK_SHARE=0` restores the write-everything commit (SSD-first arm only).
 pub fn chunkShareEnabled() bool {
     if (chunk_share_override) |v| return v;
     if (chunk_share_env_cached) |v| return v;
     const v = blk: {
-        const raw = std.c.getenv("MLX_SERVE_SSD_CHUNK_SHARE") orelse break :blk true;
+        const raw = std.c.getenv("SUSHI_SSD_CHUNK_SHARE") orelse break :blk true;
         break :blk !std.mem.eql(u8, std.mem.sliceTo(raw, 0), "0");
     };
     chunk_share_env_cached = v;
@@ -6148,7 +6148,7 @@ test "volumeSpace: free is what the OS grants, never statfs' f_bavail" {
     try testing.expectEqual(@as(u64, 36 * GB), freeForUse(0, 500 * GB, 36 * GB));
     try testing.expectEqual(@as(u64, 36 * GB), freeForUse(500 * GB + 1, 500 * GB, 36 * GB));
     // The grant probe is wired: absent it, every volume would fall back to f_bavail.
-    try testing.expect(msv_volume_free_for_use("/") > 0);
+    try testing.expect(sushi_volume_free_for_use("/") > 0);
 }
 
 test "DiskTier: SSD-first declines to store when the VOLUME is short, and says so" {

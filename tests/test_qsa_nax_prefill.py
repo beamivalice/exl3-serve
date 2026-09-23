@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """HTTP correctness and engagement guard; point at a disposable server with cache off.
 
-MLX_SERVE_QSA_NAX=1 MLX_SERVE_PREFILL_CHUNK=4096 zig-out/bin/mlx-serve serve \
+SUSHI_QSA_NAX=1 SUSHI_PREFILL_CHUNK=4096 zig-out/bin/sushi serve \
   --port 18765 --ctx-size 131072 --prefix-cache-entries 0 > /tmp/qsa-server.log 2>&1
 python3 tests/test_qsa_nax_prefill.py --log /tmp/qsa-server.log --nax on
-Repeat with MLX_SERVE_QSA_NAX=0 and --nax off for the stock arm.
+Repeat with SUSHI_QSA_NAX=0 and --nax off for the stock arm.
 """
 import argparse
 import json
@@ -39,9 +39,9 @@ for nonce in ('81492017', '52839106', '90371648'):
     assert 'MAGNOLIA-7731' in answer, result
     print(json.dumps({'arm': args.nax, 'usage': usage, 'answer': answer}), flush=True)
 log = args.log.read_bytes()[log_offset:].decode('utf-8', errors='replace')
-expected = ('[qsa-gather] engaged: msv_qsa_nax_precise' if args.nax == 'on'
-            else '[qsa-gather] engaged: msv_attn_qsa256')
+expected = ('[qsa-gather] engaged: sushi_qsa_nax_precise' if args.nax == 'on'
+            else '[qsa-gather] engaged: sushi_attn_qsa256')
 assert expected in log, f'Missing engagement: {expected}'
 if args.nax == 'off':
-    assert '[qsa-gather] engaged: msv_qsa_nax_precise' not in log
+    assert '[qsa-gather] engaged: sushi_qsa_nax_precise' not in log
 print('PASS: long prefill answers and expected QSA arm')

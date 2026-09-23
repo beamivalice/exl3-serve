@@ -41,15 +41,15 @@ if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_cache_reuses_generated_tokens: model not found ($MODEL)"
     exit 0
 fi
-if [ ! -x ./zig-out/bin/mlx-serve ]; then
-    echo -e "${RED}FAIL${NC} mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+if [ ! -x ./zig-out/bin/sushi ]; then
+    echo -e "${RED}FAIL${NC} sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 
 LOG=$(mktemp)
-echo "Starting mlx-serve on port $PORT (log: $LOG)..."
+echo "Starting sushi on port $PORT (log: $LOG)..."
 # `--log-level info` so the [cache] reusing line is captured (debug is too noisy).
-./zig-out/bin/mlx-serve --model "$MODEL" --serve --port "$PORT" --no-pld \
+./zig-out/bin/sushi --model "$MODEL" --serve --port "$PORT" --no-pld \
     --log-level info > "$LOG" 2>&1 &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; rm -f "$LOG"' EXIT
@@ -79,7 +79,7 @@ CYAN = "\033[0;36m"; DIM = "\033[2m"; NC = "\033[0m"
 
 def chat(messages, max_tokens=120):
     body = {
-        "model": "mlx-serve",
+        "model": "sushi",
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0.0,

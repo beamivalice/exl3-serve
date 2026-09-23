@@ -51,7 +51,7 @@ pub const default_max_bytes: u64 = 32 * 1024 * 1024;
 /// past this is truncated with a visible marker so a clipped line can never be
 /// mistaken for what the model actually emitted.
 const line_buf_len = 16 * 1024;
-const truncation_marker = "…[mlx-serve: log line truncated]\n";
+const truncation_marker = "…[sushi: log line truncated]\n";
 
 /// A pthread mutex, not `std.Io.Mutex`: locking the latter needs an `Io`
 /// handle, and log calls arrive from threads that don't carry one.
@@ -74,11 +74,11 @@ var sink_path_len: usize = 0;
 var sink_active: bool = false;
 
 /// Build the default log path for a server listening on `port`:
-/// `<home>/.mlx-serve/logs/mlx-serve-<port>.log`. Per-port so the app's server
+/// `<home>/.sushi/logs/sushi-<port>.log`. Per-port so the app's server
 /// and a test server never interleave into one file. Returns the slice written
 /// into `buf`.
 pub fn defaultLogPath(buf: []u8, home: []const u8, port: u16) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/.mlx-serve/logs/mlx-serve-{d}.log", .{ home, port });
+    return std.fmt.bufPrint(buf, "{s}/.sushi/logs/sushi-{d}.log", .{ home, port });
 }
 
 /// Pure rotation policy: would appending `incoming` bytes push the live file
@@ -303,13 +303,13 @@ test "setLevel changes current level" {
     try testing.expect(!isDebug());
 }
 
-test "defaultLogPath is per-port under ~/.mlx-serve/logs" {
+test "defaultLogPath is per-port under ~/.sushi/logs" {
     var buf: [256]u8 = undefined;
     const p = try defaultLogPath(&buf, "/Users/x", 11234);
-    try testing.expectEqualStrings("/Users/x/.mlx-serve/logs/mlx-serve-11234.log", p);
+    try testing.expectEqualStrings("/Users/x/.sushi/logs/sushi-11234.log", p);
     // Per-port: the app's server and a test server never share a file.
     const q = try defaultLogPath(&buf, "/Users/x", 8098);
-    try testing.expectEqualStrings("/Users/x/.mlx-serve/logs/mlx-serve-8098.log", q);
+    try testing.expectEqualStrings("/Users/x/.sushi/logs/sushi-8098.log", q);
 }
 
 test "shouldRotate: caps growth, never loops on an oversized first line" {
@@ -326,7 +326,7 @@ test "shouldRotate: caps growth, never loops on an oversized first line" {
 // lives in ONE test — the build runner executes tests in parallel and two
 // tests calling `openFile` would fight over `sink_fd`.
 test "file sink: writes lines, honors level, survives reopen, rotates at the cap" {
-    const dir = "/tmp/mlx-serve-logtest";
+    const dir = "/tmp/sushi-logtest";
     const path = dir ++ "/s.log";
     _ = std.c.mkdir(dir, @as(std.c.mode_t, 0o755));
     _ = std.c.unlink(path);
@@ -382,14 +382,14 @@ test "file sink: writes lines, honors level, survives reopen, rotates at the cap
     try testing.expect(readFileForTest(path ++ ".1", &buf2) > 0); // rotated backup exists
 
     // Nested parents are created: the real default path is
-    // ~/.mlx-serve/logs/… and BOTH components can be missing on a fresh HOME.
-    const deep = "/tmp/mlx-serve-logtest/a/b/c/deep.log";
+    // ~/.sushi/logs/… and BOTH components can be missing on a fresh HOME.
+    const deep = "/tmp/sushi-logtest/a/b/c/deep.log";
     defer {
         closeFile();
         _ = std.c.unlink(deep);
-        _ = std.c.rmdir("/tmp/mlx-serve-logtest/a/b/c");
-        _ = std.c.rmdir("/tmp/mlx-serve-logtest/a/b");
-        _ = std.c.rmdir("/tmp/mlx-serve-logtest/a");
+        _ = std.c.rmdir("/tmp/sushi-logtest/a/b/c");
+        _ = std.c.rmdir("/tmp/sushi-logtest/a/b");
+        _ = std.c.rmdir("/tmp/sushi-logtest/a");
     }
     try openFile(deep, 0);
     info("deep\n", .{});

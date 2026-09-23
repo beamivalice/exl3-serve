@@ -31,7 +31,7 @@ PORT=${1:-8135}
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 
-MODELS_ROOT="$HOME/.mlx-serve/models"
+MODELS_ROOT="$HOME/.sushi/models"
 CHAT_A="${STRESS_CHAT_A:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 CHAT_B="${STRESS_CHAT_B:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}"
 N_AGENTS=${N_AGENTS:-3}
@@ -42,7 +42,7 @@ MAX_TOKENS=${MAX_TOKENS:-200}
 ROUNDS=${ROUNDS:-1}
 export STRESS_THINK="${STRESS_THINK:-0}" STRESS_MTP="${STRESS_MTP:-0}"
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 [ -x "$BINARY" ] || { echo -e "${RED}FAIL${NC} $BINARY not found (zig build -Doptimize=ReleaseFast)"; exit 1; }
 [ -d "$CHAT_A" ] || { echo -e "${YELLOW}SKIP${NC} chat model A not found: $CHAT_A (set STRESS_CHAT_A)"; exit 0; }
 [ -d "$CHAT_B" ] || { echo -e "${YELLOW}SKIP${NC} chat model B not found: $CHAT_B (set STRESS_CHAT_B)"; exit 0; }

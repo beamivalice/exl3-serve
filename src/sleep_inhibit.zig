@@ -20,7 +20,7 @@ const utf8_encoding: u32 = 0x08000100;
 const level_on: u32 = 255;
 // PreventSystemSleep is deprecated; this still permits display sleep.
 const assertion_type: [*:0]const u8 = "PreventUserIdleSystemSleep";
-const assertion_name: [*:0]const u8 = "mlx-serve is generating";
+const assertion_name: [*:0]const u8 = "sushi is generating";
 
 var enabled = true;
 var held = false;

@@ -9,7 +9,7 @@
 set -u
 
 PORT="${1:-11483}"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 REQUESTS="${CONN_REAP_REQUESTS:-300}"
 EMPTY_DIR="$(mktemp -d)"
 LOG="$(mktemp)"

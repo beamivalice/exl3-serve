@@ -1,6 +1,6 @@
-//! `mlx-serve --version` report — the versions of the app and every embedded
+//! `sushi --version` report — the versions of the app and every embedded
 //! engine, WITHOUT booting the HTTP server. The macOS app spawns
-//! `mlx-serve --version` as a one-shot subprocess and parses this so Settings
+//! `sushi --version` as a one-shot subprocess and parses this so Settings
 //! can show engine versions without a running server (Swift side:
 //! `EngineVersions.parse`). Keep this a pure formatter — main.zig gathers the
 //! runtime value (`mlx_version()`) and the build-time pins (`build_options`)
@@ -11,7 +11,7 @@ const std = @import("std");
 /// Every version string surfaced by `--version`. `mlx` comes from the linked
 /// library at runtime; the rest are build-time pins.
 pub const Info = struct {
-    /// mlx-serve app version (`build_options.version`).
+    /// sushi app version (`build_options.version`).
     app: []const u8,
     /// MLX core, from `mlx_version()` at runtime.
     mlx: []const u8,
@@ -29,7 +29,7 @@ pub const Info = struct {
 /// `nax on (M5 neural accelerators)`). A pin with no value collapses to
 /// `unknown` so every line always has a value token.
 pub fn writeReport(w: *std.Io.Writer, info: Info) !void {
-    try w.print("mlx-serve {s}\n", .{val(info.app)});
+    try w.print("sushi {s}\n", .{val(info.app)});
     try w.print("mlx {s}\n", .{val(info.mlx)});
     try w.print("mlx-c {s}\n", .{val(info.mlx_c)});
     try w.print("nax {s}\n", .{val(info.nax)});
@@ -58,7 +58,7 @@ test "version: report renders one name-value line per component" {
     });
     defer std.testing.allocator.free(s);
     try std.testing.expectEqualStrings(
-        \\mlx-serve 26.7.9
+        \\sushi 26.7.9
         \\mlx 0.32.0
         \\mlx-c 0.6.0
         \\nax on (M5 neural accelerators)
@@ -75,7 +75,7 @@ test "version: blank pins read as unknown" {
     });
     defer std.testing.allocator.free(s);
     try std.testing.expectEqualStrings(
-        \\mlx-serve 26.7.9
+        \\sushi 26.7.9
         \\mlx 0.32.0
         \\mlx-c unknown
         \\nax unknown

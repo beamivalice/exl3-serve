@@ -7,17 +7,17 @@
 set -u
 MODEL="${MTP_BATCHED_MODEL:?set MTP_BATCHED_MODEL}"
 PORT=${1:-18850}; BASE="http://127.0.0.1:$PORT"
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 LOG=$(mktemp); OUT=$(mktemp -d)
-MLX_SERVE_MTP_FORCE_DEPTH=2 MLX_SERVE_ROUND_COST_PERSIST=0 "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld --mtp --max-concurrent 8 --prefix-cache-entries 0 > "$LOG" 2>&1 &
+SUSHI_MTP_FORCE_DEPTH=2 SUSHI_ROUND_COST_PERSIST=0 "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld --mtp --max-concurrent 8 --prefix-cache-entries 0 > "$LOG" 2>&1 &
 PID=$!; trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$LOG" "$OUT"' EXIT
 for i in $(seq 1 240); do curl -sf "$BASE/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$BASE/health" >/dev/null || { echo -e "${RED}FAIL${NC} server did not start"; tail -20 "$LOG"; exit 1; }
 IS_QWEN4=$(python3 -c "import json,sys; print(1 if json.load(open(sys.argv[1]+'/config.json')).get('model_type')=='qwen4_exp' else 0)" "$MODEL")
 
 P=("Write a short essay about the history of quantum computing." "Explain how a compiler turns source code into machine code." "Describe the water cycle for a graduate seminar." "Summarize the causes of the French revolution.")
-req() { python3 -c "import json,sys; print(json.dumps({'model':'mlx-serve','messages':[{'role':'user','content':sys.argv[1]}],'max_tokens':150,'temperature':0}))" "$1" |
+req() { python3 -c "import json,sys; print(json.dumps({'model':'sushi','messages':[{'role':'user','content':sys.argv[1]}],'max_tokens':150,'temperature':0}))" "$1" |
     curl -s -m 900 -X POST -H 'Content-Type: application/json' -d @- "$BASE/v1/chat/completions" |
     python3 -c "import sys,json; j=json.load(sys.stdin); print(j['choices'][0]['message']['content'])"; }
 
@@ -46,7 +46,7 @@ idx = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]), min(len(a), 
 # Score the gap on the SHARED prefix: a serial run diverges from both at its own near-tie.
 r = urllib.request.urlopen(urllib.request.Request(base + "/detokenize", json.dumps({"tokens": a[:idx]}).encode(), {"Content-Type": "application/json"}))
 prefix = json.load(r)["content"]
-body = {"model": "mlx-serve", "messages": [{"role": "user", "content": prompt}, {"role": "assistant", "content": prefix}], "continue_final_message": True, "max_tokens": 1, "temperature": 0, "logprobs": True, "top_logprobs": 2, "enable_mtp": False}
+body = {"model": "sushi", "messages": [{"role": "user", "content": prompt}, {"role": "assistant", "content": prefix}], "continue_final_message": True, "max_tokens": 1, "temperature": 0, "logprobs": True, "top_logprobs": 2, "enable_mtp": False}
 r = urllib.request.urlopen(urllib.request.Request(base + "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"}))
 t = json.load(r)["choices"][0]["logprobs"]["content"][0]["top_logprobs"]
 print(round(t[0]["logprob"] - t[1]["logprob"], 4), idx)

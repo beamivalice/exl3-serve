@@ -27,7 +27,7 @@
 #   LFM2.5-350M-MLX-8bit:  4-bit diverges ~12 tokens — override with
 #                          KV_QUANT_FIRST_N_4BIT=10 for this family.
 #
-# Requires a built mlx-serve binary (zig build -Doptimize=ReleaseFast).
+# Requires a built sushi binary (zig build -Doptimize=ReleaseFast).
 # Default model is the Flash-Next EXL3 pack; pass any model dir as $1:
 #   ./tests/test_kv_quant_equivalence.sh [/path/to/model] [port]
 
@@ -52,7 +52,7 @@ if [ ! -f "$MODEL/config.json" ]; then
     exit 1
 fi
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build first with 'zig build -Doptimize=ReleaseFast'."
     exit 1
@@ -64,7 +64,7 @@ PROMPT='Recite the first paragraph of "A Tale of Two Cities" by Charles Dickens.
 JSON_PAYLOAD=$(python3 -c "
 import json
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '''$PROMPT'''}],
     'max_tokens': 200,
     'temperature': 0.0,
@@ -79,7 +79,7 @@ run_and_tokenize() {
     echo "  starting server ($label)..." >&2
     local logfile
     logfile=$(mktemp)
-    "$BINARY" --model "$MODEL" --serve --port "$PORT" $kv_flag ${MLX_SERVE_TEST_EXTRA_ARGS:-} > "$logfile" 2>&1 &
+    "$BINARY" --model "$MODEL" --serve --port "$PORT" $kv_flag ${SUSHI_TEST_EXTRA_ARGS:-} > "$logfile" 2>&1 &
     local pid=$!
     local up=0
     local i
@@ -151,7 +151,7 @@ echo "  model: $MODEL"
 echo "  prompt: <memorized recital, max_tokens=200>"
 echo
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 REF_COMPLETION=""

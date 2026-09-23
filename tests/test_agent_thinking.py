@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Direct multi-turn agent loop test against mlx-serve (no Swift app in the loop).
+Direct multi-turn agent loop test against sushi (no Swift app in the loop).
 Verifies that thinking is enabled on EVERY iteration of the agent loop and that
 content/reasoning/tool_calls split cleanly across turns.
 
@@ -20,7 +20,7 @@ MODEL_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("/Users/bea
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8095
 STREAM = bool(int(sys.argv[3])) if len(sys.argv) > 3 else False
 BASE = f"http://127.0.0.1:{PORT}"
-WORKSPACE = os.path.expanduser("~/.mlx-serve/workspace/agent_thinking_test")
+WORKSPACE = os.path.expanduser("~/.sushi/workspace/agent_thinking_test")
 
 TOOLS = [
     {"type": "function", "function": {
@@ -62,7 +62,7 @@ def post_json(path, body, stream=False):
 
 def call_chat(messages, stream=False):
     body = {
-        "model": "mlx-serve",
+        "model": "sushi",
         "messages": messages,
         "max_tokens": 800,
         "temperature": 0.3,

@@ -1,4 +1,4 @@
-//! Per-model settings (`~/.mlx-serve/model-settings.json`): context size, KV
+//! Per-model settings (`~/.sushi/model-settings.json`): context size, KV
 //! quant and MTP that follow the MODEL, applied at every load construction
 //! site. Keyed by the model's absolute path (dir, or the `.gguf` file).
 //! The app edits the file; the server owns applying it. A malformed file is
@@ -172,7 +172,7 @@ pub fn load(alloc: std.mem.Allocator, io: std.Io, path: []const u8) Settings {
 
 pub fn defaultPath(buf: []u8) []const u8 {
     const home = std.mem.span(std.c.getenv("HOME") orelse "/tmp");
-    return std.fmt.bufPrint(buf, "{s}/.mlx-serve/model-settings.json", .{home}) catch "";
+    return std.fmt.bufPrint(buf, "{s}/.sushi/model-settings.json", .{home}) catch "";
 }
 
 /// The one call load sites make: read the default file, look the model up, log a hit.

@@ -5,10 +5,10 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 CHECKPOINT=${QWEN4_BF16_STREAM_MODEL:-/Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next}
 FIXTURE=${QWEN4_TEACHER_FIXTURE:-/Users/beam/llm/models/kld-teacher/mlx-serve-bf16-60x64}
 PORT=${1:-}
-LOG=$(mktemp /tmp/mlx-serve-bf16-stream.XXXXXX.log)
-BODY1=$(mktemp /tmp/mlx-serve-bf16-stream.XXXXXX.1.json)
-BODY2=$(mktemp /tmp/mlx-serve-bf16-stream.XXXXXX.2.json)
-BODY3=$(mktemp /tmp/mlx-serve-bf16-stream.XXXXXX.3.json)
+LOG=$(mktemp /tmp/sushi-bf16-stream.XXXXXX.log)
+BODY1=$(mktemp /tmp/sushi-bf16-stream.XXXXXX.1.json)
+BODY2=$(mktemp /tmp/sushi-bf16-stream.XXXXXX.2.json)
+BODY3=$(mktemp /tmp/sushi-bf16-stream.XXXXXX.3.json)
 PID=
 
 cleanup() {
@@ -32,12 +32,12 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | grep -q LISTEN; then
 fi
 
 cd "$ROOT"
-KLD_JSON=$(mktemp /tmp/mlx-serve-bf16-stream.XXXXXX.kld.json)
-./zig-out/bin/mlx-serve kld compare --model "$CHECKPOINT" --fixture "$FIXTURE" --limit 3 --ssd-budget-gb 60 --no-mtp --kv-quant off --json "$KLD_JSON"
+KLD_JSON=$(mktemp /tmp/sushi-bf16-stream.XXXXXX.kld.json)
+./zig-out/bin/sushi kld compare --model "$CHECKPOINT" --fixture "$FIXTURE" --limit 3 --ssd-budget-gb 60 --no-mtp --kv-quant off --json "$KLD_JSON"
 jq -e '.mean_kld_to_eos < 0.02 and .mean_top1_to_eos > 0.95' "$KLD_JSON" >/dev/null
 rm -f "$KLD_JSON"
 
-./zig-out/bin/mlx-serve --model "$CHECKPOINT" --serve --host 127.0.0.1 --port "$PORT" --expert-cache-gb 60 --no-mtp --kv-quant 8 --ctx-size 65536 --metrics --no-vision >"$LOG" 2>&1 &
+./zig-out/bin/sushi --model "$CHECKPOINT" --serve --host 127.0.0.1 --port "$PORT" --expert-cache-gb 60 --no-mtp --kv-quant 8 --ctx-size 65536 --metrics --no-vision >"$LOG" 2>&1 &
 PID=$!
 for _ in $(seq 1 1200); do
     if curl --connect-timeout 1 --max-time 2 -fsS "http://127.0.0.1:$PORT/health" >/dev/null; then break; fi

@@ -155,7 +155,7 @@ rather than against our own masking of a w16 bitstream.
 
 ## Quality bar
 
-A pack is judged by KLD against the bf16 teacher (`mlx-serve kld capture` /
+A pack is judged by KLD against the bf16 teacher (`sushi kld capture` /
 `kld compare`, see [quality-kld](quality-kld.md)), never by bytes against an
 affine pack: the EXL3 kernel arms round once and are not byte-identical to any
 composite.

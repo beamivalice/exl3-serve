@@ -1,4 +1,4 @@
-# EXL3-serve — project context for AI
+# Sushi — project context for AI
 
 A native Zig inference engine for Apple Silicon serving exactly two models: Qwen3.8-Flash-Next (`qwen4_exp`, EXL3
 routed experts, resident or SSD-streamed) and MiMo-V2.6-Flash (`mimo_v2`, experimental, text-only, MCG EXL3 or
@@ -9,7 +9,7 @@ streamed MXFP4). OpenAI/Anthropic-compatible HTTP, no Python at serve time. Fork
   public code (license, NOTICE, docs); sushi is not scoped to EXL3 or to these two models forever.
 - **sashimi** is the PRIVATE quant-creation stack (its own private repo): every converter, allocator, imatrix driver
   and repacker. This repo keeps only the CONSUMER contract — `docs/pack-format.md`, the Zig shard-stamp check, the
-  committed `src/fixtures/`, and `mlx-serve kld`. The oracle fixture dumpers (`tests/dump_*_fixtures.py`) stay: they
+  committed `src/fixtures/`, and `sushi kld`. The oracle fixture dumpers (`tests/dump_*_fixtures.py`) stay: they
   verify the engine, they do not make packs. Converter knowledge (recipes, calibration data, research notes) never
   goes into a committed file: it goes to `docs/private/`, and committed files say only that it lives in the private
   repo.
@@ -48,7 +48,7 @@ doc for the area before changing it, and update it in the same landing.
 | [tests/CLAUDE.md](tests/CLAUDE.md) | the integration-test matrix (auto-loads in `tests/`) |
 
 **Private, local-only** (`docs/private/`, gitignored): they exist only in the main checkout, so a git worktree does
-not contain them; a worker in a worktree reads them from `/Users/beam/llm/exl3-serve/docs/private/`. Never link to or
+not contain them; a worker in a worktree reads them from `/Users/beam/llm/sushi/docs/private/`. Never link to or
 quote them from a committed file.
 
 | doc | what it holds |
@@ -75,7 +75,7 @@ no `libllama` (`tests/test_serving_deps.sh`). Box: M5 Max 128 GB, macOS 27.
 | `server.zig` / `responses.zig` / `ws.zig` | all HTTP: `/v1/*`, `/metrics(.json)`, WS, `--api-key`; Responses store | server-http-apis |
 | `chat.zig` | chat templates (Jinja2 + fallback), thinking tags, tool-call parse/repair/coercion | server-tool-calling |
 | `reasoning_protocol.zig` / `json_schema.zig` / `json_grammar.zig` / `token_mask.zig` / `regex.zig` | constrained decoding | server-http-apis |
-| `launch.zig` | `mlx-serve launch <agent>` configs | server-http-apis |
+| `launch.zig` | `sushi launch <agent>` configs | server-http-apis |
 | `scheduler.zig` / `generate.zig` | slots, inference thread, batching, admission; generation, sampling, MTP orchestration | server-lifecycle |
 | `model.zig` / `model_settings.zig` / `model_discovery.zig` / `model_registry.zig` | config + weights, per-model settings, discovery, registry | server-lifecycle |
 | `transformer.zig` | forward pass, arch dispatch, quant resolution, custom kernels, `KVCache` | arch-*, engine-* |
@@ -88,7 +88,7 @@ no `libllama` (`tests/test_serving_deps.sh`). Box: M5 Max 128 GB, macOS 27.
 | `prefix_cache.zig` / `kv_disk_cache.zig` / `kv_disk_writer.zig` / `restore_dump.zig` | prefix cache, SSD tier | engine-prefix-cache |
 | `tokenizer.zig` / `tokenize_cache.zig` | BPE, special tokens, per-model `digit_group`; prompt LRU | engine-mlx-gotchas |
 | `vision.zig` / `qwen_vision.zig` / `mrope.zig` | media INPUT (Qwen3-VL tower, M-RoPE) | server-lifecycle |
-| `kld.zig` | `mlx-serve kld capture|compare` | quality-kld |
+| `kld.zig` | `sushi kld capture|compare` | quality-kld |
 | `metrics.zig` / `status.zig` / `log.zig` | metrics, status bar, logging | server-http-apis |
 | `format_corpus_test.zig` / `tool_traffic_replay_test.zig` | hermetic format corpus, real-traffic replay | server-tool-calling |
 
@@ -103,7 +103,7 @@ Flags that matter: `--model --serve --host --port --ctx-size --kv-quant --kv-att
   one). A git worktree lacks `.zig-toolchain/` and `lib/mlx/`: symlink both from the main checkout. After a
   toolchain/SDK change `rm -rf .zig-cache` (configure-time output is cached).
 - **ALWAYS `zig build -Doptimize=ReleaseFast`, never bare `zig build`** (Debug is 2–4× slower ⇒ fake regressions).
-  `zig build test` does NOT refresh `zig-out/bin/mlx-serve` — rebuild before any live A/B.
+  `zig build test` does NOT refresh `zig-out/bin/sushi` — rebuild before any live A/B.
 - mlx + mlx-c: `scripts/build-mlx.sh`. Bump = checkout tag → rerun → re-diff `src/mlx.zig` externs against
   `lib/mlxc-src/mlx/c/*.h`.
 - Jinja after `lib/jinja_cpp/*.cpp` changes: compile the 7 `.cpp` (`clang++ -std=c++17 -O2 -DNDEBUG -I .`) into
@@ -126,7 +126,7 @@ Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter=
   one stray line hangs the runner while the standalone binary passes.
 - **A PASSING test prints NOTHING, on either stream**: the pinned nightly renders any test stderr through its failure
   renderer (`failed command: … --listen=-`, exit 0), which reads as a failed suite. Diagnostics ride an env switch
-  (`MLX_SERVE_EXL3_LAYER_UBENCH`). Guard: `tests/test_test_runner_quiet.sh`.
+  (`SUSHI_EXL3_LAYER_UBENCH`). Guard: `tests/test_test_runner_quiet.sh`.
 - **No source-scan tests** (`@embedFile` + "this string appears in that function"): they pin text, not behaviour.
   Test the behaviour or state the rule in a comment.
 - **An integration assertion that a MODEL must think/answer/call is a checkpoint expectation**: assert the INVARIANT,
@@ -169,11 +169,11 @@ inherit: [docs/perf-baselines.md](docs/perf-baselines.md), [docs/quality-kld.md]
 
 ## Debugging
 
-Server log `~/.mlx-serve/logs/mlx-serve-<port>.log` is THE post-mortem file (`--log-level debug`). Grep:
+Server log `~/.sushi/logs/sushi-<port>.log` is THE post-mortem file (`--log-level debug`). Grep:
 `jinja error:`, `[cache]`, `<- N+M tokens`, `tool_msgs=`, `[spec-stats]`, `[mtp-planner]`, `[mtp-trace]`,
 `[loop-stop]`, `[admission]`, `[kv-cache]`, `[expert-stream]`, `[disk-cache]`, `[hot-cache]`, `[dtype-trace]`,
-`[short-gen]`. Capture traffic: `MLX_SERVE_RAW_DUMP_FILE=<abs>` → `tests/harvest_tool_traffic.py`. Reproduce tool bugs
-`stream:false` first; `pkill -f mlx-serve` between KV-poison tests. `/props` reports `active_bytes`,
+`[short-gen]`. Capture traffic: `SUSHI_RAW_DUMP_FILE=<abs>` → `tests/harvest_tool_traffic.py`. Reproduce tool bugs
+`stream:false` first; `pkill -x sushi` between KV-poison tests. `/props` reports `active_bytes`,
 `memory.cache_bytes`, `batching`; RSS is blind to Metal.
 
 <a id="team-process"></a>

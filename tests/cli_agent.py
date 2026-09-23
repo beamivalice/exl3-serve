@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CLI agent that replicates MLX Core's agent loop against a running mlx-serve.
+CLI agent that replicates MLX Core's agent loop against a running sushi.
 
 Usage:
     python3 tests/cli_agent.py [--port 8080] [--max-rounds 10] "your prompt here"
@@ -171,7 +171,7 @@ def execute_tool_mock(name, args):
 def stream_request(base_url, messages, enable_thinking=False):
     """Send streaming request and return parsed result with live output."""
     body = {
-        "model": "mlx-serve",
+        "model": "sushi",
         "messages": messages,
         "tools": TOOLS,
         "max_tokens": 4096,
@@ -340,7 +340,7 @@ def run_agent(base_url, user_prompt, max_rounds=10, mock=False, thinking=False, 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CLI agent for mlx-serve")
+    parser = argparse.ArgumentParser(description="CLI agent for sushi")
     parser.add_argument("prompt", nargs="?", help="User prompt")
     parser.add_argument("--port", type=int, default=8080, help="Server port (default: 8080)")
     parser.add_argument("--max-rounds", type=int, default=10, help="Max agent loop rounds")

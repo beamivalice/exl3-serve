@@ -5,7 +5,7 @@
 # output to the single-slot decode path at temp=0, single client. The default
 # scheduler routes single-slot ticks through `runSingleDecodeTick` (the legacy
 # path) — that's the auto-gate at `active.len == 1`. Setting
-# `MLX_SERVE_FORCE_BATCHED=1` flips the gate so even N=1 routes through
+# `SUSHI_FORCE_BATCHED=1` flips the gate so even N=1 routes through
 # `forwardBatchedDecode`. If the two paths diverge, this catches it.
 #
 # Why test it: the batched kernel laid out tensors differently (positions
@@ -20,7 +20,7 @@
 # on long greedy generations. The first ~30 tokens are stable.
 #
 # Requires:
-#   - A built mlx-serve binary (run `zig build -Doptimize=ReleaseFast`)
+#   - A built sushi binary (run `zig build -Doptimize=ReleaseFast`)
 #   - Either:
 #       BATCHED_TEST_MODEL set to a model directory, OR
 #       a default MLX checkpoint at /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
@@ -51,7 +51,7 @@ if [ ! -f "$MODEL/config.json" ]; then
     exit 1
 fi
 
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found or not executable. Build first."
     exit 1
@@ -66,7 +66,7 @@ EOF
 JSON_PAYLOAD=$(python3 -c "
 import json, sys
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '''$PROMPT'''}],
     'max_tokens': 32,
     'temperature': 0.0,
@@ -81,7 +81,7 @@ LONG_PROMPT='Recite the first paragraph of "A Tale of Two Cities" by Charles Dic
 LONG_JSON_PAYLOAD=$(python3 -c "
 import json, sys
 print(json.dumps({
-    'model': 'mlx-serve',
+    'model': 'sushi',
     'messages': [{'role': 'user', 'content': '''$LONG_PROMPT'''}],
     'max_tokens': 200,
     'temperature': 0.0,
@@ -98,7 +98,7 @@ run_request() {
     local logfile
     logfile=$(mktemp)
     if [ "$force_flag" = "1" ]; then
-        MLX_SERVE_FORCE_BATCHED=1 "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld > "$logfile" 2>&1 &
+        SUSHI_FORCE_BATCHED=1 "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld > "$logfile" 2>&1 &
     else
         "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld > "$logfile" 2>&1 &
     fi
@@ -151,7 +151,7 @@ run_and_tokenize() {
     local logfile
     logfile=$(mktemp)
     if [ "$force_flag" = "1" ]; then
-        MLX_SERVE_FORCE_BATCHED=1 "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld > "$logfile" 2>&1 &
+        SUSHI_FORCE_BATCHED=1 "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld > "$logfile" 2>&1 &
     else
         "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld > "$logfile" 2>&1 &
     fi
@@ -213,7 +213,7 @@ echo "== batched-kernel byte-equivalence test =="
 echo "  model: $MODEL"
 echo
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 OUT_SINGLE=$(run_request "single-slot path (default)" "0") || exit 1
@@ -413,7 +413,7 @@ echo "== batched-kernel x kv-quant crash guard =="
 
 sleep 2
 KVQ_LOG=$(mktemp)
-MLX_SERVE_FORCE_BATCHED=1 "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld --kv-quant 8 > "$KVQ_LOG" 2>&1 &
+SUSHI_FORCE_BATCHED=1 "$BINARY" --model "$MODEL" --serve --port "$PORT" --no-pld --kv-quant 8 > "$KVQ_LOG" 2>&1 &
 KVQ_PID=$!
 up=0
 for i in $(seq 1 60); do
@@ -459,11 +459,11 @@ wait $KVQ_PID 2>/dev/null || true
 rm -f "$KVQ_LOG"
 echo -e "${GREEN}PASS${NC} batched decode survives --kv-quant 8 (server alive, completion returned)"
 
-# Pad-waste cap arm (opt-in: MLX_SERVE_PADWASTE_ARM=1): one ~1k-token stream beside one ~64k
+# Pad-waste cap arm (opt-in: SUSHI_PADWASTE_ARM=1): one ~1k-token stream beside one ~64k
 # one. The cap was dead on every linear-layer-0 trunk (it read `cache.step`, 0 forever there).
 # The bar is the SPLIT, not bytes. Off by default: it needs a long-context checkpoint and a
 # multi-minute 64k prefill.
-if [ "${MLX_SERVE_PADWASTE_ARM:-0}" = "1" ]; then
+if [ "${SUSHI_PADWASTE_ARM:-0}" = "1" ]; then
     echo
     echo "== pad-waste cap: a 1k stream must NOT batch with a 64k one =="
 
@@ -497,7 +497,7 @@ def body(rung, words, max_tokens):
         # ~1.3 tokens per word of prose-shaped filler.
         filler = " ".join("section %d paragraph body text" % i for i in range(words))
         b = {"messages": [{"role": "user", "content": filler}]}
-    b["model"] = "mlx-serve"
+    b["model"] = "sushi"
     b["max_tokens"] = max_tokens
     b["temperature"] = 0.0
     b["stream"] = True

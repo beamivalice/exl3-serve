@@ -19,7 +19,7 @@ SCHEMA = {
 
 def request(base, surface, streaming, thinking):
     cap = 2048 if thinking else 256
-    body = {'model': 'mlx-serve', 'temperature': 0, 'stream': streaming}
+    body = {'model': 'sushi', 'temperature': 0, 'stream': streaming}
     prompt = 'Return the JSON object required by the schema.'
     if surface == 'responses':
         body.update(max_output_tokens=cap, input=prompt, reasoning={'effort': 'medium' if thinking else 'none'},

@@ -186,7 +186,7 @@ pub const ModelConfig = struct {
     /// `trunk_quant` (a pack field): MiMo's bf16 tensors requantized at load.
     trunk_quant: TrunkQuantSpec = .{},
     expert_source_dir: ?[]u8 = null,
-    /// `MLX_SERVE_NGRAM_BF16_DIR`: serve the PLE n-gram table from the ORIGINAL bf16
+    /// `SUSHI_NGRAM_BF16_DIR`: serve the PLE n-gram table from the ORIGINAL bf16
     /// shards in this HF checkpoint dir instead of the pack's quantized `ngram_table.bin`
     /// (a two-arm lever: it isolates the table's quantization cost under `kld compare`).
     ngram_bf16_dir: ?[]u8 = null,
@@ -1522,7 +1522,7 @@ pub fn parseConfig(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
     var config = try parseConfigFromJson(allocator, content);
     if (config.isQwen4()) {
         config.ngram_table_path = try std.fmt.allocPrint(allocator, "{s}/ngram_table.bin", .{model_dir});
-        if (std.c.getenv("MLX_SERVE_NGRAM_BF16_DIR")) |raw| {
+        if (std.c.getenv("SUSHI_NGRAM_BF16_DIR")) |raw| {
             const dir = std.mem.span(raw);
             if (dir.len > 0) config.ngram_bf16_dir = try allocator.dupe(u8, dir);
         }
@@ -4198,7 +4198,7 @@ fn loadWeightsFromOpenDirMode(io: std.Io, allocator: std.mem.Allocator, dir: std
     // the download. Fail here with an actionable message, mirroring the
     // tokenizer path's "incomplete download?" hint (see main.zig).
     if (weights.count() == 0) {
-        log.err("no usable weights loaded from {s} ({d} *.safetensors file(s) found) — the checkpoint looks like an incomplete download (config/tokenizer present, weight shards missing). Re-download the model (e.g. `mlx-serve pull <model>`) or delete the dir and re-fetch.\n", .{ model_dir, file_count });
+        log.err("no usable weights loaded from {s} ({d} *.safetensors file(s) found) — the checkpoint looks like an incomplete download (config/tokenizer present, weight shards missing). Re-download the model (e.g. `sushi pull <model>`) or delete the dir and re-fetch.\n", .{ model_dir, file_count });
         return error.NoWeightFiles;
     }
 
@@ -4240,7 +4240,7 @@ pub fn narrowsLoadedF16(key: []const u8, ndim: usize, dtype: mlx.mlx_dtype) bool
     return ndim == 1;
 }
 
-/// Kill switch for the 1-D arm (`MLX_SERVE_F16_NARROW_1D=0`). A load-time
+/// Kill switch for the 1-D arm (`SUSHI_F16_NARROW_1D=0`). A load-time
 /// dtype normalization is invisible once the model is up, so a one-boot A/B
 /// switch is the only way to attribute a future f16-checkpoint regression to
 /// it. The side-tensor arm predates this and is not switchable.
@@ -4248,7 +4248,7 @@ var narrow_1d_env: ?bool = null;
 fn narrow1dEnabled() bool {
     if (narrow_1d_env) |v| return v;
     const on = blk: {
-        const raw = std.c.getenv("MLX_SERVE_F16_NARROW_1D") orelse break :blk true;
+        const raw = std.c.getenv("SUSHI_F16_NARROW_1D") orelse break :blk true;
         break :blk !std.mem.eql(u8, std.mem.sliceTo(raw, 0), "0");
     };
     narrow_1d_env = on;
@@ -4262,7 +4262,7 @@ var narrowed_1d: usize = 0;
 
 pub fn reportF16Narrowing() void {
     if (narrowed_1d == 0) return;
-    log.info("[dtype] narrowed {d} 1-D f16 tables to bf16 (MLX_SERVE_F16_NARROW_1D=0 disables)\n", .{narrowed_1d});
+    log.info("[dtype] narrowed {d} 1-D f16 tables to bf16 (SUSHI_F16_NARROW_1D=0 disables)\n", .{narrowed_1d});
     narrowed_1d = 0;
 }
 
@@ -4580,7 +4580,7 @@ test "loadWeights casts f16 quant scales/biases to bf16 (mixed-dtype qmm slow-pa
 }
 
 test "loadWeights on a weightless dir (incomplete download) errors clearly, not empty map" {
-    // Reproduces the live misdiagnosis: an interrupted `hf download`/`mlx-serve
+    // Reproduces the live misdiagnosis: an interrupted `hf download`/`sushi
     // pull` lands config + tokenizer but never finalizes the *.safetensors
     // weight shards. Before the guard, loadWeights returned an empty map and
     // the caller crashed with a misleading "MISSING WEIGHT:
@@ -8633,7 +8633,7 @@ test "mimo_v2 streaming leaves trunk keys intact and excludes only routed banks"
 }
 
 test "the loader refuses a model_type this build does not serve, by name, before reading the checkpoint" {
-    const missing = "/nonexistent/mlx-serve-arch-gate";
+    const missing = "/nonexistent/sushi-arch-gate";
     const llama = ModelConfig{ .model_type = "llama" };
     try std.testing.expectError(error.ArchitectureUnsupported, loadWeightsForConfig(std.testing.io, std.testing.allocator, missing, &llama, false));
     // The served archs pass the gate and fail on the missing directory instead.

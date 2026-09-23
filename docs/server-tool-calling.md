@@ -20,7 +20,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
   never worsens conformance; a parsed NAME never contains `<|`; no tag leaks. Harness:
   `src/tool_traffic_replay_test.zig` over `src/fixtures/tool_traffic.jsonl`.
 - A live failure revealing a CLASS ships the instance test plus a corpus entry or invariant in
-  `src/format_corpus_test.zig` plus a rule here. Capture traffic: `MLX_SERVE_RAW_DUMP_FILE=<abs>` →
+  `src/format_corpus_test.zig` plus a rule here. Capture traffic: `SUSHI_RAW_DUMP_FILE=<abs>` →
   `tests/harvest_tool_traffic.py`. Reproduce tool bugs `stream:false` first.
 
 ## Templates

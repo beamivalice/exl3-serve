@@ -1,5 +1,5 @@
-#ifndef MLXSERVE_ANE_MLP_H
-#define MLXSERVE_ANE_MLP_H
+#ifndef SUSHI_ANE_MLP_H
+#define SUSHI_ANE_MLP_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -26,19 +26,19 @@
  * input and one output surface, so a bank is homogeneous (all MLP or all
  * GDN). NB: eval returns 1 on SUCCESS. */
 
-typedef struct msv_ane_mlp msv_ane_mlp;   /* one compiled bank */
-typedef struct msv_ane_bank msv_ane_bank; /* the builder for one */
-typedef struct msv_ane_plane msv_ane_plane; /* opaque IOSurface handle */
+typedef struct sushi_ane_mlp sushi_ane_mlp;   /* one compiled bank */
+typedef struct sushi_ane_bank sushi_ane_bank; /* the builder for one */
+typedef struct sushi_ane_plane sushi_ane_plane; /* opaque IOSurface handle */
 
-int msv_ane_available(void);
+int sushi_ane_available(void);
 
 /* Free bytes on the INTERNAL volume's /private/tmp — the ANE compiler
  * service (aned) holds per-compile scratch there for the client's lifetime
  * regardless of where OUR staging lives, so this is the number that bounds
  * a compile session's program budget (~free / program-bytes). 0 on probe
  * failure (no information). */
-uint64_t msv_ane_internal_free_disk(void);
-uint64_t msv_volume_free_for_use(const char *path);
+uint64_t sushi_ane_internal_free_disk(void);
+uint64_t sushi_volume_free_for_use(const char *path);
 
 /* Shared I/O planes (A9): within ONE unit evals are strictly serial (one
  * in-flight kick/wait), so every program of a shape class binds the SAME
@@ -48,20 +48,20 @@ uint64_t msv_volume_free_for_use(const char *path);
  * `input_plane`/`output_plane` of NULL keeps a per-program allocation; a
  * non-NULL plane is retained by the program and must be at least the
  * program's plane bytes. */
-msv_ane_plane *msv_ane_plane_create(size_t bytes);
-void msv_ane_plane_free(msv_ane_plane *p);
-__fp16 *msv_ane_plane_base(msv_ane_plane *p);
+sushi_ane_plane *sushi_ane_plane_create(size_t bytes);
+void sushi_ane_plane_free(sushi_ane_plane *p);
+__fp16 *sushi_ane_plane_base(sushi_ane_plane *p);
 
 /* ── Bank building ── */
 
-msv_ane_bank *msv_ane_bank_create(void);
-void msv_ane_bank_free(msv_ane_bank *b);
-uint32_t msv_ane_bank_count(const msv_ane_bank *b);
-uint64_t msv_ane_bank_bytes(const msv_ane_bank *b);
+sushi_ane_bank *sushi_ane_bank_create(void);
+void sushi_ane_bank_free(sushi_ane_bank *b);
+uint32_t sushi_ane_bank_count(const sushi_ane_bank *b);
+uint64_t sushi_ane_bank_bytes(const sushi_ane_bank *b);
 
 /* Append one SwiGLU MLP (gate/up/SiLU/down) procedure. Returns the
  * procedure index, or -1 with `error` filled. */
-int msv_ane_bank_add_mlp(msv_ane_bank *b, uint32_t hidden, uint32_t ffn,
+int sushi_ane_bank_add_mlp(sushi_ane_bank *b, uint32_t hidden, uint32_t ffn,
                          uint32_t rows,
                          const int8_t *gate_q, const float *gate_s,
                          const int8_t *up_q, const float *up_s,
@@ -73,7 +73,7 @@ int msv_ane_bank_add_mlp(msv_ane_bank *b, uint32_t hidden, uint32_t ffn,
  * output row is an independent dot product, so stacking along the
  * output-channel axis is exactly the two convs concatenated. Output rows
  * are qkv first. Returns the procedure index, or -1. */
-int msv_ane_bank_add_gdn(msv_ane_bank *b, uint32_t hidden, uint32_t qkv_out,
+int sushi_ane_bank_add_gdn(sushi_ane_bank *b, uint32_t hidden, uint32_t qkv_out,
                          uint32_t z_out, uint32_t rows,
                          const int8_t *qkv_q, const float *qkv_s,
                          const int8_t *z_q, const float *z_s,
@@ -83,21 +83,21 @@ int msv_ane_bank_add_gdn(msv_ane_bank *b, uint32_t hidden, uint32_t qkv_out,
  * bank as ONE program pinned to `ane_instance` (0 = no affinity hint, the
  * single-ANE path; 1..4 name a die on a multi-instance machine). The
  * builder is CONSUMED either way. */
-msv_ane_mlp *msv_ane_bank_finish(msv_ane_bank *b, const char *name,
+sushi_ane_mlp *sushi_ane_bank_finish(sushi_ane_bank *b, const char *name,
                                  int ane_instance,
-                                 msv_ane_plane *input_plane,
-                                 msv_ane_plane *output_plane,
+                                 sushi_ane_plane *input_plane,
+                                 sushi_ane_plane *output_plane,
                                  char *error, size_t error_size);
 
-void msv_ane_mlp_free(msv_ane_mlp *m);
+void sushi_ane_mlp_free(sushi_ane_mlp *m);
 
-__fp16 *msv_ane_mlp_input(msv_ane_mlp *m);
-__fp16 *msv_ane_mlp_output(msv_ane_mlp *m);
+__fp16 *sushi_ane_mlp_input(sushi_ane_mlp *m);
+__fp16 *sushi_ane_mlp_output(sushi_ane_mlp *m);
 /* Dispatch procedure `procedure` of the bank. */
-int msv_ane_mlp_eval(msv_ane_mlp *m, uint32_t procedure, char *error,
+int sushi_ane_mlp_eval(sushi_ane_mlp *m, uint32_t procedure, char *error,
                      size_t error_size);
 
-double msv_ane_mlp_compile_seconds(const msv_ane_mlp *m);
-int msv_ane_mlp_cache_hit(const msv_ane_mlp *m);
+double sushi_ane_mlp_compile_seconds(const sushi_ane_mlp *m);
+int sushi_ane_mlp_cache_hit(const sushi_ane_mlp *m);
 
 #endif

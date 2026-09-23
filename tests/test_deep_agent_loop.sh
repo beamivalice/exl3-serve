@@ -79,7 +79,7 @@ for i in $(seq 1 $ITERATIONS); do
 import json
 msgs = json.load(open('$MSGS_FILE'))
 tools = json.loads('$TOOL_DEF')
-req = {'model':'mlx-serve','messages':msgs,'tools':tools,'max_tokens':512,'temperature':0.3,'stream':False}
+req = {'model':'sushi','messages':msgs,'tools':tools,'max_tokens':512,'temperature':0.3,'stream':False}
 json.dump(req, open('$REQ_FILE','w'))
 "
 

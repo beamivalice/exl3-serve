@@ -13,7 +13,7 @@
 //! wants 112 — twice that under dual ANE.
 //!
 //! Threading contract: the inference thread stays the sole MLX caller — it
-//! does the plane memcpys and mlx array creation; ONLY `msv_ane_mlp_eval`
+//! does the plane memcpys and mlx array creation; ONLY `sushi_ane_mlp_eval`
 //! runs on a dedicated ANE thread. Within ONE unit evals are strictly
 //! serial (one in-flight kick/wait), which is what makes that unit's shared
 //! I/O planes legal (A9). Separate UNITS eval concurrently, so each owns
@@ -36,18 +36,18 @@ const status = @import("status.zig");
 pub const MsvAneMlp = opaque {};
 pub const MsvAneBank = opaque {};
 pub const MsvAnePlane = opaque {};
-extern fn msv_ane_available() c_int;
-extern fn msv_ane_internal_free_disk() u64;
-extern fn msv_ane_cache_lineage(group: [*:0]const u8, variant: [*:0]const u8) void;
-extern fn msv_ane_cache_variant(group: [*:0]const u8, out: [*]u8, out_len: c_int) void;
-extern fn msv_ane_plane_create(bytes: usize) ?*MsvAnePlane;
-extern fn msv_ane_plane_free(p: ?*MsvAnePlane) void;
-extern fn msv_ane_plane_base(p: ?*MsvAnePlane) ?[*]f16;
-extern fn msv_ane_bank_create() ?*MsvAneBank;
-extern fn msv_ane_bank_free(b: ?*MsvAneBank) void;
-extern fn msv_ane_bank_count(b: ?*const MsvAneBank) u32;
-extern fn msv_ane_bank_bytes(b: ?*const MsvAneBank) u64;
-extern fn msv_ane_bank_add_mlp(
+extern fn sushi_ane_available() c_int;
+extern fn sushi_ane_internal_free_disk() u64;
+extern fn sushi_ane_cache_lineage(group: [*:0]const u8, variant: [*:0]const u8) void;
+extern fn sushi_ane_cache_variant(group: [*:0]const u8, out: [*]u8, out_len: c_int) void;
+extern fn sushi_ane_plane_create(bytes: usize) ?*MsvAnePlane;
+extern fn sushi_ane_plane_free(p: ?*MsvAnePlane) void;
+extern fn sushi_ane_plane_base(p: ?*MsvAnePlane) ?[*]f16;
+extern fn sushi_ane_bank_create() ?*MsvAneBank;
+extern fn sushi_ane_bank_free(b: ?*MsvAneBank) void;
+extern fn sushi_ane_bank_count(b: ?*const MsvAneBank) u32;
+extern fn sushi_ane_bank_bytes(b: ?*const MsvAneBank) u64;
+extern fn sushi_ane_bank_add_mlp(
     b: ?*MsvAneBank,
     hidden: u32,
     ffn: u32,
@@ -61,7 +61,7 @@ extern fn msv_ane_bank_add_mlp(
     err: [*]u8,
     err_size: usize,
 ) c_int;
-extern fn msv_ane_bank_add_gdn(
+extern fn sushi_ane_bank_add_gdn(
     b: ?*MsvAneBank,
     hidden: u32,
     qkv_out: u32,
@@ -74,7 +74,7 @@ extern fn msv_ane_bank_add_gdn(
     err: [*]u8,
     err_size: usize,
 ) c_int;
-extern fn msv_ane_bank_finish(
+extern fn sushi_ane_bank_finish(
     b: ?*MsvAneBank,
     name: [*:0]const u8,
     ane_instance: c_int,
@@ -83,16 +83,16 @@ extern fn msv_ane_bank_finish(
     err: [*]u8,
     err_size: usize,
 ) ?*MsvAneMlp;
-extern fn msv_ane_mlp_free(m: ?*MsvAneMlp) void;
-extern fn msv_ane_mlp_input(m: ?*MsvAneMlp) ?[*]f16;
-extern fn msv_ane_mlp_output(m: ?*MsvAneMlp) ?[*]f16;
-extern fn msv_ane_mlp_eval(m: ?*MsvAneMlp, procedure: u32, err: [*]u8, err_size: usize) c_int;
-extern fn msv_ane_mlp_compile_seconds(m: ?*const MsvAneMlp) f64;
-extern fn msv_ane_mlp_cache_hit(m: ?*const MsvAneMlp) c_int;
+extern fn sushi_ane_mlp_free(m: ?*MsvAneMlp) void;
+extern fn sushi_ane_mlp_input(m: ?*MsvAneMlp) ?[*]f16;
+extern fn sushi_ane_mlp_output(m: ?*MsvAneMlp) ?[*]f16;
+extern fn sushi_ane_mlp_eval(m: ?*MsvAneMlp, procedure: u32, err: [*]u8, err_size: usize) c_int;
+extern fn sushi_ane_mlp_compile_seconds(m: ?*const MsvAneMlp) f64;
+extern fn sushi_ane_mlp_cache_hit(m: ?*const MsvAneMlp) c_int;
 
 /// Whether the private AppleNeuralEngine framework is present and usable.
 pub fn available() bool {
-    return msv_ane_available() != 0;
+    return sushi_ane_available() != 0;
 }
 
 /// Minimum useful ANE tile: below this the per-layer kick/join overhead
@@ -173,7 +173,7 @@ fn chipBrandString(buf: []u8) []const u8 {
 ///     share also drops the int8 copy 9.47 → 7.30 GB).
 ///   row / M4 Max: 0.40 (2026-08-17: 0.30 +10/+14%, 0.40 +12/+18%, 0.50
 ///     regresses). Row is unmeasured elsewhere and keeps the M4 row.
-/// The DUAL default is deliberately the same number: MLX_SERVE_ANE_SPLIT is
+/// The DUAL default is deliberately the same number: SUSHI_ANE_SPLIT is
 /// the TOTAL ANE share either way, halved across the units, so every
 /// measurement above carries over unchanged — and the dual optimum is
 /// EXPECTED to sit higher (halving the ANE critical path is the whole
@@ -201,7 +201,7 @@ pub fn dualDefault(chip: []const u8) bool {
 
 /// The ANE's TOTAL share of each covered projection (channel mode: fraction
 /// of output channels, split evenly across the units; row mode: fraction of
-/// chunk token rows). MLX_SERVE_ANE_SPLIT overrides; the default is per
+/// chunk token rows). SUSHI_ANE_SPLIT overrides; the default is per
 /// (mode, silicon) — see `defaultShare`.
 pub fn splitShare() f32 {
     return explicitShareEnv() orelse defaultShare(splitMode(), chipBrand());
@@ -211,7 +211,7 @@ pub fn splitShare() f32 {
 
 /// The three media seams' switches and the explicit share, set ONCE in
 /// `main()` from `--ane-image/--ane-video/--ane-audio` + `--ane-split` (or
-/// MLX_SERVE_ANE_SPLIT). The seams sit under gen.zig with no server config
+/// SUSHI_ANE_SPLIT). The seams sit under gen.zig with no server config
 /// in reach, so this is process-global like `applyMlxCacheLimit`.
 pub const MediaOffload = struct {
     image: bool = false,
@@ -221,9 +221,9 @@ pub const MediaOffload = struct {
 };
 pub var media_offload: MediaOffload = .{};
 
-/// MLX_SERVE_ANE_SPLIT parsed; null when unset or outside (0, 1].
+/// SUSHI_ANE_SPLIT parsed; null when unset or outside (0, 1].
 pub fn explicitShareEnv() ?f32 {
-    const raw = std.c.getenv("MLX_SERVE_ANE_SPLIT") orelse return null;
+    const raw = std.c.getenv("SUSHI_ANE_SPLIT") orelse return null;
     const v = std.fmt.parseFloat(f32, std.mem.sliceTo(raw, 0)) catch return null;
     if (!(v > 0) or v > 1) return null;
     return v;
@@ -506,7 +506,7 @@ fn lineageGroup(buf: []u8, what: []const u8, layers: usize, hidden: u32, ffn: u3
 fn tagCacheLineage(group: [:0]const u8, share: f32, reusable: bool) void {
     var vb: [32]u8 = undefined;
     const variant = shareVariant(&vb, share, reusable) catch return;
-    msv_ane_cache_lineage(group.ptr, variant.ptr);
+    sushi_ane_cache_lineage(group.ptr, variant.ptr);
 }
 
 /// A set's lineage variant. Only a calibrated media share is tagged reusable,
@@ -526,13 +526,13 @@ fn parseShareVariant(v: []const u8) ?f32 {
 /// The calibrated share of the most recently used set compiled for `group`.
 fn cachedShare(group: [:0]const u8) ?f32 {
     var buf: [32]u8 = @splat(0);
-    msv_ane_cache_variant(group.ptr, &buf, buf.len);
+    sushi_ane_cache_variant(group.ptr, &buf, buf.len);
     return parseShareVariant(std.mem.sliceTo(&buf, 0));
 }
 
 /// ANE prefill is for M4-and-below: on NAX-class GPUs (M5+) the GPU prefill
 /// already outruns the seam — measured a LOSS on M5 Max (channel 0.45 median
-/// -11%/-7.5% at 16k/32k, PR #223, two testers). MLX_SERVE_ANE_FORCE=1 keeps
+/// -11%/-7.5% at 16k/32k, PR #223, two testers). SUSHI_ANE_FORCE=1 keeps
 /// the build for future silicon measurement (M6 etc.). Pure so it is
 /// hermetically testable; the scheduler passes the live NAX probe + env.
 pub fn anePrefillAllowed(nax_available: bool, force_env: ?[]const u8) bool {
@@ -541,10 +541,10 @@ pub fn anePrefillAllowed(nax_available: bool, force_env: ?[]const u8) bool {
     return false;
 }
 
-/// GDN input-projection offload beside the MLP one (v2). MLX_SERVE_ANE_GDN=0
+/// GDN input-projection offload beside the MLP one (v2). SUSHI_ANE_GDN=0
 /// keeps `--ane-prefill` MLP-only — the attribution lever for A/Bs.
 pub fn gdnEnabled() bool {
-    const raw = std.c.getenv("MLX_SERVE_ANE_GDN") orelse return true;
+    const raw = std.c.getenv("SUSHI_ANE_GDN") orelse return true;
     return !std.mem.eql(u8, std.mem.sliceTo(raw, 0), "0");
 }
 
@@ -558,11 +558,11 @@ pub fn gdnEnabled() bool {
 /// the DEFAULT since the 2026-08-18 counterbalanced A/B (27B oQ4e, M4 Max,
 /// medians): channel-0.45 306.4/301.1 vs row-0.40 300.7/294.3 vs off
 /// 258.2/239.0 at 16k/32k — +18.7%/+26.0% over off at 9.3 GB ANE bytes
-/// against row's 20.4. MLX_SERVE_ANE_MODE=row restores the row split.
+/// against row's 20.4. SUSHI_ANE_MODE=row restores the row split.
 pub const Mode = enum { row, channel };
 
 pub fn splitMode() Mode {
-    const raw = std.c.getenv("MLX_SERVE_ANE_MODE") orelse return .channel;
+    const raw = std.c.getenv("SUSHI_ANE_MODE") orelse return .channel;
     if (std.mem.eql(u8, std.mem.sliceTo(raw, 0), "row")) return .row;
     return .channel;
 }
@@ -571,10 +571,10 @@ pub fn splitMode() Mode {
 /// concurrently. Default ON where it was measured (M3 Ultra), off elsewhere
 /// (unmeasurable on single-ANE silicon; private API on top of private API).
 pub fn dualEnabled() bool {
-    return dualEnabledFrom(if (std.c.getenv("MLX_SERVE_ANE_DUAL")) |p| std.mem.sliceTo(p, 0) else null, chipBrand());
+    return dualEnabledFrom(if (std.c.getenv("SUSHI_ANE_DUAL")) |p| std.mem.sliceTo(p, 0) else null, chipBrand());
 }
 
-/// MLX_SERVE_ANE_DUAL=1 forces it on, =0 off; unset = the chip default.
+/// SUSHI_ANE_DUAL=1 forces it on, =0 off; unset = the chip default.
 pub fn dualEnabledFrom(raw: ?[]const u8, chip: []const u8) bool {
     if (raw) |v| {
         if (std.mem.eql(u8, v, "1")) return true;
@@ -589,7 +589,7 @@ pub fn dualEnabledFrom(raw: ?[]const u8, chip: []const u8) bool {
 /// mode is silently wrong numbers, and the copy is ~1.7 ms on the 27B
 /// against a ~20 ms eval. Flip it once dual is proven.
 pub fn dualShareInput() bool {
-    const raw = std.c.getenv("MLX_SERVE_ANE_DUAL_SHARE_INPUT") orelse return false;
+    const raw = std.c.getenv("SUSHI_ANE_DUAL_SHARE_INPUT") orelse return false;
     return std.mem.eql(u8, std.mem.sliceTo(raw, 0), "1");
 }
 
@@ -724,11 +724,11 @@ pub const BUILD_DISK_FLOOR_BYTES: u64 = 1 << 30;
 /// peak (2x). Under the cap a model banks monolithically — which is what
 /// oMLX measured bit-stable across five greedy runs, against split banks
 /// that were ~1% faster but occasionally diverged at a tie.
-/// MLX_SERVE_ANE_BANK_MAX_BYTES overrides (the split-ladder test lever).
+/// SUSHI_ANE_BANK_MAX_BYTES overrides (the split-ladder test lever).
 pub const DEFAULT_BANK_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 pub fn bankMaxBytes() u64 {
-    const raw = std.c.getenv("MLX_SERVE_ANE_BANK_MAX_BYTES") orelse return DEFAULT_BANK_MAX_BYTES;
+    const raw = std.c.getenv("SUSHI_ANE_BANK_MAX_BYTES") orelse return DEFAULT_BANK_MAX_BYTES;
     const v = std.fmt.parseInt(u64, std.mem.sliceTo(raw, 0), 10) catch return DEFAULT_BANK_MAX_BYTES;
     return if (v == 0) DEFAULT_BANK_MAX_BYTES else v;
 }
@@ -755,7 +755,7 @@ pub fn bankGroupLen(sizes: []const u64, start: usize, group: usize, cap: u64) us
 /// budget (aned's per-compile scratch lives in root tmp for the client's
 /// lifetime, wherever OUR staging is). 0 = probe failed, no information.
 pub fn internalFreeDiskBytes() u64 {
-    return msv_ane_internal_free_disk();
+    return sushi_ane_internal_free_disk();
 }
 
 /// Live ANE totals across resident engines, for the `--metrics` gauges and
@@ -853,7 +853,7 @@ pub const Unit = struct {
     banks: std.ArrayList(*MsvAneMlp) = .empty,
     plane_in: ?*MsvAnePlane = null,
     /// False when this unit borrows unit 0's input plane
-    /// (MLX_SERVE_ANE_DUAL_SHARE_INPUT=1).
+    /// (SUSHI_ANE_DUAL_SHARE_INPUT=1).
     owns_plane_in: bool = true,
     plane_mlp_out: ?*MsvAnePlane = null,
     plane_gdn_out: ?*MsvAnePlane = null,
@@ -906,15 +906,15 @@ pub const Unit = struct {
     }
 
     pub fn inputBase(self: *Unit) ?[*]f16 {
-        return msv_ane_plane_base(self.plane_in);
+        return sushi_ane_plane_base(self.plane_in);
     }
 
     pub fn mlpOutputBase(self: *Unit) ?[*]f16 {
-        return msv_ane_plane_base(self.plane_mlp_out);
+        return sushi_ane_plane_base(self.plane_mlp_out);
     }
 
     pub fn gdnOutputBase(self: *Unit) ?[*]f16 {
-        return msv_ane_plane_base(self.plane_gdn_out);
+        return sushi_ane_plane_base(self.plane_gdn_out);
     }
 
     /// Hand a procedure to this unit's eval thread. One in-flight eval per
@@ -953,7 +953,7 @@ pub const Unit = struct {
             const proc = self.pending_proc;
             self.mu.unlock(self.parent.io);
 
-            const ok = msv_ane_mlp_eval(bank, proc, &self.eval_err, self.eval_err.len) != 0;
+            const ok = sushi_ane_mlp_eval(bank, proc, &self.eval_err, self.eval_err.len) != 0;
             if (ok) {
                 _ = self.evals_ok.fetchAdd(1, .monotonic);
             } else {
@@ -1020,14 +1020,14 @@ pub const Unit = struct {
     /// Assemble one bank from `pending[start..start+n)`. Returns false when
     /// the compile or load was refused — the caller walks the split ladder.
     fn buildBank(self: *Unit, start: usize, n: usize) bool {
-        const bank = msv_ane_bank_create() orelse return false;
+        const bank = sushi_ane_bank_create() orelse return false;
         var err: [512]u8 = @splat(0);
         var ok = true;
         for (self.pending.items[start..][0..n]) |*p| {
             const rc = if (p.gdn)
-                msv_ane_bank_add_gdn(bank, self.parent.hidden, p.qkv_out, p.z_out, self.parent.rows, p.a.q.ptr, p.a.s.ptr, p.b.q.ptr, p.b.s.ptr, &err, err.len)
+                sushi_ane_bank_add_gdn(bank, self.parent.hidden, p.qkv_out, p.z_out, self.parent.rows, p.a.q.ptr, p.a.s.ptr, p.b.q.ptr, p.b.s.ptr, &err, err.len)
             else
-                msv_ane_bank_add_mlp(bank, self.parent.hidden, p.ffn, self.parent.rows, p.a.q.ptr, p.a.s.ptr, p.b.q.ptr, p.b.s.ptr, p.c.?.q.ptr, p.c.?.s.ptr, &err, err.len);
+                sushi_ane_bank_add_mlp(bank, self.parent.hidden, p.ffn, self.parent.rows, p.a.q.ptr, p.a.s.ptr, p.b.q.ptr, p.b.s.ptr, p.c.?.q.ptr, p.c.?.s.ptr, &err, err.len);
             if (rc < 0) {
                 ok = false;
                 break;
@@ -1035,7 +1035,7 @@ pub const Unit = struct {
         }
         if (!ok) {
             log.warn("[ane] unit {d} bank assembly failed: {s}\n", .{ self.instance, std.mem.sliceTo(&err, 0) });
-            msv_ane_bank_free(bank);
+            sushi_ane_bank_free(bank);
             return false;
         }
         const kind: []const u8 = if (self.pending.items[start].gdn) "gdn" else "mlp";
@@ -1044,12 +1044,12 @@ pub const Unit = struct {
             kind, self.instance, self.banks.items.len, self.pending.items[start].layer, n, self.parent.rows,
         }, 0) catch "ane_bank";
         const out_plane = if (self.pending.items[start].gdn) self.plane_gdn_out else self.plane_mlp_out;
-        const compiled = msv_ane_bank_finish(bank, name.ptr, self.instance, self.plane_in, out_plane, &err, err.len) orelse {
+        const compiled = sushi_ane_bank_finish(bank, name.ptr, self.instance, self.plane_in, out_plane, &err, err.len) orelse {
             log.warn("[ane] unit {d} bank of {d} programs failed: {s}\n", .{ self.instance, n, std.mem.sliceTo(&err, 0) });
             return false;
         };
         self.banks.append(self.allocator(), compiled) catch {
-            msv_ane_mlp_free(compiled);
+            sushi_ane_mlp_free(compiled);
             return false;
         };
         for (self.pending.items[start..][0..n], 0..) |*p, i| {
@@ -1110,13 +1110,13 @@ pub const Unit = struct {
         const alloc = self.allocator();
         for (self.pending.items) |*p| p.deinit(alloc);
         self.pending.deinit(alloc);
-        for (self.banks.items) |b| msv_ane_mlp_free(b);
+        for (self.banks.items) |b| sushi_ane_mlp_free(b);
         self.banks.deinit(alloc);
         alloc.free(self.layers);
         alloc.free(self.gdn_layers);
-        if (self.owns_plane_in) msv_ane_plane_free(self.plane_in);
-        msv_ane_plane_free(self.plane_mlp_out);
-        msv_ane_plane_free(self.plane_gdn_out);
+        if (self.owns_plane_in) sushi_ane_plane_free(self.plane_in);
+        sushi_ane_plane_free(self.plane_mlp_out);
+        sushi_ane_plane_free(self.plane_gdn_out);
     }
 };
 
@@ -1205,11 +1205,11 @@ pub const AnePrefill = struct {
                 unit_slice[u].plane_in = unit_slice[0].plane_in;
                 unit_slice[u].owns_plane_in = false;
             } else {
-                unit_slice[u].plane_in = msv_ane_plane_create(io_bytes) orelse return error.AnePlaneAlloc;
+                unit_slice[u].plane_in = sushi_ane_plane_create(io_bytes) orelse return error.AnePlaneAlloc;
             }
-            unit_slice[u].plane_mlp_out = msv_ane_plane_create(io_bytes) orelse return error.AnePlaneAlloc;
+            unit_slice[u].plane_mlp_out = sushi_ane_plane_create(io_bytes) orelse return error.AnePlaneAlloc;
             if (gdn_qkv_out > 0 and gdn_z_out > 0)
-                unit_slice[u].plane_gdn_out = msv_ane_plane_create(@as(usize, gdn_qkv_out + gdn_z_out) * rows * 2) orelse return error.AnePlaneAlloc;
+                unit_slice[u].plane_gdn_out = sushi_ane_plane_create(@as(usize, gdn_qkv_out + gdn_z_out) * rows * 2) orelse return error.AnePlaneAlloc;
             unit_slice[u].thread = try std.Thread.spawn(.{}, Unit.evalLoop, .{&unit_slice[u]});
         }
         if (self.units[0].plane_gdn_out == null) {
@@ -1343,13 +1343,13 @@ pub const AnePrefill = struct {
     pub fn logEngagedOnce(self: *AnePrefill, what: []const u8) void {
         if (self.engaged_logged) return;
         self.engaged_logged = true;
-        log.info("[ane] {s} offload engaged: mode={s} units={d} mlp={d} rows={d}/{d} (MLX_SERVE_ANE_SPLIT sets the share)\n", .{ what, @tagName(self.mode), self.units.len, self.coveredLayers(), self.rows, self.chunk_rows });
+        log.info("[ane] {s} offload engaged: mode={s} units={d} mlp={d} rows={d}/{d} (SUSHI_ANE_SPLIT sets the share)\n", .{ what, @tagName(self.mode), self.units.len, self.coveredLayers(), self.rows, self.chunk_rows });
     }
 
     pub fn logGdnEngagedOnce(self: *AnePrefill) void {
         if (self.gdn_engaged_logged) return;
         self.gdn_engaged_logged = true;
-        log.info("[ane] gdn offload engaged: mode={s} units={d} {d} layers, rows={d}/{d} (MLX_SERVE_ANE_GDN=0 restores MLP-only)\n", .{ @tagName(self.mode), self.units.len, self.coveredGdnLayers(), self.rows, self.chunk_rows });
+        log.info("[ane] gdn offload engaged: mode={s} units={d} {d} layers, rows={d}/{d} (SUSHI_ANE_GDN=0 restores MLP-only)\n", .{ @tagName(self.mode), self.units.len, self.coveredGdnLayers(), self.rows, self.chunk_rows });
     }
 
     /// The dual-ANE proof line: which instances the units were pinned to
@@ -1359,7 +1359,7 @@ pub const AnePrefill = struct {
     /// check (`macpow --dump | grep ANE0_` must move BOTH counters).
     pub fn logDualReady(self: *AnePrefill) void {
         if (self.units.len < 2) return;
-        log.info("[ane] dual engaged: {d} units pinned to instances {d}..{d}, {d} channels each of mlp / {d}+{d} of gdn (verify BOTH IOReport ANE0_ counters move; MLX_SERVE_ANE_DUAL=0 restores single-ANE)\n", .{
+        log.info("[ane] dual engaged: {d} units pinned to instances {d}..{d}, {d} channels each of mlp / {d}+{d} of gdn (verify BOTH IOReport ANE0_ counters move; SUSHI_ANE_DUAL=0 restores single-ANE)\n", .{
             self.units.len,
             self.units[0].instance,
             self.units[self.units.len - 1].instance,
@@ -1486,7 +1486,7 @@ pub fn dequantToHostF32(
 
 /// Fill every unit's input plane with the same packed activation. The pack is
 /// done ONCE and memcpy'd into the other units (~1.7 ms on the 27B against a
-/// ~20 ms eval); MLX_SERVE_ANE_DUAL_SHARE_INPUT=1 shares one surface and skips
+/// ~20 ms eval); SUSHI_ANE_DUAL_SHARE_INPUT=1 shares one surface and skips
 /// the copy. The wait stays BLOCKING and on this thread: oMLX measured that
 /// moving it to a worker, or launching the ANE from the Metal completion
 /// callback, destroyed device overlap (a fused layer 47.5 -> 71.0 ms).
@@ -1767,7 +1767,7 @@ test "anePrefillAllowed: NAX-class GPUs refuse the seam unless forced" {
     try std.testing.expect(!anePrefillAllowed(true, null));
     try std.testing.expect(!anePrefillAllowed(true, "0"));
     try std.testing.expect(!anePrefillAllowed(true, ""));
-    // MLX_SERVE_ANE_FORCE=1 keeps the build for future-silicon measurement.
+    // SUSHI_ANE_FORCE=1 keeps the build for future-silicon measurement.
     try std.testing.expect(anePrefillAllowed(true, "1"));
 }
 
@@ -1906,7 +1906,7 @@ test "channelSliceWidth: 128-aligned slice, GPU remainder, degenerate shares" {
 }
 
 test "channelSliceWidthUnits: the share is TOTAL, halved across units, GPU keeps a slice" {
-    // MLX_SERVE_ANE_SPLIT keeps meaning the total fraction taken off the
+    // SUSHI_ANE_SPLIT keeps meaning the total fraction taken off the
     // GPU, so every single-ANE measurement carries over: two units at 0.40
     // take the same 40% of channels one unit at 0.40 does.
     const k1 = channelSliceWidthUnits(17408, 0.40, 1);

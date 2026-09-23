@@ -40,7 +40,7 @@ var ane_prefill: bool = false;
 // Serve-mode default for requests that omit max_tokens (0 = flag not given).
 var serve_default_max_tokens: u32 = 0;
 
-/// `mlx-serve run` REPL thread: chats against the in-process server over
+/// `sushi run` REPL thread: chats against the in-process server over
 /// its own Ollama /api/chat endpoint, then brings the server down cleanly
 /// (SIGTERM → the serve loop's shutdown path) when the user exits.
 fn replThreadMain(allocator: std.mem.Allocator, io: std.Io, port: u16) void {
@@ -54,27 +54,27 @@ fn printUsage(io: std.Io) void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
     stdout_w.interface.writeAll(
-        \\mlx-serve — MLX inference server for Apple Silicon
+        \\sushi — MLX inference server for Apple Silicon
         \\
-        \\Usage: mlx-serve <command> [options]
-        \\       mlx-serve [options]
+        \\Usage: sushi <command> [options]
+        \\       sushi [options]
         \\
         \\Commands:
         \\  run <model>         Download if needed, serve it, and chat right here
         \\                      (short name like "gemma4", "qwen3.6:27b", or any
         \\                      HuggingFace "org/repo")
-        \\  pull <model>        Download a model into ~/.mlx-serve/models
+        \\  pull <model>        Download a model into ~/.sushi/models
         \\  list                Show downloaded models
-        \\  serve               Start the server over ~/.mlx-serve/models
+        \\  serve               Start the server over ~/.sushi/models
         \\                      (every pulled model loads on demand by name)
         \\  launch <agent>      Configure + launch a coding agent CLI against the
         \\                      local server (claude, pi, omp, opencode, codex,
-        \\                      hermes, aider). `mlx-serve launch <agent> -h`
+        \\                      hermes, aider). `sushi launch <agent> -h`
         \\                      for options
         \\  kld capture|compare Write a teacher fixture (full-vocab logits at
         \\                      every greedy position), or teacher-force one
         \\                      through a model and report KLD / top-1 / NLL.
-        \\                      `mlx-serve kld --help` for options
+        \\                      `sushi kld --help` for options
         \\
         \\Options:
         \\  --model <dir>       Path to MLX model directory
@@ -151,7 +151,7 @@ fn printUsage(io: std.Io) void {
         \\  --ane-prefill       Offload a share of each prefill chunk's dense
         \\                        MLP rows to the Neural Engine (qwen3_5-family
         \\                        only; int8/fp16, lossy; needs >= 96 GB RAM).
-        \\                        MLX_SERVE_ANE_SPLIT tunes the share (0.40).
+        \\                        SUSHI_ANE_SPLIT tunes the share (0.40).
         \\  --mtp               Force the MTP head ON for MoE targets too.
         \\                        Requests default to MTP only on DENSE models;
         \\                        a MoE checkpoint that ships a sidecar is
@@ -175,13 +175,13 @@ fn printUsage(io: std.Io) void {
         \\                      decode/verify steps only; prefill keeps the
         \\                      dense weights. Default ON; --no-… restores
         \\                      exact dense decode. Env tuning:
-        \\                      MLX_SERVE_DECODE_ATTN_QUANT_NVFP4_FROM=<layer>
+        \\                      SUSHI_DECODE_ATTN_QUANT_NVFP4_FROM=<layer>
         \\                      moves the 4-bit boundary, =off keeps the whole
         \\                      stack INT8.
         \\  --mtp-depth <n>     Max tokens drafted per MTP round (default:
         \\                        adaptive — the EV controller plans depth
         \\                        per round up to 8 on eligible M5 NAX targets,
-        \\                        otherwise 6; MLX_SERVE_MTP_ADAPTIVE=0
+        \\                        otherwise 6; SUSHI_MTP_ADAPTIVE=0
         \\                        reverts to the fixed windowed controller,
         \\                        cap 3). Pass an explicit <n> to hard-cap.
         \\  --mtp-typical <d>  Opt-in lossy typical MTP acceptance (d > 0).
@@ -236,7 +236,7 @@ fn printUsage(io: std.Io) void {
         \\                      Pass 0/off to disable the byte budget.
         \\  --prefix-cache-disk <n>{{KB,MB,GB}}
         \\                      SSD tier for the prefix cache (default: off).
-        \\                      Seen prefixes persist under ~/.mlx-serve/kv-cache
+        \\                      Seen prefixes persist under ~/.sushi/kv-cache
         \\                        and are restored across restarts and RAM
         \\                        evictions instead of recomputed. Can use many
         \\                        GB of disk, so it's opt-in; e.g. 10GB. 0/off
@@ -316,7 +316,7 @@ fn printUsage(io: std.Io) void {
         \\                        world-readable). Unset/empty VAR = no auth.
         \\  --log-level <lvl>   Log level: error, warn, info, debug (default: info)
         \\  --log-file <path>   Persist the server log ("off" disables).
-        \\                      Default: ~/.mlx-serve/logs/mlx-serve-<port>.log
+        \\                      Default: ~/.sushi/logs/sushi-<port>.log
         \\  --version           Print version and exit
         \\  --help              Show this help
         \\
@@ -359,7 +359,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // ── Subcommands (Ollama-grade CLI): `mlx-serve run|pull|list|serve` ──
+    // ── Subcommands (Ollama-grade CLI): `sushi run|pull|list|serve` ──
     // `pull` and `list` finish here; `run` and `serve` fall through into the
     // normal flag parse (skipping the consumed positionals) and serve path.
     var arg_start: usize = 1;
@@ -371,7 +371,7 @@ pub fn main(init: std.process.Init) !void {
         const cmd = args[1];
         if (std.mem.eql(u8, cmd, "pull")) {
             if (args.len < 3) {
-                log.err("usage: mlx-serve pull <model>\n", .{});
+                log.err("usage: sushi pull <model>\n", .{});
                 std.process.exit(1);
             }
             try cli_mod.cmdPull(allocator, io, args[2]);
@@ -381,7 +381,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         } else if (std.mem.eql(u8, cmd, "run")) {
             if (args.len < 3) {
-                log.err("usage: mlx-serve run <model> [options]\n", .{});
+                log.err("usage: sushi run <model> [options]\n", .{});
                 std.process.exit(1);
             }
             run_model_dir = try cli_mod.ensureModelAvailable(allocator, io, args[2]);
@@ -389,7 +389,7 @@ pub fn main(init: std.process.Init) !void {
             // of booting a server whose chat surface can only 400.
             if (model_discovery.classifyModelPath(io, allocator, run_model_dir.?)) |kind| {
                 if (kind != .chat) {
-                    log.err("'{s}' is {s} — `mlx-serve run` starts a chat REPL, which it can't serve.\n", .{ args[2], kind.describe() });
+                    log.err("'{s}' is {s} — `sushi run` starts a chat REPL, which it can't serve.\n", .{ args[2], kind.describe() });
                     std.process.exit(1);
                 }
             }
@@ -401,7 +401,7 @@ pub fn main(init: std.process.Init) !void {
             use_default_models_root = true;
         } else if (std.mem.eql(u8, cmd, "launch")) {
             if (args.len < 3) {
-                log.err("usage: mlx-serve launch <agent> — supported: {s}\n", .{launch_mod.AgentKind.names});
+                log.err("usage: sushi launch <agent> — supported: {s}\n", .{launch_mod.AgentKind.names});
                 std.process.exit(1);
             }
             try launch_mod.cmdLaunch(allocator, io, args[2..]);
@@ -425,7 +425,7 @@ pub fn main(init: std.process.Init) !void {
     var port: u16 = 11234;
     var host: []const u8 = "0.0.0.0";
     var host_explicit = false;
-    // `--log-file <path|off>`. null = default (`~/.mlx-serve/logs/mlx-serve-<port>.log`).
+    // `--log-file <path|off>`. null = default (`~/.sushi/logs/sushi-<port>.log`).
     var log_file_arg: ?[]const u8 = null;
     var serve_mode = false;
     var stream_mode = false;
@@ -460,8 +460,8 @@ pub fn main(init: std.process.Init) !void {
     var mtp_explicit = false;
     var mtp_head_kv_quant = false;
     var mtp_depth: u32 = 0; // 0 = auto (EV cap 8 on eligible M5 NAX, else 6; fixed cap 3); explicit wins
-    var mtp_typical_raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_TYPICAL")) |v| std.mem.span(v) else null;
-    var mtp_tokenv3_raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_MTP_TOKENV3")) |v| std.mem.span(v) else null;
+    var mtp_typical_raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_TYPICAL")) |v| std.mem.span(v) else null;
+    var mtp_tokenv3_raw: ?[]const u8 = if (std.c.getenv("SUSHI_MTP_TOKENV3")) |v| std.mem.span(v) else null;
     // Plan 04 Phase 1: pre-fault weights and pre-compile kernels at boot.
     // Default ON in serve mode — small boot-time cost, big cold-prefill win.
     // --no-warmup-eager opts out for benchmarking / minimal-footprint deployments.
@@ -637,14 +637,14 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "--ane-prefill")) {
             // ANE prefill-MLP offload (perf-plan-aug-17 P5): opt-in, lossy
             // by design (int8 fp16 datapath). Eligibility + machine gates
-            // are named [ane] log lines at load; MLX_SERVE_ANE_SPLIT tunes
+            // are named [ane] log lines at load; SUSHI_ANE_SPLIT tunes
             // the row share.
             ane_prefill = true;
         } else if (std.mem.eql(u8, args[i], "--dspark")) {
             // DSpark (DeepSeek-V4 draft stages) is OPT-IN: the stages cost
             // ~11 GB resident, so the default leaves them lazy and serves
             // serial. deepseek_v4.initModel reads the env at model load.
-            _ = setenv("MLX_SERVE_DSV4_DSPARK", "1", 1);
+            _ = setenv("SUSHI_DSV4_DSPARK", "1", 1);
         } else if (std.mem.eql(u8, args[i], "--decode-attn-quant")) {
             transformer_mod.decode_attn_quant_flag = true;
         } else if (std.mem.eql(u8, args[i], "--no-decode-attn-quant")) {
@@ -846,7 +846,7 @@ pub fn main(init: std.process.Init) !void {
     generate_mod.mtp_acceptance_explicit = mtp_typical_raw != null or mtp_tokenv3_raw != null;
 
     // Subcommand plumbing: `run <model>` supplies the model dir + serve
-    // mode; `run`/`serve` default the discovery root to ~/.mlx-serve/models
+    // mode; `run`/`serve` default the discovery root to ~/.sushi/models
     // so every pulled model is loadable by name (Ollama-style).
     var default_models_root_storage: ?[]u8 = null;
     defer if (default_models_root_storage) |r| allocator.free(r);
@@ -868,7 +868,7 @@ pub fn main(init: std.process.Init) !void {
         models_root = default_models_root_storage;
     }
 
-    // `mlx-serve run` on a TTY quiets logs to warn (unless --log-level was
+    // `sushi run` on a TTY quiets logs to warn (unless --log-level was
     // given) BEFORE the models-root scan below — discovery's per-directory
     // `[discovery] skip …` info lines would otherwise spam the chat REPL.
     if (repl_after_serve and !log_level_explicit) log.setLevel(.warn);
@@ -942,8 +942,8 @@ pub fn main(init: std.process.Init) !void {
     // (model loading takes seconds — fail fast instead of wasting time)
     if (serve_mode) {
         if (portInUse(io, port)) {
-            log.err("Port {d} is already in use — another mlx-serve instance may be running.\n", .{port});
-            log.err("Stop it first (pkill -f mlx-serve) or use a different port (--port {d}).\n", .{port + 1});
+            log.err("Port {d} is already in use — another sushi instance may be running.\n", .{port});
+            log.err("Stop it first (pkill -x sushi) or use a different port (--port {d}).\n", .{port + 1});
             std.process.exit(1);
         }
         // Above every serve dispatch (GGUF/headless/media return early below).
@@ -953,7 +953,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // `mlx-serve run` on a TTY: chat REPL on a side thread. It polls
+    // `sushi run` on a TTY: chat REPL on a side thread. It polls
     // /health until the model is up, then drives the server's own
     // /v1/chat/completions (SSE) endpoint. (Logs were already quieted to warn above,
     // before discovery, so streamed tokens aren't interleaved with [info]
@@ -990,7 +990,7 @@ pub fn main(init: std.process.Init) !void {
     var ver = mlx.mlx_string_new();
     defer _ = mlx.mlx_string_free(ver);
     try mlx.check(mlx.mlx_version(&ver));
-    log.info("mlx-serve {s} (MLX {s})\n", .{ VERSION, mlx.mlx_string_data(ver) });
+    log.info("sushi {s} (MLX {s})\n", .{ VERSION, mlx.mlx_string_data(ver) });
 
     // Every text-gen serve path takes the PLD defaults from this ONE value —
     // see `server.PldDefaults`. Built after arg parsing so it can't capture a
@@ -1096,7 +1096,7 @@ pub fn main(init: std.process.Init) !void {
         // was a live SIGSEGV on a partially-downloaded model dir (the
         // preloadCpuState errdefer-after-init pattern applies here too).
         allocator.destroy(tok);
-        log.err("failed to load tokenizer from {s}: {s} (incomplete download? `mlx-serve pull` the model again to resume, or delete the dir)\n", .{ model_dir, @errorName(err) });
+        log.err("failed to load tokenizer from {s}: {s} (incomplete download? `sushi pull` the model again to resume, or delete the dir)\n", .{ model_dir, @errorName(err) });
         return err;
     };
     // defer-only (see config note above): errdefer + defer with the same body
@@ -1492,7 +1492,7 @@ fn runHeadlessServe(
     mtp_explicit: bool,
     pld: server_mod.PldDefaults,
 ) !void {
-    log.info("mlx-serve {s} (headless — models load on demand)\n", .{VERSION});
+    log.info("sushi {s} (headless — models load on demand)\n", .{VERSION});
     log.info("[args] serve: {s}:{d}\n", .{ host, port });
 
     var stub = try scheduler_mod.headlessStubCpuState(allocator);

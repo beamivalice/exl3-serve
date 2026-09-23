@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Serve resident EXL3 K3 using the mlx-serve-qwen38flash.sh settings.
+# Serve resident EXL3 K3 using the sushi-qwen38flash.sh settings.
 # Extra arguments are appended, e.g. ./exl3-qwen38flash-k3.sh --port 11235.
 set -euo pipefail
 
-binary="$HOME/llm/exl3-serve/zig-out/bin/mlx-serve"
+binary="$HOME/llm/sushi/zig-out/bin/sushi"
 if [[ ! -x "$binary" ]]; then
   printf '%s\n' "Missing executable: $binary" \
-    "Build $HOME/llm/exl3-serve first: zig build -Doptimize=ReleaseFast" >&2
+    "Build $HOME/llm/sushi first: zig build -Doptimize=ReleaseFast" >&2
   exit 1
 fi
 

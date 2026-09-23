@@ -20,7 +20,7 @@
 //! only ever allowed to touch input that is actually broken.
 //!
 //! Grow the fixture:
-//!     MLX_SERVE_RAW_DUMP_FILE=/tmp/rawdump.txt mlx-serve --serve --log-level debug
+//!     SUSHI_RAW_DUMP_FILE=/tmp/rawdump.txt sushi --serve --log-level debug
 //!     # drive agents at it, then:
 //!     tests/harvest_tool_traffic.py --dump /tmp/rawdump.txt \
 //!         --out src/fixtures/tool_traffic.jsonl

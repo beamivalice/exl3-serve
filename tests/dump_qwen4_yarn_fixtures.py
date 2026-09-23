@@ -3,7 +3,7 @@
 
 Answers one question with numbers the Zig engine is checked against: what does
 the REFERENCE produce for this checkpoint's rope geometry when its context is
-scaled past the trained window? Nothing here is mlx-serve's own math — the
+scaled past the trained window? Nothing here is sushi's own math — the
 frequencies come out of `transformers.modeling_rope_utils` (the same library
 that wrote the checkpoint's config.json), and every value is cross-checked
 against a transcription of vLLM's `YaRNScalingRotaryEmbedding` before the
@@ -47,7 +47,7 @@ def vllm_yarn_inv_freq(head_size, rotary_dim, orig_max, base, factor,
     """Transcription of vLLM's YaRNScalingRotaryEmbedding._compute_inv_freq /
     _compute_cos_sin_cache (vllm/model_executor/layers/rotary_embedding/
     yarn_scaling_rope.py + common.py), in float64. Kept here so the fixture
-    proves HF and vLLM agree before mlx-serve is compared to either."""
+    proves HF and vLLM agree before sushi is compared to either."""
 
     def find_correction_dim(num_rotations, dim, b, max_pos):
         return (dim * math.log(max_pos / (num_rotations * 2 * math.pi))) / (2 * math.log(b))
@@ -144,7 +144,7 @@ def main():
     # HF's construction (Qwen3-Next-style rotary): emb = cat(freqs, freqs) with
     # cos/sin multiplied by attention_factor. For TEXT positions t==h==w, so the
     # interleaved 3-D selection collapses onto one scalar position — the exact
-    # property mlx-serve's mrope.zig relies on.
+    # property sushi's mrope.zig relies on.
     #
     # The rows are built from the float64 spectrum on purpose. HF and vLLM both
     # compute inv_freq in float32 and then multiply it by the position, so at a

@@ -329,7 +329,7 @@ fn scanLlmGguf(io: std.Io, allocator: std.mem.Allocator, dir: *std.Io.Dir) !Gguf
 /// True if `path` points at a .gguf file or a directory containing an LLM
 /// one (mmproj sidecars don't count — a folder holding only an mmproj file
 /// is not a valid LLM path). Accepts directories so users can pass the
-/// canonical `~/.mlx-serve/models/<owner>/<repo>/` shape.
+/// canonical `~/.sushi/models/<owner>/<repo>/` shape.
 ///
 /// Empty / non-absolute paths (e.g. headless boot with no --model) return
 /// false — guarded BEFORE `openDirAbsolute`, which ASSERTS the path is
@@ -403,7 +403,7 @@ pub fn logResolveGgufError(path: []const u8, err: anyerror) void {
     }
 }
 
-/// Coarse classification of a model for UX surfaces — the `mlx-serve list`
+/// Coarse classification of a model for UX surfaces — the `sushi list`
 /// TYPE column and the `run` chat-REPL preflight. Mirrors how serving
 /// actually routes the directory (embedded GGUF engines, encoder-only,
 /// drafter sidecars).
@@ -429,7 +429,7 @@ pub const ModelKind = enum {
             .chat => "a chat model",
             .embed => "an embedding encoder (use /v1/embeddings)",
             .drafter => "a speculative-decoding drafter sidecar, not a standalone model (load it via --drafter beside a Gemma 4 target)",
-            .unsupported => "an architecture mlx-serve does not support",
+            .unsupported => "an architecture sushi does not support",
         };
     }
 
@@ -673,8 +673,8 @@ pub fn discoverModelsMany(io: std.Io, allocator: std.mem.Allocator, roots: []con
 /// Core scan over an already-open root. Two layouts are recognized:
 ///   <root>/<model>/config.json               → id "<model>"
 ///   <root>/<org>/<model>/config.json         → id "<org>/<model>"
-/// The second is the HF-style layout `~/.mlx-serve/models` uses (the app's
-/// DownloadManager and `mlx-serve pull` both write there).
+/// The second is the HF-style layout `~/.sushi/models` uses (the app's
+/// DownloadManager and `sushi pull` both write there).
 pub fn discoverModelsInDir(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, model_dir: []const u8) !DiscoveryResult {
     var found = std.ArrayList(DiscoveredModel).empty;
     errdefer {
@@ -1125,7 +1125,7 @@ test "discoverModels finds flat and org/repo model dirs" {
 
     try tmp.dir.createDirPath(io, "flat-model");
     try tmp.dir.writeFile(io, .{ .sub_path = "flat-model/config.json", .data = "{\"model_type\":\"gemma3\"}" });
-    // HF-style org/repo layout — the DownloadManager / `mlx-serve pull`
+    // HF-style org/repo layout — the DownloadManager / `sushi pull`
     // convention. Must be discovered with id "org/name".
     try tmp.dir.createDirPath(io, "mlx-community/nested-model");
     try tmp.dir.writeFile(io, .{ .sub_path = "mlx-community/nested-model/config.json", .data = "{\"model_type\":\"qwen3\"}" });
@@ -1406,7 +1406,7 @@ test "discoverModels finds GGUF dirs without config.json (issue #59)" {
 
     // Pulled GGUF repo layout: `<org>/<repo>/<quant>.gguf`, NO config.json
     // (bartowski / unsloth-style multi-quant repos ship only .gguf files).
-    // `mlx-serve list` already counts these as models; discovery must agree.
+    // `sushi list` already counts these as models; discovery must agree.
     try tmp.dir.createDirPath(io, "bartowski/some-model-GGUF");
     try tmp.dir.writeFile(io, .{ .sub_path = "bartowski/some-model-GGUF/model-IQ2_M.gguf", .data = "0123" });
     try tmp.dir.writeFile(io, .{ .sub_path = "bartowski/some-model-GGUF/model-Q4_K_M.gguf", .data = "01234567" });

@@ -66,7 +66,7 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 REF_BASE = "https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL/raw/main/"
 REF_FILES = ("configuration_mimo_v2.py", "modeling_mimo_v2.py")
-DEFAULT_CACHE = Path("~/.cache/mlx-serve/mimo-v2-ref").expanduser()
+DEFAULT_CACHE = Path("~/.cache/sushi/mimo-v2-ref").expanduser()
 BOUND = 1e-3  # prefill-vs-cache self-consistency bound (f32 reference)
 
 TINY = dict(

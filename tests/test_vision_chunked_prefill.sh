@@ -4,8 +4,8 @@
 # width is what the memory guard bills, so long conversations + one screenshot
 # hit a 400 no flag can fix).
 #
-# Two arms, same binary: MLX_SERVE_VISION_CHUNKED=0 (old whole-prompt forward)
-# vs default-on, both at MLX_SERVE_PREFILL_CHUNK=32 so chunk boundaries land
+# Two arms, same binary: SUSHI_VISION_CHUNKED=0 (old whole-prompt forward)
+# vs default-on, both at SUSHI_PREFILL_CHUNK=32 so chunk boundaries land
 # INSIDE the image's placeholder span (the image splices at prompt start; the
 # prompt is padded past nextChunkEnd's TAIL_MERGE_MAX so chunking actually
 # engages). Asserts: [1] the on arm logs "[vision] chunked prefill" and the
@@ -22,7 +22,7 @@
 set -u
 
 PORT="${1:-11499}"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 MODEL="${VISION_CHUNK_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 WORK="$(mktemp -d)"
 SERVER_PID=""
@@ -71,7 +71,7 @@ b64 = base64.b64encode(png).decode()
 
 filler = " ".join(f"item{i} shelf {i % 7}." for i in range(120))
 body = {
-    "model": "mlx-serve",
+    "model": "sushi",
     "temperature": 0.0,
     "max_tokens": 96,
     "messages": [
@@ -88,7 +88,7 @@ PYEOF
 run_arm() {
     local arm="$1" env_val="$2"
     local log="$WORK/$arm.log"
-    MLX_SERVE_VISION_CHUNKED="$env_val" MLX_SERVE_PREFILL_CHUNK=32 \
+    SUSHI_VISION_CHUNKED="$env_val" SUSHI_PREFILL_CHUNK=32 \
         "$BINARY" --serve --model "$MODEL" \
         --host 127.0.0.1 --port "$PORT" --prefix-cache-entries 0 \
         --log-level debug --log-file "$log" \

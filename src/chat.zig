@@ -10852,7 +10852,7 @@ test "parseToolCalls: empty body + attribute-args + explicit </tool_call> close"
     const allocator = testing.allocator;
     const text =
         \\<tool_calls>
-        \\<tool_call name="cwd" arguments="{"path": "/Users/david/.mlx-serve/workspace"}"></tool_call>
+        \\<tool_call name="cwd" arguments="{"path": "/Users/david/.sushi/workspace"}"></tool_call>
         \\</tool_calls>
     ;
     const calls = (try parseToolCalls(allocator, text)) orelse return error.NoCalls;
@@ -10866,7 +10866,7 @@ test "parseToolCalls: empty body + attribute-args + explicit </tool_call> close"
     try testing.expectEqual(@as(usize, 1), calls.len);
     try testing.expectEqualStrings("cwd", calls[0].name);
     try testing.expect(std.mem.indexOf(u8, calls[0].arguments, "\"path\"") != null);
-    try testing.expect(std.mem.indexOf(u8, calls[0].arguments, ".mlx-serve/workspace") != null);
+    try testing.expect(std.mem.indexOf(u8, calls[0].arguments, ".sushi/workspace") != null);
 }
 
 test "parseToolCalls: <tool_call>{JSON} truncated before </tool_call>" {
@@ -11071,7 +11071,7 @@ fn parseArgsObj(allocator: std.mem.Allocator, args: []const u8) !std.json.Parsed
 
 test "coerceToolArgsToSchema: Python-style False on a boolean param becomes JSON false" {
     // VERBATIM capture, 2026-07-09, Qwen3.6-35B-A3B via Claude Code on
-    // ~/.mlx-serve/logs/mlx-serve-11234.log:109471. The model emits the Hermes
+    // ~/.sushi/logs/sushi-11234.log:109471. The model emits the Hermes
     // XML parameter form with Python's `False`; parseHermesToolCall's
     // isJsonLiteral only knows lowercase, so it shipped the STRING "False" and
     // Claude Code rejected every Edit with
@@ -11501,7 +11501,7 @@ test "coerceToolArgsToSchema: a MANGLED array-typed param is tolerantly repaired
 // ── Misplaced required param (buried-`path` class) ──────────────────────────
 //
 // VERBATIM captured arguments, 2026-07-13 pi session (gemma-4-26B-A4B-it-qat-4bit,
-// ~/.mlx-serve/logs/mlx-serve-11234.log around the us_presidents run). The model
+// ~/.sushi/logs/sushi-11234.log around the us_presidents run). The model
 // put `path` INSIDE each edits[] item and emitted no top-level `path`, so pi
 // answered
 //     Validation failed for tool "edit":
@@ -12094,7 +12094,7 @@ test "parseToolCalls hy3: truncated mid-value recovers name + closed args only" 
 
 test "parseToolCalls hy3: dropped <tool_sep> + mangled key-close still recovers name AND args" {
     // Live 2026-07-16 RAW capture (pipenetwork/Hy3-REAP62 via the running server,
-    // MLX_SERVE_RAW_DUMP_FILE): the pruned model drops <tool_sep> (closes the NAME
+    // SUSHI_RAW_DUMP_FILE): the pruned model drops <tool_sep> (closes the NAME
     // with </arg_value:opensource>) and closes the arg KEY block with
     // </arg_value:opensource> instead of </arg_key:opensource> — the VALUE block is
     // well-formed. Before the fix the strict parser bailed at the missing
@@ -12123,7 +12123,7 @@ test "parseToolCalls hy3: dropped <tool_sep> + mangled key-close still recovers 
 
 test "parseToolCalls hy3: dropped singular <tool_call> opener (plural wrapper only) still recovers" {
     // Live 2026-07-16 RAW capture (pipenetwork/Hy3-REAP62 via the running server,
-    // MLX_SERVE_RAW_DUMP_FILE): the pruned model emitted the PLURAL wrapper
+    // SUSHI_RAW_DUMP_FILE): the pruned model emitted the PLURAL wrapper
     // <tool_calls:opensource> and jumped STRAIGHT to the NAME, dropping the
     // singular per-call <tool_call:opensource> opener the parser keys on — so the
     // whole (well-structured, complete) call LEAKED as content (finish_reason
@@ -13688,7 +13688,7 @@ test "minicpm5 COMBINED: parser and scrubber agree on the same bytes" {
     // one does, so that shape cannot recur silently.
     //
     // Fixtures marked LIVE are verbatim raw emissions of
-    // mlx-community/MiniCPM5-1B-OptiQ-4bit captured via MLX_SERVE_RAW_DUMP_FILE.
+    // mlx-community/MiniCPM5-1B-OptiQ-4bit captured via SUSHI_RAW_DUMP_FILE.
     const Case = struct {
         raw: []const u8,
         is_call: bool, // parser must produce a call

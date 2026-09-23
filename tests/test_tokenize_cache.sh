@@ -13,27 +13,27 @@
 # Env:
 #   MODEL    Any MLX model. Default: the Flash-Next EXL3 pack.
 #   PORT     Default 19105.
-#   BINARY   Default ./zig-out/bin/mlx-serve.
+#   BINARY   Default ./zig-out/bin/sushi.
 
 set -uo pipefail
 
 PORT="${PORT:-19105}"
-BIN="${BINARY:-./zig-out/bin/mlx-serve}"
+BIN="${BINARY:-./zig-out/bin/sushi}"
 MODEL="${MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 BASE="http://127.0.0.1:$PORT"
 
 [ -d "$MODEL" ] || { echo "SKIP: model dir missing: $MODEL"; exit 0; }
-[ -x "$BIN" ]   || { echo "fail: build mlx-serve first ($BIN)"; exit 1; }
+[ -x "$BIN" ]   || { echo "fail: build sushi first ($BIN)"; exit 1; }
 command -v jq >/dev/null || { echo "needs jq"; exit 1; }
 
-pkill -9 -f "mlx-serve.*port $PORT" 2>/dev/null
+pkill -9 -f "sushi.*port $PORT" 2>/dev/null
 sleep 1
 
 LOG="$(mktemp)"
 SERVER_PID=""
 cleanup() {
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
-    pkill -9 -f "mlx-serve.*port $PORT" 2>/dev/null
+    pkill -9 -f "sushi.*port $PORT" 2>/dev/null
     rm -f "$LOG"
 }
 trap cleanup EXIT INT TERM

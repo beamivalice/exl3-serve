@@ -794,7 +794,7 @@ const NameCtx = struct {
 // half on OUR dequantized weights, so a diff is a layout/math bug, never
 // quantization error).
 //
-//   MUSE_VISION_MODEL=~/.mlx-serve/models/ddalcu/Muse-Glimmer-30B-MLX-Serve-8bit \
+//   MUSE_VISION_MODEL=~/.sushi/models/ddalcu/Muse-Glimmer-30B-MLX-Serve-8bit \
 //   MUSE_VISION_FIXTURE=~/claude-tmp/muse-vision/muse_vision_fixture.safetensors \
 //   zig build test -Doptimize=ReleaseFast -Dtest-filter="muse vision parity"
 test "muse vision live: tower parity vs the executed reference" {

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **The engine is renamed sushi**: the binary is `sushi`, environment variables take the `SUSHI_` prefix, settings, logs and caches live under `~/.sushi`, and `/v1/models` reports `owned_by: sushi`.
 - **The original bf16 Qwen3.8 Flash Next serves from a 128 GB Mac by streaming experts from SSD.** Point `--model` at the HF checkpoint and set `--ssd-budget-gb <GiB>` (the total resident target), `--expert-cache-gb`, or the per-model `ssd_budget_gb` in Model Settings; the app shows an `SSD` badge and an SSD budget row for such a checkpoint. Speculative decoding is refused by name on a streamed model.
 - **A load the server refuses by name no longer restarts it from the tray**; the selection reverts to the model still being served and the refusal shows as an error card.
 - **Two EXL3 packs on different codebooks can be loaded at once**; each model's forward now decodes with its own codebook instead of the one the most recent load installed.
@@ -12,7 +13,7 @@
 - **The KV cache is 8-bit by default.** `--kv-quant off` (or `4`), the per-model `kv_quant` setting and the per-request `kv_quant` field still choose another scheme; every load logs its choice as `[kv-cache] <scheme> (<source>)`, and `/props` and `/v1/models` report it as `kv_cache`.
 - **An explicit launch flag now outranks `model-settings.json`**: `--mtp`/`--no-mtp`, `--kv-quant`, `--ctx-size` and `--mtp-typical`/`--mtp-tokenv3` win over the model's `mtp`, `kv_quant`, `ctx_size` and `mtp_acceptance`; each load logs `[mtp] <on|off> (<source>)` and `/props` reports `settings.mtp.source`.
 - **The TINY EXL3 codebook is retired**: a pack that names `tiny` in `expert_quant` or a shard stamp is refused by name at load; re-convert it with `mcg`.
-- **`mlx-serve kld` scores a resident MiMo pack through the model the server serves.** It loads the source FP8 trunk like every other path, so two packs that differ only in their routed experts no longer compare identical.
+- **`sushi kld` scores a resident MiMo pack through the model the server serves.** It loads the source FP8 trunk like every other path, so two packs that differ only in their routed experts no longer compare identical.
 - **Qwen3.8 Flash Next attends 16 or more query rows on an 8-bit KV cache without rebuilding the whole cache where that is slower**: a prompt's final span, short follow-up turns and wide verify blocks read the packed cache directly, and prefill chunks below 8k keys gather instead of taking the dense-mask path.
 
 ## Exl3-serve - v26.9.5

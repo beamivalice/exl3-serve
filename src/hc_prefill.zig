@@ -13,7 +13,7 @@ var enabled_env: ?bool = null;
 
 pub fn enabled() bool {
     if (enabled_env) |on| return on;
-    const raw = std.c.getenv("MLX_SERVE_HC_PREFILL");
+    const raw = std.c.getenv("SUSHI_HC_PREFILL");
     const on = raw == null or !std.mem.eql(u8, std.mem.sliceTo(raw.?, 0), "0");
     enabled_env = on;
     return on;
@@ -50,7 +50,7 @@ fn getKernel(which: usize) !mlx.mlx_fast_metal_kernel {
     defer _ = mlx.mlx_vector_string_free(ins);
     const outs = if (which == 0) mlx.mlx_vector_string_new_data(&no, no.len) else mlx.mlx_vector_string_new_data(&mo, mo.len);
     defer _ = mlx.mlx_vector_string_free(outs);
-    const k = mlx.mlx_fast_metal_kernel_new(if (which == 0) "msv_hc_prefill_norm" else "msv_hc_prefill_mix", ins, outs, if (which == 0) @embedFile("kernels/hc_prefill_norm.metal") else @embedFile("kernels/hc_prefill_mix.metal"), "", true, false);
+    const k = mlx.mlx_fast_metal_kernel_new(if (which == 0) "sushi_hc_prefill_norm" else "sushi_hc_prefill_mix", ins, outs, if (which == 0) @embedFile("kernels/hc_prefill_norm.metal") else @embedFile("kernels/hc_prefill_mix.metal"), "", true, false);
     if (k.ctx == null) return error.MetalKernelCompileFailed;
     kernels[which] = k;
     return k;

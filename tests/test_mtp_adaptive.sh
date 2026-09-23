@@ -6,17 +6,17 @@
 #       measured `serial_cell=` > 0;
 #   [2] speculation still ENGAGES there (`mode=mtp` with attempts > 0);
 #   [3] a burst of short requests never emits `-> serial` (the MIN_KV floor);
-#   [4] `MLX_SERVE_MTP_ADAPTIVE_SERIAL=0` produces no `[mtp] adaptive:` line and no serial arm;
+#   [4] `SUSHI_MTP_ADAPTIVE_SERIAL=0` produces no `[mtp] adaptive:` line and no serial arm;
 #   [5] the off arm costs nothing (`serial_cell=0.00` is expected, not a failure);
 #   [6] a `--no-mtp` boot with persistence ON writes no round-cost table.
 # The ~40k-token prompt is generated in-script from a fixed seed; both boots see the same bytes.
-# `MLX_SERVE_ROUND_COST_PERSIST=0` keeps the user's table out of it.
+# `SUSHI_ROUND_COST_PERSIST=0` keeps the user's table out of it.
 #
 # Usage: MTP_ADAPTIVE_MODEL=<model-dir> ./tests/test_mtp_adaptive.sh [port]
 
 set -u
 PORT="${1:-11316}"
-BIN="${MLX_SERVE_BIN:-./zig-out/bin/mlx-serve}"
+BIN="${SUSHI_BIN:-./zig-out/bin/sushi}"
 LOG_A=/tmp/mtp_adaptive_on.log
 LOG_B=/tmp/mtp_adaptive_off.log
 WORK=$(mktemp -d /tmp/mtp_adaptive.XXXXXX)
@@ -27,8 +27,8 @@ MODEL="${MTP_ADAPTIVE_MODEL:-}"
 if [ -z "$MODEL" ]; then
     for cand in \
         "$HOME/llm/models/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit" \
-        "$HOME/.mlx-serve/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-4bit" \
-        "$HOME/.mlx-serve/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"; do
+        "$HOME/.sushi/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-4bit" \
+        "$HOME/.sushi/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"; do
         [ -d "$cand" ] && { MODEL="$cand"; break; }
     done
 fi
@@ -110,11 +110,11 @@ PY
 
 # Boot C's isolated HOME: the only place this script lets the server persist a round-cost table.
 ISO_HOME="$WORK/home"
-RC_DIR="$ISO_HOME/.mlx-serve/round-cost"
+RC_DIR="$ISO_HOME/.sushi/round-cost"
 
-start_server() { # $1 = log path, $2 = value for MLX_SERVE_MTP_ADAPTIVE_SERIAL ("" = unset)
+start_server() { # $1 = log path, $2 = value for SUSHI_MTP_ADAPTIVE_SERIAL ("" = unset)
     local log="$1" adapt="$2"
-    pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+    pkill -f "sushi.*--port $PORT" 2>/dev/null
     for _ in $(seq 1 30); do
         lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 || break
         sleep 1
@@ -122,13 +122,13 @@ start_server() { # $1 = log path, $2 = value for MLX_SERVE_MTP_ADAPTIVE_SERIAL (
     : > "$log"
     # Never read or write the user's round-cost table; the boots must stay independent.
     if [ -n "$adapt" ]; then
-        MLX_SERVE_ROUND_COST_PERSIST=0 MLX_SERVE_MTP_TRACE=1 \
-        MLX_SERVE_MTP_ADAPTIVE_SERIAL="$adapt" \
+        SUSHI_ROUND_COST_PERSIST=0 SUSHI_MTP_TRACE=1 \
+        SUSHI_MTP_ADAPTIVE_SERIAL="$adapt" \
         "$BIN" --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" \
             --mtp --kv-quant 8 --ctx-size "$CTX_SIZE" --no-pld \
             --prefix-cache-entries 2 --log-level info >"$log" 2>&1 &
     else
-        MLX_SERVE_ROUND_COST_PERSIST=0 MLX_SERVE_MTP_TRACE=1 \
+        SUSHI_ROUND_COST_PERSIST=0 SUSHI_MTP_TRACE=1 \
         "$BIN" --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" \
             --mtp --kv-quant 8 --ctx-size "$CTX_SIZE" --no-pld \
             --prefix-cache-entries 2 --log-level info >"$log" 2>&1 &
@@ -272,7 +272,7 @@ else
 fi
 
 # ── Boot B: the kill switch ───────────────────────────────────────────────
-echo "== boot B: MLX_SERVE_MTP_ADAPTIVE_SERIAL=0 =="
+echo "== boot B: SUSHI_MTP_ADAPTIVE_SERIAL=0 =="
 start_server "$LOG_B" "0"
 
 req "$WORK/long_serial.json" "$LOG_B" "$WORK/b_serial.slice" >/dev/null ||
@@ -284,7 +284,7 @@ stop_server
 
 # [4] Nothing switches, and nothing probes, anywhere in the boot.
 if grep -q "\[mtp\] adaptive:" "$LOG_B"; then
-    bad "kill switch" "'[mtp] adaptive:' appeared with MLX_SERVE_MTP_ADAPTIVE_SERIAL=0"
+    bad "kill switch" "'[mtp] adaptive:' appeared with SUSHI_MTP_ADAPTIVE_SERIAL=0"
     grep "\[mtp\] adaptive:" "$LOG_B" | head -5 | sed 's/^/      /'
 else
     ok "kill switch: no adaptive decision or probe line in the whole boot"
@@ -298,16 +298,16 @@ fi
 # [5] The off arm costs nothing; `serial_cell` is reported for information only.
 B_CELL=$(max_serial_cell "$LOG_B")
 if grep -q "probing .* serial tokens" "$LOG_B"; then
-    bad "kill switch" "a serial probe ran with MLX_SERVE_MTP_ADAPTIVE_SERIAL=0"
+    bad "kill switch" "a serial probe ran with SUSHI_MTP_ADAPTIVE_SERIAL=0"
 else
     ok "kill switch: no probe ran (serial_cell=$B_CELL, informational)"
 fi
 
-# Boot R: re-entry, only when `MLX_SERVE_MTP_ADAPTIVE_REENTRY_TOKENS` is set (default off). A
+# Boot R: re-entry, only when `SUSHI_MTP_ADAPTIVE_REENTRY_TOKENS` is set (default off). A
 # switch followed by a re-entry must come back cleanly or decline in the log, never `MtpPositionGap`.
-if [ -n "${MLX_SERVE_MTP_ADAPTIVE_REENTRY_TOKENS:-}" ] &&
-   [ "${MLX_SERVE_MTP_ADAPTIVE_REENTRY_TOKENS:-0}" != "0" ]; then
-    echo "== boot R: re-entry enabled (REENTRY_TOKENS=$MLX_SERVE_MTP_ADAPTIVE_REENTRY_TOKENS) =="
+if [ -n "${SUSHI_MTP_ADAPTIVE_REENTRY_TOKENS:-}" ] &&
+   [ "${SUSHI_MTP_ADAPTIVE_REENTRY_TOKENS:-0}" != "0" ]; then
+    echo "== boot R: re-entry enabled (REENTRY_TOKENS=$SUSHI_MTP_ADAPTIVE_REENTRY_TOKENS) =="
     LOG_R=/tmp/mtp_adaptive_reentry.log
     start_server "$LOG_R" "" || bad "re-entry boot" "server did not become ready"
     # Teach the bucket a serial cell, then a long MTP reply with room to
@@ -328,7 +328,7 @@ if [ -n "${MLX_SERVE_MTP_ADAPTIVE_REENTRY_TOKENS:-}" ] &&
         grep -- "re-entry declined" "$LOG_R" | head -2 | sed 's/^/      /'
     fi
 else
-    echo "== boot R: SKIPPED (set MLX_SERVE_MTP_ADAPTIVE_REENTRY_TOKENS to exercise re-entry) =="
+    echo "== boot R: SKIPPED (set SUSHI_MTP_ADAPTIVE_REENTRY_TOKENS to exercise re-entry) =="
 fi
 
 # Boot C: a model that never speculates must not write a round-cost table.
@@ -336,13 +336,13 @@ echo "== boot C: --no-mtp, persistence ON, isolated HOME =="
 LOG_C=/tmp/mtp_adaptive_nomtp.log
 mkdir -p "$ISO_HOME"
 rm -rf "$RC_DIR"
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null
+pkill -f "sushi.*--port $PORT" 2>/dev/null
 for _ in $(seq 1 30); do
     lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 || break
     sleep 1
 done
 : > "$LOG_C"
-HOME="$ISO_HOME" MLX_SERVE_MTP_TRACE=1 MLX_SERVE_ROUND_COST_PERSIST=1 \
+HOME="$ISO_HOME" SUSHI_MTP_TRACE=1 SUSHI_ROUND_COST_PERSIST=1 \
 "$BIN" --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" \
     --no-mtp --kv-quant 8 --ctx-size "$CTX_SIZE" --no-pld \
     --prefix-cache-entries 2 --log-level info >"$LOG_C" 2>&1 &

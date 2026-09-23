@@ -19,7 +19,7 @@ set -u
 
 MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11293}"
-BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${BINARY:-./zig-out/bin/sushi}"
 FAKE="/tmp/test_oom_preflight_model"
 LOG=/tmp/test_oom_preflight.log
 PASS=0
@@ -41,7 +41,7 @@ if [ ! -x "$BINARY" ]; then
     exit 0
 fi
 
-pkill -f "mlx-serve.*--port $PORT" 2>/dev/null || true
+pkill -f "sushi.*--port $PORT" 2>/dev/null || true
 sleep 1
 
 # Build the fake-OOM model: symlink the real (small) files so CPU-side setup

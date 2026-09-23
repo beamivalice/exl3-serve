@@ -29,7 +29,7 @@ done
 
 PORT="${DFLASH_TEST_PORT:-11353}"
 BASE="http://127.0.0.1:$PORT"
-BIN="$(dirname "$0")/../zig-out/bin/mlx-serve"
+BIN="$(dirname "$0")/../zig-out/bin/sushi"
 LOG=$(mktemp /tmp/dflash_test_serve.XXXXXX)
 
 # --no-mtp: a loaded DFlash sidecar outranks an in-checkpoint MTP head
@@ -86,7 +86,7 @@ fi
 # Greedy request helper: returns reasoning_content + content concatenated.
 gen() { # prompt, max_tokens, extra_json_fragment
     curl -s -m 300 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "{
-        \"model\": \"mlx-serve\",
+        \"model\": \"sushi\",
         \"messages\": [{\"role\": \"user\", \"content\": \"$1\"}],
         \"temperature\": 0.0,
         \"max_tokens\": $2
@@ -159,7 +159,7 @@ fi
 # argmax flips between them — the sanctioned INT4 divergence class. Measured on
 # Muse-Glimmer-30B: the 8-bit build is byte-identical 6/6, the 4-bit build
 # diverges reproducibly while each arm stays perfectly self-consistent, and the
-# divergence is unchanged with MLX_SERVE_SLIDING_BLOCK_TRIM=0.
+# divergence is unchanged with SUSHI_SLIDING_BLOCK_TRIM=0.
 #
 # So: byte-equality at 8-bit or wider; at narrower widths assert what must still
 # hold — each arm REPRODUCIBLE (a broken verify or rollback shows as run-to-run
@@ -225,7 +225,7 @@ fi
 # externally visible accounting; the hermetic Zig test also pins returned ids,
 # generated_ids, trunk KV and assistant context to the same exact boundary.
 CAP=$(curl -s -m 300 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [{"role": "user", "content": "Write a long numbered list with one short item per line."}],
     "temperature": 0.0,
     "max_tokens": 17,
@@ -243,7 +243,7 @@ else
 fi
 
 CAP_STREAM=$(curl -s -m 300 -N "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [{"role": "user", "content": "Write a long numbered list with one short item per line."}],
     "temperature": 0.0,
     "max_tokens": 17,
@@ -283,7 +283,7 @@ fi
 
 # [8] Tools still parse with the drafter engaged.
 TOOLS=$(curl -s -m 300 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [{"role": "user", "content": "What is the weather in Paris right now? Use the tool."}],
     "tools": [{"type": "function", "function": {"name": "get_weather", "description": "Get current weather for a city", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}],
     "temperature": 0.0,

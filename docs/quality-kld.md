@@ -10,7 +10,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [perf-baselines](perf-base
 
 ## The tool
 
-- `src/kld.zig`: `mlx-serve kld capture|compare`. `capture` writes a teacher fixture from the bf16 path; `compare`
+- `src/kld.zig`: `sushi kld capture|compare`. `capture` writes a teacher fixture from the bf16 path; `compare`
   scores a pack against it. KLD is scored to the teacher's first end-of-turn token.
 - `compare` prints two lines: "to-first-EOS" and all-positions. **Quote the first-EOS number** (the owner's tables);
   give the all-positions number beside it when comparing with older records.
@@ -39,10 +39,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [perf-baselines](perf-base
 Commands (MiMo; Flash-Next drops `--ssd-budget-gb` when the source fits):
 
 ```sh
-mlx-serve kld capture --model /Users/beam/llm/models/MiMo-V2.6-Flash-RL \
+sushi kld capture --model /Users/beam/llm/models/MiMo-V2.6-Flash-RL \
   --prompts /Users/beam/llm/models/kld-teacher/mlx-serve-bf16-16x512-raw --out <teacher dir> \
   --tokens 512 --top-k 10 --label <label> --no-template --kv-quant off --ctx-size 8192 --ssd-budget-gb 94
-mlx-serve kld compare --model <pack> --fixture <teacher dir> --label <label> \
+sushi kld compare --model <pack> --fixture <teacher dir> --label <label> \
   --kv-quant 8 --tokens 512 --top-k 10 --ctx-size 8192 --json <out>.json
 ```
 
@@ -59,7 +59,7 @@ Both are heavy GPU jobs: take the lock per run (CLAUDE.md, Team process).
 - History: a MiMo teacher captured through an affine-8 trunk and a kv8 cache differed from the lossless one by 0.0076
   nats (the whole engine-to-engine gap mlx-lm had measured); no pack number moved, but a biased reference is refused
   regardless of size. A pack-declared `trunk_quant` (served packs only) leaves the teacher untouched.
-- `MLX_SERVE_NGRAM_BF16_DIR=<hf checkpoint>` serves a Flash-Next pack with the original bf16 n-gram table to isolate
+- `SUSHI_NGRAM_BF16_DIR=<hf checkpoint>` serves a Flash-Next pack with the original bf16 n-gram table to isolate
   the PLE table's cost.
 
 ## Cross-engine check

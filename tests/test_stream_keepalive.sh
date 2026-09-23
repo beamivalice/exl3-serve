@@ -29,7 +29,7 @@
 # the buffer, so it SKIPs rather than passing vacuously.
 #
 # Requires:
-#   - A built mlx-serve binary (zig build -Doptimize=ReleaseFast)
+#   - A built sushi binary (zig build -Doptimize=ReleaseFast)
 #   - KEEPALIVE_TEST_MODEL or /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
 #
 # Usage: ./tests/test_stream_keepalive.sh [port]
@@ -47,7 +47,7 @@ if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_stream_keepalive: model directory not found ($MODEL)."
     exit 0
 fi
-BINARY="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
+BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}FAIL${NC} $BINARY not found. Build with 'zig build -Doptimize=ReleaseFast'."
     exit 1

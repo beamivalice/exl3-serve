@@ -24,8 +24,8 @@ TOTAL=0
 
 MODEL=$(eval echo "$MODEL")
 if [ ! -d "$MODEL" ]; then echo "SKIP: model not found at $MODEL"; exit 0; fi
-if [ ! -x "./zig-out/bin/mlx-serve" ]; then
-    echo "FAIL: mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+if [ ! -x "./zig-out/bin/sushi" ]; then
+    echo "FAIL: sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required"; exit 1; }
@@ -33,8 +33,8 @@ command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required"; exit 1; }
 ROOT=$(dirname "$(dirname "$MODEL")")
 ID="$(basename "$(dirname "$MODEL")")/$(basename "$MODEL")"
 
-./zig-out/bin/mlx-serve serve --port $PORT --host 127.0.0.1 --log-level info \
-    --model-dir "$ROOT" >/tmp/mlx-serve-route404.log 2>&1 &
+./zig-out/bin/sushi serve --port $PORT --host 127.0.0.1 --log-level info \
+    --model-dir "$ROOT" >/tmp/sushi-route404.log 2>&1 &
 SERVER_PID=$!
 cleanup() { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; }
 trap cleanup EXIT

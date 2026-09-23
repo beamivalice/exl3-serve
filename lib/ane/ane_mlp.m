@@ -21,7 +21,7 @@
 
 #define ANE_MLP_MAX_DOWN_K 4608u
 
-struct msv_ane_mlp {
+struct sushi_ane_mlp {
     uint32_t hidden;
     uint32_t rows;
     uint32_t procedures;
@@ -29,7 +29,7 @@ struct msv_ane_mlp {
     IOSurfaceRef output_surface;
     __fp16 *input_base;
     __fp16 *output_base;
-    msv_ane_model *model;
+    sushi_ane_model *model;
 };
 
 static void mlp_fail(char *error, size_t error_size, const char *format, ...) {
@@ -40,14 +40,14 @@ static void mlp_fail(char *error, size_t error_size, const char *format, ...) {
     va_end(arguments);
 }
 
-int msv_ane_available(void) {
-    return msv_ane_bridge_available();
+int sushi_ane_available(void) {
+    return sushi_ane_bridge_available();
 }
 
 /* Bytes the OS will grant a write at `path`: statfs/NSFileSystemFreeSize
  * exclude purgeable space, which macOS releases on demand (a volume "36 GB
  * free" by df had 117 GB for important usage). 0 = probe failed. */
-uint64_t msv_volume_free_for_use(const char *path) {
+uint64_t sushi_volume_free_for_use(const char *path) {
     if (!path) return 0;
     NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
     NSNumber *avail = nil;
@@ -56,21 +56,21 @@ uint64_t msv_volume_free_for_use(const char *path) {
     return avail.unsignedLongLongValue;
 }
 
-uint64_t msv_ane_internal_free_disk(void) {
-    return msv_volume_free_for_use("/private/tmp");
+uint64_t sushi_ane_internal_free_disk(void) {
+    return sushi_volume_free_for_use("/private/tmp");
 }
 
-/* msv_ane_plane is an IOSurfaceRef in a trench coat: the opaque typedef
+/* sushi_ane_plane is an IOSurfaceRef in a trench coat: the opaque typedef
  * keeps IOSurface types out of the public header (and Zig's FFI). */
-msv_ane_plane *msv_ane_plane_create(size_t bytes) {
-    return (msv_ane_plane *)msv_ane_bridge_surface(bytes);
+sushi_ane_plane *sushi_ane_plane_create(size_t bytes) {
+    return (sushi_ane_plane *)sushi_ane_bridge_surface(bytes);
 }
 
-void msv_ane_plane_free(msv_ane_plane *p) {
+void sushi_ane_plane_free(sushi_ane_plane *p) {
     if (p) CFRelease((IOSurfaceRef)p);
 }
 
-__fp16 *msv_ane_plane_base(msv_ane_plane *p) {
+__fp16 *sushi_ane_plane_base(sushi_ane_plane *p) {
     return p ? IOSurfaceGetBaseAddress((IOSurfaceRef)p) : NULL;
 }
 
@@ -143,7 +143,7 @@ static void emit_int8_weight(NSMutableString *text, const char *name,
 
 /* ── Bank builder ── */
 
-struct msv_ane_bank {
+struct sushi_ane_bank {
     void *text;      /* NSMutableString, +1 retained */
     mlp_blob blob;
     uint32_t procedures;
@@ -160,14 +160,14 @@ static NSString *bank_header(void) {
         "{\"coremltools-version\", \"9.0\"}})]\n{\n";
 }
 
-msv_ane_bank *msv_ane_bank_create(void) {
-    msv_ane_bank *b = calloc(1, sizeof(*b));
+sushi_ane_bank *sushi_ane_bank_create(void) {
+    sushi_ane_bank *b = calloc(1, sizeof(*b));
     if (!b) return NULL;
     NSMutableString *text = [NSMutableString stringWithString:bank_header()];
     b->text = (__bridge_retained void *)text;
     b->blob.cursor = 64;
     if (!blob_reserve(&b->blob, 4096)) {
-        msv_ane_bank_free(b);
+        sushi_ane_bank_free(b);
         return NULL;
     }
     b->blob.data[0] = 0x01;
@@ -175,7 +175,7 @@ msv_ane_bank *msv_ane_bank_create(void) {
     return b;
 }
 
-void msv_ane_bank_free(msv_ane_bank *b) {
+void sushi_ane_bank_free(sushi_ane_bank *b) {
     if (!b) return;
     @autoreleasepool {
         if (b->text) {
@@ -187,17 +187,17 @@ void msv_ane_bank_free(msv_ane_bank *b) {
     free(b);
 }
 
-uint32_t msv_ane_bank_count(const msv_ane_bank *b) {
+uint32_t sushi_ane_bank_count(const sushi_ane_bank *b) {
     return b ? b->procedures : 0;
 }
 
-uint64_t msv_ane_bank_bytes(const msv_ane_bank *b) {
+uint64_t sushi_ane_bank_bytes(const sushi_ane_bank *b) {
     return b ? (uint64_t)b->blob.cursor : 0;
 }
 
 /* Every procedure in a bank binds the SAME input and output surfaces, so
  * their shapes have to agree; the first procedure fixes them. */
-static bool bank_shape_ok(msv_ane_bank *b, uint32_t hidden, uint32_t rows,
+static bool bank_shape_ok(sushi_ane_bank *b, uint32_t hidden, uint32_t rows,
                           uint32_t out_width, const char *what, char *error,
                           size_t error_size) {
     /* rows % 32: an fp16 plane's per-channel pitch is rows * 2 bytes, and a
@@ -225,7 +225,7 @@ static bool bank_shape_ok(msv_ane_bank *b, uint32_t hidden, uint32_t rows,
     return true;
 }
 
-int msv_ane_bank_add_mlp(msv_ane_bank *b, uint32_t hidden, uint32_t ffn,
+int sushi_ane_bank_add_mlp(sushi_ane_bank *b, uint32_t hidden, uint32_t ffn,
                          uint32_t rows,
                          const int8_t *gate_q, const float *gate_s,
                          const int8_t *up_q, const float *up_s,
@@ -348,7 +348,7 @@ int msv_ane_bank_add_mlp(msv_ane_bank *b, uint32_t hidden, uint32_t ffn,
  * (5120 on the 27B) sits well under the K=17408 chunking cliff, so no
  * in-graph K-chunking; values are post-norm-scale small (|y| < 1 measured),
  * so no accumulator wrap either — the same regime as the gate/up convs. */
-int msv_ane_bank_add_gdn(msv_ane_bank *b, uint32_t hidden, uint32_t qkv_out,
+int sushi_ane_bank_add_gdn(sushi_ane_bank *b, uint32_t hidden, uint32_t qkv_out,
                          uint32_t z_out, uint32_t rows,
                          const int8_t *qkv_q, const float *qkv_s,
                          const int8_t *z_q, const float *z_s,
@@ -409,15 +409,15 @@ int msv_ane_bank_add_gdn(msv_ane_bank *b, uint32_t hidden, uint32_t qkv_out,
 
 /* Bind a bank's I/O surfaces: a shared plane is retained, NULL allocates a
  * per-bank surface of `bytes`. Returns false on allocation failure. */
-static bool mlp_bind_planes(msv_ane_mlp *m, msv_ane_plane *input_plane,
-                            size_t input_bytes, msv_ane_plane *output_plane,
+static bool mlp_bind_planes(sushi_ane_mlp *m, sushi_ane_plane *input_plane,
+                            size_t input_bytes, sushi_ane_plane *output_plane,
                             size_t output_bytes) {
     m->input_surface = input_plane ?
         (IOSurfaceRef)CFRetain((IOSurfaceRef)input_plane) :
-        msv_ane_bridge_surface(input_bytes);
+        sushi_ane_bridge_surface(input_bytes);
     m->output_surface = output_plane ?
         (IOSurfaceRef)CFRetain((IOSurfaceRef)output_plane) :
-        msv_ane_bridge_surface(output_bytes);
+        sushi_ane_bridge_surface(output_bytes);
     if (!m->input_surface || !m->output_surface) return false;
     m->input_base = IOSurfaceGetBaseAddress(m->input_surface);
     m->output_base = IOSurfaceGetBaseAddress(m->output_surface);
@@ -429,27 +429,27 @@ static bool mlp_bind_planes(msv_ane_mlp *m, msv_ane_plane *input_plane,
     return true;
 }
 
-msv_ane_mlp *msv_ane_bank_finish(msv_ane_bank *b, const char *name,
+sushi_ane_mlp *sushi_ane_bank_finish(sushi_ane_bank *b, const char *name,
                                  int ane_instance,
-                                 msv_ane_plane *input_plane,
-                                 msv_ane_plane *output_plane,
+                                 sushi_ane_plane *input_plane,
+                                 sushi_ane_plane *output_plane,
                                  char *error, size_t error_size) {
     if (!b) {
         mlp_fail(error, error_size, "no ANE bank to finish");
         return NULL;
     }
-    if (!msv_ane_available() || b->failed || b->procedures == 0) {
+    if (!sushi_ane_available() || b->failed || b->procedures == 0) {
         const char *why = b->failed ? "the bank failed while building" :
             (b->procedures == 0 ? "the bank is empty" :
              "the Neural Engine bridge is unavailable");
         mlp_fail(error, error_size, "ANE %s: %s", name, why);
-        msv_ane_bank_free(b);
+        sushi_ane_bank_free(b);
         return NULL;
     }
 
-    msv_ane_mlp *m = calloc(1, sizeof(*m));
+    sushi_ane_mlp *m = calloc(1, sizeof(*m));
     if (!m) {
-        msv_ane_bank_free(b);
+        sushi_ane_bank_free(b);
         mlp_fail(error, error_size, "out of memory creating ANE %s", name);
         return NULL;
     }
@@ -460,8 +460,8 @@ msv_ane_mlp *msv_ane_bank_finish(msv_ane_bank *b, const char *name,
                          (size_t)b->hidden * b->rows * sizeof(__fp16),
                          output_plane,
                          (size_t)b->out_width * b->rows * sizeof(__fp16))) {
-        msv_ane_bank_free(b);
-        msv_ane_mlp_free(m);
+        sushi_ane_bank_free(b);
+        sushi_ane_mlp_free(m);
         mlp_fail(error, error_size, "ANE %s surface alloc failed", name);
         return NULL;
     }
@@ -473,48 +473,48 @@ msv_ane_mlp *msv_ane_bank_finish(msv_ane_bank *b, const char *name,
         size_t weight_bytes = b->blob.cursor;
         b->blob.data = NULL; /* ownership moves to the bridge */
         IOSurfaceRef inputs[1] = { m->input_surface };
-        m->model = msv_ane_model_create(name, text.UTF8String, weights,
+        m->model = sushi_ane_model_create(name, text.UTF8String, weights,
                                         weight_bytes, inputs, 1,
                                         m->output_surface, b->procedures,
                                         ane_instance, error, error_size);
     }
-    msv_ane_bank_free(b);
+    sushi_ane_bank_free(b);
     if (!m->model) {
-        msv_ane_mlp_free(m);
+        sushi_ane_mlp_free(m);
         return NULL;
     }
     return m;
 }
 
-void msv_ane_mlp_free(msv_ane_mlp *m) {
+void sushi_ane_mlp_free(sushi_ane_mlp *m) {
     if (!m) return;
-    msv_ane_model_free(m->model);
+    sushi_ane_model_free(m->model);
     if (m->input_surface) CFRelease(m->input_surface);
     if (m->output_surface) CFRelease(m->output_surface);
     free(m);
 }
 
-__fp16 *msv_ane_mlp_input(msv_ane_mlp *m) {
+__fp16 *sushi_ane_mlp_input(sushi_ane_mlp *m) {
     return m ? m->input_base : NULL;
 }
 
-__fp16 *msv_ane_mlp_output(msv_ane_mlp *m) {
+__fp16 *sushi_ane_mlp_output(sushi_ane_mlp *m) {
     return m ? m->output_base : NULL;
 }
 
-int msv_ane_mlp_eval(msv_ane_mlp *m, uint32_t procedure, char *error,
+int sushi_ane_mlp_eval(sushi_ane_mlp *m, uint32_t procedure, char *error,
                      size_t error_size) {
     if (!m) {
         mlp_fail(error, error_size, "the ANE bank is not loaded");
         return 0;
     }
-    return msv_ane_model_eval(m->model, procedure, error, error_size);
+    return sushi_ane_model_eval(m->model, procedure, error, error_size);
 }
 
-double msv_ane_mlp_compile_seconds(const msv_ane_mlp *m) {
-    return m ? msv_ane_model_compile_seconds(m->model) : 0.0;
+double sushi_ane_mlp_compile_seconds(const sushi_ane_mlp *m) {
+    return m ? sushi_ane_model_compile_seconds(m->model) : 0.0;
 }
 
-int msv_ane_mlp_cache_hit(const msv_ane_mlp *m) {
-    return m ? (int)msv_ane_model_cache_hit(m->model) : 0;
+int sushi_ane_mlp_cache_hit(const sushi_ane_mlp *m) {
+    return m ? (int)sushi_ane_model_cache_hit(m->model) : 0;
 }

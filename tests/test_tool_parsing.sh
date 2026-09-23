@@ -8,15 +8,15 @@
 # Usage: ./tests/test_tool_parsing.sh [model_dir] [port]
 # Starts its own server, runs tests, kills it.
 
-MODEL_DIR=${1:-${MLX_SERVE_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}
+MODEL_DIR=${1:-${SUSHI_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}
 PORT=${2:-8097}
 BASE="http://127.0.0.1:$PORT"
-BINARY="./zig-out/bin/mlx-serve"
+BINARY="./zig-out/bin/sushi"
 PASS=0
 FAIL=0
 SKIP=0
 TOTAL=0
-LOG="/tmp/mlx-serve-test-tool-parsing.log"
+LOG="/tmp/sushi-test-tool-parsing.log"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -86,7 +86,7 @@ echo -e "${YELLOW}Test 1: writeFile tool call with code content (nested braces)$
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "You MUST call the writeFile tool. Do not respond with text. Call writeFile with path=\"test.js\" and content that is a simple Express server with one GET route that returns JSON {\"status\":\"ok\"}."},
       {"role": "user", "content": "Create a test.js file with an Express server"}
@@ -141,7 +141,7 @@ echo -e "${YELLOW}Test 2: Thinking tags not in content when thinking disabled (w
 EVENTS=$(curl -sf -N "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "Think step by step about what tool to use, then call it."},
       {"role": "user", "content": "List files in the current directory"}
@@ -186,7 +186,7 @@ echo -e "${YELLOW}Test 3: Thinking tags stripped in non-streaming mode${NC}"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "Think carefully then answer briefly."},
       {"role": "user", "content": "What is 2+2?"}
@@ -218,7 +218,7 @@ for i in $(seq 1 5); do
     EVENTS=$(curl -sf -N "$BASE/v1/chat/completions" \
       -H "Content-Type: application/json" \
       -d '{
-        "model": "mlx-serve",
+        "model": "sushi",
         "messages": [
           {"role": "system", "content": "You MUST call the readFile tool. Always call readFile with path=\"config.json\". Never respond with text."},
           {"role": "user", "content": "Read the config file"}
@@ -272,7 +272,7 @@ echo -e "${YELLOW}Test 5: Tool call round-trip preserves multiline content${NC}"
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "You are helpful. Be brief."},
       {"role": "user", "content": "Read the server.js file"},
@@ -333,7 +333,7 @@ echo -e "${YELLOW}Test 6: enable_thinking=true puts reasoning in reasoning_conte
 RESULT=$(curl -sf "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-serve",
+    "model": "sushi",
     "messages": [
       {"role": "system", "content": "Think step by step."},
       {"role": "user", "content": "What is 15 * 17?"}

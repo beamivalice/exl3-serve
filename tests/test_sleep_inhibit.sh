@@ -1,5 +1,5 @@
 #!/bin/bash
-# The Mac stays awake only while mlx-serve has work in flight.
+# The Mac stays awake only while sushi has work in flight.
 # Usage: ./tests/test_sleep_inhibit.sh [model_dir] [port]
 
 set -u
@@ -12,19 +12,19 @@ FAIL=0
 TOTAL=0
 
 if [ ! -d "$MODEL" ]; then echo "SKIP: model not found at $MODEL"; exit 0; fi
-if [ ! -x "./zig-out/bin/mlx-serve" ]; then
-    echo "FAIL: mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+if [ ! -x "./zig-out/bin/sushi" ]; then
+    echo "FAIL: sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 command -v pmset >/dev/null 2>&1 || { echo "SKIP: pmset not available (macOS only)"; exit 0; }
 
 ROOT=$(dirname "$(dirname "$MODEL")")
 ID="$(basename "$(dirname "$MODEL")")/$(basename "$MODEL")"
-# The type also matches powerd, and the name matches any OTHER mlx-serve
+# The type also matches powerd, and the name matches any OTHER sushi
 # instance on the box (a live server generating concurrently would false-fail
 # the idle/opt-out arms), so match the assertion to OUR pid: pmset prints
 # every assertion under a "pid NNN(process):" owner line.
-NAME="mlx-serve is generating"
+NAME="sushi is generating"
 
 run_test() {
     TOTAL=$((TOTAL + 1))
@@ -39,8 +39,8 @@ held() {
 }
 
 start_server() {
-    ./zig-out/bin/mlx-serve serve --port "$PORT" --host 127.0.0.1 --log-level info \
-        --model-dir "$ROOT" "$@" >/tmp/mlx-serve-sleep-inhibit.log 2>&1 &
+    ./zig-out/bin/sushi serve --port "$PORT" --host 127.0.0.1 --log-level info \
+        --model-dir "$ROOT" "$@" >/tmp/sushi-sleep-inhibit.log 2>&1 &
     SERVER_PID=$!
     for i in $(seq 1 120); do
         curl -sf "$BASE/health" >/dev/null 2>&1 && return 0
@@ -56,7 +56,7 @@ generate() {
     curl -s -N -X POST "$BASE/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d "{\"model\":\"$ID\",\"messages\":[{\"role\":\"user\",\"content\":\"Write a long story about a lighthouse keeper.\"}],\"max_tokens\":800,\"stream\":true}" \
-        -o /tmp/mlx-serve-sleep-inhibit-stream.json
+        -o /tmp/sushi-sleep-inhibit-stream.json
 }
 
 echo "=== idle-sleep inhibition ($ID, port $PORT) ==="
@@ -84,8 +84,8 @@ stop_server
 
 # Log order avoids racing the short startup load.
 start_server --model "$MODEL" --log-level debug
-ARM=$(grep -n -m1 'idle-sleep assertion held' /tmp/mlx-serve-sleep-inhibit.log | cut -d: -f1)
-READY=$(grep -n -m1 'Model ready' /tmp/mlx-serve-sleep-inhibit.log | cut -d: -f1)
+ARM=$(grep -n -m1 'idle-sleep assertion held' /tmp/sushi-sleep-inhibit.log | cut -d: -f1)
+READY=$(grep -n -m1 'Model ready' /tmp/sushi-sleep-inhibit.log | cut -d: -f1)
 if [ -n "$ARM" ] && [ -n "$READY" ] && [ "$ARM" -lt "$READY" ]; then
     run_test "startup model load is covered" PASS ""
 else

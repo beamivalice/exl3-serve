@@ -22,8 +22,8 @@ if [ ! -d "$MODEL_DIR" ]; then
     exit 0
 fi
 
-if [ ! -x "./zig-out/bin/mlx-serve" ]; then
-    echo "FAIL: mlx-serve not built — run 'zig build -Doptimize=ReleaseFast' first"
+if [ ! -x "./zig-out/bin/sushi" ]; then
+    echo "FAIL: sushi not built — run 'zig build -Doptimize=ReleaseFast' first"
     exit 1
 fi
 
@@ -32,9 +32,9 @@ echo "Model: $MODEL_DIR"
 echo ""
 
 echo "Starting server..."
-./zig-out/bin/mlx-serve \
+./zig-out/bin/sushi \
     --model "$MODEL_DIR" --serve --port $PORT --log-level info \
-    >/tmp/mlx-serve-anthropic-vision-test.log 2>&1 &
+    >/tmp/sushi-anthropic-vision-test.log 2>&1 &
 SERVER_PID=$!
 sleep 2
 
@@ -100,7 +100,7 @@ ask_anthropic_vision() {
     local b64="$1" question="$2"
     local body
     body=$(jq -n --arg b64 "$b64" --arg q "$question" '{
-        model:"mlx-serve",
+        model:"sushi",
         max_tokens:32,
         temperature:0,
         messages:[
@@ -149,7 +149,7 @@ echo "--- Test 3: red PNG via data-URL source ---"
 RED_B64=$(make_solid_png_b64 220 30 30)
 DATA_URL="data:image/png;base64,${RED_B64}"
 BODY=$(jq -n --arg url "$DATA_URL" '{
-    model:"mlx-serve",
+    model:"sushi",
     max_tokens:32,
     temperature:0,
     messages:[

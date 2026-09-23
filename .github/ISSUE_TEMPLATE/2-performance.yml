@@ -15,7 +15,7 @@ body:
       label: Priority
       description: How badly this affects you
       options:
-        - high (blocks my use of mlx-serve)
+        - high (blocks my use of sushi)
         - medium (workaround exists)
         - low (minor annoyance)
     validations:
@@ -23,7 +23,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: mlx-serve version(s)
+      label: sushi version(s)
       description: If it's a regression, name BOTH versions
       placeholder: "26.8.10 vs 26.8.9"
     validations:
