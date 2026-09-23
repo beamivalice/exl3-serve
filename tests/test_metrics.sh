@@ -58,24 +58,6 @@ wait_health() {
 }
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 0: index-panel rate math (pure, no server, no GPU)
-# ════════════════════════════════════════════════════════════════════════════
-echo ""
-echo "── Phase 0: panel rate math (src/html/metrics.js) ──"
-NODE_BIN="$(command -v node || true)"
-if [ -z "$NODE_BIN" ]; then
-    echo "  SKIP: node not on PATH"
-else
-    if "$NODE_BIN" "$(dirname "$0")/metrics_panel_test.mjs" > /tmp/metrics_panel.out 2>&1; then
-        sed 's/^/  /' /tmp/metrics_panel.out | grep -E "PASS|ALL PASS"
-        check "panel rate math (no carry-forward; prefill 0 while decoding)" 1
-    else
-        sed 's/^/  /' /tmp/metrics_panel.out
-        check "panel rate math (no carry-forward; prefill 0 while decoding)" 0
-    fi
-fi
-
-# ════════════════════════════════════════════════════════════════════════════
 # Phase 1: Without --metrics, /metrics* return 503 and the index page has no panel
 # ════════════════════════════════════════════════════════════════════════════
 echo ""

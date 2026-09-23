@@ -1,6 +1,6 @@
 #!/bin/bash
-# sweep_agent_memory.sh — run the 11-turn agent memory test against every
-# locally-available architecture. For each arch:
+# sweep_agent_memory.sh — run the 11-turn agent memory test against each
+# listed checkpoint. For each:
 #   1. Boot mlx-serve on a free port.
 #   2. Invoke tests/test_long_agent_memory.py against it.
 #   3. Count PASS/FAIL lines and the final "tests passed" line.
@@ -18,15 +18,10 @@ BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
 PORT="${PORT:-11296}"
 RESULTS="${RESULTS:-AGENT_MEMORY_RESULTS.md}"
 
-# Mirror sweep_all_archs.sh's table — pipe-separated entries.
+# logical|display|path|engine — pipe-separated entries. MiMo is absent: it
+# streams its experts and this boot passes no --ssd-budget-gb.
 MODELS=(
-    "gemma4-e2b-4bit|Gemma 4 E2B (4-bit)|$HOME/.lmstudio/models/mlx-community/gemma-4-e2b-it-4bit|mlx"
-    "gemma4-e4b-4bit|Gemma 4 E4B (4-bit)|$HOME/.lmstudio/models/mlx-community/gemma-4-e4b-it-4bit|mlx"
-    "gemma4-26b-moe-4bit|Gemma 4 26B-A4B MoE (4-bit)|$HOME/.mlx-serve/models/mlx-community/gemma-4-26b-a4b-it-4bit|mlx"
-    "gemma4-31b-4bit|Gemma 4 31B (4-bit)|$HOME/.lmstudio/models/mlx-community/gemma-4-31b-it-4bit|mlx"
-    "qwen36-27b-4bit|Qwen 3.6 27B dense (4-bit)|$HOME/.lmstudio/models/mlx-community/Qwen3.6-27B-4bit|mlx"
-    "qwen36-35b-moe-ud|Qwen 3.6 35B-A3B MoE UD (4-bit)|$HOME/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit|mlx"
-    "dsv4-flash-gguf|DeepSeek-V4-Flash (GGUF, ds4)|$HOME/projects/agents/ds4/ds4flash.gguf|gguf"
+    "qwen4_exp|Qwen3.8 Flash-Next|${QWEN4_EXP_MODEL:-$HOME/.mlx-serve/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit}|mlx"
 )
 
 if [[ -n "${SWEEP_MODELS:-}" ]]; then

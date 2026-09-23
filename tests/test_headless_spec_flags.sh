@@ -13,8 +13,8 @@
 # hardcoded values regardless of Settings.
 #
 # Fully hermetic: an EMPTY --model-dir discovers zero models and never loads
-# one, so the boot banner is reachable with no checkpoint on disk (same trick
-# as tests/test_3d_gen.sh). The banner is the observable — server.zig's
+# one, so the boot banner is reachable with no checkpoint on disk. The banner
+# is the observable — server.zig's
 # `PLD speculative decoding: ENABLED (draft_len=N, key_len=M...)` line reads
 # the exact ServerConfig fields a request would.
 #

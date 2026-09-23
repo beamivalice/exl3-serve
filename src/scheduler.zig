@@ -3802,8 +3802,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // future re-entrant callers) must verify they're not racing the
     // compiled call; (b) mlx_compile with shapeless=false recompiles
     // per unique input shape, which thrashes if the prefill loop sees
-    // many different chunk sizes. Tied to byte-equivalence pin in
-    // tests/test_phase2_forward_equivalence.sh.
+    // many different chunk sizes.
     if (std.c.getenv("MLX_SERVE_COMPILE_FORWARD") != null) {
         const raw = std.c.getenv("MLX_SERVE_COMPILE_FORWARD").?;
         const slice = std.mem.sliceTo(raw, 0);
