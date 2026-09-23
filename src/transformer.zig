@@ -7347,6 +7347,45 @@ pub const KVCache = struct {
         return .{ .entries = out, .step = self.step, .allocator = self.allocator, .config = self.config, .swa_ring_window = self.swa_ring_window };
     }
 
+    /// The retention snapshot: `snapshot`, but a ringed entry's storage is
+    /// copied down to the rows it actually holds. A ring buffer is allocated at
+    /// `ringCap` from its first token, so the refcount share billed — and
+    /// pinned — the dead capacity too (a 25-token MiMo prompt cost a full
+    /// 640-row ring per sliding layer). The retained rows are unchanged, so
+    /// `base`, `offset` and every rewind the ring's slack allows are as well.
+    pub fn snapshotRetained(self: *const KVCache, s: mlx.mlx_stream) !KVCacheSnapshot {
+        var snap = try self.snapshot();
+        errdefer snap.deinit();
+        const vec = mlx.mlx_vector_array_new();
+        defer _ = mlx.mlx_vector_array_free(vec);
+        var copied: usize = 0;
+        for (snap.entries) |*e| {
+            if (!e.initialized or !e.ringed) continue;
+            if (e.offset >= bufferCapacity(e.keys)) continue;
+            var bufs: [6]*mlx.mlx_array = undefined;
+            var n: usize = 2;
+            bufs[0] = &e.keys;
+            bufs[1] = &e.values;
+            if (self.config.scheme != .off) {
+                bufs[2] = &e.keys_scales;
+                bufs[3] = &e.keys_biases;
+                bufs[4] = &e.values_scales;
+                bufs[5] = &e.values_biases;
+                n = 6;
+            }
+            for (bufs[0..n]) |buf| {
+                const owned = try trimRowsOwned(buf.*, e.offset, s);
+                _ = mlx.mlx_array_free(buf.*);
+                buf.* = owned;
+                _ = mlx.mlx_vector_array_append_value(vec, owned);
+            }
+            copied += 1;
+        }
+        // Without the eval the lazy copies pin the ring buffers this exists to release.
+        if (copied > 0) _ = mlx.mlx_eval(vec);
+        return snap;
+    }
+
     /// Replace cache state with `snap`. Frees current entries' arrays first;
     /// re-binds via refcount-share from snapshot. After restore, the next
     /// `update()` will recreate `*_view` fields from the restored buffers.

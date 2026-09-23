@@ -1582,7 +1582,7 @@ pub const HotPrefixCache = struct {
             }
         }
 
-        var new_snap = try source_cache.snapshot();
+        var new_snap = try source_cache.snapshotRetained(mlx.gpuStream());
         // The speculative-side payloads are best-effort: a snapshot failure
         // must not cost the trunk KV entry they ride on.
         var new_dflash: ?DflashSnap = null;
@@ -2065,7 +2065,7 @@ pub const HotPrefixCache = struct {
         log.info("  [disk-cache] declined RAM candidate spilled to SSD ({d} tokens, {s})\n", .{ tokens.len, note });
     }
 
-    /// Snapshot the live cache (refcount-shared) plus the full token record and this turn's
+    /// Snapshot the live cache (refcount-shared but for a ring's retained rows) plus the full token record and this turn's
     /// checkpoints. Best effort; the caller still owns `ssm_cps`/`dflash`/`mtp`.
     fn capturePendingDisk(
         self: *HotPrefixCache,
@@ -2080,7 +2080,7 @@ pub const HotPrefixCache = struct {
             old.deinit(self.allocator);
             self.pending_disk = null;
         }
-        var snap = source_cache.snapshot() catch |err| {
+        var snap = source_cache.snapshotRetained(mlx.gpuStream()) catch |err| {
             log.warn("  [disk-cache] live snapshot failed: {s} — flushing the RAM entry instead\n", .{@errorName(err)});
             return;
         };
@@ -3247,6 +3247,107 @@ fn testFillHeadCache(cache: *KVCache, s: mlx.mlx_stream, layer: u32, tokens: u32
         try testWriteCacheLayer(cache, s, layer, written, step);
         transformer_mod.Transformer.qwen4MtpAdvance(cache, seq_offset, @intCast(step));
         written += step;
+    }
+}
+
+/// One layer's chunk at absolute rows `[written, written+step)`, handed the
+/// `max_seq` its attention would ask for: non-zero IS the ring predicate.
+fn ringWriteLayer(cache: *KVCache, s: mlx.mlx_stream, layer: u32, written: u32, step: u32, window: u32) !transformer_mod.DenseKVView {
+    var flat = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(flat);
+    const count: f64 = @floatFromInt(step * 8);
+    const base: f64 = @floatFromInt(written * 8 + layer * 1_000_000);
+    try mlx.check(mlx.mlx_arange(&flat, base, base + count, 1.0, .float32, s));
+    var k = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(k);
+    const shape = [_]c_int{ 1, 1, @intCast(step), 8 };
+    try mlx.check(mlx.mlx_reshape(&k, flat, &shape, 4, s));
+    const span: u32 = if (layer == 0) 0 else transformer_mod.slidingTailSpan(window, step, transformer_mod.SLIDING_TRIM_UNBOUNDED);
+    return cache.update(layer, k, k, s, span);
+}
+
+/// MiMo shape: layer 0 global, every other layer sliding.
+fn ringFill(cache: *KVCache, s: mlx.mlx_stream, n_layers: u32, window: u32, from: u32, to: u32, chunk: u32) !void {
+    var written: u32 = from;
+    while (written < to) {
+        const step: u32 = @min(chunk, to - written);
+        var li: u32 = 0;
+        while (li < n_layers) : (li += 1) {
+            var view = try ringWriteLayer(cache, s, li, written, step, window);
+            view.deinit();
+        }
+        written += step;
+    }
+}
+
+/// Bytes one sequence row of `arr` bills, from its own shape.
+fn ringRowBytes(arr: mlx.mlx_array) u64 {
+    const rows: u64 = @intCast(mlx.getShape(arr)[2]);
+    return (@as(u64, mlx.mlx_array_size(arr)) * @as(u64, mlx.mlx_array_itemsize(arr))) / rows;
+}
+
+test "a hot entry holds a ringed layer's retained rows, not the ring buffer's capacity" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    const n_layers: u32 = 4; // layer 0 global, 1..3 sliding
+    const prompt_len: u32 = 700; // past the ring cap, so a compaction has run
+    const chunk: u32 = 64;
+
+    var toks: [prompt_len]u32 = undefined;
+    for (&toks, 0..) |*t, i| t.* = @intCast(i + 1);
+
+    var live = try KVCache.init(testing.allocator, n_layers);
+    defer live.deinit();
+    live.setSwaRing(window);
+    try ringFill(&live, s, n_layers, window, 0, prompt_len, chunk);
+
+    // The ring buffer is allocated at its cap from the first token, so the
+    // rows past `offset` are rows no restore can ever read.
+    var want_bytes: u64 = 0;
+    var ring_rows: usize = 0;
+    var ring_cap: usize = 0;
+    for (live.entries) |*e| {
+        if (!e.initialized) continue;
+        const cap: usize = @intCast(mlx.getShape(e.keys)[2]);
+        if (e.ringed) {
+            ring_rows = e.offset;
+            ring_cap = cap;
+        }
+        const rows: u64 = if (e.ringed) @intCast(e.offset) else @intCast(cap);
+        want_bytes += rows * (ringRowBytes(e.keys) + ringRowBytes(e.values));
+    }
+    try testing.expect(ring_rows > 0 and ring_rows < ring_cap);
+
+    var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+    defer hc.deinit();
+    _ = try hc.commitWithState(&live, &toks, false, 0, null, null, null);
+    try testing.expectEqual(want_bytes, hc.current_kv_bytes);
+
+    // A restore off that entry must still rebuild a ring and keep appending:
+    // the reference cache walks the same absolute rows and never snapshots.
+    var restored = try KVCache.init(testing.allocator, n_layers);
+    defer restored.deinit();
+    restored.setSwaRing(window);
+    var moe_off: usize = 0;
+    const hit = try hc.lookupAndRestore(&restored, &moe_off, null, s, &toks, false, 0, null, null);
+    try testing.expectEqual(@as(usize, prompt_len - 1), hit.matched);
+
+    var ref = try KVCache.init(testing.allocator, n_layers);
+    defer ref.deinit();
+    ref.setSwaRing(window);
+    try ringFill(&ref, s, n_layers, window, 0, prompt_len + chunk, chunk);
+    try ringFill(&restored, s, n_layers, window, @intCast(hit.matched), prompt_len + chunk, prompt_len + chunk);
+
+    var li: u32 = 0;
+    while (li < n_layers) : (li += 1) {
+        var rv = try ringWriteLayer(&ref, s, li, prompt_len + chunk, 1, window);
+        defer rv.deinit();
+        var sv = try ringWriteLayer(&restored, s, li, prompt_len + chunk, 1, window);
+        defer sv.deinit();
+        try testing.expectEqual(@as(f32, 0), try transformer_mod.maxAbsDiffF32(rv.k, sv.k, s));
+        try testing.expectEqual(@as(f32, 0), try transformer_mod.maxAbsDiffF32(rv.v, sv.v, s));
+        try testing.expectEqual(ref.absSeqLen(li), restored.absSeqLen(li));
     }
 }
 
