@@ -7844,8 +7844,7 @@ fn handleChatCompletions(
     //   - logprobs are requested (drafter doesn't expose realized log-probs)
     //   - hybrid SSM architecture (same SSM-state issue as PLD; drafter would
     //     hit it on the verify forward).
-    // Tools do NOT disable the drafter (same reasoning as PLD above);
-    // equivalence with tools is pinned by tests/test_drafter_tools.sh.
+    // Tools do NOT disable the drafter (same reasoning as PLD above).
     // Priority: drafter > PLD > regular. When drafter wins, force PLD off
     // so logs / state stay consistent.
     const drafter_explicit_in_json: bool = root.get("enable_drafter") != null;

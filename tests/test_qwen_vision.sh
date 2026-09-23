@@ -9,7 +9,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-MODEL="${1:-${QWEN_VISION_MODEL:-$HOME/.mlx-serve/models/mlx-community/Qwen3.5-0.8B-MLX-4bit}}"
+MODEL="${1:-${QWEN_VISION_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
 PORT="${2:-11385}"
 IMAGE="tests/fixtures/house.jpeg"
 

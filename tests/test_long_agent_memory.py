@@ -88,7 +88,7 @@ def chat(messages, *, enable_thinking=False, with_tools=True, max_tokens=512, te
     """Send a non-streaming chat completion and return parsed fields.
 
     Non-streaming on purpose: SSE parsing is exercised plenty in
-    test_thinking_streaming, test_streaming_drafter, etc. This test cares
+    test_thinking_streaming, etc. This test cares
     about *content correctness across many turns*, not stream framing.
     """
     body = {

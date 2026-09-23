@@ -12,8 +12,8 @@
 #
 # Configs: default (kv8) | off (--kv-quant off) | kv4 (--kv-quant 4) | kv8 (--kv-quant 8) | mtp (--mtp, only
 # where the pack ships a head and does not stream) | nospec (--no-pld --no-mtp
-# --no-drafter). MiMo streams its experts, so every mimo_v2 boot carries
-# --ssd-budget-gb.
+# --no-drafter). The MiMo EXL3 pack serves resident; MIMO_SSD_BUDGET_GB adds
+# --ssd-budget-gb for a streamed MiMo checkpoint.
 # Per boot: chat non-stream/stream, thinking on/off, tools, json_schema,
 # logprobs, max_tokens cap, prefix-cache hit, 2-way concurrency, /v1/completions,
 # /v1/messages (both modes), /v1/responses (both modes), /v1/models,
@@ -33,8 +33,8 @@ mkdir -p "$OUT/home"
 MD="$HOME/.mlx-serve/models"
 # arch|thinking(yes/no)|candidate paths (first that exists wins)
 ARCHES=(
-    "qwen4_exp|yes|${QWEN4_EXP_MODEL:-$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit}|$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw"
-    "mimo_v2|yes|${MIMO_STREAM_MODEL:-$MD/XiaomiMiMo/MiMo-V2.6-Flash-RL}"
+    "qwen4_exp|yes|${QWEN4_EXP_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}|$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw"
+    "mimo_v2|yes|${MIMO_STREAM_MODEL:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}"
 )
 CONFIGS="${SMOKE_CONFIGS:-default,off,kv4,mtp,nospec}"
 
@@ -241,7 +241,7 @@ for entry in "${ARCHES[@]}"; do
     if [[ "$MAX_GB" -gt 0 && "$gb" -gt "$MAX_GB" ]]; then CELL="$arch"; skip "$arch" "${gb} GB > SMOKE_MAX_GB=$MAX_GB"; continue; fi
 
     arch_flags=()
-    [[ "$arch" == mimo_v2 ]] && arch_flags=(--ssd-budget-gb "${MIMO_SSD_BUDGET_GB:-60}" --no-vision)
+    [[ "$arch" == mimo_v2 ]] && arch_flags=(${MIMO_SSD_BUDGET_GB:+--ssd-budget-gb "$MIMO_SSD_BUDGET_GB"} --no-vision)
 
     for cfg in "${WANT_CFG[@]}"; do
         CELL="$arch.$cfg"

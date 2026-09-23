@@ -21,7 +21,7 @@
 
 set -e
 
-MODEL="${1:-$HOME/.mlx-serve/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit}"
+MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11490}"
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'

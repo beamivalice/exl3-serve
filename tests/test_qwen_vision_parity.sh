@@ -9,12 +9,12 @@
 #
 # Usage:
 #   tests/test_qwen_vision_parity.sh [model_dir] [image]
-# Defaults to the local Qwen3.5-0.8B 4-bit checkpoint + house.jpeg. Skips
+# Defaults to the Flash-Next EXL3 pack + house.jpeg. Skips
 # cleanly (exit 0) when the model is absent.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-MODEL="${1:-$HOME/.mlx-serve/models/mlx-community/Qwen3.5-0.8B-MLX-4bit}"
+MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 IMAGE="${2:-tests/fixtures/house.jpeg}"
 FIX="${QWEN_VISION_FIXTURE:-/tmp/qwen_vision_fixture}"
 

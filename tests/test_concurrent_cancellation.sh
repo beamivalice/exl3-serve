@@ -32,12 +32,12 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${CANCEL_TEST_MODEL:-${PLD_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit}}"
+MODEL="${CANCEL_TEST_MODEL:-${PLD_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
 
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_concurrent_cancellation: model directory not found."
     echo "  Set CANCEL_TEST_MODEL or place an MLX checkpoint at"
-    echo "  ~/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit."
+    echo "  /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged"
     exit 0
 fi
 

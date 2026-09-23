@@ -14,7 +14,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-MODEL_PATH="${1:-$HOME/.lmstudio/models/mlx-community/gemma-4-e4b-it-4bit}"
+MODEL_PATH="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11305}"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
 

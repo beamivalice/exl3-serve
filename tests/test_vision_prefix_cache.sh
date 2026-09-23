@@ -11,7 +11,7 @@
 # human's image message; that media still belongs to the active turn, while an
 # image before the latest assistant boundary must remain historical.
 set -u
-MODEL="${VISION_CACHE_MODEL:-${1:-$HOME/.mlx-serve/models/mlx-community/Qwen3.5-0.8B-MLX-4bit}}"
+MODEL="${VISION_CACHE_MODEL:-${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
 PORT="${2:-11419}"
 BIN="${MLX_SERVE_BIN:-./zig-out/bin/mlx-serve}"
 LOG="$HOME/claude-tmp/vision-cache/server-$PORT.log"

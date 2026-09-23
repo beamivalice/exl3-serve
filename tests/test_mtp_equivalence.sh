@@ -21,7 +21,7 @@
 #      Every divergence fails, with the serial top-two gap reported.
 #
 # Usage: MTP_TEST_MODEL=<model-dir> ./tests/test_mtp_equivalence.sh [port]
-# Default model: ~/.mlx-serve/models/ddalcu/Qwen3.8-27B-MLX-Serve-4bit. A standalone
+# Default model: /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged. A standalone
 # sidecar (every mtp.sidecar_rel_paths location) or a sharded/monolithic
 # checkpoint carrying one of mtp_marker_keys works.
 # Calibrated auto-depth surfaces can additionally pin their live dispatch arm:
@@ -33,7 +33,7 @@
 # engagement + acceptance-floor checks exercise the MoE head arm.
 
 set -u
-MODEL="${MTP_TEST_MODEL:-$HOME/.mlx-serve/models/ddalcu/Qwen3.8-27B-MLX-Serve-4bit}"
+MODEL="${MTP_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${1:-11313}"
 BIN="${MLX_SERVE_BINARY:-./zig-out/bin/mlx-serve}"
 EXTRA_ARGS="${MLX_SERVE_TEST_EXTRA_ARGS:-}"

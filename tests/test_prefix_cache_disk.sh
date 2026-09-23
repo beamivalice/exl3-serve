@@ -20,7 +20,7 @@
 
 set -e
 
-MODEL="${1:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit}"
+MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-8096}"
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'
@@ -29,8 +29,8 @@ YELLOW='\033[0;33m'
 NC='\033[0m'
 
 # Legacy flat layout fallback (pre-two-level model dirs).
-if [ ! -d "$MODEL" ] && [ -d "$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit" ]; then
-    MODEL="$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit"
+if [ ! -d "$MODEL" ] && [ -d "/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged" ]; then
+    MODEL="/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged"
 fi
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_prefix_cache_disk: $MODEL not found."
@@ -207,8 +207,8 @@ echo "== 6. hybrid SSM arch (Qwen 3.5 GatedDeltaNet) persists + restores SSM sta
 # beside the KV chunks and restore both across a restart. Gated on a local
 # Qwen3.5-0.8B; SKIPs cleanly otherwise (the attention sections above cover the
 # non-hybrid path either way).
-HYBRID_MODEL="$HOME/.mlx-serve/models/mlx-community/Qwen3.5-0.8B-MLX-4bit"
-[ -d "$HYBRID_MODEL" ] || HYBRID_MODEL="$HOME/.mlx-serve/models/mlx-community/Qwen3.5-0.8B-MLX-4bit"
+HYBRID_MODEL="/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged"
+[ -d "$HYBRID_MODEL" ] || HYBRID_MODEL="/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged"
 if [ ! -d "$HYBRID_MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} hybrid section: Qwen3.5-0.8B-MLX-4bit not found."
 else

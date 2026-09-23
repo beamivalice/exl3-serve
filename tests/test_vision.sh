@@ -1,6 +1,6 @@
 #!/bin/bash
 # Vision recognition test for mlx-serve
-# Requires: running mlx-serve with a Gemma 4 vision model, Python 3 with PIL
+# Requires: running mlx-serve with a vision model (the Flash-Next pack), Python 3 with PIL
 # Usage: ./tests/test_vision.sh [port]
 set -euo pipefail
 

@@ -28,12 +28,12 @@
 #                          KV_QUANT_FIRST_N_4BIT=10 for this family.
 #
 # Requires a built mlx-serve binary (zig build -Doptimize=ReleaseFast).
-# Default model is gemma-4-e4b-it-4bit; pass any model dir as $1:
+# Default model is the Flash-Next EXL3 pack; pass any model dir as $1:
 #   ./tests/test_kv_quant_equivalence.sh [/path/to/model] [port]
 
 set -e
 
-MODEL="${1:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit}"
+MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-8094}"
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'
@@ -44,7 +44,7 @@ NC='\033[0m'
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_kv_quant_equivalence: $MODEL not found."
     echo "  Pass a model dir as the first argument, e.g.:"
-    echo "    $0 ~/.mlx-serve/models/mlx-community/Qwen3.5-4B-MLX-4bit"
+    echo "    $0 /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged"
     exit 0
 fi
 if [ ! -f "$MODEL/config.json" ]; then

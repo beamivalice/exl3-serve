@@ -13,7 +13,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-MODEL="${BATCH_FEAT_MODEL:-$HOME/.mlx-serve/models/lmstudio-community/Qwen3.5-4B-MLX-4bit}"
+MODEL="${BATCH_FEAT_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${1:-11513}"
 BASE="http://127.0.0.1:$PORT"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"

@@ -12,7 +12,7 @@ Timings measured 2026-07-16 on the M4 Max 128 GB, AFTER the `stop_all_engines` p
 | 1 | Hermetic suite | `zig build test` (**must** be 6/6 steps, 0 fail) | ~1 min |
 | 2 | ReleaseFast binary | `zig build -Doptimize=ReleaseFast` → `du -h zig-out/bin/mlx-serve` ≈ **7 MB** (Debug ≈ 2× = fake regression) | ~10 s |
 | 3 | **Perf gate** (did WE regress?) | `./tests/bench.sh` (mlx-serve only, llmprobe) → diff vs the previous column in `benchmarks.md` → append this release's column | ~15 min |
-| 4 | Tool-call correctness | `zig build test -Dtest-filter="format corpus"` + `-Dtest-filter="tool traffic"`; live: `./tests/test_tool_matrix_small.sh` | ~3 min |
+| 4 | Tool-call correctness | `zig build test -Dtest-filter="format corpus"` + `-Dtest-filter="tool traffic"`; live: `./tests/test_format_matrix.sh` | ~3 min |
 | 5 | API conformance | `npx llmprobe@latest http://127.0.0.1:<port>/v1 --quick` → expect **100%** engine conformance | ~10 s/model |
 | 6 | Regression scripts | `integration_test.sh`, `test_anthropic_api.sh`, `test_stream_keepalive.sh`, `test_disconnect_cancel.sh`, `test_pld_equivalence.sh`, `test_mtp_equivalence.sh` | ~15 min |
 | 7 | Soak (bigger releases) | `SOAK_DURATION_HOURS=1 ./tests/test_soak_24h.sh` — RSS drift < 10% | 1 h |

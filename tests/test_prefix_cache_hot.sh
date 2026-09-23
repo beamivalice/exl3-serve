@@ -20,7 +20,7 @@
 
 set -uo pipefail
 
-MODEL_DIR="${1:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit}"
+MODEL_DIR="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-19040}"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
 

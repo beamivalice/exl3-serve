@@ -2,8 +2,8 @@
 # DFlash block-drafter integration test — env-gated on a local target +
 # assistant pair (Muse-Glimmer-30B + its DFlash assistant today):
 #
-#   DFLASH_TEST_MODEL=~/claude-tmp/muse-glimmer/Muse-Glimmer-30B-MLX-Serve-8bit \
-#   DFLASH_TEST_DRAFTER=~/.mlx-serve/models/meta-models/Muse-Glimmer-30B-assistant \
+#   DFLASH_TEST_MODEL=/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged \
+#   DFLASH_TEST_DRAFTER=/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged \
 #       ./tests/test_dflash.sh
 #
 # Pins the live contract: the sidecar probe classifies the assistant as

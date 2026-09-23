@@ -12,11 +12,11 @@
 #                             (live > 0 after a request, live == total at rest).
 #
 # Usage: ./tests/test_metrics.sh [model_dir] [port]
-#   Starts its own servers. Default model: Gemma 4 E4B 8-bit.
+#   Starts its own servers. Default model: the Flash-Next EXL3 pack.
 
 set -u
 
-MODEL="${1:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit}"
+MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11291}"
 BASE="http://127.0.0.1:$PORT"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"

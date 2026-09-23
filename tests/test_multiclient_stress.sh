@@ -12,8 +12,8 @@
 # Usage:
 #   ./tests/test_multiclient_stress.sh [port]
 # Env:
-#   STRESS_CHAT_A   agent-workload chat model dir (default gemma-4-e4b-it-4bit)
-#   STRESS_CHAT_B   plain-chat model dir, should differ from A (default gemma-4-e2b-it-4bit)
+#   STRESS_CHAT_A   agent-workload chat model dir (default the Flash-Next EXL3 pack)
+#   STRESS_CHAT_B   plain-chat model dir, should differ from A (default the MiMo EXL3 pack)
 #   N_AGENTS=3 N_PLAIN=2 MAX_TOKENS=200 ROUNDS=1
 #   STRESS_THINK=1   send enable_thinking on chat A (reasoning models)
 #   STRESS_MTP=1     send enable_mtp on chat A (MoE default is off)
@@ -32,8 +32,8 @@ BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 
 MODELS_ROOT="$HOME/.mlx-serve/models"
-CHAT_A="${STRESS_CHAT_A:-$MODELS_ROOT/mlx-community/gemma-4-e4b-it-4bit}"
-CHAT_B="${STRESS_CHAT_B:-$MODELS_ROOT/mlx-community/gemma-4-e2b-it-4bit}"
+CHAT_A="${STRESS_CHAT_A:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+CHAT_B="${STRESS_CHAT_B:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}"
 N_AGENTS=${N_AGENTS:-3}
 N_PLAIN=${N_PLAIN:-2}
 N_ABORT=${N_ABORT:-0}

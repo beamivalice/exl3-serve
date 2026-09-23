@@ -8,9 +8,9 @@
 # layer (llmprobe --bench-only) and varies ONLY the binary.
 #
 #   ./tests/bench_versions.sh                    # every model, both arms
-#   ./tests/bench_versions.sh --only muse-30b    # one row
+#   ./tests/bench_versions.sh --only mimo-v2    # one row
 #   ./tests/bench_versions.sh --resume <tag>     # pick up where a run stopped
-#   ./tests/bench_versions.sh --skip inkling-small-2bit   # leave a row for later
+#   ./tests/bench_versions.sh --skip qwen38-flash-next-k3   # leave a row for later
 #   ./tests/bench_versions.sh --list             # matrix + what each row proves
 #
 # PAUSE / RESUME. Every (model, arm) is a UNIT recorded in state.tsv the moment
@@ -84,21 +84,12 @@ RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[0;33m'; DIM='\033[2m'; NC='\033[0m
 # it — /Volumes/G Drive SSD — split a --drafter path into three words and the
 # server refused to boot rather than quietly benching without the sidecar.
 # Quote any path inside spec_args; it is re-split with `eval` below.)
-MD="$HOME/.mlx-serve/models"
-SSD="/Volumes/G Drive SSD/models"
 
 TARGETS=(
-  # ── sliding-window archs: where the trim pays ──
-  "muse-30b-4bit|$MD/ddalcu/Muse-Glimmer-30B-MLX-Serve-4bit||52 layers @ sw 2048; in-dir drafter/ = DFlash"
-  "gemma4-26b-a4b-4bit|$SSD/mlx-community/gemma-4-26b-a4b-it-4bit||MoE, 25/30 sliding @ sw 1024; PLD"
-  "gemma4-e4b-4bit|$SSD/mlx-community/gemma-4-e4b-it-4bit|--drafter '$SSD/mlx-community/gemma-4-E4B-it-assistant-bf16'|dense, 35/42 sliding @ sw 512; sidecar drafter"
-  "laguna-xs-nvfp4|$SSD/poolside/Laguna-XS-2.1-NVFP4-mlx||serial coder, 30/40 sliding @ sw 512; prefill-chunk win"
-  "inkling-small-2bit|$SSD/mlx-community/Inkling-Small-mlx-2bit||serial MoE, 35/42 sliding @ sw 512; RelativeLogits bias"
+  # ── mimo_v2: sliding layers ring, so this is where the trim pays ──
+  "mimo-v2-flash-k2.5|/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal|--no-vision|EXL3 K2.5 experts, resident; sliding layers ring"
   # ── qwen4_exp: hyper-connections + n-gram PLE + QSA; MTP is opt-in on MoE, forced like bench.sh ──
-  "qwen38-flash-next-4bit|$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-4bit|--mtp|125B-A6B, no sliding; in-checkpoint MTP head (opt-in), QSA past 2048"
-  # ── controls: no sliding layers, so these must come out FLAT ──
-  "qwen38-27b-4bit|$MD/ddalcu/Qwen3.8-27B-MLX-Serve-4bit||CONTROL: no sliding; in-checkpoint MTP head; the round-cost table's home cell"
-  "lfm2-2.6b-nvfp4|$SSD/mlx-community/LFM2.5-2.6B-nvfp4||CONTROL: hybrid conv+full attn, no sliding; cheap smoke"
+  "qwen38-flash-next-k3|/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged|--mtp|125B-A6B EXL3 K3, no sliding; in-checkpoint MTP head (opt-in), QSA past 2048"
 )
 
 if [[ "$LIST" -eq 1 ]]; then

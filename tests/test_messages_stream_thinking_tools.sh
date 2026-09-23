@@ -23,7 +23,7 @@
 
 set -u
 
-MODEL="${1:-$HOME/.mlx-serve/models/mlx-community/Qwen3.6-35B-A3B-6bit}"
+MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11263}"
 BASE="http://127.0.0.1:$PORT"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"

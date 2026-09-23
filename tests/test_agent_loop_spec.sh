@@ -30,7 +30,7 @@
 #   AGENT_SPEC_TEST_MODEL=/path/to/model ./tests/test_agent_loop_spec.sh [port]
 #
 # Defaults:
-#   model   = ~/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit
+#   model   = /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
 #   drafter = ~/.mlx-serve/models/mlx-community/gemma-4-E4B-it-assistant-bf16 (only used if
 #             AGENT_SPEC_TEST_MODEL points at a Gemma 4 target)
 #
@@ -45,8 +45,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${AGENT_SPEC_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit}"
-DRAFTER="${AGENT_SPEC_TEST_DRAFTER:-$HOME/.mlx-serve/models/mlx-community/gemma-4-E4B-it-assistant-bf16}"
+MODEL="${AGENT_SPEC_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+DRAFTER="${AGENT_SPEC_TEST_DRAFTER:-}"
 
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_agent_loop_spec: model directory not found ($MODEL)."

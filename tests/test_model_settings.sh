@@ -15,8 +15,8 @@ BIN="$ROOT/zig-out/bin/mlx-serve"
 [ -x "$BIN" ] || { echo "FAIL: build first (zig build -Doptimize=ReleaseFast)"; exit 1; }
 
 MODELS_ROOT="${MODELS_ROOT:-$HOME/.mlx-serve/models}"
-MODEL_A="${MODEL_A:-$MODELS_ROOT/mlx-community/Qwen3.5-0.8B-MLX-4bit}"
-MODEL_B="${MODEL_B:-$MODELS_ROOT/lmstudio-community/Qwen3.5-2B-MLX-4bit}"
+MODEL_A="${MODEL_A:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+MODEL_B="${MODEL_B:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}"
 if [ ! -f "$MODEL_A/config.json" ] || [ ! -f "$MODEL_B/config.json" ]; then
     echo "SKIP: needs two local chat models (MODEL_A=$MODEL_A, MODEL_B=$MODEL_B)"
     exit 0

@@ -11,13 +11,13 @@
 #
 # Usage: ./tests/test_thinking_split.sh [model_dir] [port]
 #   model_dir must be a model whose chat template injects a think opener when
-#   thinking is on (Qwen 3.5/3.6). Default: Qwen3.6-35B-A3B-4bit (LM Studio dir).
+#   thinking is on (Qwen 3.5/3.6). Default: the Flash-Next EXL3 pack.
 #
 # Starts its own server on [port].
 
 set -u
 
-MODEL="${1:-$HOME/.lmstudio/models/mlx-community/Qwen3.6-35B-A3B-4bit}"
+MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11261}"
 BASE="http://127.0.0.1:$PORT"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"

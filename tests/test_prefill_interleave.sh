@@ -21,7 +21,7 @@ set -u
 
 PORT="${1:-11487}"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
-MODEL="${INTERLEAVE_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/gemma-4-E2B-it-qat-4bit}"
+MODEL="${INTERLEAVE_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 WORK="$(mktemp -d)"
 SERVER_PID=""
 

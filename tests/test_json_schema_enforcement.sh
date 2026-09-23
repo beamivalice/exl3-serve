@@ -15,7 +15,7 @@
 
 set -u
 
-MODEL_DIR=${1:-~/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit}
+MODEL_DIR=${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}
 PORT=${2:-8099}
 BASE="http://127.0.0.1:$PORT"
 PASS=0

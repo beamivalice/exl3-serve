@@ -26,7 +26,7 @@ set -e
 
 SOAK_DURATION_HOURS="${SOAK_DURATION_HOURS:-24}"
 PORT="${PORT:-8095}"
-MODEL="${SOAK_MODEL:-${1:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit}}"
+MODEL="${SOAK_MODEL:-${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
 BASE="http://127.0.0.1:$PORT"
 LOG_DIR="${SOAK_LOG_DIR:-./tests}"
 SAMPLE_LOG="$LOG_DIR/soak_log.csv"

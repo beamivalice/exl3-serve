@@ -15,7 +15,7 @@
 #     0.7× is a loose, hardware-agnostic threshold).
 #
 # Env:
-#   MLX_HYBRID_MODEL  Path to a hybrid MLX model dir. Default: Qwen3.5-4B-MLX-4bit
+#   MLX_HYBRID_MODEL  Path to a hybrid MLX model dir. Default: the Flash-Next EXL3 pack
 #                     under Sandisk; pass another to exercise lfm2/qwen3_next/etc.
 #   PORT              Server port. Default 19077.
 #
@@ -24,7 +24,7 @@
 
 set -uo pipefail
 
-MODEL="${MLX_HYBRID_MODEL:-/Volumes/Sandisk_1TB/Models/mlx-community/Qwen3.5-4B-MLX-4bit}"
+MODEL="${MLX_HYBRID_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${PORT:-19077}"
 BIN="${BINARY:-./zig-out/bin/mlx-serve}"
 BASE="http://127.0.0.1:$PORT"

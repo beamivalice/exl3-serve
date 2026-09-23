@@ -13,8 +13,8 @@
 
 set -u
 
-MODEL_A=${1:-~/.mlx-serve/models/mlx-community/Qwen3.5-0.8B-MLX-4bit}
-MODEL_B=${2:-~/.mlx-serve/models/LiquidAI/LFM2.5-2.6B-MLX-mxfp4}
+MODEL_A=${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}
+MODEL_B=${2:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}
 PORT=${3:-8121}
 BASE="http://127.0.0.1:$PORT"
 LOG=/tmp/mlx-serve-json-multi-model.log

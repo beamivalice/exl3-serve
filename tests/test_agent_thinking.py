@@ -16,7 +16,7 @@ import sys
 import time
 import urllib.request
 
-MODEL_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/.mlx-serve/models/Qwen3.6-35B-A3B-6bit")
+MODEL_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged")
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8095
 STREAM = bool(int(sys.argv[3])) if len(sys.argv) > 3 else False
 BASE = f"http://127.0.0.1:{PORT}"

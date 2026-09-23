@@ -44,8 +44,8 @@ set -u
 
 PORT=${1:-8080}
 BASE="http://127.0.0.1:$PORT"
-MODEL="${LONG_AGENT_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit}"
-DRAFTER="${LONG_AGENT_TEST_DRAFTER:-$HOME/.mlx-serve/models/mlx-community/gemma-4-E4B-it-assistant-bf16}"
+MODEL="${LONG_AGENT_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+DRAFTER="${LONG_AGENT_TEST_DRAFTER:-}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

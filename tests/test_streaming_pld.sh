@@ -16,7 +16,7 @@
 #   - A built mlx-serve binary (run `zig build -Doptimize=ReleaseFast` first)
 #   - Either:
 #       PLD_TEST_MODEL set to a model directory, OR
-#       a default MLX checkpoint at ~/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit
+#       a default MLX checkpoint at /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
 #
 # Usage:
 #   PLD_TEST_MODEL=/path/to/model ./tests/test_streaming_pld.sh [port]
@@ -32,13 +32,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${PLD_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit}"
+MODEL="${PLD_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_streaming_pld: model directory not found."
     echo
     echo "  Set PLD_TEST_MODEL to a model directory, or place an MLX checkpoint"
-    echo "  at ~/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit (the default this test"
+    echo "  at /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged (the default this test"
     echo "  looks for). PLD works on any model so the choice is arbitrary."
     exit 0
 fi

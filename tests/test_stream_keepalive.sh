@@ -30,7 +30,7 @@
 #
 # Requires:
 #   - A built mlx-serve binary (zig build -Doptimize=ReleaseFast)
-#   - KEEPALIVE_TEST_MODEL or ~/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit
+#   - KEEPALIVE_TEST_MODEL or /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
 #
 # Usage: ./tests/test_stream_keepalive.sh [port]
 
@@ -42,7 +42,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${KEEPALIVE_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit}"
+MODEL="${KEEPALIVE_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_stream_keepalive: model directory not found ($MODEL)."
     exit 0

@@ -21,7 +21,7 @@
 # the next request — the conversation gets monotonically longer as we go.
 #
 # Defaults:
-#   model = ~/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit
+#   model = /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
 #   N = 12 turns of ~50-token unique content (more than enough to cross 512)
 #
 # Usage:
@@ -37,8 +37,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${LONG_CONV_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit}"
-DRAFTER="${LONG_CONV_TEST_DRAFTER:-$HOME/.mlx-serve/models/mlx-community/gemma-4-E4B-it-assistant-bf16}"
+MODEL="${LONG_CONV_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+DRAFTER="${LONG_CONV_TEST_DRAFTER:-}"
 
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_long_conversation_spec: model directory not found ($MODEL)."

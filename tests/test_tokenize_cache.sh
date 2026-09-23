@@ -11,7 +11,7 @@
 # handler plumbing in src/server.zig) MUST flip this test red.
 #
 # Env:
-#   MODEL    Any MLX model. Default: Gemma 4 E4B 4-bit under Sandisk.
+#   MODEL    Any MLX model. Default: the Flash-Next EXL3 pack.
 #   PORT     Default 19105.
 #   BINARY   Default ./zig-out/bin/mlx-serve.
 
@@ -19,7 +19,7 @@ set -uo pipefail
 
 PORT="${PORT:-19105}"
 BIN="${BINARY:-./zig-out/bin/mlx-serve}"
-MODEL="${MODEL:-/Volumes/Sandisk_1TB/Models/mlx-community/gemma-4-e4b-it-4bit}"
+MODEL="${MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 BASE="http://127.0.0.1:$PORT"
 
 [ -d "$MODEL" ] || { echo "SKIP: model dir missing: $MODEL"; exit 0; }

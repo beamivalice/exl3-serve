@@ -11,7 +11,7 @@
 #
 # Usage: MODEL=<dir> ./tests/test_shutdown_midstream.sh [port] [iterations]
 set -u
-MODEL="${MODEL:-$HOME/.mlx-serve/models/mlx-community/Qwen3.5-0.8B-MLX-4bit}"
+MODEL="${MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${1:-11455}"
 ITERS="${2:-8}"
 BIN="./zig-out/bin/mlx-serve"

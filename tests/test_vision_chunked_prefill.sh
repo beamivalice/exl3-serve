@@ -23,7 +23,7 @@ set -u
 
 PORT="${1:-11499}"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
-MODEL="${VISION_CHUNK_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/LFM2.5-VL-1.6B-4bit}"
+MODEL="${VISION_CHUNK_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 WORK="$(mktemp -d)"
 SERVER_PID=""
 

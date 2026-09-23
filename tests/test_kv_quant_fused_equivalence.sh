@@ -32,7 +32,7 @@
 
 set -e
 
-MODEL="${1:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit}"
+MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-8094}"
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'
@@ -276,7 +276,7 @@ compare_first_n_tokens "spec fused vs spec dense" "$SPEC_DENSE_TOK" "$SPEC_FUSED
 # the shapes the Phase-2 A/B measured wins on. A dispatch hole here is
 # output-invisible (dense fallback is equivalent), so ENGAGEMENT is the
 # assertion, per the spec-test rule.
-VERIFY_MODEL="${KV_VERIFY_SPEC_MODEL:-$HOME/.mlx-serve/models/mlx-community/Qwen3.5-0.8B-MLX-4bit}"
+VERIFY_MODEL="${KV_VERIFY_SPEC_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 if [ ! -d "$VERIFY_MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} verify-kernel arm: $VERIFY_MODEL not found (KV_VERIFY_SPEC_MODEL overrides)."
     exit $FAIL

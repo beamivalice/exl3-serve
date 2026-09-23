@@ -24,11 +24,11 @@
 #     decode-cancel contract of [1] covers it (section skipped, not failed).
 #
 # Usage: ./tests/test_cancel_commit.sh [model_dir] [port]
-#   Starts its own server. Default model: Gemma 4 E4B 4-bit.
+#   Starts its own server. Default model: the Flash-Next EXL3 pack.
 
 set -u
 
-MODEL="${1:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit}"
+MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11272}"
 BASE="http://127.0.0.1:$PORT"
 BINARY="${BINARY:-./zig-out/bin/mlx-serve}"

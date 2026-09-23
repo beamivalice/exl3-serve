@@ -17,10 +17,10 @@
 #
 #   LOGPROBS_TEST_MODEL=<dir> ./tests/test_logprobs.sh [port]
 #
-# Any chat model works; defaults to LFM2.5-2.6B-8bit. SKIPs without one.
+# Any chat model works; defaults to the Flash-Next EXL3 pack. SKIPs without one.
 set -uo pipefail
 
-MODEL="${LOGPROBS_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/LFM2.5-2.6B-8bit}"
+MODEL="${LOGPROBS_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${1:-11293}"
 BIN="${BINARY:-./zig-out/bin/mlx-serve}"
 BASE="http://127.0.0.1:$PORT"

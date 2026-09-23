@@ -19,11 +19,11 @@
 #
 # Usage:
 #   ./tests/test_kv_quant_per_request.sh [/path/to/model] [port]
-# Defaults: model = ~/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit, port = 8094.
+# Defaults: model = /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged, port = 8094.
 
 set -e
 
-MODEL="${1:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-4bit}"
+MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-8094}"
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'

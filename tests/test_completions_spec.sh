@@ -25,8 +25,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${PLD_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit}"
-DRAFTER="${DRAFTER_TEST_DRAFTER:-$HOME/.mlx-serve/models/mlx-community/gemma-4-E4B-it-assistant-bf16}"
+MODEL="${PLD_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+DRAFTER="${DRAFTER_TEST_DRAFTER:-}"
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_completions_spec: model directory not found."
     exit 0

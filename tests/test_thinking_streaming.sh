@@ -9,7 +9,7 @@
 # Usage: ./tests/test_thinking_streaming.sh [model_dir] [port]
 # Starts its own server, runs tests, kills it.
 
-MODEL_DIR=${1:-${MLX_SERVE_TEST_MODEL:-$HOME/.mlx-serve/models/unsloth/Qwen3.6-27B-UD-MLX-4bit}}
+MODEL_DIR=${1:-${MLX_SERVE_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}
 PORT=${2:-8099}
 BASE="http://127.0.0.1:$PORT"
 BINARY="./zig-out/bin/mlx-serve"

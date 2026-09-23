@@ -2,12 +2,12 @@
 # Integration tests for mlx-serve API endpoints.
 # Usage: ./tests/integration_test.sh [model_dir] [port]
 #
-# Requires a model to be available. Defaults to gemma-4-e4b-it-8bit.
+# Requires a model to be available. Defaults to the Flash-Next EXL3 pack.
 # Builds a debug binary, starts the server, runs tests, then kills it.
 
 set -euo pipefail
 
-MODEL_DIR="${1:-${MLX_SERVE_TEST_MODEL:-$HOME/.mlx-serve/models/mlx-community/gemma-4-e4b-it-8bit}}"
+MODEL_DIR="${1:-${MLX_SERVE_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
 PORT="${2:-8095}"
 BASE="http://localhost:$PORT"
 BINARY="./zig-out/bin/mlx-serve"
