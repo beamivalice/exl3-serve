@@ -3563,10 +3563,20 @@ pub fn slidingBandScoreBytes(config: *const model_mod.ModelConfig, fwd: u64) u64
 /// 8 heads of 192 twice — 2.4x).
 pub fn kvDequantScratchBytes(config: *const model_mod.ModelConfig, seq: u64) u64 {
     if (config.swaRingTokens() == 0) return 0;
+    // A layer whose prefill attention reads the PACKED cache one dispatch at a
+    // time (`transformer.fusedSdpaPrefillKv`) never rebuilds more than a
+    // dispatch's keys, at `MOE_PREFILL_COEXIST` of them — the dispatches are
+    // serially dependent through the softmax carry, so this is the ceiling.
+    // The kill switch takes the width off `prefillHeadDimFused` and the whole
+    // rebuild comes back with it.
+    const seq_rows: u64 = if (transformer_mod.prefillHeadDimFused(config.prefillScoreHeadDim()))
+        MOE_PREFILL_COEXIST *| @as(u64, @intCast(transformer_mod.PACKED_KV_SLICE_MAX))
+    else
+        seq;
     var widest: u64 = 0;
     var li: u32 = 0;
     while (li < config.num_hidden_layers) : (li += 1) {
-        const rows: u64 = if (config.isKvPerTokenLayer(li)) seq else @min(seq, config.swaRingTokens());
+        const rows: u64 = if (config.isKvPerTokenLayer(li)) @min(seq, seq_rows) else @min(seq, config.swaRingTokens());
         widest = @max(widest, rows *| config.layerKvBytes(li));
     }
     return widest;
@@ -24746,13 +24756,26 @@ test "a ringed arch's kv-quant dequant scratch is one layer's rebuild, not the m
     const cfg = mimoV2BillConfig();
     const seq: u64 = 512 * 1024;
 
-    // The widest rebuild is a GLOBAL layer at the prompt length: 2 kv heads of
-    // qk 192 + v 128. The sliding layers rebuild their ring, not the sequence.
+    // Composed: the widest rebuild is a GLOBAL layer at the prompt length,
+    // 2 kv heads of qk 192 + v 128. The sliding layers rebuild their ring.
+    transformer_mod.fused256_override = false;
+    defer transformer_mod.fused256_override = null;
     try t.expectEqual(seq * 2 * (192 + 128) * 2, kvDequantScratchBytes(&cfg, seq));
     // The generic expression this replaces reads the SLIDING head count and
     // doubles the qk width: 1.8x here, 2.4x at the shipped 4/8-head geometry.
     const generic: u64 = 2 * seq * cfg.num_key_value_heads * cfg.head_dim * 2;
     try t.expect(generic > kvDequantScratchBytes(&cfg, seq));
+
+    // Fused: the global layers read the packed cache per dispatch, so their
+    // rebuild stops scaling with the prompt at all.
+    transformer_mod.fused256_override = true;
+    const fused = kvDequantScratchBytes(&cfg, seq);
+    try t.expectEqual(
+        MOE_PREFILL_COEXIST * @as(u64, @intCast(transformer_mod.PACKED_KV_SLICE_MAX)) * 2 * (192 + 128) * 2,
+        fused,
+    );
+    try t.expectEqual(fused, kvDequantScratchBytes(&cfg, 2 * seq));
+    transformer_mod.fused256_override = false;
 
     // A short prompt never rebuilds more than it stores, and below the ring the
     // widest layer is a SLIDING one: it carries more KV heads than a global.

@@ -2225,12 +2225,19 @@ const ATTN_PD_KERNEL_SOURCE =
     \\// carry-in present, bit 1 = final chunk (normalize + bf16 store).
     \\const int k_begin = kr[0];
     \\const int k_end = metal::min(kr[1], kL);
+    \\// The buffer is not always the cache: a quantized cache hands each
+    \\// dispatch a DEQUANTIZED SLICE, so `koff` is where this buffer's row 0
+    \\// sits in the cache and `kL_abs` is the cache's own length. Every causal
+    \\// and band comparison is in cache coordinates; staging is in buffer
+    \\// coordinates. A dense caller passes {0, kL} and nothing below moves.
+    \\const int koff = kr[2];
+    \\const int kL_abs = kr[3];
     \\const bool has_carry = (phase[0] & 1) != 0;
     \\const bool is_final = (phase[0] & 2) != 0;
     \\
     \\// Bottom-right aligned causal: query row r of this chunk sits at
     \\// absolute KV position q_off + r.
-    \\const int q_off = kL - qL;
+    \\const int q_off = kL_abs - qL;
     \\
     \\const device T* Qp = q + bb * q_strides[0] + hq * q_strides[1]
     \\    + (long)(tqx * BQ) * q_strides[2];
@@ -2304,10 +2311,10 @@ const ATTN_PD_KERNEL_SOURCE =
     \\const int NK = (k_end + BK - 1) / BK;
     \\const int q_lo = tqx * BQ + q_off;
     \\const int q_hi = q_lo + BQ - 1;
-    \\const int kb_lim = metal::min(NK, (q_hi + BK) / BK);
+    \\const int kb_lim = metal::min(NK, (q_hi - koff + BK) / BK);
     \\int kb = k_begin / BK;
-    \\if (SW > 0) kb = metal::max(kb, metal::max(0, q_lo - SW + 1) / BK);
-    \\const int kb_min_causal = metal::max(0, q_lo) / BK;
+    \\if (SW > 0) kb = metal::max(kb, metal::max(0, q_lo - SW + 1 - koff) / BK);
+    \\const int kb_min_causal = metal::max(0, q_lo - koff) / BK;
     \\const int row_pos = q_lo + tm + sm;
     \\
     \\// QSA arm (template QSA=1): `mask` is the [B,1,qL,kL] bool visibility
@@ -2368,16 +2375,17 @@ const ATTN_PD_KERNEL_SOURCE =
     \\  // Masking: kL remainder + causal + sliding band, all element-wise.
     \\  const bool tail_k = (rows_k < BK);
     \\  const bool need_causal = (kb >= kb_min_causal);
-    \\  const bool need_band = (SW > 0) && (c0 <= q_hi - SW);
+    \\  const bool need_band = (SW > 0) && (koff + c0 <= q_hi - SW);
     \\  if (QSA || tail_k || need_causal || need_band) {
     \\    for (int kt = 0; kt < BK / 8; ++kt) {
     \\      for (int jj = 0; jj < 2; ++jj) {
     \\        const int col = c0 + kt * 8 + sn + jj;
+    \\        const int col_abs = koff + col;
     \\        bool masked = false;
     \\        if (tail_k && col >= kL) masked = true;
-    \\        if (need_causal && row_pos < col) masked = true;
-    \\        if (need_band && (row_pos - col) >= SW) masked = true;
-    \\        if (QSA && !masked && (!mask_row_ok || !mask[mask_row0 + (long)col * mask_strides[3]])) masked = true;
+    \\        if (need_causal && row_pos < col_abs) masked = true;
+    \\        if (need_band && (row_pos - col_abs) >= SW) masked = true;
+    \\        if (QSA && !masked && (!mask_row_ok || !mask[mask_row0 + (long)col_abs * mask_strides[3]])) masked = true;
     \\        if (masked) Sfrag[kt][jj] = -INFINITY;
     \\      }
     \\    }
@@ -2530,6 +2538,12 @@ pub const Fused256CausalMode = enum { all, off };
 // M4 Max at the kernel's measured ~1.1e10 work-units/s).
 pub const FUSED256_DEFAULT_DISPATCH_BUDGET: i64 = 250_000_000;
 
+/// Rows of a quantized cache one dispatch may dequantize. The work budget
+/// already chunks the key axis, but it scales with heads x q_len, so a narrow
+/// forward would otherwise rebuild the whole prompt in one slice. 16384 rows
+/// is ~21 MB at the widest cache geometry we serve.
+pub const PACKED_KV_SLICE_MAX: c_int = 16384;
+
 /// Test seam: forces the budget without the environment.
 pub var fused256_budget_override: ?i64 = null;
 var fused256_budget_env_cached: ?i64 = null;
@@ -2640,7 +2654,35 @@ pub fn fusedSdpaPrefill(
         if (naxSdpaPreferred() and mlx.mlx_array_ndim(q) == 4 and
             mlx.getShape(q)[3] == 256) return null;
     }
-    return fusedSdpaPrefillImpl(s, q, k, v, scale, window, null);
+    return fusedSdpaPrefillImpl(s, q, k, v, scale, window, null, null);
+}
+
+/// The causal arm over a KV cache view. When the cache is quantized the kernel
+/// reads it one dispatch at a time (`PackedKv`) and `view.k`/`view.v` — the
+/// lazy dense rebuild `denseView` set up — are never evaluated. Falls through
+/// to the dense arm on an `off`-scheme cache or a shape the slicing cannot
+/// serve, so the caller has one entry either way.
+pub fn fusedSdpaPrefillKv(
+    s: mlx.mlx_stream,
+    q: mlx.mlx_array,
+    view: *const DenseKVView,
+    scale: f32,
+    window: c_int,
+) !?mlx.mlx_array {
+    if (window > 0 or !view.has_quant_triple or view.bits == 0 or view.group_size == 0) {
+        return fusedSdpaPrefill(s, q, view.k, view.v, scale, window);
+    }
+    if (fused256CausalMode() == .off) return null;
+    return fusedSdpaPrefillImpl(s, q, view.k, view.v, scale, 0, null, .{
+        .k_q = view.k_triple_q,
+        .k_scales = view.k_triple_scales,
+        .k_biases = view.k_triple_biases,
+        .v_q = view.v_triple_q,
+        .v_scales = view.v_triple_scales,
+        .v_biases = view.v_triple_biases,
+        .bits = view.bits,
+        .group_size = view.group_size,
+    });
 }
 
 /// One line per (qk, value) width the kernel actually serves in this process:
@@ -2692,7 +2734,7 @@ pub fn fusedSdpa256Masked(
     const qs = mlx.getShape(q);
     const ks = mlx.getShape(k);
     if (ms[0] != qs[0] or ms[1] != 1 or ms[2] != qs[2] or ms[3] != ks[2]) return null;
-    const out = try fusedSdpaPrefillImpl(s, q, k, v, scale, 0, mask);
+    const out = try fusedSdpaPrefillImpl(s, q, k, v, scale, 0, mask, null);
     if (out != null and !qsa_fused_logged) {
         qsa_fused_logged = true;
         log.info("[qsa-fused] engaged: msv_attn_p256 mask arm qL={d} kL={d} Hq={d} Hkv={d} (MLX_SERVE_QSA_FUSED=0 restores stock sdpa)\n", .{ qs[2], ks[2], qs[1], ks[1] });
@@ -6660,6 +6702,59 @@ pub fn qsaPrefillTransientBytes(n_idx: u64, fwd: u64, kv: u64, ratio: u64, idx_h
     return rows * nb * 4 * (n_idx * 2 + 4) + fwd * @min(nb, 512) * 4;
 }
 
+/// A quantized KV cache as the kernel reads it: the packed triples plus the
+/// shape of the dense view they stand for. `KVCache.denseView` already borrows
+/// these; taking them here is what keeps its lazy dense arrays unevaluated.
+pub const PackedKv = struct {
+    k_q: mlx.mlx_array,
+    k_scales: mlx.mlx_array,
+    k_biases: mlx.mlx_array,
+    v_q: mlx.mlx_array,
+    v_scales: mlx.mlx_array,
+    v_biases: mlx.mlx_array,
+    bits: u8,
+    group_size: u32,
+};
+
+/// One dispatch's keys or values: slice the packed triple along the token axis
+/// and dequantize the slice. The slice is a VIEW and mlx's quantized ops want
+/// their own rows, so it is materialized first (a few MB of packed bytes).
+fn dequantKvSlice(
+    s: mlx.mlx_stream,
+    q: mlx.mlx_array,
+    scales: mlx.mlx_array,
+    biases: mlx.mlx_array,
+    k0: c_int,
+    k1: c_int,
+    group_size: u32,
+    bits: u8,
+) !mlx.mlx_array {
+    var parts: [3]mlx.mlx_array = .{ .{ .ctx = null }, .{ .ctx = null }, .{ .ctx = null } };
+    defer for (&parts) |*a| {
+        if (a.ctx != null) _ = mlx.mlx_array_free(a.*);
+    };
+    for ([_]mlx.mlx_array{ q, scales, biases }, 0..) |src, i| {
+        const sh = mlx.getShape(src);
+        if (sh.len != 4) return error.InvalidKvSliceShape;
+        var view = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(view);
+        try mlx.check(mlx.mlx_slice(
+            &view,
+            src,
+            &[_]c_int{ 0, 0, k0, 0 },
+            4,
+            &[_]c_int{ sh[0], sh[1], k1, sh[3] },
+            4,
+            &[_]c_int{ 1, 1, 1, 1 },
+            4,
+            s,
+        ));
+        parts[i] = mlx.mlx_array_new();
+        try mlx.check(mlx.mlx_contiguous(&parts[i], view, false, s));
+    }
+    return kv_quant.dequantizeAffine(s, parts[0], parts[1], parts[2], group_size, bits);
+}
+
 fn fusedSdpaPrefillImpl(
     s: mlx.mlx_stream,
     q: mlx.mlx_array,
@@ -6668,6 +6763,7 @@ fn fusedSdpaPrefillImpl(
     scale: f32,
     window: c_int,
     mask: ?mlx.mlx_array,
+    packed_kv: ?PackedKv,
 ) !?mlx.mlx_array {
     if (mlx.mlx_array_ndim(q) != 4 or mlx.mlx_array_ndim(k) != 4 or mlx.mlx_array_ndim(v) != 4) return null;
     const qs = mlx.getShape(q);
@@ -6704,6 +6800,8 @@ fn fusedSdpaPrefillImpl(
     const kL: c_int = ks[2];
     const chunk_len: c_int = if (window > 0)
         kL
+    else if (packed_kv != null)
+        @min(PACKED_KV_SLICE_MAX, fused256KvChunkLen(@intCast(qs[0]), @intCast(qs[1]), @intCast(qs[2]), @intCast(kL), fused256DispatchBudget()))
     else
         fused256KvChunkLen(@intCast(qs[0]), @intCast(qs[1]), @intCast(qs[2]), @intCast(kL), fused256DispatchBudget());
 
@@ -6740,10 +6838,31 @@ fn fusedSdpaPrefillImpl(
         const final = k1 == kL;
         const has_carry = k0 > 0;
 
-        const two = [_]c_int{2};
-        const kr_data = [_]i32{ @intCast(k0), @intCast(k1) };
-        const kr = mlx.mlx_array_new_data(&kr_data, &two, 1, .int32);
+        // {begin, end} in the BUFFER, then where the buffer starts in the
+        // cache and how long the cache is. Dense: the buffer is the cache.
+        const four = [_]c_int{4};
+        const kr_data = [_]i32{
+            if (packed_kv != null) 0 else @as(i32, @intCast(k0)),
+            if (packed_kv != null) @as(i32, @intCast(k1 - k0)) else @as(i32, @intCast(k1)),
+            if (packed_kv != null) @as(i32, @intCast(k0)) else 0,
+            @intCast(kL),
+        };
+        const kr = mlx.mlx_array_new_data(&kr_data, &four, 1, .int32);
         defer _ = mlx.mlx_array_free(kr);
+
+        // One dispatch's keys, dequantized here and freed as the graph runs
+        // past them — the whole-prompt dense rebuild `denseView` would make
+        // never exists (1.25 GiB per global layer at a 512k prompt).
+        var k_slice: mlx.mlx_array = .{ .ctx = null };
+        var v_slice: mlx.mlx_array = .{ .ctx = null };
+        defer {
+            if (k_slice.ctx != null) _ = mlx.mlx_array_free(k_slice);
+            if (v_slice.ctx != null) _ = mlx.mlx_array_free(v_slice);
+        }
+        if (packed_kv) |pk| {
+            k_slice = try dequantKvSlice(s, pk.k_q, pk.k_scales, pk.k_biases, k0, k1, pk.group_size, pk.bits);
+            v_slice = try dequantKvSlice(s, pk.v_q, pk.v_scales, pk.v_biases, k0, k1, pk.group_size, pk.bits);
+        }
         const phase_data = [_]i32{(if (has_carry) @as(i32, 1) else 0) | (if (final) @as(i32, 2) else 0)};
         const phase = mlx.mlx_array_new_data(&phase_data, &one, 1, .int32);
         defer _ = mlx.mlx_array_free(phase);
@@ -6776,8 +6895,8 @@ fn fusedSdpaPrefillImpl(
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "QSA", if (mask != null) 1 else 0));
 
         const inputs_arr = [_]mlx.mlx_array{
-            q,                                k,
-            v,                                scl,
+            q,                                if (packed_kv != null) k_slice else k,
+            if (packed_kv != null) v_slice else v, scl,
             win,                              kr,
             phase,                            if (has_carry) m_prev else dummy,
             if (has_carry) l_prev else dummy, if (has_carry) o_prev else dummy,
@@ -26080,7 +26199,7 @@ pub const Transformer = struct {
             // [heads, chunk, total_kv] — 32 GiB at a 512k prompt. A layer that
             // carries sinks keeps it: the kernel has no sink column.
             const pd: ?mlx.mlx_array = if (is_prefill and fa.sinks.ctx == null)
-                try fusedSdpaPrefill(self.s, q_rope, kv_view.k, kv_view.v, attn_scale, 0)
+                try fusedSdpaPrefillKv(self.s, q_rope, &kv_view, attn_scale, 0)
             else
                 null;
             if (pd) |fused| {
@@ -52608,6 +52727,119 @@ test "fusedSdpaPrefill: only the instantiated (qk, value) width pairs are served
     const kv = try attn256RandBf16(rnd, &[_]c_int{ 1, 2, 32, 192 }, s);
     defer _ = mlx.mlx_array_free(kv);
     try std.testing.expect((try fusedSdpaPrefill(s, q, kv, kv, 1.0, 0)) == null);
+}
+
+/// A `DenseKVView` over a freshly quantized K/V pair, as `KVCache.denseView`
+/// hands one out: lazy dense arrays plus the packed triples they stand for.
+const TestQuantView = struct {
+    view: DenseKVView,
+    kq: kv_quant.QuantizedKV,
+    vq: kv_quant.QuantizedKV,
+
+    fn init(s: mlx.mlx_stream, k: mlx.mlx_array, v: mlx.mlx_array, bits: u8, group_size: u32) !TestQuantView {
+        var kq = try kv_quant.quantizeAffine(s, k, group_size, bits);
+        errdefer kq.deinit();
+        var vq = try kv_quant.quantizeAffine(s, v, group_size, bits);
+        errdefer vq.deinit();
+        const dk = try kv_quant.dequantizeAffine(s, kq.q, kq.scales, kq.biases, group_size, bits);
+        errdefer _ = mlx.mlx_array_free(dk);
+        const dv = try kv_quant.dequantizeAffine(s, vq.q, vq.scales, vq.biases, group_size, bits);
+        return .{
+            .kq = kq,
+            .vq = vq,
+            .view = .{
+                .k = dk,
+                .v = dv,
+                .owned = true,
+                .k_triple_q = kq.q,
+                .k_triple_scales = kq.scales,
+                .k_triple_biases = kq.biases,
+                .v_triple_q = vq.q,
+                .v_triple_scales = vq.scales,
+                .v_triple_biases = vq.biases,
+                .has_quant_triple = true,
+                .bits = bits,
+                .group_size = group_size,
+            },
+        };
+    }
+
+    fn deinit(self: *TestQuantView) void {
+        self.view.deinit();
+        self.kq.deinit();
+        self.vq.deinit();
+    }
+};
+
+test "fusedSdpaPrefillKv: a quantized cache is read per dispatch, never rebuilt whole" {
+    const s = mlx.gpuStream();
+    fused256_override = true;
+    defer fused256_override = null;
+    nax_sdpa_override = false;
+    defer nax_sdpa_override = null;
+    var prng = std.Random.DefaultPrng.init(0x19282);
+    const rnd = prng.random();
+
+    // mimo_v2's global-layer geometry, ragged on both axes.
+    const q = try attn256RandBf16(rnd, &[_]c_int{ 1, 16, 70, 192 }, s);
+    defer _ = mlx.mlx_array_free(q);
+    const k = try attn256RandBf16(rnd, &[_]c_int{ 1, 2, 1993, 192 }, s);
+    defer _ = mlx.mlx_array_free(k);
+    const v = try attn256RandBf16(rnd, &[_]c_int{ 1, 2, 1993, 128 }, s);
+    defer _ = mlx.mlx_array_free(v);
+    const scale: f32 = 1.0 / @sqrt(192.0);
+
+    var qv = try TestQuantView.init(s, k, v, 8, 64);
+    defer qv.deinit();
+
+    // Force several slices so the absolute-offset arithmetic is exercised.
+    fused256_budget_override = 16 * 70 * 256;
+    defer fused256_budget_override = null;
+    const sliced = (try fusedSdpaPrefillKv(s, q, &qv.view, scale, 0)) orelse return error.FusedDeclined;
+    defer _ = mlx.mlx_array_free(sliced);
+    try std.testing.expect(fused256_last_dispatch_count > 1);
+
+    // The dense arm over the SAME dequantized values, in one dispatch: the
+    // fp32 carry makes the sliced chain exact, so this is byte equality.
+    fused256_budget_override = 0;
+    const whole = (try fusedSdpaPrefill(s, q, qv.view.k, qv.view.v, scale, 0)) orelse return error.FusedDeclined;
+    defer _ = mlx.mlx_array_free(whole);
+    try std.testing.expectEqual(@as(u32, 1), fused256_last_dispatch_count);
+    try std.testing.expectEqual(@as(f32, 0), try attn256MaxDiff(sliced, whole, s));
+
+    // And no worse than the composed path against fp32 truth.
+    const truth = try attnPdTruthF32(q, qv.view.k, qv.view.v, scale, s);
+    defer _ = mlx.mlx_array_free(truth);
+    const ref = try attn256Reference(q, qv.view.k, qv.view.v, scale, "causal", .{ .ctx = null }, s);
+    defer _ = mlx.mlx_array_free(ref);
+    const scale_of = try attn256MaxAbs(truth, s);
+    try std.testing.expect(std.math.isFinite(scale_of) and scale_of > 0);
+    const sliced_err = try attn256MaxDiff(sliced, truth, s);
+    try std.testing.expect(std.math.isFinite(sliced_err));
+    try std.testing.expect(sliced_err <= (try attn256MaxDiff(ref, truth, s)) + scale_of * 0.00390625);
+}
+
+test "fusedSdpaPrefillKv: an unquantized cache view takes the dense arm unchanged" {
+    const s = mlx.gpuStream();
+    fused256_override = true;
+    defer fused256_override = null;
+    nax_sdpa_override = false;
+    defer nax_sdpa_override = null;
+    var prng = std.Random.DefaultPrng.init(0x19283);
+    const rnd = prng.random();
+    const q = try attn256RandBf16(rnd, &[_]c_int{ 1, 8, 64, 192 }, s);
+    defer _ = mlx.mlx_array_free(q);
+    const k = try attn256RandBf16(rnd, &[_]c_int{ 1, 2, 512, 192 }, s);
+    defer _ = mlx.mlx_array_free(k);
+    const v = try attn256RandBf16(rnd, &[_]c_int{ 1, 2, 512, 128 }, s);
+    defer _ = mlx.mlx_array_free(v);
+    const scale: f32 = 1.0 / @sqrt(192.0);
+    const off = DenseKVView{ .k = k, .v = v, .owned = false };
+    const via_view = (try fusedSdpaPrefillKv(s, q, &off, scale, 0)) orelse return error.FusedDeclined;
+    defer _ = mlx.mlx_array_free(via_view);
+    const direct = (try fusedSdpaPrefill(s, q, k, v, scale, 0)) orelse return error.FusedDeclined;
+    defer _ = mlx.mlx_array_free(direct);
+    try std.testing.expectEqual(@as(f32, 0), try attn256MaxDiff(via_view, direct, s));
 }
 
 /// A QSA-shaped bool mask [1,1,qL,kL]: causal, bottom-right aligned, with a
