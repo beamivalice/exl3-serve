@@ -24,7 +24,6 @@ const pld_index = @import("pld_index.zig");
 const prefix_cache_mod = @import("prefix_cache.zig");
 const tokenize_cache_mod = @import("tokenize_cache.zig");
 const scheduler_mod = @import("scheduler.zig");
-const ds4_ffi = if (@import("build_options").ios) @import("ds4_ffi_stub.zig") else @import("ds4_ffi.zig");
 const model_registry_mod = @import("model_registry.zig");
 const model_discovery = @import("model_discovery.zig");
 const model_settings = @import("model_settings.zig");
@@ -860,7 +859,7 @@ test "effectiveSsmCheckpointStride: disabled prefix cache disables checkpoint ca
 /// the same role for LoadParams.
 ///
 /// Serve paths whose decode never routes through the PLD-capable generator
-/// (media gen, ds4) take `.off`: the field is dead weight there,
+/// take `.off`: the field is dead weight there,
 /// and saying so once beats five hand-written `false`s that read like a
 /// decision but drift like a typo.
 pub const PldDefaults = struct {
@@ -964,23 +963,6 @@ pub fn embedOverflowMessage(buf: []u8, index: usize, tokens: usize, limit: u32) 
 // slice was also removed — `/v1/models` iterates `registry.entries` directly.
 
 
-/// Decode a slice of token IDs to bytes, routing through the ds4 engine when
-/// the loaded model is GGUF-backed (no MLX tokenizer in that case). Used by
-/// the request handlers' streaming + final-decode paths so a single call
-/// site supports both backends.
-fn decodeTokens(
-    allocator: std.mem.Allocator,
-    lm: *LoadedModel,
-    tok: *const Tokenizer,
-    ids: []const u32,
-    strip_leading_space: bool,
-) ![]u8 {
-    if (lm.ds4_engine) |engine| {
-        return chat_mod.decodeViaDs4(allocator, engine, ids);
-    }
-    return tok.decode(allocator, ids, strip_leading_space);
-}
-
 /// Assistant-history reasoning field on an incoming chat message:
 /// `reasoning_content` (our own SSE/vLLM field, what pi rounds-trips) with
 /// `reasoning` (the vLLM request spelling laguna's template reads first) as
@@ -1004,13 +986,12 @@ fn messageReasoningFromObj(obj: std.json.ObjectMap) ?[]const u8 {
 /// visible content.
 fn promptOpensThink(
     allocator: std.mem.Allocator,
-    lm: *LoadedModel,
     tok: *const Tokenizer,
     prompt_ids: []const u32,
 ) bool {
     if (prompt_ids.len == 0) return false;
     const n = @min(prompt_ids.len, 8);
-    const tail = decodeTokens(allocator, lm, tok, prompt_ids[prompt_ids.len - n ..], false) catch return false;
+    const tail = tok.decode(allocator, prompt_ids[prompt_ids.len - n ..], false) catch return false;
     defer allocator.free(tail);
     return chat_mod.promptTailOpensThink(tail);
 }
@@ -1038,13 +1019,13 @@ const THINK_BOUND_EARLY_STOP = "\n\nConsidering the limited time by the user, I 
 /// allocated; the caller frees it after generation.
 fn armThinkBound(allocator: std.mem.Allocator, lm: *LoadedModel, tok: *const Tokenizer, prompt_ids: []const u32, enable_thinking: bool, budget: i32) ?generate_mod.ThinkBound {
     if (budget < 0 or !enable_thinking or lm.transformer == null) return null;
-    const closer = promptOpenerMarkerCloser(allocator, lm, tok, prompt_ids) orelse
+    const closer = promptOpenerMarkerCloser(allocator, tok, prompt_ids) orelse
         atomicTokenId(allocator, tok, chat_mod.BARE_THINK_CLOSER) orelse {
         log.info("  reasoning budget {d}: think markers are not atomic tokens, delivery cap only\n", .{budget});
         return null;
     };
     const opener = atomicTokenId(allocator, tok, chat_mod.BARE_THINK_OPENER);
-    const opened = promptOpensThink(allocator, lm, tok, prompt_ids);
+    const opened = promptOpensThink(allocator, tok, prompt_ids);
     if (opener == null and !opened) return null;
 
     const stop_ids = tok.encode(allocator, THINK_BOUND_EARLY_STOP) catch return null;
@@ -1063,7 +1044,7 @@ fn promptOpensMuseHeader(allocator: std.mem.Allocator, lm: *LoadedModel, tok: *c
     const c = lm.config orelse return false;
     if (!std.mem.eql(u8, c.model_type, "muse_glimmer") or prompt_ids.len == 0) return false;
     const n = @min(prompt_ids.len, 8);
-    const tail = decodeTokens(allocator, lm, tok, prompt_ids[prompt_ids.len - n ..], false) catch return false;
+    const tail = tok.decode(allocator, prompt_ids[prompt_ids.len - n ..], false) catch return false;
     defer allocator.free(tail);
     return chat_mod.promptTailOpensMuseHeader(tail);
 }
@@ -1087,14 +1068,14 @@ fn templateThinkOpener(template: []const u8) ?[]const u8 {
 
 /// The aliased atomic closer for the last non-whitespace prompt token, when
 /// that token is a K2 think opener (`Tokenizer.markerCloserFor`).
-fn promptOpenerMarkerCloser(allocator: std.mem.Allocator, lm: *LoadedModel, tok: *const Tokenizer, prompt_ids: []const u32) ?u32 {
+fn promptOpenerMarkerCloser(allocator: std.mem.Allocator, tok: *const Tokenizer, prompt_ids: []const u32) ?u32 {
     if (tok.marker_closers == null) return null;
     var i = prompt_ids.len;
     while (i > 0 and prompt_ids.len - i < 8) {
         i -= 1;
         const id = prompt_ids[i];
         if (tok.markerCloserFor(id)) |closer| return closer;
-        const text = decodeTokens(allocator, lm, tok, prompt_ids[i..][0..1], false) catch return null;
+        const text = tok.decode(allocator, prompt_ids[i..][0..1], false) catch return null;
         defer allocator.free(text);
         if (std.mem.trim(u8, text, "\n\r\t ").len != 0) return null;
     }
@@ -1115,7 +1096,7 @@ fn resolveReasoningProtocol(
 ) bool {
     if (prompt_ids.len == 0 or lm.transformer == null) return false;
     const tail_n = @min(prompt_ids.len, 64);
-    const tail = decodeTokens(allocator, lm, tok, prompt_ids[prompt_ids.len - tail_n ..], false) catch return false;
+    const tail = tok.decode(allocator, prompt_ids[prompt_ids.len - tail_n ..], false) catch return false;
     defer allocator.free(tail);
     const trimmed = std.mem.trimEnd(u8, tail, "\n\r\t ");
 
@@ -1144,7 +1125,7 @@ fn resolveReasoningProtocol(
                 // opener token names the pack's own closer, and only that
                 // spelling is the boundary (a literal `</think>` in the
                 // reasoning is text).
-                if (promptOpenerMarkerCloser(allocator, lm, tok, prompt_ids)) |id| {
+                if (promptOpenerMarkerCloser(allocator, tok, prompt_ids)) |id| {
                     const text = tok.id_to_token.get(id) orelse return false;
                     if (!proto.setCloser(text)) return false;
                 }
@@ -4885,21 +4866,6 @@ fn prefillFfnWidth(config: *const model_mod.ModelConfig) u64 {
     return if (w > 0) w else config.intermediate_size;
 }
 
-/// Whether the MLX-prefill attention-memory preflight applies to a request.
-/// The guard (`checkAttentionMemory`/`prefillMemoryNeeded`) models the MLX
-/// transformer's per-token working set. The embedded ds4 (DeepSeek-V4-Flash)
-/// engine NEVER takes that path — it owns its KV *outside* MLX — so the
-/// estimate is pure fiction for it. Its stub `ModelConfig`
-/// still advertises head/layer counts (ds4: 56 heads, 61 layers, hidden 7168),
-/// so without this early-out the guard projected ~25 GB for an 8.6K-token ds4
-/// prompt and 400-rejected it — a prompt the SAME server had just served on the
-/// MLX qwen35 engine one model-switch earlier (live 2026-07-15, pi + ds4). Skip
-/// the memory guard whenever an embedded engine will serve; the context-length
-/// guard still bounds the prompt against ds4's own session ctx.
-fn mlxMemoryGuardApplies(uses_ds4: bool) bool {
-    return !uses_ds4;
-}
-
 /// Estimate peak GPU memory for prefill and reject if it would exceed the Metal
 /// working-set ceiling. Exceeding it throws an uncatchable C++ exception on a
 /// Metal completion-handler thread and kills the process, so PREVENTION is the
@@ -4907,9 +4873,6 @@ fn mlxMemoryGuardApplies(uses_ds4: bool) bool {
 /// (prefillMemoryNeeded above; chunk choice from generate.effectivePrefillChunk).
 /// `kv_override` is the per-request `kv_quant` body field where the surface
 /// parses one (chat/messages/responses); null falls back to the process default.
-/// `lm` is the resolved model: an embedded-engine model skips this guard
-/// entirely (see `mlxMemoryGuardApplies`) — this is the single chokepoint, so
-/// every current and future call site is covered without per-site gating.
 /// Per-token bytes of the arch's out-of-cache request state as billed: the QSA indexer history
 /// at the copies a live slot holds (one by default; two with `MLX_SERVE_QSA_HISTORY_SHARE=0`
 /// or `MLX_SERVE_KV_RESERVE=0`), plus the f32 block-score bank the two-copy slack used to
@@ -5678,9 +5641,8 @@ pub fn logPrefillRefusal(config: *const model_mod.ModelConfig, prompt_len: usize
     });
 }
 
-fn checkAttentionMemory(allocator: std.mem.Allocator, stream: *Conn, prompt_ids: []const u32, max_tokens: u32, config: *const model_mod.ModelConfig, is_anthropic: bool, kv_override: ?transformer_mod.KVQuantConfig, lm: *const LoadedModel, unchunked_prefill: bool, enable_mtp: bool) !bool {
+fn checkAttentionMemory(allocator: std.mem.Allocator, stream: *Conn, prompt_ids: []const u32, max_tokens: u32, config: *const model_mod.ModelConfig, is_anthropic: bool, kv_override: ?transformer_mod.KVQuantConfig, unchunked_prefill: bool, enable_mtp: bool) !bool {
     const prompt_len: usize = prompt_ids.len;
-    if (!mlxMemoryGuardApplies(lm.ds4_engine != null)) return true;
     if (config.num_attention_heads == 0) return true; // unknown architecture, skip check
     // The connection thread has no slot and no cache: it bills cold and defers a warm prompt.
     const bill = prefillAdmissionBill(config, prompt_len, max_tokens, kv_override, unchunked_prefill, prompt_ids, .{ .mtp_on = enable_mtp });
@@ -5796,16 +5758,9 @@ const ReadyCaps = struct {
     has_embedding: bool = false,
 };
 
-/// Chat capability for a READY entry. Template presence is NOT the gate for
-/// embedded-engine (ds4) models: a GGUF without a chat_template in its
-/// header still serves chat via fallback formatting, and gating on the
-/// template made a loaded DSV4-Flash advertise capabilities:[] — LAN clients
-/// hid the peer's model as "no chat models" while chatting on it (live
-/// 2026-07-21). The unloaded GGUF stub path already advertises the chat set
-/// unconditionally; loaded must never advertise less than its stub.
-fn readyHasChat(is_encoder_only: bool, chat_template_len: usize, has_embedded_lm: bool) bool {
-    if (is_encoder_only) return false;
-    return chat_template_len > 0 or has_embedded_lm;
+/// Chat capability for a READY entry: a decoder with a chat template.
+fn readyHasChat(is_encoder_only: bool, chat_template_len: usize) bool {
+    return !is_encoder_only and chat_template_len > 0;
 }
 
 /// `capabilities` JSON array for a ready model. Caller deinits.
@@ -5842,7 +5797,7 @@ fn readyCapsJson(allocator: std.mem.Allocator, c: ReadyCaps) !std.ArrayList(u8) 
 /// decision is hermetically testable.
 const TextGenTarget = struct {
     is_encoder_only: bool = false,
-    /// A text-capable LM is resident (transformer / ds4 engine) —
+    /// A text-capable LM is resident (transformer) —
     /// or the entry isn't loaded yet, in which case stubs default to
     /// "assume text until the arch hint or a load says otherwise".
     has_text_lm: bool = true,
@@ -5886,8 +5841,7 @@ fn textGenTargetOf(lm: *LoadedModel) TextGenTarget {
     const cpu_state_stable = lm.state != .loading;
     return .{
         .is_encoder_only = cpu_state_stable and lm.config != null and lm.config.?.is_encoder_only,
-        .has_text_lm = lm.state != .ready or lm.transformer != null or
-            lm.ds4_engine != null,
+        .has_text_lm = lm.state != .ready or lm.transformer != null,
     };
 }
 
@@ -5917,13 +5871,9 @@ fn isTextGenRoute(method: []const u8, path: []const u8) bool {
     return std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/v1/responses");
 }
 
-/// Which backend serves this entry — surfaced as `meta.engine` in /v1/models
-/// so a client never has to INFER it from `architecture`: a NATIVE
-/// deepseek_v4 safetensors dir and a DeepSeek GGUF on the embedded ds4 engine
-/// report the SAME model_type. "gguf" = an unloaded GGUF stub whose engine is
-/// only known once the header is read at load time.
-fn modelEngineName(has_ds4: bool, path: []const u8, arch_hint: []const u8) []const u8 {
-    if (has_ds4) return "ds4";
+/// `meta.engine` in /v1/models: "gguf" for a GGUF stub (which no engine in
+/// this build loads), "mlx" for everything else.
+fn modelEngineName(path: []const u8, arch_hint: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".gguf") or std.mem.eql(u8, arch_hint, "gguf")) return "gguf";
     return "mlx";
 }
@@ -5948,11 +5898,7 @@ fn renderModelEntry(
             try std.fmt.allocPrint(allocator, "null", .{});
         defer allocator.free(ctx_str);
 
-        const has_chat = readyHasChat(
-            config.is_encoder_only,
-            chat_config.chat_template.len,
-            entry.ds4_engine != null,
-        );
+        const has_chat = readyHasChat(config.is_encoder_only, chat_config.chat_template.len);
         const has_vision = entry.vision_encoder != null;
         const has_audio = if (entry.vision_encoder) |ve| ve.supportsAudio() else false;
         var caps = try readyCapsJson(allocator, .{
@@ -6032,7 +5978,7 @@ fn renderModelEntry(
             caps.items,
             mods.items,
             config.model_type,
-            modelEngineName(entry.ds4_engine != null, entry.path, entry.arch_hint),
+            modelEngineName(entry.path, entry.arch_hint),
             config.vocab_size,
             config.hidden_size,
             config.num_hidden_layers,
@@ -6117,14 +6063,8 @@ fn renderModelEntry(
     // the load path uses, so stub and loaded capability can't disagree.
     const stub_has_embedding = (sm.found and sm.has_embedding) or
         model_mod.poolingFromDirName(std.fs.path.basename(entry.path), entry.arch_hint) != null;
-    // GGUF discovery stub (issue #59): no config.json to read StubMeta from,
-    // but the embedded ds4 engine always serves chat (the GGUF's own
-    // template is adopted at load), so advertise the chat capability set the
-    // ready path would.
-    const is_gguf_stub = std.mem.eql(u8, entry.arch_hint, "gguf");
     const caps_part: []const u8 = blk: {
         if (is_encoder_stub) break :blk try allocator.dupe(u8, ",\"capabilities\":[\"embeddings\"]");
-        if (is_gguf_stub) break :blk try allocator.dupe(u8, ",\"capabilities\":[\"chat\",\"tool_use\",\"streaming\",\"json_schema\"]");
         if (!sm.found or !(sm.has_chat or sm.has_vision or stub_has_embedding)) break :blk try allocator.dupe(u8, "");
         var b = std.ArrayList(u8).empty;
         errdefer b.deinit(allocator);
@@ -6158,7 +6098,7 @@ fn renderModelEntry(
         ",\"input_modalities\":[\"text\",\"image\",\"video\"]"
     else if (sm.found and sm.has_vision)
         ",\"input_modalities\":[\"text\",\"image\"]"
-    else if ((sm.found and sm.has_chat) or is_gguf_stub)
+    else if (sm.found and sm.has_chat)
         ",\"input_modalities\":[\"text\"]"
     else
         "";
@@ -6170,10 +6110,9 @@ fn renderModelEntry(
     } else &[_]u8{};
     defer if (arch_part.len > 0) allocator.free(arch_part);
 
-    // Unloaded entries have no engine attached yet — "gguf" (undetermined
-    // ds4) for GGUF paths/stubs, "mlx" for everything else.
+    // "gguf" for GGUF paths/stubs, "mlx" for everything else.
     const engine_part = try std.fmt.allocPrint(allocator, "\"engine\":\"{s}\",", .{
-        modelEngineName(false, entry.path, entry.arch_hint),
+        modelEngineName(entry.path, entry.arch_hint),
     });
     defer allocator.free(engine_part);
 
@@ -6561,7 +6500,6 @@ fn renderPropsBody(
 /// The model-level half of `Scheduler.batchVerdict`: does this loaded model
 /// batch decode at all? Per-slot arms (spec, grammar, logprobs) come later.
 fn batchVerdictFor(entry: *const LoadedModel) scheduler_mod.BatchVerdict {
-    if (entry.ds4_engine != null) return .embedded_engine;
     const cfg = entry.config orelse return .arch;
     return if (scheduler_mod.configBatchesDecode(cfg)) .ok else .arch;
 }
@@ -6607,28 +6545,8 @@ const PropsSettings = struct {
     prefix_cache_disk_bytes: u64,
 };
 
-const PropsEngine = enum { mlx, ds4 };
-
-/// ds4 bypasses generate.zig: MLX decode levers, PLD and the MLX drafters never run there.
-fn embeddedEngineSettings(st: PropsSettings, engine: PropsEngine, engine_mtp: bool) PropsSettings {
-    if (engine == .mlx) return st;
-    var out = st;
-    out.engine = @tagName(engine);
-    if (engine == .ds4) out.kv_quant = "off";
-    out.decode_attn_quant = false;
-    out.prefill_chunk = 0;
-    out.mtp_loaded = engine_mtp;
-    out.mtp_default_on = engine_mtp;
-    out.mtp_adaptive = false;
-    out.drafter = "none";
-    out.pld = PldDefaults.off;
-    return out;
-}
-
 fn propsSettingsFor(lm: *LoadedModel) PropsSettings {
-    const engine: PropsEngine = if (lm.ds4_engine != null) .ds4 else .mlx;
-    const engine_mtp = if (lm.ds4_engine) |e| e.mtpDraftTokens() > 1 else false;
-    return embeddedEngineSettings(mlxPropsSettings(lm), engine, engine_mtp);
+    return mlxPropsSettings(lm);
 }
 
 fn mlxPropsSettings(lm: *LoadedModel) PropsSettings {
@@ -6720,33 +6638,14 @@ fn handleProps(allocator: std.mem.Allocator, stream: *Conn, lm: *LoadedModel) !v
 
     const safe_ctx = computeMaxSafeContext(config);
 
-    // Query memory usage. The MLX path uses mlx's allocator counters; the
-    // ds4 path bypasses MLX entirely (no allocator hook to query), so we
-    // fall back to the GGUF on-disk size + the ds4 context-memory estimate.
-    // Without this branch the Swift app's "GPU Memory" progress bar shows a
-    // 0/0 indeterminate state for the entire DSV4 session.
+    // Query memory usage from mlx's allocator counters, plus its reclaimable
+    // buffer pool.
     var active_mem: usize = 0;
     var peak_mem: usize = 0;
-    // MLX's reclaimable buffer pool. Always read from MLX — the embedded
-    // engine doesn't feed it, so it correctly reads ~0 on a ds4 session
-    // rather than needing a per-engine branch.
     var cache_mem: usize = 0;
     _ = mlx.mlx_get_cache_memory(&cache_mem);
-    if (lm.ds4_engine != null) {
-        // Static estimate: GGUF mmap size (set on the entry at registry-stub
-        // time in `runDs4Serve`) plus ds4's reported KV/scratch for the
-        // current ctx. Falls back to ctx-only if bytes_on_disk wasn't
-        // populated (shouldn't happen in practice, defensive).
-        const gguf_bytes: u64 = lm.bytes_on_disk orelse 0;
-        const ctx_for_estimate: c_int = @intCast(if (ctx_len > 0) ctx_len else config.max_position_embeddings);
-        const ctx_mem = ds4_ffi.ds4_context_memory_estimate(.metal, ctx_for_estimate);
-        const total: u64 = gguf_bytes + ctx_mem.total_bytes;
-        active_mem = @intCast(total);
-        peak_mem = active_mem;
-    } else {
-        _ = mlx.mlx_get_active_memory(&active_mem);
-        _ = mlx.mlx_get_peak_memory(&peak_mem);
-    }
+    _ = mlx.mlx_get_active_memory(&active_mem);
+    _ = mlx.mlx_get_peak_memory(&peak_mem);
 
     // Free system RAM — same calc as the model-load pre-flight, so the app's
     // "Free RAM" line stays in lockstep with what gates a load.
@@ -6853,10 +6752,10 @@ fn handleEmbeddings(
     body: []const u8,
     lm: *LoadedModel,
 ) !void {
-    // Engine-backed (GGUF/ds4) models have no MLX transformer and both embed
-    // paths forward through it: refuse by name before anything is queued.
+    // Both embed paths forward through the transformer: refuse by name when
+    // none is resident, before anything is queued.
     const xfm = lm.transformer orelse {
-        try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", "This model runs on an embedded engine (GGUF); embeddings are not supported. Load an MLX embedding model instead.", null);
+        try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", "This model has no language model resident; embeddings are not supported.", null);
         return;
     };
     const tok = lm.tokenizer.?;
@@ -7083,19 +6982,6 @@ fn truncateEmbeddingDims(embedding: []f32, dims: usize) []f32 {
     return out;
 }
 
-/// Text -> ids through the model's own vocabulary: ds4's GGUF vocab, else the
-/// loaded BPE tokenizer (a ds4 model's `tok` is an empty stub).
-fn encodeText(allocator: std.mem.Allocator, lm: *const LoadedModel, tok: *const Tokenizer, text: []const u8) ![]u32 {
-    const i32_ids = if (lm.ds4_engine) |engine|
-        try engine.tokenizeText(allocator, text)
-    else
-        return tok.encode(allocator, text);
-    defer allocator.free(i32_ids);
-    const out = try allocator.alloc(u32, i32_ids.len);
-    for (i32_ids, out) |t, *o| o.* = @intCast(t);
-    return out;
-}
-
 fn handleTokenize(
     allocator: std.mem.Allocator,
     stream: *Conn,
@@ -7120,7 +7006,7 @@ fn handleTokenize(
         return;
     }
 
-    const ids = try encodeText(allocator, lm, tok, content.?);
+    const ids = try tok.encode(allocator, content.?);
     defer allocator.free(ids);
 
     var result = std.ArrayList(u8).empty;
@@ -7171,7 +7057,7 @@ fn handleDetokenize(
         if (item == .integer) try ids.append(allocator, @intCast(item.integer));
     }
 
-    const text = try decodeTokens(allocator, lm, tok, ids.items, false);
+    const text = try tok.decode(allocator, ids.items, false);
     defer allocator.free(text);
 
     const result = try detokenizeResponseJson(allocator, text);
@@ -7350,31 +7236,6 @@ fn continueFinalMessageRequested(root: std.json.ObjectMap, messages: []const cha
     return chat_mod.continuationRequested(messages);
 }
 
-/// Why this model cannot serve a continuation, or null when it can.
-///
-/// ds4 renders through the embedded engine's OWN template, which lives inside
-/// the engine and is unreachable from this process — there is nowhere to append
-/// the partial reply, so a continuation there would silently render it as
-/// history and open a second assistant turn.
-///
-/// ONE predicate, consulted by BOTH surfaces before they render, so a model
-/// that cannot serve one is never handed to `cachedFormatChat`'s backstop —
-/// which returns an error no handler can turn into a response, and therefore
-/// hangs up the socket with no status line at all. What the two surfaces do
-/// with the answer differs, and must: the OpenAI surface was ASKED and gets a
-/// named 400, while `/v1/messages` infers the request from the message list and
-/// falls back to an ordinary turn — refusing a request the client never made
-/// would break every Anthropic SDK caller on an embedded-engine model.
-fn continuationRejectReason(embedded_engine: bool) ?[]const u8 {
-    if (embedded_engine) {
-        return "continue_final_message is not supported by this model: its chat " ++
-            "template is rendered inside the embedded GGUF engine, so there is " ++
-            "nowhere to append the partial reply. Send the partial text as the " ++
-            "end of your prompt instead.";
-    }
-    return null;
-}
-
 const JoinedText = struct { text: []const u8, owned: bool };
 
 /// Collect every `{"type":"text"}` part of a content array into one string,
@@ -7473,10 +7334,9 @@ fn handleChatCompletions(
     body: []const u8,
     lm: *LoadedModel,
 ) !void {
-    // NOTE: no `lm.transformer.?` here — this handler also serves engine-backed
-    // models (GGUF/ds4) whose `transformer` is null. The only MLX-specific
-    // gate below reads `config.has_hybrid_layers` (valid for every model incl. the
-    // GGUF stub), so the transformer is never needed at this level.
+    // NOTE: no `lm.transformer.?` here — the only MLX-specific gate below
+    // reads `config.has_hybrid_layers`, so the transformer is never needed at
+    // this level.
     const tok = lm.tokenizer.?;
     const chat_config = lm.chat_config.?;
     const config = lm.config.?;
@@ -8023,28 +7883,17 @@ fn handleChatCompletions(
     }
     const tools_len = if (tools_json) |tj| tj.len else 0;
 
-    // Format chat template. ds4-backed models render through the engine's
-    // built-in template/tokenizer; the MLX path renders via Jinja and
-    // tokenizes through the loaded BPE tokenizer. Both paths now thread
-    // `tools_json` + `tool_choice_instruction` through — the ds4 helper
-    // synthesizes a system-message fallback when the GGUF chat template
-    // doesn't model `tools` natively (which is the DSV4 case).
+    // Format chat template: Jinja render + BPE tokenize, threading
+    // `tools_json` + `tool_choice_instruction` through.
     //
     // Phase 4 instrumentation + Iteration 2 cache: time the render+tokenize
-    // step. The cache is engine-agnostic — same hit even when the
-    // underlying call is ds4 / MLX formatChat.
+    // step.
     // Continuation is EXPLICIT on this surface (`continue_final_message`, the
     // spelling vLLM uses). It cannot be implied by a trailing assistant
     // message the way /v1/messages implies it: agent frameworks legitimately
     // POST assistant-last history here and expect a fresh turn, and turning
     // that into a prefill would change what every one of them gets back.
-    // Asked for by name, so a model that cannot serve it is refused by name.
     const continue_final = continueFinalMessageRequested(root, messages.items);
-    if (continue_final) if (continuationRejectReason(lm.ds4_engine != null)) |reason| {
-        log.warn("  -> 400 (continuation unsupported by the embedded engine)\n", .{});
-        try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", reason, 400);
-        return;
-    };
     const active_media = activeTurnMediaMessage(messages.items, continue_final);
     var tokenize_sw = Stopwatch.init(stream.io);
     var prompt_ids_raw = try cachedFormatChat(allocator, stream.io, lm, tok, chat_config, messages.items, tools_json, tool_choice_instruction, enable_thinking, if (effort_cfg) |e| e.effort else null, continue_final);
@@ -8136,7 +7985,7 @@ fn handleChatCompletions(
     const effective_max_tokens = clampMaxTokens(max_tokens, prompt_ids.len, effective_ctx);
 
     // Check if attention computation would exceed GPU memory.
-    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, false, kv_quant_override, lm, generate_mod.visionPrefillUnchunked(local_ve != null), enable_mtp)) return;
+    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, false, kv_quant_override, generate_mod.visionPrefillUnchunked(local_ve != null), enable_mtp)) return;
 
     log.info("  prompt={d} tokens, max_gen={d}, ctx={d}\n", .{ prompt_ids.len, effective_max_tokens, effective_ctx });
 
@@ -8372,8 +8221,7 @@ fn handleCompletions(
     // Spec-decode flags (mirror chat-completions). FIM / code-completion
     // prompts are echo-heavy, so the old hardcoded enable_pld/enable_drafter
     // = false at submit left real speedups unused on this endpoint
-    // (tests/test_completions_spec.sh). The embedded ds4 engine ignores
-    // these flags at dispatch.
+    // (tests/test_completions_spec.sh).
     const pld_explicit_in_json: bool = root.get("enable_pld") != null;
     var enable_pld: bool = if (root.get("enable_pld")) |v|
         (v == .bool and v.bool)
@@ -8404,10 +8252,8 @@ fn handleCompletions(
     log.info("POST /v1/completions (max_tokens={s}, temp={d:.2}, top_p={d:.2}, top_k={d}, stream={}) \n", .{ describeMaxTokens(&max_tokens_desc_buf, max_tokens, max_tokens_origin), temperature, top_p, top_k, is_stream });
     log.info("  > \"{s}{s}\"\n", .{ prompt_text.?[0..preview_len], if (prompt_text.?.len > 80) "..." else "" });
 
-    // Tokenize prompt directly (no chat template). ds4-backed models
-    // tokenize through the engine's GGUF vocab; MLX models go through
-    // the loaded BPE tokenizer.
-    const prompt_ids = try encodeText(allocator, lm, tok, prompt_text.?);
+    // Tokenize prompt directly (no chat template).
+    const prompt_ids = try tok.encode(allocator, prompt_text.?);
     defer allocator.free(prompt_ids);
     enable_mtp = admitMtpForCtx(enable_mtp, prompt_ids.len);
 
@@ -8425,7 +8271,7 @@ fn handleCompletions(
     const effective_max_tokens = clampMaxTokens(max_tokens, prompt_ids.len, effective_ctx);
 
     // Check if attention computation would exceed GPU memory.
-    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, false, null, lm, false, enable_mtp)) return;
+    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, false, null, false, enable_mtp)) return;
 
     // Adaptive spec-decode gate (mirrors chat-completions): novel prompts
     // (low 3-gram repetition) skip PLD/drafter unless explicitly requested.
@@ -8514,7 +8360,7 @@ fn handleNonStreamingCompletion(
     // applies — FIM clients rely on exact indentation, and the streaming
     // handler never stripped it, so this also restores stream/non-stream
     // parity (tests/test_completions_spec.sh).
-    const raw_text = try decodeTokens(allocator, lm, tok, result.token_ids, false);
+    const raw_text = try tok.decode(allocator, result.token_ids, false);
     defer allocator.free(raw_text);
 
     var final_text: []const u8 = raw_text;
@@ -8682,7 +8528,7 @@ fn handleStreamingCompletion(
         }
         try lps.note(token_id);
         const strip = tok.tok_type == .sentencepiece_bpe;
-        const raw_decoded_c = try decodeTokens(allocator, lm, tok, &[_]u32{token_id}, strip and false);
+        const raw_decoded_c = try tok.decode(allocator, &[_]u32{token_id}, strip and false);
 
         // Handle incomplete UTF-8 sequences across token boundaries
         var token_text = blk: {
@@ -8921,7 +8767,7 @@ fn nonStreamingViaScheduler(
     // Only reachable non-streaming: a delta cannot be retracted, so a
     // streaming client has already received the tail.
     const emit_ids = loopTrimmedIds(output_ids.items, slot.loop_trim_start);
-    const text = try decodeTokens(allocator, lm, tok, emit_ids, strip_leading);
+    const text = try tok.decode(allocator, emit_ids, strip_leading);
     const token_ids = try output_ids.toOwnedSlice(allocator);
 
     // Convert the generator's (token index, byte offset) payload boundary
@@ -8932,7 +8778,7 @@ fn nonStreamingViaScheduler(
         var pb: ?usize = ps.byte_offset;
         if (ps.token_index > 0) {
             if (ps.token_index <= emit_ids.len) {
-                const prefix = decodeTokens(allocator, lm, tok, emit_ids[0..ps.token_index], strip_leading) catch null;
+                const prefix = tok.decode(allocator, emit_ids[0..ps.token_index], strip_leading) catch null;
                 if (prefix) |p| {
                     pb = p.len + ps.byte_offset;
                     allocator.free(p);
@@ -9150,7 +8996,7 @@ fn handleNonStreamingGeneration(
     // never paid-for-and-dropped — thinking-off is enforced on the PROMPT side
     // (chat.noThinkTailSuffix commits the channel), so any reasoning that
     // still shows up here is real work the client gets to see.
-    const opens_think = promptOpensThink(allocator, lm, tok, prompt_ids);
+    const opens_think = promptOpensThink(allocator, tok, prompt_ids);
 
     // Apply reasoning budget: truncate reasoning by token count
     // For non-streaming, we truncate after generation since we can't interrupt mid-generation
@@ -9318,7 +9164,7 @@ fn handleNonStreamingGeneration(
             reasoning_allocated = true;
             // usage.completion_tokens_details.reasoning_tokens (OpenAI/LM Studio
             // parity) so clients can budget visible content separately.
-            if (encodeText(allocator, lm, tok, reasoning)) |rids| {
+            if (tok.encode(allocator, reasoning)) |rids| {
                 defer allocator.free(rids);
                 usage_details_json = try std.fmt.allocPrint(allocator, ",\"completion_tokens_details\":{{\"reasoning_tokens\":{d}}}", .{rids.len});
                 usage_details_allocated = true;
@@ -9774,7 +9620,7 @@ fn handleStreamingGeneration(
     // thinking off its reasoning is tag-free prose the gate flushed as the
     // visible answer (live 2026-08-04). Families that gate the opener on
     // enable_thinking render the closed signature and stay false here.
-    const prompt_opened_think = promptOpensThink(allocator, lm, tok, prompt_ids);
+    const prompt_opened_think = promptOpensThink(allocator, tok, prompt_ids);
     const opens_think = prompt_opened_think;
 
     // Pick the speculative-decoding mode (regular / PLD / drafter). The
@@ -9957,7 +9803,7 @@ fn handleStreamingGeneration(
         }
         try lps.note(token_id);
         const strip = tok.tok_type == .sentencepiece_bpe;
-        const raw_decoded = try decodeTokens(allocator, lm, tok, &[_]u32{token_id}, strip and false);
+        const raw_decoded = try tok.decode(allocator, &[_]u32{token_id}, strip and false);
         if (delivery) |*d| d.noteToken(raw_decoded.len, slot_handle.?.constraintPayloadStart());
 
         // Prepend any carried-over bytes from a previous incomplete UTF-8 sequence,
@@ -11428,56 +11274,6 @@ test "each connection thread handle is detached after spawn" {
     }
 }
 
-test "continuationRejectReason names the embedded engine, and only it" {
-    // An MLX checkpoint renders through our own Jinja, so the prefill has
-    // somewhere to go.
-    try std.testing.expect(continuationRejectReason(false) == null);
-    // ds4 does not, and the refusal has to SAY so — the reason is what a
-    // client reads instead of the answer it asked for.
-    const reason = continuationRejectReason(true) orelse return error.NoReason;
-    try std.testing.expect(std.mem.indexOf(u8, reason, "continue_final_message") != null);
-    try std.testing.expect(std.mem.indexOf(u8, reason, "embedded GGUF engine") != null);
-}
-
-test "every continuation surface consults continuationRejectReason before rendering" {
-    // `cachedFormatChat`'s guard returns an error, and an error at that depth
-    // reaches no handler that can turn it into a response: it unwinds to
-    // `handleConnectionThread`, which logs it and closes the socket. The client
-    // gets a dropped connection with no status line — and on `/v1/messages`,
-    // where a continuation is INFERRED from the message list, that happened
-    // with no client opt-in at all on every ds4 model.
-    //
-    // So the predicate is the gate and the error is the backstop: each surface
-    // that computes a `continue_final` must consult it in the same statement or
-    // just after, and this scan is what keeps a third surface from wiring the
-    // flag straight into the render.
-    // Needles are split so this test's own source cannot match them — it sits
-    // in the file it greps, and an unsplit literal is found here first.
-    const src = @embedFile("server.zig");
-    const predicate = "continuationRejectReason" ++ "(";
-
-    // Both computations of `continue_final`, each followed by the gate before
-    // the next one starts.
-    const binding = "const continue_final " ++ "= ";
-    const explicit = binding ++ "continueFinalMessageRequested" ++ "(";
-    const implicit = binding ++ "chat_mod.continuationRequested" ++ "(";
-    const explicit_at = std.mem.indexOf(u8, src, explicit) orelse return error.ExplicitSurfaceMissing;
-    const implicit_at = std.mem.indexOf(u8, src, implicit) orelse return error.ImplicitSurfaceMissing;
-    // Within the ~40 lines after each, the predicate must appear.
-    const window = 1600;
-    for ([_]usize{ explicit_at, implicit_at }) |at| {
-        const end = @min(src.len, at + window);
-        if (std.mem.indexOf(u8, src[at..end], predicate) == null) return error.SurfaceSkipsThePredicate;
-    }
-
-    // Exactly two computations — a third `continue_final` binding is a third
-    // surface, and it has to come with its own gate rather than inherit one.
-    var count: usize = 0;
-    var i: usize = 0;
-    while (std.mem.indexOfPos(u8, src, i, binding)) |at| : (i = at + binding.len) count += 1;
-    try std.testing.expectEqual(@as(usize, 2), count);
-}
-
 test "every input_modalities gate that advertises image beside a video-capable model also advertises video" {
     // Video piggybacks the SAME "does this model take image input?" signal —
     // Qwen3-VL-family checkpoints declare `video_token_id` alongside
@@ -11781,7 +11577,7 @@ pub fn loadRefusalFor(err: anyerror) ?LoadRefusal {
         error.NotEnoughMemory => .{ .type = "out_of_memory", .message = not_enough_memory_message },
         error.InsufficientMemory => .{ .type = "out_of_memory", .message = insufficient_free_memory_message },
         error.ArchitectureUnsupported => .{ .type = "architecture_unsupported", .message = "This checkpoint's model_type is not served by this build, which loads only qwen4_exp (Qwen3.8-Flash-Next) and mimo_v2 (MiMo-V2.6-Flash)." },
-        error.GgufEngineUnsupported => .{ .type = "gguf_engine_unsupported", .message = "This .gguf is not a ds4-loadable checkpoint, and the generic llama.cpp engine is not part of this build. Serve an MLX safetensors checkpoint, or a DeepSeek-V4/V4.1/Qwen3.8-Flash-Next/GLM-5 GGUF from the ds4 converters." },
+        error.GgufEngineUnsupported => .{ .type = "gguf_engine_unsupported", .message = "GGUF checkpoints are not served by this build, which has no GGUF engine. Serve an MLX safetensors checkpoint (qwen4_exp or mimo_v2)." },
         error.ExpertCacheDoesNotFit => .{ .type = "expert_cache_does_not_fit", .message = "The requested expert cache, full-union workspace, bounce buffers, resident trunk, and serving state do not fit under the GPU memory ceiling. Lower --expert-cache-gb or free memory." },
         error.ExpertStreamingMtpUnsupported => .{ .type = "expert_streaming_mtp_unsupported", .message = expert_stream_mod.MTP_UNSUPPORTED },
         error.ExpertStreamingRequired => .{ .type = "expert_streaming_required", .message = "This checkpoint streams its experts from SSD and needs a resident budget: set this model's \"ssd_budget_gb\" in model-settings.json, or launch with --ssd-budget-gb <n> (or --expert-cache-gb <n>)." },
@@ -11904,21 +11700,7 @@ fn cachedFormatChat(
     if (cache_ptr) |cache| if (key_opt) |key| {
         if (try cache.get(io, key, allocator)) |cached| return cached;
     };
-    // ds4 renders through the GGUF engine's own template, which never reads
-    // the effort string — only the Jinja paths thread it.
-    // Backstop only. Both surfaces consult `continuationRejectReason` before
-    // they get here, because an error returned from this depth reaches no
-    // handler that can answer it — it unwinds to `handleConnectionThread`,
-    // which logs and closes the socket, so the client sees a dropped
-    // connection instead of a status line. A NEW surface that wires
-    // continuation without asking first gets that ugly failure rather than a
-    // silently doubled assistant turn; the scan below is what stops it
-    // shipping.
-    if (continue_final and lm.ds4_engine != null) return error.ContinuationUnsupported;
-    const ids = if (lm.ds4_engine) |engine|
-        try chat_mod.encodeChatViaDs4(allocator, engine, messages, tools_json, tool_choice_instruction, enable_thinking)
-    else
-        try chat_mod.formatChat(allocator, tok, messages, chat_config, tools_json, tool_choice_instruction, enable_thinking, reasoning_effort, continue_final);
+    const ids = try chat_mod.formatChat(allocator, tok, messages, chat_config, tools_json, tool_choice_instruction, enable_thinking, reasoning_effort, continue_final);
     if (cache_ptr) |cache| if (key_opt) |key| {
         // Insert is best-effort; an OOM in the cache shouldn't fail the
         // request — the user already has their tokenized prompt.
@@ -14166,8 +13948,7 @@ fn handleAnthropicMessages(
     body: []const u8,
     lm: *LoadedModel,
 ) !void {
-    // No `lm.transformer.?` — engine-backed (GGUF/ds4) models have a null
-    // transformer; the only gate below uses `config.has_hybrid_layers`.
+    // No `lm.transformer.?` needed here.
     const tok = lm.tokenizer.?;
     const chat_config = lm.chat_config.?;
     const config = lm.config.?;
@@ -14254,8 +14035,7 @@ fn handleAnthropicMessages(
     // Anthropic carries tool results inside user content blocks, but the same
     // active-turn rule applies: inspect those blocks without decoding their
     // media, then materialize only the selected raw message below.
-    const wire_continue_final = wireContinuationRequested(messages_val.array.items, .anthropic) and
-        continuationRejectReason(lm.ds4_engine != null) == null;
+    const wire_continue_final = wireContinuationRequested(messages_val.array.items, .anthropic);
     const active_wire_media = activeWireMediaIndex(messages_val.array.items, wire_continue_final, .anthropic);
 
     // Convert Anthropic messages to internal format
@@ -14648,8 +14428,7 @@ fn handleAnthropicMessages(
     // ordinary turn rather than a 400: the client never asked for a
     // continuation, so refusing its request would take away an answer this
     // endpoint has always given.
-    const continue_final = chat_mod.continuationRequested(messages.items) and
-        continuationRejectReason(lm.ds4_engine != null) == null;
+    const continue_final = chat_mod.continuationRequested(messages.items);
     const active_media = activeTurnMediaMessage(messages.items, continue_final);
     var tokenize_sw = Stopwatch.init(stream.io);
     // The `thinking` budget object carries no effort string, but
@@ -14765,7 +14544,7 @@ fn handleAnthropicMessages(
     const effective_max_tokens = clampMaxTokens(max_tokens, prompt_ids.len, effective_ctx);
 
     // Check if attention computation would exceed GPU memory.
-    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, true, kv_quant_override, lm, generate_mod.visionPrefillUnchunked(local_ve != null), enable_mtp)) return;
+    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, true, kv_quant_override, generate_mod.visionPrefillUnchunked(local_ve != null), enable_mtp)) return;
 
     log.info("  prompt={d} tokens, max_gen={d}, ctx={d}\n", .{ prompt_ids.len, effective_max_tokens, effective_ctx });
 
@@ -14944,7 +14723,7 @@ fn handleAnthropicNonStreaming(
     var routed: ?rp_mod.Delivery = null;
     defer if (routed) |*d| d.deinit(allocator);
     {
-        const think_split = try splitConstrainedResponse(allocator, &routed, sampling, final_text, result.constraint_payload_byte, true, promptOpensThink(allocator, lm, tok, prompt_ids));
+        const think_split = try splitConstrainedResponse(allocator, &routed, sampling, final_text, result.constraint_payload_byte, true, promptOpensThink(allocator, tok, prompt_ids));
         // Reasoning is never fed back to the parser, so it is cut here.
         const split_reasoning: ?[]const u8 = if (think_split.reasoning_content) |r| blk: {
             const t = chat_mod.trimLeakedToolMarkup(r);
@@ -15205,7 +14984,7 @@ fn handleAnthropicStreaming(
     // only evidence, visible-text flushing has already leaked the thoughts.
     // See the streaming chat site for why the prompt fact is NOT ANDed with
     // enable_thinking (LFM2.5's unconditional pre-opened `<think>`).
-    const prompt_opened_think = promptOpensThink(allocator, lm, tok, prompt_ids);
+    const prompt_opened_think = promptOpensThink(allocator, tok, prompt_ids);
     const opens_think = prompt_opened_think;
     // Prompt-opened reasoning is DELIVERED as thinking blocks even when the
     // request didn't ask for thinking — generated tokens are never dropped.
@@ -15292,7 +15071,7 @@ fn handleAnthropicStreaming(
             break;
         }
         const strip = tok.tok_type == .sentencepiece_bpe;
-        const raw_decoded = try decodeTokens(allocator, lm, tok, &[_]u32{token_id}, strip and false);
+        const raw_decoded = try tok.decode(allocator, &[_]u32{token_id}, strip and false);
         if (delivery) |*d| d.noteToken(raw_decoded.len, slot_handle.?.constraintPayloadStart());
 
         // UTF-8 carry handling
@@ -16155,8 +15934,7 @@ fn handleResponsesInner(
     /// Owned by `handleResponses` so its error arm can number the terminal `error` event.
     seq_num: *u64,
 ) !void {
-    // No `lm.transformer.?` — engine-backed (GGUF/ds4) models have a null
-    // transformer; the only gates below use `config.has_hybrid_layers`.
+    // No `lm.transformer.?` needed here.
     const tok = lm.tokenizer.?;
     const chat_config = lm.chat_config.?;
     const config = lm.config.?;
@@ -16496,7 +16274,7 @@ fn handleResponsesInner(
     enable_mtp_resp = admitMtpForCtx(enable_mtp_resp, prompt_ids.len);
 
     // Check if attention computation would exceed GPU memory.
-    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, false, kv_quant_override, lm, generate_mod.visionPrefillUnchunked(local_ve != null), enable_mtp_resp)) return;
+    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, false, kv_quant_override, generate_mod.visionPrefillUnchunked(local_ve != null), enable_mtp_resp)) return;
 
     // ── sampling ──
     var sampling = generate_mod.SamplingParams{
@@ -16736,7 +16514,7 @@ fn handleResponsesInner(
         // dropped (thinking-off is enforced prompt-side, noThinkTailSuffix).
         // Prompt-derived, never flag-derived — see the chat streaming arm.
         const constrained_proto = sampling.constraint != null and sampling.constraint.?.proto != null;
-        var in_think_block = promptOpensThink(allocator, lm, tok, prompt_ids) and !constrained_proto;
+        var in_think_block = promptOpensThink(allocator, tok, prompt_ids) and !constrained_proto;
         var delivery: ?rp_mod.Delivery = if (constrained_proto) rp_mod.Delivery.init(sampling.constraint.?.proto.?) else null;
         defer if (delivery) |*d| d.deinit(allocator);
         var channel_armed = false; // the `<|channel>` marker that may open a Gemma 4 thought
@@ -16779,7 +16557,7 @@ fn handleResponsesInner(
                 break;
             }
             try token_ids_buf.append(allocator, token_id);
-            const raw_decoded = try decodeTokens(allocator, lm, tok, &[_]u32{token_id}, false);
+            const raw_decoded = try tok.decode(allocator, &[_]u32{token_id}, false);
             if (delivery) |*d| d.noteToken(raw_decoded.len, slot_handle.?.constraintPayloadStart());
 
             // UTF-8 carry across BPE-token boundaries (matches chat-completion).
@@ -17065,7 +16843,7 @@ fn handleResponsesInner(
     // never the delivery.
     var routed: ?rp_mod.Delivery = null;
     defer if (routed) |*d| d.deinit(allocator);
-    const think_split = try splitConstrainedResponse(allocator, &routed, sampling, final_text, result.constraint_payload_byte, false, promptOpensThink(allocator, lm, tok, prompt_ids));
+    const think_split = try splitConstrainedResponse(allocator, &routed, sampling, final_text, result.constraint_payload_byte, false, promptOpensThink(allocator, tok, prompt_ids));
     const reasoning_text: ?[]const u8 = think_split.reasoning_content;
     const visible_text: []const u8 = think_split.content;
 
@@ -17169,7 +16947,7 @@ fn handleResponsesInner(
     // split reasoning text — exact modulo merge boundaries).
     const reasoning_tok_count: u32 = blk: {
         const rt = reasoning_text orelse break :blk 0;
-        const rids = encodeText(allocator, lm, tok, rt) catch break :blk 0;
+        const rids = tok.encode(allocator, rt) catch break :blk 0;
         defer allocator.free(rids);
         break :blk @intCast(rids.len);
     };
@@ -19880,20 +19658,6 @@ test "settingsPropsJson: /props names the effective serving settings a benchmark
     try testing.expect(ep.value.object.get("mtp").?.object.get("acceptance_param").? == .null);
 }
 
-test "embeddedEngineSettings: an engine-backed model reports only the levers its engine runs" {
-    const base: PropsSettings = .{ .engine = "mlx", .kv_quant = "8", .kv_attn_mode = .auto, .decode_attn_quant = true, .prefill_chunk = 8192, .mtp_loaded = false, .mtp_default_on = false, .mtp_acceptance = .exact, .mtp_depth = 0, .mtp_adaptive = true, .max_mtp_ctx = 0, .drafter = "assistant", .pld = .{ .enable = true, .draft_len = 5, .key_len = 3 }, .max_concurrent = 4, .prefix_cache_mem_bytes = 2048, .prefix_cache_disk_bytes = 0 };
-
-    const ds4 = embeddedEngineSettings(base, .ds4, true);
-    try testing.expectEqualStrings("ds4", ds4.engine);
-    try testing.expectEqualStrings("off", ds4.kv_quant);
-    try testing.expect(!ds4.decode_attn_quant and !ds4.pld.enable and !ds4.mtp_adaptive);
-    try testing.expect(ds4.mtp_loaded and ds4.mtp_default_on);
-    try testing.expectEqualStrings("none", ds4.drafter);
-    try testing.expectEqual(@as(usize, 0), ds4.prefill_chunk);
-
-    try testing.expect(embeddedEngineSettings(base, .mlx, false).decode_attn_quant);
-}
-
 test "ngramWarmPropsJson: /props names how far the qwen4 ngram warm has got" {
     const none = try ngramWarmPropsJson(testing.allocator, 0, 0);
     defer testing.allocator.free(none);
@@ -20779,36 +20543,12 @@ test "readyCapsJson: embeddings capability — encoders alone, decoders beside c
     try std.testing.expect(std.mem.indexOf(u8, both.items, "\"embeddings\"") != null);
 }
 
-test "readyHasChat: embedded-engine GGUF without a chat template still advertises chat" {
+test "readyHasChat: a decoder with a chat template chats, an encoder never" {
     const t = std.testing;
-    // MLX model with a template — chat.
-    try t.expect(readyHasChat(false, 1234, false));
-    // Encoder-only never chats, template or not.
-    try t.expect(!readyHasChat(true, 1234, false));
-    try t.expect(!readyHasChat(true, 0, true));
-    // The live bug (2026-07-21): a loaded DSV4-Flash GGUF ships no
-    // chat_template in its header (fallback formatting serves chat fine), but
-    // the ready path gated "chat" on template presence — the peer advertised
-    // capabilities:[] and LAN clients hid the model ("No models yet" in the
-    // tray while actively chatting on it). The unloaded GGUF stub path
-    // already advertises the chat set; loaded must not advertise LESS.
-    try t.expect(readyHasChat(false, 0, true));
-    // Templateless pure-MLX entry keeps the existing conservative behavior.
-    try t.expect(!readyHasChat(false, 0, false));
+    try t.expect(readyHasChat(false, 1234));
+    try t.expect(!readyHasChat(true, 1234));
+    try t.expect(!readyHasChat(false, 0));
 }
-
-test "mlxMemoryGuardApplies: the embedded ds4 engine skips the MLX-prefill memory guard" {
-    const t = std.testing;
-    // MLX model — no embedded engine — the guard applies (real per-token working set).
-    try t.expect(mlxMemoryGuardApplies(false));
-    // ds4 (DeepSeek-V4-Flash): its stub config advertises 56 heads / 61 layers,
-    // so the guard would project ~25 GB for an 8.6K-token prompt and 400-reject
-    // a request ds4 serves fine (live 2026-07-15: the SAME prompt had succeeded
-    // on the MLX qwen35 engine one model-switch earlier). ds4 owns its KV
-    // outside MLX, so the guard is skipped.
-    try t.expect(!mlxMemoryGuardApplies(true));
-}
-
 test "kvBytesPerToken bills only the CACHING layers, at the arch's own K and V widths" {
     const t = std.testing;
     // Uniform arch: every layer caches, K and V are both head_dim wide.
@@ -21863,18 +21603,12 @@ test "messageReasoningFromObj: reasoning_content round-trip, reasoning fallback,
     }
 }
 
-test "modelEngineName: native dsv4 reports mlx, the embedded engine reports itself" {
-    // Loaded entries: the attached engine pointer decides.
-    try testing.expectEqualStrings("ds4", modelEngineName(true, "/m/DeepSeek-V4-Flash.gguf", ""));
-    // NATIVE deepseek_v4 (safetensors dir): architecture alone can't
-    // distinguish it from the ds4 GGUF — meta.engine must.
-    try testing.expectEqualStrings("mlx", modelEngineName(false, "/m/ddalcu/DeepSeek-V4-Flash-MLX-Serve", "deepseek_v4"));
-    // Unloaded GGUF stubs: engine undetermined until the header is read.
-    try testing.expectEqualStrings("gguf", modelEngineName(false, "/m/x.gguf", ""));
-    try testing.expectEqualStrings("gguf", modelEngineName(false, "/m/dir", "gguf"));
-    try testing.expectEqualStrings("mlx", modelEngineName(false, "/m/gemma-4-12b", "gemma4"));
+test "modelEngineName: GGUF stubs report gguf, everything else mlx" {
+    try testing.expectEqualStrings("mlx", modelEngineName("/m/ddalcu/DeepSeek-V4-Flash-MLX-Serve", "deepseek_v4"));
+    try testing.expectEqualStrings("gguf", modelEngineName("/m/x.gguf", ""));
+    try testing.expectEqualStrings("gguf", modelEngineName("/m/dir", "gguf"));
+    try testing.expectEqualStrings("mlx", modelEngineName("/m/qwen4", "qwen4_exp"));
 }
-
 test "formatCompletionsLogprobs: legacy shape, byte-aligned offsets, escaped tokens" {
     // /v1/completions ignored its `logprobs` field entirely (hardcoded 0) while
     // still emitting the key, so a client read "no alternatives exist" rather
@@ -22087,9 +21821,9 @@ test "the memory guard's vision billing routes through visionPrefillUnchunked at
     // that chunks (over-refusal), and one passing false under the kill
     // switch under-bills straight into an uncatchable Metal OOM.
     const src = @embedFile("server.zig");
-    const raw = "lm, local_ve" ++ " != null,";
+    const raw = "kv_quant_override, local_ve" ++ " != null,";
     try std.testing.expect(std.mem.indexOf(u8, src, raw) == null);
-    const routed = "lm, generate_mod.visionPrefill" ++ "Unchunked(local_ve != null),";
+    const routed = "kv_quant_override, generate_mod.visionPrefill" ++ "Unchunked(local_ve != null),";
     var n: usize = 0;
     var at: usize = 0;
     while (std.mem.indexOfPos(u8, src, at, routed)) |i| {

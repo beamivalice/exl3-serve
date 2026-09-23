@@ -8,7 +8,6 @@ const round_cost_mod = @import("round_cost.zig");
 const generate_mod = @import("generate.zig");
 const mtp_acceptance = @import("mtp_acceptance.zig");
 const model_discovery = @import("model_discovery.zig");
-const gguf_meta = @import("gguf_meta.zig");
 const model_registry_mod = @import("model_registry.zig");
 const drafter_mod = @import("drafter.zig");
 const mtp_mod = @import("mtp.zig");
@@ -17,8 +16,6 @@ const server_mod = @import("server.zig");
 const scheduler_mod = @import("scheduler.zig");
 const model_settings_mod = @import("model_settings.zig");
 const vision_mod = @import("vision.zig");
-const ds4_arch = @import("arch/ds4.zig");
-const ds4_ffi = @import("ds4_ffi.zig");
 const cli_mod = @import("cli.zig");
 const kld_mod = @import("kld.zig");
 const launch_mod = @import("launch.zig");
@@ -32,27 +29,12 @@ pub const VERSION: []const u8 = build_options.version;
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
-// Highest GGUF file-format version `gguf_meta.zig` parses.
-const GGUF_FORMAT_VERSION = "3";
-
 const DEFAULT_MODEL_DIR = ""; // pass --model <path> to specify
 
-// --ssd-streaming (issue #39): ds4 weight-streaming toggle. Set during arg
-// parsing, read by the ds4 serve + offline open paths. Module-level to avoid
-// threading it through runDs4Serve's already-long parameter list.
-var ds4_ssd_streaming: bool = false;
 var expert_cache_bytes: u64 = 0;
 var ssd_budget_bytes: u64 = 0;
-// Auto-load the ds4 MTP draft head (beside the model) for speculative decode.
-// Default on; `--no-ds4-mtp` disables it, and it's forced off under
-// `--ssd-streaming` (ds4 refuses the combination). Read by the same ds4 paths.
-var ds4_mtp: bool = true;
-// `--dspark` for the EMBEDDED ds4 engine: select the DSpark runtime when the
-// auto-found support GGUF carries DSpark stages (the same flag opts the
-// native dsv4 engine into its draft stages via MLX_SERVE_DSV4_DSPARK).
-var ds4_dspark: bool = false;
 // `--ane-prefill`: opt-in ANE prefill-MLP offload (qwen3_5-family dense MLP,
-// lossy int8/fp16). File-level like ds4_dspark so the headless serve path
+// lossy int8/fp16). File-level so the headless serve path
 // reads the same flag (the runHeadlessServe flag-eater class).
 var ane_prefill: bool = false;
 // Serve-mode default for requests that omit max_tokens (0 = flag not given).
@@ -180,12 +162,7 @@ fn printUsage(io: std.Io) void {
         \\                        dense bf16 KV).
         \\  --dspark            Enable DeepSeek-V4 DSpark draft stages (OFF by
         \\                        default: the stages cost ~11 GB resident; the
-        \\                        memory fit-gate still applies at load). For a
-        \\                        served .gguf this arms the embedded ds4
-        \\                        engine's DSpark runtime instead, using the
-        \\                        DSpark support GGUF found beside the model
-        \\                        (greedy requests only; needs the sidecar,
-        \\                        so --no-ds4-mtp disables it too).
+        \\                        memory fit-gate still applies at load).
         \\  --decode-attn-quant / --no-decode-attn-quant
         \\                      Serve decode from quantized side copies of
         \\                      DENSE (bf16/f16) attention projection weights:
@@ -290,24 +267,6 @@ fn printUsage(io: std.Io) void {
         \\                        tokenize results (default: 4). Skips re-
         \\                        rendering identical messages on warm reuse.
         \\                        0 disables.
-        \\  --engine {{auto|ds4}}
-        \\                      Engine selector for `.gguf` inputs ONLY.
-        \\                        Safetensors models always run on the native
-        \\                        MLX engine and ignore this flag. For
-        \\                        GGUF: `auto` (default) reads the file's
-        \\                        `general.architecture` metadata and routes
-        \\                        ds4-converted quants (DeepSeek V4/V4.1, Qwen3.8
-        \\                        Flash Next, GLM 5.x) to the embedded ds4
-        \\                        engine; any other GGUF is refused (this build
-        \\                        has no generic llama.cpp engine).
-        \\                        Force `ds4` when auto-detection is wrong
-        \\                        (e.g. an unusual ds4 quant whose metadata
-        \\                        layout differs).
-        \\  --ssd-streaming     ds4 / DeepSeek-V4-Flash only: stream expert
-        \\                        weights from SSD instead of holding the whole
-        \\                        model in RAM (skips full residency + warmup).
-        \\                        Use when the model is larger than available
-        \\                        memory. Ignored by the MLX engine.
         \\  --expert-cache-gb <n>
         \\                      Enable bf16 qwen4_exp expert streaming with a
         \\                        decimal-GB cache (default operating point: 60).
@@ -316,10 +275,6 @@ fn printUsage(io: std.Io) void {
         \\                        cache is what is left after the trunk, the
         \\                        prefill union and the fill buffers.
         \\                        --expert-cache-gb wins when both are given.
-        \\  --no-ds4-mtp        ds4 only: don't auto-load the MTP draft head
-        \\                        (speculative decode). On by default when the
-        \\                        model dir ships one; auto-off under
-        \\                        --ssd-streaming (ds4 refuses the combination).
         \\  --model-dir <dir>   Directory of MLX models to discover at startup.
         \\                        Discovered siblings appear in /v1/models and
         \\                        can be loaded on-demand via /v1/load-model
@@ -525,17 +480,14 @@ pub fn main(init: std.process.Init) !void {
     var max_resident_mem_explicit: bool = false;
     var idle_evict_secs: ?u32 = null;
     var metrics_enabled = false;
-    // GGUF engine routing override. null → auto (decided by gguf_meta on
-    // file inspection); set explicitly via --engine to force ds4.
-    var engine_override: ?gguf_meta.Engine = null;
     var log_level_explicit = false;
     var i: usize = arg_start;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--version")) {
             // Report app + every embedded engine version WITHOUT booting the
             // server (the macOS app spawns this and parses it — src/version.zig,
-            // Swift EngineVersions). MLX self-reports at runtime; mlx-c and ds4
-            // have no runtime API and ride build options.
+            // Swift EngineVersions). MLX self-reports at runtime; mlx-c has no
+            // runtime API and rides build options.
             var mlx_ver = mlx.mlx_string_new();
             defer _ = mlx.mlx_string_free(mlx_ver);
             _ = mlx.mlx_version(&mlx_ver);
@@ -544,8 +496,6 @@ pub fn main(init: std.process.Init) !void {
                 .mlx = std.mem.span(mlx.mlx_string_data(mlx_ver)),
                 .mlx_c = build_options.mlx_c_version,
                 .nax = transformer_mod.naxStatus(),
-                .gguf_format = GGUF_FORMAT_VERSION,
-                .ds4_commit = build_options.ds4_commit,
             };
             var ver_buf: [512]u8 = undefined;
             var ver_w = std.Io.File.stdout().writer(io, &ver_buf);
@@ -695,9 +645,6 @@ pub fn main(init: std.process.Init) !void {
             // ~11 GB resident, so the default leaves them lazy and serves
             // serial. deepseek_v4.initModel reads the env at model load.
             _ = setenv("MLX_SERVE_DSV4_DSPARK", "1", 1);
-            // Same flag, embedded engine: arm ds4's DSpark runtime when a
-            // DSpark support GGUF sits beside a served .gguf model.
-            ds4_dspark = true;
         } else if (std.mem.eql(u8, args[i], "--decode-attn-quant")) {
             transformer_mod.decode_attn_quant_flag = true;
         } else if (std.mem.eql(u8, args[i], "--no-decode-attn-quant")) {
@@ -778,8 +725,6 @@ pub fn main(init: std.process.Init) !void {
             // renders+re-tokenizes, mirrors pre-Iteration-2 behavior).
             i += 1;
             server_mod.tokenize_cache_entries = std.fmt.parseInt(u32, args[i], 10) catch 4;
-        } else if (std.mem.eql(u8, args[i], "--llama-cache-entries")) {
-            refuseLlamaFlag("--llama-cache-entries");
         } else if (std.mem.eql(u8, args[i], "--ssm-checkpoint-stride") and i + 1 < args.len) {
             // Phase 1 (perf-plan): per-position SSM/conv state snapshots during
             // chunked prefill enable multi-turn warm reuse on hybrid SSM
@@ -796,8 +741,6 @@ pub fn main(init: std.process.Init) !void {
                 log.err("--wired-margin-gib: expected an integer 2..32, got '{s}'\n", .{args[i]});
                 std.process.exit(1);
             };
-        } else if (std.mem.eql(u8, args[i], "--llama-kv-quant")) {
-            refuseLlamaFlag("--llama-kv-quant");
         } else if (std.mem.eql(u8, args[i], "--max-concurrent") and i + 1 < args.len) {
             i += 1;
             server_mod.max_concurrent = std.fmt.parseInt(u32, args[i], 10) catch 1;
@@ -858,20 +801,6 @@ pub fn main(init: std.process.Init) !void {
                 log.err("--kv-quant: expected one of {{off, 4, 8}}; got '{s}'\n", .{args[i]});
                 std.process.exit(1);
             }
-        } else if (std.mem.eql(u8, args[i], "--engine") and i + 1 < args.len) {
-            i += 1;
-            if (std.mem.eql(u8, args[i], "auto")) {
-                engine_override = null;
-            } else if (std.mem.eql(u8, args[i], "ds4")) {
-                engine_override = .ds4;
-            } else if (std.mem.eql(u8, args[i], "llama")) {
-                refuseLlamaFlag("--engine llama");
-            } else {
-                log.err("--engine: expected one of {{auto, ds4}}; got '{s}'\n", .{args[i]});
-                std.process.exit(1);
-            }
-        } else if (std.mem.eql(u8, args[i], "--ssd-streaming")) {
-            ds4_ssd_streaming = true;
         } else if (std.mem.eql(u8, args[i], "--expert-cache-gb") and i + 1 < args.len) {
             i += 1;
             expert_cache_bytes = server_mod.parseExpertCacheGb(args[i]) catch {
@@ -884,8 +813,6 @@ pub fn main(init: std.process.Init) !void {
                 log.err("--ssd-budget-gb: expected an integer in 1..512; got '{s}'\n", .{args[i]});
                 std.process.exit(1);
             };
-        } else if (std.mem.eql(u8, args[i], "--no-ds4-mtp")) {
-            ds4_mtp = false;
         } else if (std.mem.eql(u8, args[i], "--kv-attn-mode") and i + 1 < args.len) {
             i += 1;
             if (std.mem.eql(u8, args[i], "dense")) {
@@ -1041,7 +968,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Observability: allocate the metrics core once (when --metrics is on) and
     // publish it via the server-global `g_metrics`. Declared here — above every
-    // serve-dispatch path (GGUF/ds4, headless, media, and the primary MLX
+    // serve-dispatch path (headless and the primary MLX
     // path) — so `server_mod.serve()` spawns the gauge sampler + routes /metrics
     // regardless of engine, and each LoadParams builder reads it back into the
     // scheduler's per-request sink via `.metrics = server_mod.g_metrics`. The
@@ -1052,33 +979,11 @@ pub fn main(init: std.process.Init) !void {
     if (metrics_instance) |*m| server_mod.g_metrics = m;
     defer server_mod.g_metrics = null;
 
-    // ── GGUF early-branch: route to an embedded engine ──
-    //
-    // mlx-serve serves GGUF models through ONE embedded engine: `lib/ds4/`
-    // (antirez/ds4), for the DeepSeek-V4-Flash family it was written for. Any
-    // other `.gguf` is refused by name — the generic llama.cpp engine is not
-    // part of this fork. A path ending in `.gguf` (or a directory containing
-    // one) bypasses the MLX safetensors path entirely. Both offline
-    // (`--prompt`) and serve (`--serve`) modes are wired; serve constructs a
-    // stub LoadedModel whose request handlers route through the engine.
+    // No GGUF engine is part of this build: refuse a `.gguf` (or a directory
+    // holding one) by name before any config.json read.
     if (isGgufPath(io, model_dir)) {
-        const chosen = chooseGgufEngine(io, allocator, model_dir, engine_override);
-        if (serve_mode) {
-            switch (chosen) {
-                .ds4 => try runDs4Serve(io, allocator, model_dir, host, port, ctx_size, timeout, reasoning_budget, if (temp_explicit) temperature else null, top_p_flag, top_k_flag, max_resident_models, max_resident_mem, max_resident_mem_explicit, idle_evict_secs),
-                .unsupported => refuseUnsupportedGguf(model_dir),
-            }
-            return;
-        }
-        const prompt_text = prompt orelse {
-            log.err("GGUF offline mode requires --prompt <text>\n", .{});
-            std.process.exit(2);
-        };
-        switch (chosen) {
-            .ds4 => try runDs4Offline(io, allocator, model_dir, prompt_text, max_tokens, temperature, ctx_size),
-            .unsupported => refuseUnsupportedGguf(model_dir),
-        }
-        return;
+        log.err("[gguf] {s}: GGUF checkpoints are not served by this build. Serve an MLX safetensors checkpoint (qwen4_exp or mimo_v2).\n", .{model_dir});
+        std.process.exit(1);
     }
 
     // Print MLX version
@@ -1367,8 +1272,6 @@ pub fn main(init: std.process.Init) !void {
             .ssm_checkpoint_stride = server_mod.effectiveSsmCheckpointStride(server_mod.ssm_checkpoint_stride, server_mod.prefix_cache_capacity),
             .ssm_checkpoint_max = server_mod.ssm_checkpoint_max,
             .tokenize_cache_entries = server_mod.tokenize_cache_entries,
-            .ds4_mtp = ds4_mtp,
-            .ds4_dspark = ds4_dspark,
             .metrics = server_mod.g_metrics,
         };
         try server_mod.serve(io, allocator, params, config, host, port, .{
@@ -1540,176 +1443,7 @@ fn portInUse(io: std.Io, port: u16) bool {
     return true;
 }
 
-// GGUF path helpers (`isGgufModelPath` / `resolveGgufFile` /
-// `logResolveGgufError`) live in `model_discovery.zig` — shared with
-// discovery and the scheduler's cold-load path, and hermetically tested
-// there (main.zig is the executable root and not in the test pool).
 const isGgufPath = model_discovery.isGgufModelPath;
-const resolveGgufFile = model_discovery.resolveGgufFile;
-const logResolveGgufError = model_discovery.logResolveGgufError;
-
-/// Decide which embedded engine serves a `.gguf` file (or dir containing one).
-///
-/// Priority: explicit `--engine` override wins. Otherwise we read the file's
-/// GGUF metadata (cheap, header-only) and route on `general.architecture`:
-/// `deepseek4` + the antirez-style MLA key, or a ds4-only arch (V4.1, Qwen3.8
-/// Flash Next, GLM 5.x) → ds4; everything else is unsupported here.
-/// Issue #15 — the previous basename heuristic mis-routed two real-world
-/// files; see `src/gguf_meta.zig` for the rule.
-///
-/// On any inspection failure (file unreadable, malformed header) the file is
-/// unsupported and the reason is logged: ds4 is the only GGUF engine left, so
-/// guessing buys a confusing crash instead of a clear refusal.
-fn chooseGgufEngine(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    override: ?gguf_meta.Engine,
-) gguf_meta.Engine {
-    if (override) |e| {
-        log.info("[gguf] engine: {s} (forced via --engine)\n", .{@tagName(e)});
-        return e;
-    }
-    const gguf_path = resolveGgufFile(io, allocator, path) catch |err| {
-        log.warn("[gguf] route: cannot resolve gguf file ({s})\n", .{@errorName(err)});
-        return .unsupported;
-    };
-    defer allocator.free(gguf_path);
-
-    var info = gguf_meta.readFromFile(io, allocator, gguf_path) catch |err| {
-        log.warn("[gguf] route: metadata read failed ({s})\n", .{@errorName(err)});
-        return .unsupported;
-    };
-    defer info.deinit(allocator);
-
-    const e = gguf_meta.preferredEngine(info);
-    log.info("[gguf] engine: {s} (arch={s}, ds4-lora={})\n", .{
-        @tagName(e),
-        info.architecture orelse "?",
-        info.has_ds4_lora_rank,
-    });
-    return e;
-}
-
-/// A flag that only ever configured the embedded llama.cpp engine. Rejected by
-/// name rather than eaten silently (the flag-eater class), so a script that
-/// still passes it fails loudly instead of serving under different settings.
-fn refuseLlamaFlag(flag: []const u8) noreturn {
-    log.err(
-        "{s}: the embedded llama.cpp GGUF engine is not part of this build. " ++
-            "Drop the flag; `.gguf` inputs serve through ds4 or are refused.\n",
-        .{flag},
-    );
-    std.process.exit(1);
-}
-
-/// The one refusal for a `.gguf` no engine in this build can load. Exits
-/// rather than 503s: the GGUF branch runs before any server boots.
-fn refuseUnsupportedGguf(path: []const u8) noreturn {
-    log.err(
-        "[gguf] unsupported: {s} is not a ds4-loadable GGUF, and the generic llama.cpp engine is not part of this build. " ++
-            "Serve an MLX safetensors checkpoint, or a DeepSeek-V4/V4.1/Qwen3.8-Flash-Next/GLM-5 GGUF from the ds4 converters.\n",
-        .{path},
-    );
-    std.process.exit(2);
-}
-
-/// Offline single-prompt generation through the embedded ds4 engine.
-/// Skips the MLX/safetensors scaffolding entirely — there's no `Transformer`,
-/// no `Generator`, no scheduler. ds4 owns its own tokenizer, KV cache, and
-/// sampler; we just feed it the user prompt and stream the decoded tokens.
-fn runDs4Offline(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    model_dir: []const u8,
-    prompt: []const u8,
-    max_tokens: u32,
-    temp: f32,
-    ctx_size: u32,
-) !void {
-    const gguf_path = resolveGgufFile(io, allocator, model_dir) catch |err| {
-        logResolveGgufError(model_dir, err);
-        return err;
-    };
-    defer allocator.free(gguf_path);
-
-    log.info("[ds4] backend: Metal, model: {s}\n", .{gguf_path});
-
-    // Auto-load the MTP draft head beside the model for speculative decode
-    // (mirrors the serve path); skipped under ssd-streaming (ds4 refuses both).
-    const mtp_path: ?[]u8 = if (ds4_mtp and !ds4_ssd_streaming)
-        model_discovery.findDs4MtpSidecar(io, allocator, gguf_path)
-    else
-        null;
-    defer if (mtp_path) |p| allocator.free(p);
-    if (mtp_path) |p| log.info("[ds4] MTP draft head: {s}\n", .{p});
-
-    var engine = ds4_arch.Ds4Engine.open(allocator, gguf_path, .{
-        .backend = .metal,
-        .warm_weights = true,
-        .ssd_streaming = ds4_ssd_streaming,
-        .mtp_path = mtp_path,
-        .mtp_draft_tokens = if (mtp_path != null) 4 else 0,
-        .mtp_margin = 3.0,
-        .dspark = ds4_dspark,
-        .embedded_mtp = ds4_mtp and !ds4_ssd_streaming and ds4_arch.ggufDeclaresEmbeddedMtp(io, allocator, gguf_path),
-    }) catch |err| {
-        log.err("[ds4] engine open failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
-    defer engine.close();
-
-    log.info("[ds4] engine ready (EOS={d}, has_mtp={})\n", .{ engine.eosToken(), engine.hasMtp() });
-
-    // Render the prompt through ds4's built-in chat template. `prompt` is the
-    // raw user text; the engine adds BOS, system markers, and the assistant
-    // prefix according to the GGUF's vocab.
-    const prompt_ids = try engine.encodeChatPrompt(allocator, null, prompt, .none);
-    defer allocator.free(prompt_ids);
-
-    log.info("[ds4] prompt: {d} tokens\n", .{prompt_ids.len});
-
-    // ds4's session API decouples cache lifetime from a single request — one
-    // session can be reused across multiple `sync` calls. ds4 sizes its
-    // prefill buffers against the requested ctx (`prefill_chunk = 2048` per
-    // the CLI default), and sessions smaller than the prefill chunk produce
-    // junk output — so the user's --ctx-size is floored at the chunk; 0/unset
-    // → ds4's default of 32768.
-    const sess_ctx: i32 = @intCast(ds4_arch.clampSessionCtx(ctx_size));
-    var sess = try engine.createSession(sess_ctx);
-    defer sess.free();
-
-    try sess.sync(prompt_ids);
-
-    var rng: u64 = @intCast(std.Io.Timestamp.now(io, .real).toMilliseconds());
-
-    var stdout_buf: [4096]u8 = undefined;
-    var stdout = std.Io.File.stdout().writer(io, &stdout_buf);
-    const out_w = &stdout.interface;
-    try out_w.writeAll("\n");
-
-    const eos = engine.eosToken();
-    var generated: u32 = 0;
-    while (generated < max_tokens) : (generated += 1) {
-        const next_id: i32 = if (temp <= 0.0)
-            sess.argmax()
-        else
-            sess.sample(temp, 0, 1.0, 0.05, &rng);
-
-        if (next_id == eos) break;
-
-        const piece = try engine.detokenizeOne(allocator, next_id);
-        defer allocator.free(piece);
-        try out_w.writeAll(piece);
-        try out_w.flush();
-
-        try sess.eval(next_id);
-    }
-
-    try out_w.writeAll("\n");
-    try out_w.flush();
-    log.info("[ds4] generated {d} tokens (max={d})\n", .{ generated, max_tokens });
-}
 
 /// Registry resident-memory cap: the user's explicit value, or 80% of mlx's
 /// wired limit at startup (mirrors the MLX serve block). 0 = query failed →
@@ -1844,12 +1578,6 @@ fn runHeadlessServe(
         .ssm_checkpoint_stride = server_mod.effectiveSsmCheckpointStride(server_mod.ssm_checkpoint_stride, server_mod.prefix_cache_capacity),
         .ssm_checkpoint_max = server_mod.ssm_checkpoint_max,
         .tokenize_cache_entries = server_mod.tokenize_cache_entries,
-        // ds4 spec flags must survive headless/on-demand GGUF loads (the
-        // runHeadlessServe flag-eater class): the app always boots headless
-        // and cold-loads GGUFs, so a LoadParams default here silently eats
-        // --no-ds4-mtp / --dspark for every embedded-engine load.
-        .ds4_mtp = ds4_mtp,
-        .ds4_dspark = ds4_dspark,
         .ane_prefill = ane_prefill,
         .ane_chunk_resolver = server_mod.pinPrefillChunk,
         .ane_headroom_resolver = server_mod.aneGateHeadroom,
@@ -1878,220 +1606,6 @@ fn runHeadlessServe(
         // On-demand MLX loads auto-attach an MTP sidecar (LoadParams.mtp_enabled
         // defaults true), so the MoE force flag has to reach this path too.
         .default_force_mtp = enable_mtp and mtp_explicit,
-    });
-}
-
-/// ds4 serve mode. Builds a stub LoadedModel + ModelConfig + ChatConfig
-/// (the engine owns the real tokenizer and chat template internally) and
-/// hands them to `Scheduler.init` via `LoadParams.ds4_path` — the scheduler's
-/// inference thread opens the engine on the right GPU-stream thread. All
-/// MLX-specific load steps (weights, Transformer, vision, drafter, JIT,
-/// warmup) are skipped.
-fn runDs4Serve(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    model_dir: []const u8,
-    host: []const u8,
-    port: u16,
-    ctx_size: u32,
-    timeout: u32,
-    reasoning_budget: i32,
-    default_temperature: ?f32,
-    default_top_p: ?f32,
-    default_top_k: ?u32,
-    max_resident_models: u32,
-    max_resident_mem: u64,
-    max_resident_mem_explicit: bool,
-    idle_evict_secs: ?u32,
-) !void {
-    const settings = model_settings_mod.overrideFor(allocator, io, model_dir);
-    const model_ctx = model_settings_mod.contextPick(ctx_size, settings.ctx_size orelse 0).value;
-    // Resolve the GGUF file once on this thread so the engine's open() call
-    // (running on the inference thread) gets an absolute path.
-    const gguf_path_owned = resolveGgufFile(io, allocator, model_dir) catch |err| {
-        logResolveGgufError(model_dir, err);
-        return err;
-    };
-    defer allocator.free(gguf_path_owned);
-
-    log.info("mlx-serve {s} (ds4 engine, GGUF backend)\n", .{VERSION});
-    log.info("[args] model: {s}\n", .{gguf_path_owned});
-    log.info("[args] serve: {s}:{d}, ctx-size={d}\n", .{ host, port, ctx_size });
-
-    // Build a stub ModelConfig. The fields below are read by various parts
-    // of server.zig + scheduler.zig but the ds4 path bypasses anything that
-    // actually consumes the model architecture (Transformer, KV shapes,
-    // SSM cache, MoE routing). The values picked keep `modelBatchable`
-    // returning false (we're routed through `runSingleDecodeTick`), and
-    // `getEffectiveContextLength` returning the runtime ctx size.
-    const config_storage = try allocator.create(model_mod.ModelConfig);
-    var config_owned_by_registry = false;
-    errdefer if (!config_owned_by_registry) allocator.destroy(config_storage);
-    config_storage.* = model_mod.ModelConfig{
-        .model_type = "deepseek_v4",
-        .weight_prefix = "model",
-        .num_hidden_layers = 61,
-        .hidden_size = 7168,
-        .head_dim = 128,
-        .num_attention_heads = 56,
-        .num_key_value_heads = 56,
-        // Carry the user-supplied --ctx-size (floored at ds4's prefill chunk;
-        // 0/unset → ds4's default) on the standard field. `runPrefillDs4` reads
-        // it back to size the ds4 session, and `getEffectiveContextLength` /
-        // /v1/models report it.
-        .max_position_embeddings = ds4_arch.clampSessionCtx(model_ctx),
-        .ctx_override = settings.ctx_size orelse 0,
-        .is_encoder_only = false,
-    };
-
-    // Stub tokenizer. Most server.zig fast paths read `lm.tokenizer.?` —
-    // we build a minimal empty Tokenizer here. The chat handlers route
-    // through `chat_mod.decodeViaDs4` / `encodeChatViaDs4` when
-    // `lm.ds4_engine != null`, so the stub never actually services
-    // encode/decode on the happy path.
-    const tok_storage = try allocator.create(tokenizer_mod.Tokenizer);
-    var tok_owned_by_registry = false;
-    errdefer if (!tok_owned_by_registry) {
-        tok_storage.deinit();
-        allocator.destroy(tok_storage);
-    };
-    var byte_map: [256]u21 = undefined;
-    var b: usize = 0;
-    while (b < 256) : (b += 1) byte_map[b] = @intCast(b);
-    tok_storage.* = .{
-        .vocab = std.StringHashMap(u32).init(allocator),
-        .id_to_token = std.AutoHashMap(u32, []const u8).init(allocator),
-        .merge_ranks = @TypeOf(tok_storage.merge_ranks).init(allocator),
-        .allocator = allocator,
-        .special_tokens = std.StringHashMap(u32).init(allocator),
-        .tok_type = .byte_level_bpe,
-        .byte_to_unicode = byte_map,
-        .unicode_to_byte = std.AutoHashMap(u21, u8).init(allocator),
-        .bos_id = null,
-        .eos_id = null,
-        .parsed_json = null,
-    };
-
-    // Stub chat config — chat template stays empty. The ds4 path renders
-    // chat via the engine; the stub just keeps `lm.chat_config.?` reads
-    // from crashing.
-    const chat_config_storage = try allocator.create(chat_mod.ChatConfig);
-    var chat_config_owned_by_registry = false;
-    errdefer if (!chat_config_owned_by_registry) {
-        allocator.destroy(chat_config_storage);
-    };
-    chat_config_storage.* = .{
-        .chat_template = try allocator.dupe(u8, ""),
-        .bos_token = null,
-        .eos_token = null,
-        .add_bos_token = false,
-        .allocator = allocator,
-    };
-
-    // ── Registry + scheduler scaffolding. Mirror the MLX serve branch. ──
-    const model_id = blk: {
-        var p = gguf_path_owned;
-        while (p.len > 0 and p[p.len - 1] == '/') p = p[0 .. p.len - 1];
-        if (std.mem.lastIndexOfScalar(u8, p, '/')) |slash_idx| {
-            const name = p[slash_idx + 1 ..];
-            break :blk if (std.mem.endsWith(u8, name, ".gguf")) name[0 .. name.len - 5] else name;
-        }
-        break :blk p;
-    };
-
-    const effective_max_resident_mem: u64 = if (max_resident_mem_explicit) max_resident_mem else 0;
-    if (effective_max_resident_mem > 0) {
-        log.info("[registry] max_resident_models={d}, max_resident_mem={d:.1} GB\n", .{
-            max_resident_models,
-            @as(f64, @floatFromInt(effective_max_resident_mem)) / 1_073_741_824.0,
-        });
-    } else {
-        log.info("[registry] max_resident_models={d}, max_resident_mem=unlimited\n", .{max_resident_models});
-    }
-
-    const registry = try model_registry_mod.ModelRegistry.init(
-        allocator,
-        io,
-        null,
-        max_resident_models,
-        effective_max_resident_mem,
-        idle_evict_secs,
-    );
-    defer registry.deinit();
-
-    // Stat the GGUF so the registry knows its on-disk size — used by
-    // /v1/models, /props (memory indicator), and the LRU eviction gate.
-    // Without it the Swift GPU-memory bar stays at 0 for the whole session.
-    // Path is absolute; split into parent dir + basename so we can use the
-    // 0.16-era `Dir.statFile` API.
-    const gguf_bytes: ?u64 = blk: {
-        const slash = std.mem.lastIndexOfScalar(u8, gguf_path_owned, '/') orelse break :blk null;
-        const parent = gguf_path_owned[0..slash];
-        const name = gguf_path_owned[slash + 1 ..];
-        var dir = std.Io.Dir.openDirAbsolute(io, parent, .{}) catch break :blk null;
-        defer dir.close(io);
-        const st = dir.statFile(io, name, .{}) catch break :blk null;
-        break :blk @as(u64, @intCast(st.size));
-    };
-    const entry = try registry.registerStub(model_id, gguf_path_owned, gguf_bytes);
-    try registry.setDefault(model_id);
-
-    // Once the inference thread hands ownership of the stub
-    // config/tok/chat_config to the entry, the entry's deinit owns them —
-    // we mustn't double-free here.
-    defer if (entry.config != null) {
-        config_owned_by_registry = true;
-        tok_owned_by_registry = true;
-        chat_config_owned_by_registry = true;
-    };
-
-    // ds4's process-wide flock makes >1 in-flight session per process
-    // untested; clamp serial.
-    server_mod.max_concurrent = 1;
-
-    const params = scheduler_mod.LoadParams{
-        .registry = registry,
-        .entry = entry,
-        .config = config_storage,
-        .tok = tok_storage,
-        .chat_config = chat_config_storage,
-        .model_dir = gguf_path_owned, // unused on the ds4 branch but kept symmetric
-        .ctx_size = ctx_size,
-        .drafter_dir = "",
-        .load_vision = false,
-        .warmup_eager = false,
-        .draft_block_size = 0,
-        .draft_block_size_explicit = false,
-        .kv_quant_config = transformer_mod.KVQuantConfig.dense,
-        .prefix_cache_capacity = 0,
-        .prefix_cache_mem_bytes = 0,
-        .expert_cache_bytes = expert_cache_bytes,
-        .ssd_budget_bytes = ssd_budget_bytes,
-        .expert_cache_fit_resolver = server_mod.expertCacheFitForLoad,
-        // Iteration 2: tokenize cache for ds4 too.
-        .tokenize_cache_entries = server_mod.tokenize_cache_entries,
-        .ds4_path = gguf_path_owned,
-        .ds4_ssd_streaming = ds4_ssd_streaming,
-        .ds4_mtp = ds4_mtp,
-        .ds4_dspark = ds4_dspark,
-        .metrics = server_mod.g_metrics,
-    };
-
-    try server_mod.serve(io, allocator, params, config_storage, host, port, .{
-        .max_context_size = ctx_size,
-        .request_timeout_sec = timeout,
-        .default_reasoning_budget = reasoning_budget,
-        .default_max_tokens = serve_default_max_tokens,
-        .default_temperature = default_temperature,
-        .default_top_p = default_top_p,
-        .default_top_k = default_top_k,
-        // PLD is unreachable on this path (decode never routes through the
-        // PLD-capable generator), so say so once instead of three literals
-        // that read like a decision but drift like a typo.
-        .default_enable_pld = server_mod.PldDefaults.off.enable,
-        .default_pld_draft_len = server_mod.PldDefaults.off.draft_len,
-        .default_pld_key_len = server_mod.PldDefaults.off.key_len,
-        .kv_attn_mode = .auto,
     });
 }
 
@@ -2129,7 +1643,3 @@ fn parseSizeArg(s: []const u8) !u64 {
     return n * mult;
 }
 
-// Tests for the GGUF path helpers (`isMmprojGgufBasename`,
-// `isGgufModelPath`, `resolveGgufFile`) live with the implementations in
-// `src/model_discovery.zig` (where they get picked up by `zig build test`);
-// main.zig itself is the executable root and is not in the test pool.

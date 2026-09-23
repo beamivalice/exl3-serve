@@ -3,9 +3,7 @@
 # model, sends three tool-using chats, asserts each response has a properly
 # structured `tool_calls[0]` (NOT leaked `<tool_call>` text in `content`).
 #
-# Designed to run across architectures — covers both the MLX/Jinja path
-# (canonical Hermes-style emit) and the ds4/DSV4 path (attribute-form +
-# `</tool_request>` mismatched-close quirks the parser now tolerates).
+# Covers the MLX/Jinja path (canonical Hermes-style emit).
 #
 # Usage:
 #   ./tests/test_tool_call_parse.sh [model_path] [port]
@@ -22,7 +20,6 @@ BINARY="${BINARY:-./zig-out/bin/mlx-serve}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'; NC='\033[0m'
 
-# Model path may be a directory (MLX) or a .gguf file (ds4). Both are valid.
 if [[ ! -e "$MODEL_PATH" ]]; then
     echo -e "${YELLOW}SKIP${NC}: model not found at $MODEL_PATH"
     exit 0

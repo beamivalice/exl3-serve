@@ -29,7 +29,6 @@ const token_mask_mod = @import("token_mask.zig");
 const rp_mod = @import("reasoning_protocol.zig");
 const model_discovery = @import("model_discovery.zig");
 const io_util = @import("io_util.zig");
-const arch_ds4 = if (@import("build_options").ios) @import("arch/ds4_stub.zig") else @import("arch/ds4.zig");
 const generate_mod = @import("generate.zig");
 const log = @import("log.zig");
 
@@ -211,22 +210,6 @@ pub const LoadedModel = struct {
     /// the token-byte lock and retained until model teardown.
     reasoning_markers: std.ArrayList(*ReasoningMarker) = .empty,
 
-    /// Embedded ds4 engine (DeepSeek-V4-Flash via GGUF). When non-null,
-    /// `transformer` / `weights` / `tokenizer` / `chat_config` stay null and
-    /// the request handlers route through `Ds4Engine` / `Ds4Session` instead
-    /// of the MLX path. Mutually exclusive with the safetensors fields.
-    ds4_engine: ?*arch_ds4.Ds4Engine = null,
-    /// The ONE ds4 session per model (a 131k-context session is ~13 GB of
-    /// buffers, so one per request starved the box under concurrency). Created
-    /// on first prefill, driven by one slot at a time (`session_busy`), freed
-    /// with the engine.
-    ds4_session: ?*arch_ds4.Ds4Session = null,
-
-
-    /// Model-wide claim on `ds4_session`: one request drives it at a time,
-    /// taken in `Scheduler.submit`, released in `complete`.
-    session_busy: bool = false,
-
     // ── Bookkeeping. Updated under `ModelRegistry.mutex`. ──
 
     /// Number of in-flight callers holding a borrowed pointer. Incremented
@@ -310,15 +293,6 @@ pub const LoadedModel = struct {
     /// stream); the caller arranges this via `unloadResident` invoked
     /// from the inference thread before registry teardown.
     pub fn deinit(self: *LoadedModel) void {
-        self.session_busy = false;
-        if (self.ds4_session) |session| {
-            session.free();
-            self.ds4_session = null;
-        }
-        if (self.ds4_engine) |engine| {
-            engine.close();
-            self.ds4_engine = null;
-        }
         if (self.mtp) |h| {
             // Only the Qwen sidecar is a separately allocated object; an
             // in-trunk head would be owned by the Transformer and freed with
@@ -453,15 +427,6 @@ pub const LoadedModel = struct {
     /// `.unloaded` for later listing/reload, AND by `Scheduler.deinit` so
     /// mlx frees happen on the inference thread.
     pub fn unloadResident(self: *LoadedModel) void {
-        self.session_busy = false;
-        if (self.ds4_session) |session| {
-            session.free();
-            self.ds4_session = null;
-        }
-        if (self.ds4_engine) |engine| {
-            engine.close();
-            self.ds4_engine = null;
-        }
         if (self.mtp) |h| {
             // Only the Qwen sidecar is a separately allocated object; an
             // in-trunk head would be owned by the Transformer and freed with
@@ -726,7 +691,6 @@ pub const ModelRegistry = struct {
             .drafter_path = "",
             .drafter_block_size = 0,
             .prefix_cache = null,
-            .ds4_engine = null,
             .refcount = std.atomic.Value(u32).init(0),
             .last_used_ns = 0,
             .last_used_ms = std.atomic.Value(i64).init(0),

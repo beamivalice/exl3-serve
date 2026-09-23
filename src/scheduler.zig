@@ -53,8 +53,6 @@ const model_registry_mod = @import("model_registry.zig");
 const model_settings = @import("model_settings.zig");
 const mtp_acceptance_mod = @import("mtp_acceptance.zig");
 const model_discovery = @import("model_discovery.zig");
-const gguf_meta = @import("gguf_meta.zig");
-const arch_ds4 = if (@import("build_options").ios) @import("arch/ds4_stub.zig") else @import("arch/ds4.zig");
 const log = @import("log.zig");
 const io_util = @import("io_util.zig");
 const status = @import("status.zig");
@@ -187,28 +185,6 @@ pub const LoadParams = struct {
     /// handful of repeated prompts, and full chat conversations bump
     /// this counter anyway via LRU as new turns arrive.
     tokenize_cache_entries: u32 = 4,
-    /// When non-empty, the load routes through the embedded ds4 engine
-    /// instead of the MLX safetensors path. `model_dir` is expected to point
-    /// at a `.gguf` file (or a directory containing one); the inference
-    /// thread opens a `Ds4Engine` and installs it on the entry's
-    /// `ds4_engine` field. `config`/`tok`/`chat_config` are stubs (the
-    /// embedded engine owns the real tokenizer + chat template); they're
-    /// still moved onto the entry so server-side reads of `lm.config.?`
-    /// (e.g. `eosTokenSlice`, `getEffectiveContextLength`) keep working.
-    ds4_path: []const u8 = "",
-    /// SSD weight-streaming for the ds4 engine (issue #39): stream experts from
-    /// disk instead of requiring the full model resident in RAM.
-    ds4_ssd_streaming: bool = false,
-    /// Auto-load the ds4 MTP draft head (found beside the model) for speculative
-    /// decode. Default on; forced off when `ds4_ssd_streaming` (ds4 refuses the
-    /// combination). `--no-ds4-mtp` disables it.
-    ds4_mtp: bool = true,
-    /// Select ds4's DSpark runtime when the auto-found support GGUF carries
-    /// DSpark stages (`--dspark`, the same flag that opts the NATIVE dsv4
-    /// engine into its draft stages). Off by default — the engine loads the
-    /// stages but keeps target-only decode. Requires `ds4_mtp` (the sidecar
-    /// is the support model).
-    ds4_dspark: bool = false,
     /// Headless boot: skip the startup load entirely and run the inference
     /// loop idle. The registry holds discovery stubs (or nothing); the first
     /// model — chat or media — loads on demand via `/v1/load-model`. `entry`/
@@ -218,11 +194,7 @@ pub const LoadParams = struct {
     /// Optional metrics sink. Null when --metrics is off (the default).
     /// Stored on the Scheduler and read by the `finishSlot` per-request funnel.
     metrics: ?*metrics_mod.Metrics = null,
-    /// The --ctx-size launch flag (0 = unset). Cold-loaded GGUF entries have
-    /// no config.json to size their context from, so `preloadCpuState` sizes
-    /// the stub config with this — same rule as the startup GGUF path (ds4:
-    /// clampSessionCtx). MLX cold loads read their own config.json and
-    /// ignore it.
+    /// The --ctx-size launch flag (0 = not given).
     ctx_size: u32 = 0,
 };
 
@@ -439,24 +411,11 @@ pub const Slot = struct {
     /// Generator (constructed on inference thread post-prefill).
     legacy_gen: ?Generator,
 
-    /// ds4 session for this slot, BORROWED from `model.ds4_session` (one
-    /// persistent session per model, claimed via `session_busy`) — never
-    /// freed here. Mutually exclusive with `legacy_gen` (the MLX path).
-    ds4_session: ?*arch_ds4.Ds4Session = null,
-    /// Per-request RNG state for ds4 sampling. ds4's sampler takes the seed
-    /// by pointer so we keep it on the slot.
-    ds4_rng: u64 = 0,
-
     /// DiffusionGemma canvas-denoising runner. Created in
     /// `runPrefillDiffusion` for `config.isDiffusion()` models; owns the
     /// dequantized embedding table; freed in `Slot.deinit`. Mutually
     /// exclusive with `legacy_gen` (the autoregressive MLX path).
     diffusion: ?*diffusion_mod.Runner = null,
-    /// True when this slot claimed `model.session_busy` in `submit`. The
-    /// single persistent context serves one request at a time; the claim is
-    /// released in `complete()`. Tracked per-slot so only the holder releases.
-    holds_session: bool = false,
-
     // ── Submission data. Owned by the slot, freed in deinit. ──
     prompt_ids: []u32,
     full_prompt: []u32,
@@ -575,17 +534,8 @@ pub const Slot = struct {
         const slot = try allocator.create(Slot);
         errdefer allocator.destroy(slot);
 
-        // Embedded-GGUF model (ds4): skip all MLX per-slot allocations — the
-        // engine owns its own KV cache, vision is not supported, and the
-        // forward path bypasses `ForwardCtx`. Build sentinel-empty fields so
-        // `Slot.deinit` is well-defined on both paths.
-        const is_embedded = params.model.ds4_engine != null;
-
-        // Per-slot KVCache, honoring the process-level kv-quant setting. For
-        // embedded slots the engine owns its own cache — we initialize a
-        // zero-layer shell so `Slot.deinit` is symmetric with the MLX path.
-        const slot_kv_layers: u32 = if (is_embedded) 0 else config.num_hidden_layers;
-        var cache = try KVCache.initWithConfig(allocator, slot_kv_layers, kv_quant_config);
+        // Per-slot KVCache, honoring the process-level kv-quant setting.
+        var cache = try KVCache.initWithConfig(allocator, config.num_hidden_layers, kv_quant_config);
         errdefer cache.deinit();
         if (config.swaRingTokens() > 0) cache.setSwaRing(config.sliding_window);
 
@@ -600,7 +550,7 @@ pub const Slot = struct {
         // slice makes the hot prefix cache treat the model as hybrid and
         // cold-prefill every request.
         var ssm_entries: ?[]SSMCacheEntry = null;
-        if (!is_embedded and config.needsSsmEntries()) {
+        if (config.needsSsmEntries()) {
             const entries = try allocator.alloc(SSMCacheEntry, config.num_hidden_layers);
             for (entries) |*e| {
                 e.* = .{
@@ -652,9 +602,7 @@ pub const Slot = struct {
             .mrope_delta = params.mrope_delta,
             .ctx = undefined, // set after slot is in stable storage so pointers are valid
             .legacy_gen = null,
-            .ds4_session = null,
             .diffusion = null,
-            .ds4_rng = @intCast(std.Io.Timestamp.now(io, .real).toMilliseconds()),
             .prompt_ids = prompt_owned,
             .full_prompt = full_prompt_owned,
             .sampling = params.sampling,
@@ -739,10 +687,6 @@ pub const Slot = struct {
     /// finished/errored it AND the connection thread has consumed the final
     /// `done`/`err` from `waitNext`).
     pub fn deinit(self: *Slot) void {
-        // ds4_session is borrowed from the model (persistent across requests)
-        // — never freed here. The claim on it is released in
-        // Scheduler.complete; the session dies with the model.
-        self.ds4_session = null;
         if (self.diffusion) |runner| {
             runner.deinit();
             self.allocator.destroy(runner);
@@ -1107,18 +1051,6 @@ pub const LoadRequest = struct {
     /// checkpoint. `drafter_dir == ""` stopped meaning "off" the moment a
     /// checkpoint could carry its own, so the opt-out needs its own bit.
     no_drafter: bool = false,
-    /// SSD weight-streaming for cold-loaded ds4 models (issue #39). The CLI
-    /// startup path supplies this via LoadParams; cold-load defaults it off.
-    ds4_ssd_streaming: bool = false,
-    /// Auto-load the ds4 MTP draft head beside a cold-loaded ds4 model. Default
-    /// on (a switched-to ds4 model gets speculative decode); forced off under
-    /// `ds4_ssd_streaming`.
-    ds4_mtp: bool = true,
-    /// DSpark runtime for a cold-loaded ds4 model whose sidecar carries
-    /// DSpark stages. Cold loads inherit the launch flag via the Scheduler's
-    /// `ds4_dspark` (the headless flag-eater class — a LoadRequest default
-    /// would silently drop `--dspark` on every on-demand GGUF load).
-    ds4_dspark: bool = false,
     /// Auto-load the Qwen native MTP sidecar when the model dir ships one.
     mtp_enabled: bool = true,
     mtp_explicit: bool = false,
@@ -1178,13 +1110,6 @@ pub const LoadRequest = struct {
     allocator: std.mem.Allocator,
     done_mu: std.Io.Mutex = .init,
     done_cond: std.Io.Condition = .init,
-
-    /// Mirror `LoadParams.ds4_path`. Set by `ensureLoaded` when the entry's
-    /// path resolves to a ds4-loadable GGUF (issue #59): the resolved .gguf
-    /// file routes the load through the embedded-engine arm in
-    /// `doLoadOnInferenceThread` instead of the MLX safetensors path.
-    /// Borrowed from the conn thread until `done`.
-    ds4_path: []const u8 = "",
 };
 
 /// Model-unload work item. Posted by `unloadModel` after the conn thread
@@ -1228,9 +1153,9 @@ pub const Scheduler = struct {
     drafter_block_size: u32,
     kv_quant_config: transformer_mod.KVQuantConfig,
     kv_quant_explicit: bool,
-    /// `LoadParams.ctx_size` — the --ctx-size launch flag, kept for sizing
-    /// GGUF stub configs on cold loads (see preloadGgufCpuState).
-    gguf_ctx_size: u32,
+    /// `LoadParams.ctx_size`, retained so every load resolves its context
+    /// against the launch flag (`model_settings.contextPick`).
+    ctx_size_flag: u32,
     /// Launch-flag prefix-cache settings, retained so COLD-LOADED models
     /// (`ensureLoaded` → /v1/load-model, model switches) get the same
     /// prefix-cache behavior as the `--model` primary. Pre-plumbing these
@@ -1256,12 +1181,6 @@ pub const Scheduler = struct {
     mtp_explicit: bool,
     mtp_head_kv_quant: bool,
     mtp_depth: u32,
-    /// Launch-flag ds4 speculative settings, retained for cold loads (same
-    /// class as `mtp_enabled` above — `--no-ds4-mtp` / `--dspark` must
-    /// survive an on-demand GGUF load, not just the `--model` primary).
-    ds4_mtp: bool,
-    ds4_dspark: bool,
-    ds4_ssd_streaming: bool,
     /// `--ane-prefill`, retained for cold loads (same class as `mtp_enabled`).
     ane_prefill: bool,
     ane_chunk_resolver: ?*const fn (*model_mod.ModelConfig) u32,
@@ -1365,9 +1284,7 @@ pub const Scheduler = struct {
     inflight_prefill_expected: std.atomic.Value(u64),
     /// Number of slots currently inside `runPrefill`. Set on entry, cleared on
     /// every exit — so the panel can say "prefilling" IMMEDIATELY, rather than
-    /// waiting for the first 8192-token chunk to land (~40 s on a 27B). Also
-    /// covers the ds4 engine, whose prefill never reaches the MLX chunk
-    /// loop and therefore never moves `inflight_prefill_tokens`.
+    /// waiting for the first 8192-token chunk to land (~40 s on a 27B).
     requests_prefilling: std.atomic.Value(u64),
     /// Counts `pending.len + decoding.len` for back-pressure.
     in_flight: u32,
@@ -1376,10 +1293,6 @@ pub const Scheduler = struct {
     /// (matches the legacy `max_queue_size`).
     queue_cap: u32,
     submit_cond: std.Io.Condition,
-    /// Signaled when a persistent engine session (ds4) is released in
-    /// `complete()`, waking a `submit()` blocked waiting to claim it. Guarded by
-    /// `queue_mu` together with `LoadedModel.session_busy`.
-    session_cond: std.Io.Condition,
 
     inference_thread: ?std.Thread,
     shutdown: std.atomic.Value(bool),
@@ -1433,7 +1346,7 @@ pub const Scheduler = struct {
             .drafter_block_size = params.draft_block_size,
             .kv_quant_config = params.kv_quant_config,
             .kv_quant_explicit = params.kv_quant_explicit,
-            .gguf_ctx_size = params.ctx_size,
+            .ctx_size_flag = params.ctx_size,
             .prefix_cache_capacity = params.prefix_cache_capacity,
             .prefix_cache_mem_bytes = params.prefix_cache_mem_bytes,
             .prefix_cache_mem_resolver = params.prefix_cache_mem_resolver,
@@ -1447,9 +1360,6 @@ pub const Scheduler = struct {
             .mtp_explicit = params.mtp_explicit,
             .mtp_head_kv_quant = params.mtp_head_kv_quant,
             .mtp_depth = params.mtp_depth,
-            .ds4_mtp = params.ds4_mtp,
-            .ds4_dspark = params.ds4_dspark,
-            .ds4_ssd_streaming = params.ds4_ssd_streaming,
             .ane_prefill = params.ane_prefill,
             .ane_chunk_resolver = params.ane_chunk_resolver,
             .ane_headroom_resolver = params.ane_headroom_resolver,
@@ -1479,7 +1389,6 @@ pub const Scheduler = struct {
             .in_flight = 0,
             .queue_cap = cap + 32,
             .submit_cond = .init,
-            .session_cond = .init,
             .inference_thread = null,
             .shutdown = std.atomic.Value(bool).init(false),
             .started = std.atomic.Value(bool).init(false),
@@ -1639,31 +1548,7 @@ pub const Scheduler = struct {
         }
         if (self.shutdown.load(.acquire)) return error.Shutdown;
 
-        // The persistent-session engine (ds4) reuses one KV context across
-        // requests, so only one request may drive it at a time. Block here until
-        // the model's session is free, then claim it (released in `complete`).
-        // This serializes concurrent embedded-engine requests without spinning
-        // the inference thread, and lets the next request reuse the previous
-        // one's prompt KV.
-        if (params.model.ds4_engine != null) {
-            while (params.model.session_busy and !self.shutdown.load(.acquire)) {
-                self.session_cond.waitUncancelable(self.io, &self.queue_mu);
-            }
-            if (self.shutdown.load(.acquire)) return error.Shutdown;
-            params.model.session_busy = true;
-            slot.holds_session = true;
-        }
-
-        self.pending.append(self.allocator, slot) catch |err| {
-            // Release the session claim before bubbling the error — the caller
-            // never gets the slot, so `complete` won't run for it.
-            if (slot.holds_session) {
-                params.model.session_busy = false;
-                slot.holds_session = false;
-                self.session_cond.broadcast(self.io);
-            }
-            return err;
-        };
+        try self.pending.append(self.allocator, slot);
         self.in_flight += 1;
         self.queue_cond.broadcast(self.io);
         return slot;
@@ -1704,16 +1589,6 @@ pub const Scheduler = struct {
                 _ = self.decoding.orderedRemove(i);
                 break;
             }
-        }
-
-        // Release the persistent engine session claim (if this slot held it) so
-        // the next queued request can claim it AND reuse the KV prefix the
-        // session now holds. Done before enqueueing cleanup so a waiting
-        // submitter can proceed immediately.
-        if (slot.holds_session) {
-            slot.model.session_busy = false;
-            slot.holds_session = false;
-            self.session_cond.broadcast(self.io);
         }
 
         self.cleanup_queue.append(self.allocator, slot) catch {
@@ -1782,7 +1657,7 @@ pub const Scheduler = struct {
         // future ensureLoaded calls fail fast instead of re-tripping the
         // same parse error). FileNotFound / parse errors land here.
         const settings = model_settings.overrideFor(self.allocator, self.io, entry.path);
-        const cpu_state = preloadCpuState(self.allocator, self.io, entry.path, model_settings.contextPick(self.gguf_ctx_size, settings.ctx_size orelse 0).value) catch |err| {
+        const cpu_state = preloadCpuState(self.allocator, self.io, entry.path) catch |err| {
             self.registry.mutex.lockUncancelable(self.io);
             self.registry.markErrorLocked(entry, @errorName(err));
             self.registry.mutex.unlock(self.io);
@@ -1795,10 +1670,6 @@ pub const Scheduler = struct {
         var owned_active: bool = true;
         defer if (owned_active) freeCpuState(self.allocator, &owned);
         applyModelSettings(owned.config, settings);
-        // The resolved .gguf path (when this is a GGUF entry) is borrowed by
-        // the LoadRequest until `done`; the engines dupe what they keep, so
-        // it's released here on success AND failure.
-        defer if (owned.gguf) |g| self.allocator.free(g.path);
 
         // Victims selected by the eviction planner (multi-victim: one load may
         // need to free several models to fit). Lives on this stack frame; the
@@ -1938,23 +1809,11 @@ pub const Scheduler = struct {
             .mtp_explicit = self.mtp_explicit,
             .mtp_head_kv_quant = self.mtp_head_kv_quant,
             .mtp_depth = self.mtp_depth,
-            .ds4_mtp = self.ds4_mtp,
-            .ds4_dspark = self.ds4_dspark,
-            .ds4_ssd_streaming = self.ds4_ssd_streaming,
             .ane_prefill = self.ane_prefill,
             .ane_chunk_resolver = self.ane_chunk_resolver,
             .ane_headroom_resolver = self.ane_headroom_resolver,
             .evict_entries = victims_buf[0..n_victims],
             .allocator = self.allocator,
-        };
-        // GGUF entry: route through the matching embedded-engine arm in
-        // doLoadOnInferenceThread (issue #59 — discovered/pulled GGUF dirs
-        // cold-load on demand like MLX ones).
-        if (owned.gguf) |g| switch (g.engine) {
-            .ds4 => req.ds4_path = g.path,
-            // `buildGgufStubCpuState` refuses before a CpuState exists, so this
-            // is unreachable in practice — an error, never `unreachable`.
-            .unsupported => return error.LoadFailed,
         };
 
         {
@@ -2191,10 +2050,6 @@ pub const Scheduler = struct {
         if (slotReleasePending(slot)) return .head_release_pending;
         if (slot.sampling.constraint != null) return .grammar;
         if (slot.logprobs_n > 0) return .logprobs;
-        // Embedded-GGUF slots (ds4) have no `ForwardCtx` — they
-        // always fall through to the per-slot decode path (which dispatches
-        // into the engine).
-        if (slot.model.ds4_engine != null) return .embedded_engine;
         const cfg = slot.model.config orelse return .arch;
         if (modelBatchable(cfg)) return .ok;
         // A GatedDeltaNet trunk is rejected by the pure-config predicate (it is
@@ -2214,7 +2069,6 @@ pub const BatchVerdict = enum {
     head_release_pending,
     grammar,
     logprobs,
-    embedded_engine,
     arch,
     pad_waste,
 };
@@ -2438,14 +2292,6 @@ fn boxInit(
     return ptr;
 }
 
-/// Routing decision for a GGUF entry resolved at preload time: the actual
-/// `.gguf` file (owned by the conn thread, freed after the load completes —
-/// the engines dupe/copy what they keep) and which embedded engine serves it.
-const GgufRoute = struct {
-    path: []u8,
-    engine: gguf_meta.Engine,
-};
-
 /// Both load construction sites (here and main.zig's startup load) stamp the
 /// per-model settings onto the config the bills and defaults read.
 pub fn applyModelSettings(config: *ModelConfig, o: model_settings.Override) void {
@@ -2480,15 +2326,11 @@ pub fn resolveSsdBudget(flag_bytes: u64, setting_gb: u32, streaming: bool) SsdBu
 /// Plan 05 Phase D: pre-loaded CPU state bundle. Built by the conn thread
 /// (CPU only — file I/O + parse, no mlx) ahead of posting a LoadRequest.
 /// Ownership transfers to the entry on successful load; on failure the
-/// conn thread frees via `freeCpuState`. `gguf` (when set) stays owned by
-/// the conn thread either way.
+/// conn thread frees via `freeCpuState`.
 pub const CpuState = struct {
     config: *ModelConfig,
     tok: *Tokenizer,
     chat_config: *ChatConfig,
-    /// Non-null when the model is a GGUF served by an embedded engine
-    /// (issue #59: discovered/pulled GGUF dirs cold-load on demand).
-    gguf: ?GgufRoute = null,
 };
 
 /// Phase D: parse config.json, tokenizer, and chat config from `model_dir`
@@ -2499,14 +2341,10 @@ pub const CpuState = struct {
 /// is registered AFTER the successful init so a downstream failure doesn't
 /// call deinit on uninitialized memory. `ModelConfig.deinit` frees the config's
 /// one owned field; `allocator.destroy` alone would leak it.
-fn preloadCpuState(allocator: std.mem.Allocator, io: std.Io, model_dir: []const u8, gguf_ctx_size: u32) !CpuState {
-    // GGUF first — mirrors `--model` routing in main.zig, where isGgufPath
-    // is checked before any config.json read ("GGUF files bypass the MLX
-    // dispatch entirely"). The embedded engine owns the real tokenizer +
-    // chat template, so the CPU state is a stub.
-    if (model_discovery.isGgufModelPath(io, model_dir)) {
-        return preloadGgufCpuState(allocator, io, model_dir, gguf_ctx_size);
-    }
+fn preloadCpuState(allocator: std.mem.Allocator, io: std.Io, model_dir: []const u8) !CpuState {
+    // No GGUF engine is part of this build: refuse by name before any
+    // config.json read (a GGUF dir has none).
+    if (model_discovery.isGgufModelPath(io, model_dir)) return error.GgufEngineUnsupported;
 
     const config = try allocator.create(ModelConfig);
     errdefer allocator.destroy(config);
@@ -2605,11 +2443,7 @@ test "mimo_v2 expert cache budget excludes the dense prefix" {
     try std.testing.expectEqual(9 * per_expert, result.cache_bytes);
 }
 
-/// Frees the three CPU-state pointers. Does NOT free `s.gguf` — the
-/// resolved .gguf path is borrowed by the LoadRequest until `done` and is
-/// freed by ensureLoaded's own defer on both success and failure paths
-/// (on success the three pointers transfer to the entry, so this function
-/// is skipped, but the path must still be released).
+/// Frees the three CPU-state pointers.
 pub fn freeCpuState(allocator: std.mem.Allocator, s: *CpuState) void {
     s.config.deinit(allocator);
     allocator.destroy(s.config);
@@ -2617,63 +2451,6 @@ pub fn freeCpuState(allocator: std.mem.Allocator, s: *CpuState) void {
     allocator.destroy(s.tok);
     s.chat_config.deinit();
     allocator.destroy(s.chat_config);
-}
-
-/// GGUF cold-load preload: resolve the actual .gguf file, pick the embedded
-/// engine from its header metadata (the issue #15 rule in gguf_meta.zig),
-/// and build the stub CPU state. ds4 is the only GGUF engine in this build,
-/// so unreadable metadata is a refusal, not a guess.
-fn preloadGgufCpuState(allocator: std.mem.Allocator, io: std.Io, model_dir: []const u8, ctx_size: u32) !CpuState {
-    const gguf_path = model_discovery.resolveGgufFile(io, allocator, model_dir) catch |err| {
-        model_discovery.logResolveGgufError(model_dir, err);
-        return err;
-    };
-    errdefer allocator.free(gguf_path);
-
-    const engine: gguf_meta.Engine = blk: {
-        var info = gguf_meta.readFromFile(io, allocator, gguf_path) catch |err| {
-            log.warn("[gguf] route: metadata read failed ({s})\n", .{@errorName(err)});
-            break :blk gguf_meta.Engine.unsupported;
-        };
-        defer info.deinit(allocator);
-        const e = gguf_meta.preferredEngine(info);
-        log.info("[gguf] engine: {s} (arch={s}, ds4-lora={})\n", .{
-            @tagName(e),
-            info.architecture orelse "?",
-            info.has_ds4_lora_rank,
-        });
-        break :blk e;
-    };
-
-    var state = try buildGgufStubCpuState(allocator, engine, ctx_size);
-    state.gguf = .{ .path = gguf_path, .engine = engine };
-    return state;
-}
-
-/// Stub CPU state for a GGUF cold load. Mirrors the stub main.zig's
-/// `runDs4Serve` builds for the startup path: the embedded engine owns the
-/// real tokenizer + chat template, so only `model_type` (echoed in /v1/models
-/// + engine-arm dispatch guards) and `max_position_embeddings` (session sizing
-/// in runPrefillDs4 + the server's context guard) matter. `ctx_size` is the
-/// --ctx-size launch flag; 0 → ds4's own default via clampSessionCtx.
-/// `.unsupported` is refused by name here, which is the one place a GGUF this
-/// build cannot serve is turned into a load error the client sees.
-fn buildGgufStubCpuState(allocator: std.mem.Allocator, engine: gguf_meta.Engine, ctx_size: u32) !CpuState {
-    if (engine == .unsupported) return error.GgufEngineUnsupported;
-    return stubCpuState(allocator, switch (engine) {
-        .unsupported => unreachable,
-        .ds4 => ModelConfig{
-            .model_type = "deepseek_v4",
-            .weight_prefix = "model",
-            .num_hidden_layers = 61,
-            .hidden_size = 7168,
-            .head_dim = 128,
-            .num_attention_heads = 56,
-            .num_key_value_heads = 56,
-            .max_position_embeddings = arch_ds4.clampSessionCtx(ctx_size),
-            .is_encoder_only = false,
-        },
-    });
 }
 
 /// The scheduler's borrowed-view seed for a headless boot (`no_initial_load`):
@@ -2693,8 +2470,7 @@ pub fn headlessStubCpuState(allocator: std.mem.Allocator) !CpuState {
 }
 
 /// Heap CPU state around `config` with an empty byte-level tokenizer and an
-/// empty chat template: a caller that owns the real ones elsewhere (an
-/// embedded engine) or never tokenizes (headless) only needs the shapes.
+/// empty chat template: a caller that never tokenizes only needs the shapes.
 fn stubCpuState(allocator: std.mem.Allocator, config_value: ModelConfig) !CpuState {
     const config = try allocator.create(ModelConfig);
     errdefer allocator.destroy(config);
@@ -2730,115 +2506,6 @@ fn stubCpuState(allocator: std.mem.Allocator, config_value: ModelConfig) !CpuSta
     };
 
     return .{ .config = config, .tok = tok, .chat_config = cc };
-}
-
-/// ds4 load on the inference thread. Mirrors the MLX path's "open weights
-/// → install on entry → markReady" shape but works exclusively through the
-/// embedded engine. The stub `config`/`tok`/`chat_config` come in via
-/// `params.config`/`params.tok`/`params.chat_config` (main.zig allocates
-/// them); the entry takes ownership.
-/// ds4 MTP speculative-decode defaults. `draft_tokens` MUST be > 1 to engage
-/// (ds4 gates on it); margin 3.0 mirrors ds4's own default acceptance margin.
-/// The scratch buffer holds the verified token + up to ds4's 16-draft cap.
-const DS4_MTP_DRAFT_TOKENS: c_int = 4;
-const DS4_MTP_MARGIN: f32 = 3.0;
-const DS4_MTP_MAX_TOKENS: usize = 17;
-
-/// Whether a ds4 decode step should use speculative decode: the engine
-/// reports >1 ready draft tokens and sampling is greedy (ds4's spec path is
-/// argmax-based — temp>0 falls back to the normal sampler). The draft count
-/// is the readiness signal for BOTH support kinds — legacy MTP reports its
-/// configured draft count only when `mtp_ready`, DSpark reports its block
-/// size only when `--dspark` armed the runtime — so a `has_mtp` conjunct
-/// (false for DSpark by design) would leave DSpark unreachable, the
-/// dispatch-hole class. Pure + unit-tested; mirrors ds4's own CLI gate.
-/// A support-GGUF draft (legacy MTP head, DSpark) verifies by argmax, so it
-/// serves greedy requests only; the in-checkpoint head has a sampled arm.
-fn ds4MtpShouldEngage(draft_tokens: c_int, temperature: f32, embedded: bool) bool {
-    return draft_tokens > 1 and (temperature <= 0.0 or embedded);
-}
-
-fn doLoadDs4OnInferenceThread(sch: *Scheduler, params: anytype) !void {
-    log.info("[ds4] opening engine: {s}\n", .{params.ds4_path});
-    // Auto-load the MTP draft head sitting beside the model for speculative
-    // decode. ds4 refuses `--mtp` together with `--ssd-streaming`, so the sidecar
-    // is only sought when streaming is off; `ds4_mtp` (default on) gates opt-out.
-    const mtp_path: ?[]u8 = if (params.ds4_mtp and !params.ds4_ssd_streaming)
-        model_discovery.findDs4MtpSidecar(sch.io, sch.allocator, params.ds4_path)
-    else
-        null;
-    defer if (mtp_path) |p| sch.allocator.free(p);
-    if (mtp_path) |p| log.info("[ds4] MTP draft head: {s}\n", .{p});
-
-    const engine = try arch_ds4.Ds4Engine.open(sch.allocator, params.ds4_path, .{
-        .backend = .metal,
-        .warm_weights = true,
-        .ssd_streaming = params.ds4_ssd_streaming,
-        .mtp_path = mtp_path,
-        .mtp_draft_tokens = if (mtp_path != null) DS4_MTP_DRAFT_TOKENS else 0,
-        .mtp_margin = DS4_MTP_MARGIN,
-        .dspark = params.ds4_dspark,
-        .embedded_mtp = params.ds4_mtp and !params.ds4_ssd_streaming and
-            arch_ds4.ggufDeclaresEmbeddedMtp(sch.io, sch.allocator, params.ds4_path),
-    });
-    errdefer engine.close();
-    // draft_tokens is the spec-readiness signal for BOTH support kinds
-    // (legacy MTP count, or DSpark block size when the runtime is armed).
-    log.info("[ds4] engine ready (EOS={d}, has_mtp={}, draft_tokens={d})\n", .{ engine.eosToken(), engine.hasMtp(), engine.mtpDraftTokens() });
-
-    // Make sure the stub config knows about the engine's EOS token so the
-    // streaming/non-streaming paths' EOS check fires correctly. addEosToken
-    // is a no-op if the slot is already present.
-    const eos_id: u32 = @intCast(engine.eosToken());
-    params.config.addEosToken(eos_id);
-
-    // ── Install on entry. Everything below must be infallible (mirrors
-    //    the MLX path's invariant about the per-ptr errdefers above).
-    const entry = params.entry;
-    entry.ds4_engine = engine;
-    entry.releaseRetainedCpuState();
-    entry.config = params.config;
-    entry.tokenizer = params.tok;
-    entry.chat_config = params.chat_config;
-    entry.weights = null;
-    entry.transformer = null;
-    entry.vision_encoder = null;
-    entry.drafter = null;
-    entry.dflash = null;
-    entry.drafter_block_size = 0;
-    entry.drafter_path = "";
-    entry.prefix_cache = null;
-    // Iteration 2: tokenize cache also applies on the ds4 path. The
-    // MLX-branch assignment isn't reached here because we early-return.
-    if (params.tokenize_cache_entries > 0) {
-        entry.tokenize_cache = tokenize_cache_mod.TokenizeCache.init(
-            sch.allocator,
-            params.tokenize_cache_entries,
-        );
-    }
-
-    // Bytes-resident is whatever main.zig handed us (typically the GGUF
-    // on-disk size). ds4's `ds4_context_memory_estimate` could give a
-    // tighter number; we leave that as a TODO since the registry's
-    // eviction gate doesn't currently support multi-engine residency.
-    const bytes_resident: u64 = if (entry.bytes_on_disk) |b| b else 0;
-
-    sch.registry.mutex.lockUncancelable(sch.io);
-    sch.registry.markReadyLocked(entry, bytes_resident);
-    sch.registry.mutex.unlock(sch.io);
-
-    // Scheduler's borrowed views: leave the MLX fields null. `runPrefill`
-    // / `runSingleDecodeTick` branch on `slot.ds4_session` and never touch
-    // `sch.xfm` for ds4 slots.
-    sch.current_model = entry;
-    sch.xfm = null;
-    sch.weights = null;
-    sch.vision_encoder = null;
-    sch.drafter = null;
-    sch.dflash = null;
-    sch.hot_prefix_cache = null;
-    publishHotCacheResidency(sch);
-    if (hot_cache_budget_invalidate) |f| f();
 }
 
 /// The post-load residency bill the eviction gate reserves, in bytes: the
@@ -3114,7 +2781,6 @@ test "the cold-load LoadRequest re-applies EVERY retained launch setting" {
         "kv_quant_config",           "prefix_cache_capacity", "prefix_cache_mem_bytes",
         "prefix_cache_disk_bytes",   "ssm_checkpoint_stride", "ssm_checkpoint_max",
         "mtp_enabled",               "mtp_head_kv_quant",     "mtp_depth",
-        "ds4_mtp",                   "ds4_dspark",            "ds4_ssd_streaming",
         "no_drafter",                "draft_block_size",      "draft_block_size_explicit",
         "ane_prefill",               "ane_chunk_resolver",    "ane_headroom_resolver",
         "prefix_cache_mem_resolver", "expert_cache_bytes",    "expert_cache_fit_resolver",
@@ -3315,26 +2981,6 @@ test "memInsufficientForLoad: headroom + unknown-query guards" {
 /// caller decides how to surface (startup → recordLoadError + signal
 /// started; on-demand → req.error_name + done broadcast).
 fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
-    // ── ds4 fast path: when the caller passed `ds4_path`, the model is a
-    //    GGUF served by the embedded ds4 engine. The MLX scaffolding
-    //    (weights/Transformer/vision/drafter/JIT/warmup) is entirely
-    //    irrelevant — we open the engine on this thread (Metal kernels
-    //    bind to the local stream from t0), install it on the entry, and
-    //    mark ready. The stub config/tok/chat_config supplied by main.zig
-    //    is moved onto the entry so server-side reads of `lm.config.?`
-    //    (eos slices, context length, model name) keep working.
-    //
-    //    `params` is anytype — either `LoadParams` (startup) or `*LoadRequest`
-    //    (on-demand cold-load; `ensureLoaded` sets `ds4_path` when the entry
-    //    resolves to a GGUF). Read from the value type's fields after a
-    //    deref-when-pointer.
-    const Ty = @TypeOf(params);
-    const TyInfo = @typeInfo(Ty);
-    const Inner = if (TyInfo == .pointer) TyInfo.pointer.child else Ty;
-    if (@hasField(Inner, "ds4_path") and params.ds4_path.len > 0) {
-        try doLoadDs4OnInferenceThread(sch, params);
-        return;
-    }
     var streaming_resident_bytes: ?u64 = null;
     var expert_source_assigned = false;
     errdefer if (expert_source_assigned) {
@@ -3468,7 +3114,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // single-slot fallbacks, prompt-cache reuse).
     // An explicit launch flag outranks the per-model settings stamped on the config at BOTH construction sites.
     const kv_cache = transformer_mod.KvCacheChoice.resolve(params.config.kv_quant_override, params.kv_quant_config, params.kv_quant_explicit);
-    const load_ctx = model_settings.contextPick(sch.gguf_ctx_size, params.config.ctx_override);
+    const load_ctx = model_settings.contextPick(sch.ctx_size_flag, params.config.ctx_override);
     var ctx_buf: [16]u8 = undefined;
     log.info("[kv-cache] {s} ({s}); ctx {s} ({s})\n", .{
         kv_cache.label(),                                      kv_cache.sourceName(),
@@ -4095,9 +3741,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         entry.prefix_cache.?.ssm_checkpoint_max = params.ssm_checkpoint_max;
     }
     // Iteration 2 (perf-plan Phase 4 #3): tokenize cache for warm-path
-    // chat-template renders. Applies to both MLX and ds4 — they funnel
-    // through `chat_mod.formatChat` / `encodeChatViaDs4` at the handler
-    // boundary.
+    // chat-template renders (`chat_mod.formatChat` at the handler boundary).
     // Default capacity is small (4 entries) because chat conversations
     // mutate the messages list every turn; the goal is to catch warm
     // reuse benches and repeated agent-loop probes, not to memoize a
@@ -5246,149 +4890,6 @@ fn finishSlot(sch: *Scheduler, slot: *Slot, reason: []const u8) void {
     _ = mlx.mlx_clear_cache();
 }
 
-/// ds4 prefill: sync the model's ONE persistent session to the full prompt.
-/// ds4 keeps the common prefix against the session's live KV (the previous
-/// request's prompt + reply) and rebuilds only the tail, so the mlx-serve hot
-/// prefix cache stays out of the picture. `cached_tokens` is that prefix.
-fn runPrefillDs4(sch: *Scheduler, slot: *Slot, engine: *arch_ds4.Ds4Engine) !void {
-    _ = sch;
-    // Convert the slot's u32 prompt to ds4's i32 view. Sized once per
-    // prefill — ds4's session_sync owns the read of these IDs and the
-    // buffer can be freed before decode.
-    const i32_prompt = try slot.allocator.alloc(i32, slot.full_prompt.len);
-    defer slot.allocator.free(i32_prompt);
-    for (slot.full_prompt, 0..) |t, i| i32_prompt[i] = @intCast(t);
-
-    // Session ctx from the user's --ctx-size, which runDs4Serve carries on the
-    // stub config's max_position_embeddings. Floored at ds4's prefill chunk so
-    // an under-sized ctx can't drop into the junk-output regime; 0/unset →
-    // ds4's default. Larger ctx → larger KV scratch up front.
-    const req_ctx: u32 = if (slot.model.config) |c| c.max_position_embeddings else 0;
-    const ctx_size: i32 = @intCast(arch_ds4.clampSessionCtx(req_ctx));
-    const sess = slot.model.ds4_session orelse blk: {
-        const created = try engine.createSession(ctx_size);
-        slot.model.ds4_session = created;
-        break :blk created;
-    };
-
-    const cached = sess.commonPrefix(i32_prompt) catch 0;
-    sess.sync(i32_prompt) catch |err| {
-        // Leave nothing half-built behind for the next request.
-        sess.invalidate();
-        return err;
-    };
-
-    slot.ds4_session = sess;
-    slot.prompt_tokens = @intCast(slot.full_prompt.len);
-    slot.cached_tokens = @intCast(@max(cached, 0));
-    slot.state = .decoding;
-}
-
-/// ds4 decode tick: argmax (temp ≤ 0) or sample, check EOS, push token,
-/// `eval(token)` to extend the session, and stop on max_tokens. Each call
-/// emits exactly one token (unlike PLD/drafter which can emit several).
-fn runDs4DecodeTick(sch: *Scheduler, slot: *Slot, session: *arch_ds4.Ds4Session) !void {
-    const engine = slot.model.ds4_engine.?;
-    const next_id: i32 = if (slot.sampling.temperature <= 0.0)
-        session.argmax()
-    else
-        session.sample(
-            slot.sampling.temperature,
-            @intCast(slot.sampling.top_k),
-            slot.sampling.top_p,
-            0.05,
-            &slot.ds4_rng,
-        );
-
-    // ds4 returns an i32 token id; we treat any negative value as a sampler
-    // failure rather than push it through the unsigned ring buffer.
-    if (next_id < 0) {
-        slot.markError("ds4_sample_failed");
-        return;
-    }
-    const tok_u32: u32 = @intCast(next_id);
-
-    // EOS handling — match the MLX path: do NOT emit the stop token.
-    if (next_id == engine.eosToken() or generate_mod.isEosId(tok_u32, slot.eos_token_ids)) {
-        finishSlot(sch, slot, "stop");
-        return;
-    }
-
-    // MTP speculative decode: ONE call commits the sampled token AND drafts +
-    // verifies several more, advancing ds4's KV internally (no separate eval).
-    // It emits `[sampled, accepted…]`, so this tick may push several tokens.
-    // Mirrors ds4's own CLI loop; engages only under greedy sampling.
-    if (ds4MtpShouldEngage(engine.mtpDraftTokens(), slot.sampling.temperature, engine.embedded_mtp)) {
-        var spec_buf: [DS4_MTP_MAX_TOKENS]i32 = undefined;
-        const done: i64 = @intCast(slot.completion_tokens);
-        const cap: i64 = @intCast(slot.max_tokens);
-        const remaining: i32 = @intCast(@max(@as(i64, 1), cap - done));
-        const spec = if (slot.sampling.temperature <= 0.0)
-            session.evalSpeculative(next_id, remaining, engine.eosToken(), spec_buf[0..])
-        else
-            session.evalSpeculativeSampled(next_id, remaining, engine.eosToken(), slot.sampling.temperature, @intCast(slot.sampling.top_k), slot.sampling.top_p, 0.05, &slot.ds4_rng, spec_buf[0..]);
-        const n = spec catch {
-            session.invalidate();
-            slot.markError("ds4_spec_failed");
-            return;
-        };
-        const n_usize: usize = if (n > 0) @intCast(n) else 0;
-        for (spec_buf[0..n_usize]) |t| {
-            const t_u32: u32 = @intCast(t);
-            // EOS may appear mid-batch — stop, and never emit it.
-            if (t == engine.eosToken() or generate_mod.isEosId(t_u32, slot.eos_token_ids)) {
-                finishSlot(sch, slot, "stop");
-                return;
-            }
-            slot.pushToken(t_u32);
-            if (t_u32 != 0) slot.was_pad_only = false;
-            slot.completion_tokens += 1;
-            if (slot.completion_tokens >= slot.max_tokens) {
-                finishSlot(sch, slot, "length");
-                return;
-            }
-        }
-        return;
-    }
-
-    slot.pushToken(tok_u32);
-    if (tok_u32 != 0) slot.was_pad_only = false;
-    slot.completion_tokens += 1;
-
-    // Advance ds4's KV by feeding the freshly-sampled token. After this
-    // the session is in the state expected by the NEXT decode tick.
-    session.eval(next_id) catch |err| {
-        session.invalidate();
-        return err;
-    };
-
-    if (slot.completion_tokens >= slot.max_tokens) {
-        finishSlot(sch, slot, "length");
-        return;
-    }
-}
-
-test "ds4MtpShouldEngage: >1 draft tokens + greedy (legacy MTP and DSpark)" {
-    // Engages only greedily (ds4's spec path is argmax) with a ready draft.
-    // The draft-token count IS the readiness signal for BOTH support kinds:
-    // legacy MTP reports its configured draft count only when `mtp_ready`,
-    // DSpark reports its block size only when `--dspark` armed the runtime
-    // (ds4_engine_mtp_draft_tokens) — a has_mtp conjunct here would leave
-    // DSpark (has_mtp=false by design) permanently unreachable, the
-    // engagement-blind dispatch-hole class.
-    try std.testing.expect(ds4MtpShouldEngage(4, 0.0, false));
-    try std.testing.expect(ds4MtpShouldEngage(2, -1.0, false));
-    // DSpark block size (e.g. 16) engages the same way.
-    try std.testing.expect(ds4MtpShouldEngage(16, 0.0, false));
-    // No ready draft (0), or 1 draft token, or sampling → regular decode.
-    try std.testing.expect(!ds4MtpShouldEngage(0, 0.0, false));
-    try std.testing.expect(!ds4MtpShouldEngage(1, 0.0, false));
-    try std.testing.expect(!ds4MtpShouldEngage(4, 0.7, false));
-    // The in-checkpoint head (Qwen3.8 Flash Next, GLM 5.x) drafts under sampling too.
-    try std.testing.expect(ds4MtpShouldEngage(2, 0.7, true));
-    try std.testing.expect(!ds4MtpShouldEngage(0, 0.7, true));
-}
-
 /// DiffusionGemma prefill: refresh the slot ctx, build the per-slot
 /// diffusion Runner (which dequantizes the embedding table for
 /// self-conditioning), and run the causal ENCODER pass over the full prompt
@@ -5694,13 +5195,6 @@ fn runPrefill(sch: *Scheduler, slot: *Slot) !void {
         sch.inflight_prefill_expected.store(0, .monotonic);
     };
 
-    // ds4-backed model: bypass the MLX prefill path entirely. The ds4
-    // engine owns the chat/tokenizer/KV stack — we just create a session,
-    // sync it to the slot's full prompt (ds4 reuses common prefix against
-    // its live cache internally), and mark the slot decoding.
-    if (slot.model.ds4_engine) |engine| {
-        return runPrefillDs4(sch, slot, engine);
-    }
     // DiffusionGemma: generation is a canvas-denoising loop, not
     // autoregressive decode — no Generator. The encoder prefill fills the
     // slot's own KV cache; PLD/drafter/MTP/batching never apply.
@@ -6595,12 +6089,6 @@ fn runSingleDecodeTick(sch: *Scheduler, slot: *Slot) !void {
 }
 
 fn runSingleDecodeTickInner(sch: *Scheduler, slot: *Slot) !void {
-    // ds4-backed slot: drive the engine's session forward by one token. No
-    // PLD / drafter / batched paths apply — ds4 has its own internal MTP
-    // (see TODO: wire `evalSpeculative` when temp=0 and engine.hasMtp()).
-    if (slot.ds4_session) |session| {
-        return runDs4DecodeTick(sch, slot, session);
-    }
     if (slot.diffusion) |runner| {
         return runDiffusionDecodeTick(sch, slot, runner);
     }
@@ -7044,7 +6532,6 @@ fn slotMtpGroupable(slot: *const Slot) bool {
     if (gen.spec_disabled_runtime or gen.mtp_serial_left > 0 or gen.mtp_serial_exit != .none) return false;
     if (gen.ctx.ssm_entries == null) return false;
     if (slot.sampling.constraint != null or slot.logprobs_n > 0) return false;
-    if (slot.model.ds4_engine != null) return false;
     const t = slot.model.transformer orelse return false;
     if (!t.supportsBatchedGdnDecode()) return false;
     return specTickMode(slot.enable_mtp, true, slot.enable_drafter, gen.drafter != null, gen.dflash != null, slot.enable_pld, gen.pld_enabled, gen.dspark_enabled) == .mtp;
@@ -8771,23 +8258,19 @@ test "modelExclusiveDecode asks the transformer, never one hardcoded arch" {
     try testing.expect(std.mem.indexOf(u8, src, hardcoded) == null);
 }
 
-test "buildGgufStubCpuState: a GGUF no engine here can load is refused by name" {
-    // The generic llama.cpp engine is not part of this build, so the routing
-    // verdict for every non-ds4 GGUF is a NAMED load error the client sees as
-    // a 503 — never a stub config that later panics in a missing engine arm.
-    try testing.expectError(
-        error.GgufEngineUnsupported,
-        buildGgufStubCpuState(std.testing.allocator, .unsupported, 0),
-    );
-}
-
-test "buildGgufStubCpuState: ds4 stub carries deepseek_v4 + clamped ctx" {
-    const a = std.testing.allocator;
-    // Under-sized ctx floors at ds4's prefill chunk, exactly like runDs4Serve.
-    var s = try buildGgufStubCpuState(a, .ds4, 512);
-    defer freeCpuState(a, &s);
-    try testing.expectEqualStrings("deepseek_v4", s.config.model_type);
-    try testing.expectEqual(arch_ds4.clampSessionCtx(512), s.config.max_position_embeddings);
+test "preloadCpuState refuses a GGUF checkpoint by name" {
+    // No GGUF engine is part of this build: the verdict is a NAMED load error
+    // the client sees as a 503, never a stub config for a missing engine.
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "g");
+    try tmp.dir.writeFile(io, .{ .sub_path = "g/model-Q4_K_M.gguf", .data = "GGUF" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &buf);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/g", .{buf[0..root_len]});
+    defer testing.allocator.free(path);
+    try testing.expectError(error.GgufEngineUnsupported, preloadCpuState(testing.allocator, io, path));
 }
 
 test "sumInflightGeneratedTokens sums active slots, excludes finished/cancelled/errored" {
@@ -9330,7 +8813,6 @@ test "single MTP slot reaches the round entry through runDecodeTick" {
     var slot: Slot = undefined;
     slot.allocator = testing.allocator;
     slot.model = &model;
-    slot.ds4_session = null;
     slot.diffusion = null;
     slot.legacy_gen = gen;
     slot.enable_mtp = true;

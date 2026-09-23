@@ -1007,8 +1007,8 @@ pub const GenerationResult = struct {
     prefill_ns: u64 = 0,
     /// Wall-clock nanoseconds spent on decode (token generation).
     decode_ns: u64 = 0,
-    /// Prompt tokens served from a KV-cache prefix (hot prefix cache for MLX,
-    /// persistent-session prefix reuse for ds4). `prompt_tokens - cached_tokens`
+    /// Prompt tokens served from a KV-cache prefix (the hot prefix cache).
+    /// `prompt_tokens - cached_tokens`
     /// is what was actually run through the model this turn, so `prefill_tps`
     /// reflects real compute rather than an inflated full-prompt rate.
     cached_tokens: u32 = 0,

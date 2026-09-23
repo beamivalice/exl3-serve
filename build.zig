@@ -62,28 +62,13 @@ pub fn build(b: *std.Build) void {
     // that have NO runtime query API (MLX reports itself at runtime):
     //   --mlx-c-version  pinned mlx-c submodule version; defaults from the
     //                    lib/mlx/.version stamp (written by scripts/build-mlx.sh)
-    //   --ds4-commit     pinned ds4 submodule short commit (build.sh: `git rev-parse`)
     const mlx_c_version = b.option([]const u8, "mlx-c-version", "Pinned mlx-c version") orelse readMlxcPin(b) orelse "unknown";
-    const ds4_commit = b.option([]const u8, "ds4-commit", "Pinned ds4 submodule short commit") orelse "unknown";
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version);
     build_options.addOption([]const u8, "mlx_c_version", mlx_c_version);
-    build_options.addOption([]const u8, "ds4_commit", ds4_commit);
     const git_sha = b.option([]const u8, "git-sha", "Engine build id for the round-cost table: a release sha stands for the executable bytes, which are then not hashed; the MLX dylib and metallib fingerprints are always mixed in") orelse "";
     build_options.addOption([]const u8, "git_sha", git_sha);
-    // Constant false with the iOS static-lib target gone: the ds4-vs-stub
-    // selects in chat/server/scheduler/model_registry always take the engine.
-    build_options.addOption(bool, "ios", false);
-
-    // ds4 Metal kernel sources embedded via @embedFile and exposed as a
-    // named module so src/arch/ds4.zig can import them with `@import("ds4_metal_sources")`
-    // without traversing the project root.
-    const ds4_metal_sources = b.createModule(.{
-        .root_source_file = b.path("lib/ds4_metal_sources.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -92,7 +77,6 @@ pub fn build(b: *std.Build) void {
         .link_libcpp = true,
         .imports = &.{
             .{ .name = "build_options", .module = build_options.createModule() },
-            .{ .name = "ds4_metal_sources", .module = ds4_metal_sources },
             .{ .name = "jinja_c", .module = addCHeaderModule(b, b.path("lib/jinja_cpp/jinja_wrapper.h"), b.path("lib/jinja_cpp"), target, optimize) },
             .{ .name = "stb", .module = addCHeaderModule(b, b.path("lib/stb_image.h"), b.path("lib"), target, optimize) },
             .{ .name = "webp", .module = addCHeaderModule(b, .{ .cwd_relative = "/opt/homebrew/include/webp/decode.h" }, .{ .cwd_relative = "/opt/homebrew/include" }, target, optimize) },
@@ -108,13 +92,6 @@ pub fn build(b: *std.Build) void {
     // stb_image for JPEG/PNG decoding in the vision pipeline
     mod.addCSourceFile(.{ .file = b.path("lib/stb_image_impl.c"), .flags = &.{"-O2"} });
     mod.addIncludePath(b.path("lib"));
-
-    // ds4 inference engine for DSV4-Flash (Metal backend, macOS only). See
-    // `lib/ds4/` submodule pinned at 9139e2a and `src/arch/ds4.zig`. Kernel
-    // sources are embedded via `lib/ds4_metal_sources.zig` and extracted at
-    // runtime to ~/.mlx-serve/ds4-metal/<hash>/.
-    addDs4Sources(b, mod);
-    mod.addIncludePath(b.path("lib/ds4"));
 
     // ANE prefill-MLP offload (perf-plan-aug-17 P5): objc bridge to the
     // private AppleNeuralEngine framework (dlopen'd at runtime — the probe
@@ -167,7 +144,6 @@ pub fn build(b: *std.Build) void {
         .link_libcpp = true,
         .imports = &.{
             .{ .name = "build_options", .module = build_options.createModule() },
-            .{ .name = "ds4_metal_sources", .module = ds4_metal_sources },
             .{ .name = "jinja_c", .module = addCHeaderModule(b, b.path("lib/jinja_cpp/jinja_wrapper.h"), b.path("lib/jinja_cpp"), target, optimize) },
             .{ .name = "stb", .module = addCHeaderModule(b, b.path("lib/stb_image.h"), b.path("lib"), target, optimize) },
             .{ .name = "webp", .module = addCHeaderModule(b, .{ .cwd_relative = "/opt/homebrew/include/webp/decode.h" }, .{ .cwd_relative = "/opt/homebrew/include" }, target, optimize) },
@@ -178,8 +154,6 @@ pub fn build(b: *std.Build) void {
     test_mod.addIncludePath(b.path("lib/jinja_cpp"));
     test_mod.addCSourceFile(.{ .file = b.path("lib/stb_image_impl.c"), .flags = &.{"-O2"} });
     test_mod.addIncludePath(b.path("lib"));
-    addDs4Sources(b, test_mod);
-    test_mod.addIncludePath(b.path("lib/ds4"));
     addAneSources(b, test_mod);
     test_mod.linkSystemLibrary("c++", .{});
     addMlxLib(b, test_mod);
@@ -238,57 +212,6 @@ fn addCHeaderModule(
     });
     translate.addIncludePath(include_dir);
     return translate.createModule();
-}
-
-fn addDs4Sources(b: *std.Build, module: *std.Build.Module) void {
-    // Match ds4's Makefile flags (lib/ds4/Makefile lines 10–11). We drop
-    // `-mcpu=native` so the produced binary stays portable across Apple
-    // Silicon generations — ds4 itself ships portable IR for its Metal
-    // kernels, and the C host code is not perf-critical compared to the GPU
-    // path. `-Wno-unused-parameter` + `-Wno-unused-variable` keep upstream's
-    // warnings from breaking our build without patching the submodule.
-    const c_flags = &[_][]const u8{
-        "-O3",
-        "-ffast-math",
-        "-std=c99",
-        "-Wno-unused-parameter",
-        "-Wno-unused-variable",
-        "-Wno-unused-but-set-variable",
-        "-Wno-unused-function",
-        "-Wno-deprecated-declarations",
-    };
-    module.addCSourceFile(.{ .file = b.path("lib/ds4/ds4.c"), .flags = c_flags });
-    // ds4.c #includes ds4_distributed.h; the engine/session path links its impl.
-    // ds4_gpu.h is implemented in ds4_metal.m; ds4_kvstore/web/help/agent.c and
-    // ds4_gpu_args.c are CLI/server-only and not part of the library path
-    // mlx-serve embeds (upstream Makefile CORE_OBJS is the authority).
-    module.addCSourceFile(.{ .file = b.path("lib/ds4/ds4_distributed.c"), .flags = c_flags });
-    // SSD weight-streaming (issue #39): ds4_ssd.c is a standalone TU (#includes
-    // only ds4_ssd.h) implementing the streaming expert cache the engine_options
-    // ssd_streaming_* fields drive. Added upstream after the previous pin.
-    module.addCSourceFile(.{ .file = b.path("lib/ds4/ds4_ssd.c"), .flags = c_flags });
-    // Two-machine tensor parallelism + multi-GPU layer placement (pin 9139e2a):
-    // ds4.c references ds4_tp_* and ds4_compute_layer_placement/ds4_layer_pack_print
-    // unconditionally, so both TUs must link even though we never enable TP.
-    module.addCSourceFile(.{ .file = b.path("lib/ds4/ds4_tp.c"), .flags = c_flags });
-    module.addCSourceFile(.{ .file = b.path("lib/ds4/ds4_layer_pack.c"), .flags = c_flags });
-    module.addCSourceFile(.{ .file = b.path("lib/ds4/ds4_image.c"), .flags = c_flags });
-    module.addCSourceFile(.{ .file = b.path("lib/ds4/ds4_engram.c"), .flags = c_flags });
-    // Our own shim: exports sizeof/offsetof of the real C structs so the
-    // ds4_ffi.zig layout test catches mirror drift (mid-struct-insert class).
-    module.addCSourceFile(.{ .file = b.path("src/ds4_layout_check.c"), .flags = c_flags });
-
-    const objc_flags = &[_][]const u8{
-        "-O3",
-        "-ffast-math",
-        "-fobjc-arc",
-        "-Wno-unused-parameter",
-        "-Wno-unused-variable",
-        "-Wno-unused-but-set-variable",
-        "-Wno-unused-function",
-        "-Wno-deprecated-declarations",
-    };
-    module.addCSourceFile(.{ .file = b.path("lib/ds4/ds4_metal.m"), .flags = objc_flags });
 }
 
 /// ANE prefill offload sources (lib/ane): the private-framework bridge and

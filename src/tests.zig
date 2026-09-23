@@ -57,11 +57,8 @@ test {
     _ = @import("kv_disk_writer.zig");
     _ = @import("model_discovery.zig");
     _ = @import("mimo_source.zig");
-    _ = @import("gguf_meta.zig");
     _ = @import("model_registry.zig");
     _ = @import("scheduler.zig");
-    _ = @import("ds4_ffi.zig");
-    _ = @import("arch/ds4.zig");
     _ = @import("ane.zig");
     _ = @import("kld.zig");
     _ = @import("cli.zig");

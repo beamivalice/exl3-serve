@@ -285,16 +285,6 @@ into the mlx-serve binary. Pinned to an upstream commit chosen for
 compatibility with the pinned MLX version. Unmodified.
 
 --------------------------------------------------------------------------------
-ds4.c
-https://github.com/antirez/ds4
-Copyright (c) 2026 The ds4.c authors
-Copyright (c) 2023-2026 The ggml authors
-
-Pinned submodule at `lib/ds4`, compiled into the mlx-serve binary as the
-DeepSeek-V4-Flash GGUF engine. Unmodified; mlx-serve supplies its own Metal
-kernel staging and FFI bridge in `src/arch/ds4.zig`.
-
---------------------------------------------------------------------------------
 nlohmann/json
 https://github.com/nlohmann/json
 SPDX-FileCopyrightText: 2013-2023 Niels Lohmann

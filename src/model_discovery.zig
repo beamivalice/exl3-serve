@@ -515,20 +515,6 @@ pub const DiscoveryResult = struct {
     }
 };
 
-/// True if a `.gguf` basename is the DeepSeek-V4-Flash model served by the ds4
-/// engine (case-insensitive `deepseek-v4-flash` prefix). ds4 is the only GGUF
-/// engine in this build, so every other GGUF is refused at load. Mirrors the
-/// Swift app's `isSupportedDsv4Gguf` so client and server agree on which GGUFs
-/// are ds4.
-pub fn isDs4GgufBasename(name: []const u8) bool {
-    const prefix = "deepseek-v4-flash";
-    if (name.len < prefix.len) return false;
-    for (prefix, 0..) |c, i| {
-        if (std.ascii.toLower(name[i]) != c) return false;
-    }
-    return true;
-}
-
 /// True if a `.gguf` basename is a multimodal-projection sidecar (CLIP
 /// vision / audio encoder packaged separately so the language model can
 /// reference it at runtime). llama.cpp tooling, ollama, and LM Studio all
@@ -584,28 +570,6 @@ pub fn isGgufSidecarBasename(basename: []const u8) bool {
     if (isMmprojGgufBasename(basename)) return true;
     if (asciiContainsIgnoreCase(basename, "tokenizer")) return true;
     return isMtpGgufBasename(basename);
-}
-
-/// Full path to the ds4 MTP draft-head GGUF sitting beside `model_file_path`
-/// (the primary quant), or null when there is none. The primary's parent
-/// directory is scanned for a `-MTP-` GGUF. Caller owns the returned slice.
-/// Used to auto-enable ds4 speculative decode: the app downloads the MTP file
-/// into the same folder as the chosen quant, and the engine finds it here.
-pub fn findDs4MtpSidecar(io: std.Io, allocator: std.mem.Allocator, model_file_path: []const u8) ?[]u8 {
-    const dir_path = std.fs.path.dirname(model_file_path) orelse return null;
-    // openDirAbsolute asserts (→ ReleaseFast UB) on a non-absolute path.
-    if (dir_path.len == 0 or !std.fs.path.isAbsolute(dir_path)) return null;
-    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return null;
-    defer dir.close(io);
-    var it = dir.iterate();
-    while (it.next(io) catch null) |entry| {
-        if (!isMtpGgufBasename(entry.name)) continue;
-        if (std.mem.eql(u8, entry.name, std.fs.path.basename(model_file_path))) continue;
-        const st = dir.statFile(io, entry.name, .{}) catch continue;
-        if (st.kind != .file) continue;
-        return std.fs.path.join(allocator, &.{ dir_path, entry.name }) catch return null;
-    }
-    return null;
 }
 
 fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
@@ -1511,26 +1475,6 @@ test "probeModelDir accepts a GGUF dir (register-by-path / /api/pull)" {
     try testing.expectEqual(@as(?u64, 8), probe.bytes_on_disk);
 }
 
-test "findDs4MtpSidecar never returns the model file itself" {
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{ .sub_path = "Flash-Next-IQ2-MTP.gguf", .data = "x" });
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(io, &path_buf);
-    const model = try std.fmt.allocPrint(allocator, "{s}/Flash-Next-IQ2-MTP.gguf", .{path_buf[0..root_len]});
-    defer allocator.free(model);
-
-    try testing.expectEqual(@as(?[]u8, null), findDs4MtpSidecar(io, allocator, model));
-
-    try tmp.dir.writeFile(io, .{ .sub_path = "Flash-Next-MTP-Q8.gguf", .data = "x" });
-    const found = findDs4MtpSidecar(io, allocator, model) orelse return error.TestExpectedSidecar;
-    defer allocator.free(found);
-    try testing.expectEqualStrings("Flash-Next-MTP-Q8.gguf", std.fs.path.basename(found));
-}
-
 test "resolveGgufFile: deterministic pick, mmproj filtering, precise errors" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -1686,17 +1630,6 @@ test "lessThanById sorts ascending" {
     try testing.expect(lessThanById({}, a, b));
     try testing.expect(!lessThanById({}, b, a));
     try testing.expect(!lessThanById({}, a, a));
-}
-
-test "isDs4GgufBasename routes DSV4 to ds4 and nothing else" {
-    // DeepSeek-V4-Flash → ds4 (case-insensitive).
-    try testing.expect(isDs4GgufBasename("DeepSeek-V4-Flash-Q4_K_M.gguf"));
-    try testing.expect(isDs4GgufBasename("deepseek-v4-flash-bf16.gguf"));
-    // Any other GGUF has no engine in this build.
-    try testing.expect(!isDs4GgufBasename("qwen2.5-0.5b-instruct-q4_k_m.gguf"));
-    try testing.expect(!isDs4GgufBasename("Meta-Llama-3.1-8B-Instruct.Q4_K_M.gguf"));
-    try testing.expect(!isDs4GgufBasename("deepseek-v3-chat.gguf")); // V3, not V4-Flash
-    try testing.expect(!isDs4GgufBasename("short.gguf"));
 }
 
 test "isMmprojGgufBasename catches the multimodal-projection sidecars" {
