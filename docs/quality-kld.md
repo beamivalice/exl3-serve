@@ -23,11 +23,15 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [perf-baselines](perf-base
 - **16 prompts x 512 tokens, scored to the first EOS, for every model** (Flash-Next's 16 wikitext prompts, raw text,
   no template). 60x64 is a short-context screen only, never a verdict.
 - Differences under ~3% of mean KLD are inside conversion noise (a quantizer's seed alone moves it that much); need
+  several seeds per arm or a larger margin before ranking.
 - Differences under ~1% on ONE pack are inside the ROUNDING-FLIP floor (measured 2026-09-24 on the MiMo MCG pack:
   flipping 0.07-0.13% of attention outputs by one bf16 ulp, no precision loss, moved 16x512 KLD -0.5% .. +0.55%). A
   kernel or storage change that flips bits reads as a KLD change of that size with no quality meaning; each flip
   pattern is deterministic. Compare arms on the same binary; say the floor beside the number.
-  several seeds per arm or a larger margin before ranking.
+- **NAX vs SIMD is accepted hardware noise (owner policy).** A NAX (tensor-op) arm and its SIMD twin accumulate in a
+  different order, so they score a slightly different KLD. The engine takes the faster arm knowingly: such a delta is
+  recorded, never treated as a regression or a reason to hold a NAX kernel back, and never "fixed" toward SIMD.
+  A NAX arm still has to pass its fp32 parity test; this policy covers only the model-level KLD difference.
 - No static weight metric (per-module error, weighted error, tail quantiles) predicts model-level KLD rank; only a real
   pack and this reading decide.
 
