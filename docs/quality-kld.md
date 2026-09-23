@@ -23,6 +23,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [perf-baselines](perf-base
 - **16 prompts x 512 tokens, scored to the first EOS, for every model** (Flash-Next's 16 wikitext prompts, raw text,
   no template). 60x64 is a short-context screen only, never a verdict.
 - Differences under ~3% of mean KLD are inside conversion noise (a quantizer's seed alone moves it that much); need
+- Differences under ~1% on ONE pack are inside the ROUNDING-FLIP floor (measured 2026-09-24 on the MiMo MCG pack:
+  flipping 0.07-0.13% of attention outputs by one bf16 ulp, no precision loss, moved 16x512 KLD -0.5% .. +0.55%). A
+  kernel or storage change that flips bits reads as a KLD change of that size with no quality meaning; each flip
+  pattern is deterministic. Compare arms on the same binary; say the floor beside the number.
   several seeds per arm or a larger margin before ranking.
 - No static weight metric (per-module error, weighted error, tail quantiles) predicts model-level KLD rank; only a real
   pack and this reading decide.
