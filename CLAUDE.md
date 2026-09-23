@@ -2,7 +2,7 @@
 
 Fork of ddalcu's mlx-serve, serving Qwen3.8-Flash-Next (`qwen4_exp`) on Apple Silicon with EXL3 routed experts, resident or SSD-streamed. MiMo-V2.6-Flash (`mimo_v2`) is an experimental text-only bring-up using native MXFP4 expert streaming. Native Zig, OpenAI/Anthropic-compatible HTTP, no Python at serve time.
 
-Everything else in `src/` (the other architectures, ANE) is INHERITED upstream code: it builds, it is not supported here, and this file does not document it. The loader refuses any other `model_type` by name (`model.served_model_types`, `ArchitectureUnsupported` → 503). No GGUF engine is part of this build: a `.gguf` is refused by name (`GgufEngineUnsupported` → 503; `--model` exits). Upstream's docs are archived: `git show ff1380d:docs/reference.md`.
+Everything else in `src/` (other architectures' forwards and loaders in `transformer.zig`/`model.zig`, the dormant ANE driver) is INHERITED upstream code: it builds, it is unreachable, and this file does not document it. The loader refuses any other `model_type` by name (`model.served_model_types`, `ArchitectureUnsupported` → 503). No GGUF engine is part of this build: a `.gguf` is refused by name (`GgufEngineUnsupported` → 503; `--model` exits). Upstream's docs are archived: `git show ff1380d:docs/reference.md`.
 
 **No conversion side here.** Every converter, allocator, imatrix driver and repacker now lives in PonyExl3 as `python -m ponyexl3.serve_convert <subcommand>`; this repo keeps the CONSUMER contract — `docs/pack-format.md`, the Zig shard-stamp check, the committed `src/fixtures/`, and `mlx-serve kld`. The oracle fixture dumpers (`tests/dump_*_fixtures.py`) stay: they verify the engine, they do not make packs.
 
@@ -13,7 +13,7 @@ Everything else in `src/` (the other architectures, ANE) is INHERITED upstream c
 
 ## Stack
 
-Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds); mlx + mlx-c PINNED SUBMODULES (`lib/mlx-src` v0.32.2, `lib/mlxc-src` 56b2d39) self-built NAX-enabled by `scripts/build-mlx.sh` into `lib/mlx/` (FFI `src/mlx.zig`); jinja.cpp (wangzhaode, Apache-2.0) as `lib/jinja_cpp/libjinja.a`; safetensors; BPE. Min macOS 26.2; NAX kernels need the 26.2 deployment target (asserted by `tests/test_mlx_staged_nax.sh`). The served binary's only non-system dylibs are `libmlxc` and Homebrew's `libwebp` — no `libllama` (`tests/test_serving_deps.sh`).
+Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds); mlx + mlx-c PINNED SUBMODULES (`lib/mlx-src` v0.32.2, `lib/mlxc-src` 56b2d39) self-built NAX-enabled by `scripts/build-mlx.sh` into `lib/mlx/` (FFI `src/mlx.zig`); jinja.cpp (wangzhaode, Apache-2.0) as `lib/jinja_cpp/libjinja.a`; safetensors; BPE; `stb_image` + libwebp decode image INPUT. Min macOS 26.2; NAX kernels need the 26.2 deployment target (asserted by `tests/test_mlx_staged_nax.sh`). The served binary's only non-system dylibs are `libmlxc` and Homebrew's `libwebp` — no `libllama` (`tests/test_serving_deps.sh`).
 
 ## Layout (`src/`, served path only)
 
@@ -23,6 +23,7 @@ Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds)
 | `cli.zig` | alias → HF repo, resumable pull into `~/.mlx-serve/models/<org>/<repo>`, `list`, `run` REPL |
 | `launch.zig` | `mlx-serve launch <agent>` (claude/pi/omp/opencode/codex/hermes/aider): reads `/v1/models`, writes agent configs into `~/.mlx-serve/<agent>/` |
 | `mlx.zig` | mlx-c FFI |
+| `vision.zig` / `qwen_vision.zig` / `mrope.zig` | Media INPUT: Qwen3-VL image/video tower, M-RoPE positions, audio embedder forward |
 | `model.zig` | Config parse + safetensors loading; weight-prefix probing |
 | `mimo_source.zig` | Original MiMo source headers, selective trunk loading, rank-local FP8 QKV reconstruction and in-memory FP8→bf16 dequantization |
 | `tokenizer.zig` | BPE; single special-token splitter; per-model `digit_group` |

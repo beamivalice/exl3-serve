@@ -12,7 +12,7 @@ Search first, then write. Check the open AND closed issues, the open PRs, and `g
 
 Open an issue with:
 - What you expected vs what happened
-- Model name and quantization (e.g. `Qwen3.8-27B-MLX-Serve-4bit`)
+- Model name and quantization (e.g. `Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`)
 - macOS version and chip (e.g. macOS 26.6, M4 Max)
 - Server log output (`--log-level debug`, `~/.mlx-serve/logs/mlx-serve-<port>.log`)
 
@@ -20,7 +20,7 @@ Open an issue with:
 
 1. **Build and run it, or do not open a PR.** If you cannot compile and run on a real Mac, there is no PR.
 2. **Tests first.** A hermetic test at the bottom of the `.zig` file (`zig build test`, 6/6, 0 fail) and an integration script in `tests/` where the change is visible over HTTP. Red before green. Run them. Paste the result in the PR.
-3. **Human testing is required.** Serve it, hit it with a client, repeat. Many times. A passing suite is the floor, not the proof. UI changes need screenshots of the result in the PR, before and after.
+3. **Human testing is required.** Serve it, hit it with a client, repeat. Many times. A passing suite is the floor, not the proof.
 4. **Draft while working, publish when ready.** Open as draft early so nobody duplicates you. Move to ready for review only when 1-3 are done.
 5. **Keep it simple.** One fix or feature per PR, smallest change that does the job, match surrounding style, no new plumbing to make something testable, no comments that restate code, no new dependencies. Read `CLAUDE.md` and the matching `docs/gotchas/*.md` before touching a subsystem. Read "Diff hygiene" below; a PR that fails it gets sent back before anyone reads the code.
 6. **Numbers name what they beat.** A perf claim is an llmprobe cell (`./tests/bench.sh`) against a named arm, same session, with the engagement line from the log. See `.claude/skills/bench/SKILL.md`.

@@ -181,30 +181,6 @@ mlx-serve addition modeled on the same project's `h3_ane_linear.m` blob
 layout and int8 constexpr-dequantize idioms.
 
 --------------------------------------------------------------------------------
-SwaTex
-https://github.com/PhraseHQ/SwaTex
-Copyright (c) 2026 Phrase (https://phrase.so) and SwaTex contributors
-Licensed under the MIT License.
-
-Used by the MLX Core app to parse, lay out, and natively render LaTeX in
-assistant chat responses. SwaTex includes work derived from:
-
-  * RaTeX (https://github.com/erweixin/RaTeX), Copyright (c) erweixin,
-    licensed under the MIT License. SwaTex's engine architecture, layout
-    mathematics, generated tables, and golden corpus derive from RaTeX.
-  * KaTeX (https://katex.org), Copyright (c) 2013-2020 Khan Academy and other
-    contributors, licensed under the MIT License. Font metrics, symbols,
-    stretchy-SVG geometry, macros, and layout rules derive from KaTeX.
-  * mhchem for KaTeX, Copyright (c) Martin Hensel, licensed under the MIT
-    License. The chemistry command state machine reaches SwaTex through
-    RaTeX's Rust port.
-
-The KaTeX_*.ttf fonts bundled in SwaTexRender use the SIL Open Font License
-1.1. SwaTex_SwaTexRender.bundle includes the upstream OFL.txt and
-FONT_NOTICE.txt alongside those fonts, and the entire bundle is copied into the
-app's Resources directory by every packaging path.
-
---------------------------------------------------------------------------------
 MLX
 https://github.com/ml-explore/mlx
 Copyright (c) 2023 Apple Inc.
@@ -396,12 +372,13 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --------------------------------------------------------------------------------
-stb_image / stb_image_write
+stb_image
 https://github.com/nothings/stb
 Copyright (c) 2017 Sean Barrett
 Public domain (Unlicense), or MIT at your option.
 
-Vendored under `lib/` and compiled into the mlx-serve binary. Unmodified.
+Vendored under `lib/` and compiled into the mlx-serve binary for image-input
+decoding. Unmodified.
 
 
 ================================================================================
@@ -417,42 +394,9 @@ and they are listed because they made that work possible.
   * The `inkling_mlx/` package bundled with Thinking Machines' Inkling Small
     checkpoints (Apache-2.0), the reference and parity oracle for
     `inkling_mm_model`.
-  * hexgrad/misaki (Apache-2.0), whose pronunciation dictionaries are fetched
-    verbatim into the Kokoro conversion we publish at
-    `ddalcu/Kokoro-82M-MLX-Serve`, where they are redistributed under their own
-    Apache-2.0 terms.
   * DeepSeek's `inference/model.py` and `encoding_dsv4.py`, shipped with the
     DeepSeek-V4-Flash release, the reference for the `deepseek_v4` architecture
     and its chat template.
-  * The diffusers `minimax-music3-integration` branch (Apache-2.0, The MiniMax
-    Team + The HuggingFace Team), the reference for the `minimax_music3`
-    architecture: its prompt-normalization contract, the hierarchical AR loop,
-    condition encoder, flow-matching DiT, chunked denoise and Flow-VAE vocoder.
-    Its module code is transcribed into plain torch by
-    `tests/dump_music3_fixtures.py` as the parity oracle; the fixtures it
-    produces are golden values, not source.
-  * ComfyUI's `comfy/ldm/minimax/*` and `comfy_extras/nodes_minimax_h3.py`
-    (GPL-3.0), the reference for the `minimax_h3` architecture, its packed
-    layout and its dual sigma schedule. Its layout/schedule output is executed
-    directly as a parity oracle by `tests/dump_minimax_h3_layout.py`; the
-    fixtures it produces are golden values, not source.
-  * ComfyUI's `comfy/latent_formats.py` and `latent_preview.py` (GPL-3.0), the
-    reference for the per-step denoise preview: the published latent-to-RGB
-    fits `LTXAV` (128 channels) and `MiniMaxH3Video` (24), and the
-    `Latent2RGBPreviewer` + `preview_to_image` arithmetic they are applied
-    with. `tests/dump_latent_rgb_factors.py` EXECUTES those classes to emit
-    `src/latent_rgb.zig` and `src/fixtures/latent_rgb.json`; the coefficients
-    and reference outputs it produces are golden values, not source, and no
-    ComfyUI code is transcribed or shipped.
-  * Larryvrh/ComfyUI-MiniMax-H3-Turbo (Apache-2.0), whose `_turbo_sampler`
-    is the reference for stepping H3's audio stream by the exact mapped
-    delta-sigma at low step counts (`minimax_h3.audioStepFactor`). The Turbo
-    LoRA weights it loads (larryvrh/MiniMax-H3-Turbo-Lora, Apache-2.0) are
-    downloaded at runtime and not redistributed here.
-  * filipstrand/mflux (MIT), the reference for stacking several LoRA adapters
-    at once — summing per-adapter deltas at forward time rather than merging
-    them into the base weight, the `lora_paths`/`lora_scales` request shape,
-    and splitting a fused QKV up-projection across q/k/v targets.
   * turboderp/exllamav3 (MIT), the EXL3 weight format served for
     Qwen3.8-Flash-Next experts (`src/expert_exl3.zig`,
     `src/expert_exl3_kernels.zig`, `tests/convert_qwen38_flash_next_exl3.py`):
