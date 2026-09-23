@@ -220,6 +220,8 @@ fn printUsage(io: std.Io) void {
         \\                        `auto` (default) picks fused from 8K prompt
         \\                        tokens. Only effective at --kv-quant 4 or 8;
         \\                        per-request `kv_attn_mode` field overrides.
+        \\                        MiMo's global layers read packed from 4096
+        \\                        cached keys in every mode.
         \\  --prefill-chunk <n> Max tokens forwarded per prefill chunk
         \\                        (default: 8192). Auto-capped further per model
         \\                        so one layer's attention scores stay within

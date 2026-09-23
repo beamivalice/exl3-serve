@@ -5728,7 +5728,7 @@ pub fn qkvAttnSplitKKernel(s: mlx.mlx_stream, q_in: mlx.mlx_array, view: *const 
     const out = (try splitKAttnDispatch(s, q_in, no_blocks, arrays, scale, key)) orelse return null;
     if (!qkv_splitk_engaged) {
         qkv_splitk_engaged = true;
-        log.info("[kv-attn] split-K packed attention engaged: bits={d} gs={d} DK={d} DV={d} Hq={d} Hkv={d} Tq={d} nsplit={d}\n", .{ view.bits, view.group_size, dk, dv, qs[1], h_kv, t_q, key.nsplit });
+        log.info("[kv-attn] split-K packed attention engaged: bits={d} gs={d} DK={d} DV={d} Hq={d} Hkv={d} Tq={d} Tk={d} nsplit={d}\n", .{ view.bits, view.group_size, dk, dv, qs[1], h_kv, t_q, t_k, key.nsplit });
     }
     return out;
 }
@@ -15335,15 +15335,17 @@ pub fn qkvAttnMppKernel(s: mlx.mlx_stream, q_in: mlx.mlx_array, view: *const Den
     try mlx.check(mlx.mlx_reshape(&out, o_t, &[_]c_int{ 1, h_q, t_q, dv }, 4, s));
     if (!qkv_mpp_engaged) {
         qkv_mpp_engaged = true;
-        log.info("[kv-attn] matmul2d packed attention engaged: bits={d} gs={d} DK={d} DV={d} Hq={d} Hkv={d} Tq={d}\n", .{ view.bits, view.group_size, dk, dv, h_q, h_kv, t_q });
+        log.info("[kv-attn] matmul2d packed attention engaged: bits={d} gs={d} DK={d} DV={d} Hq={d} Hkv={d} Tq={d} Tk={d}\n", .{ view.bits, view.group_size, dk, dv, h_q, h_kv, t_q, t_k });
     }
     return out;
 }
 
 // ── Fused quant-attention gate (docs/kv-quant-perf.md Phase 1) ──
 
+pub var kv_attn_fused_override: ?bool = null;
 var kv_attn_fused_env: ?bool = null;
 fn kvAttnFusedEnvEnabled() bool {
+    if (kv_attn_fused_override) |v| return v;
     if (kv_attn_fused_env) |v| return v;
     const raw = std.c.getenv("SUSHI_KV_ATTN_FUSED");
     const enabled = raw == null or !std.mem.eql(u8, std.mem.sliceTo(raw.?, 0), "0");
@@ -15411,9 +15413,12 @@ fn qkvMppDecodeServes(view: *const DenseKVView, t_q: c_int) bool {
 
 fn packedDecodeServesFrom(view: *const DenseKVView, t_q: c_int, floor: c_int) bool {
     if (!kvAttnFusedEligible(view, t_q)) return false;
+    return mlx.getShape(view.k_triple_q)[2] >= packedDecodeFloor(floor);
+}
+
+fn packedDecodeFloor(floor: c_int) c_int {
     // An overridden SUSHI_KV_ATTN_MIN_TK is a test's request to exercise the fused arms.
-    const f = if (kvAttnFusedMinTk() == KV_ATTN_FUSED_MIN_TK) floor else kvAttnFusedMinTk();
-    return mlx.getShape(view.k_triple_q)[2] >= f;
+    return if (kvAttnFusedMinTk() == KV_ATTN_FUSED_MIN_TK) floor else kvAttnFusedMinTk();
 }
 
 /// Decode floor for the split-K arm at MiMo's global shape where matrix units are absent.
@@ -15431,6 +15436,14 @@ fn mimoDecodeUsesNax() bool {
 fn mimoGlobalDecodeArm(view: *const DenseKVView, t_q: c_int, nax: bool) MimoDecodeArm {
     if (nax) return if (qkvMppDecodeServes(view, t_q)) .mpp else .dense;
     return if (packedDecodeServesFrom(view, t_q, QKV_SPLITK_DECODE_MIN_TK)) .split_k else .dense;
+}
+
+/// The most keys a MiMo global layer's decode still dequantizes whole: below the packed arms'
+/// floor, or every length once SUSHI_KV_ATTN_FUSED=0 takes them away. `server.kvDequantScratchBytes` bills it.
+pub fn mimoGlobalDecodeRebuildMaxKeys() u64 {
+    if (!kvAttnFusedEnvEnabled()) return std.math.maxInt(u64);
+    const floor = @max(packedDecodeFloor(QKV_MPP_DECODE_MIN_TK), packedDecodeFloor(QKV_SPLITK_DECODE_MIN_TK));
+    return @intCast(@max(floor, 1) - 1);
 }
 
 var kv_attn_fused_engaged: bool = false; // one-shot log guard
@@ -26909,10 +26922,11 @@ pub const Transformer = struct {
             // bd 64/96/128 and a 256 dsplit), so the composed arm materializes
             // [heads, chunk, total_kv] — 32 GiB at a 512k prompt. A global layer
             // that carries sinks keeps it: only the band arm's sink is proven. A packed
-            // decode reads the cache in place rather than dequantizing it whole.
+            // decode reads the cache in place rather than dequantizing it whole; its arm follows
+            // the cache's length every step, never the request's admission-time `kv_attn_fused`.
             const pd: ?mlx.mlx_array = if (is_prefill and fa.sinks.ctx == null)
                 try fusedSdpaPrefillKv(self.s, q_rope, &kv_view, attn_scale, 0, .{ .ctx = null })
-            else if (!is_prefill and fa.sinks.ctx == null and ctx.kv_attn_fused) switch (mimoGlobalDecodeArm(&kv_view, seq_len, mimoDecodeUsesNax())) {
+            else if (!is_prefill and fa.sinks.ctx == null) switch (mimoGlobalDecodeArm(&kv_view, seq_len, mimoDecodeUsesNax())) {
                 .mpp => try qkvAttnMppKernel(self.s, q_rope, &kv_view, attn_scale, ""),
                 .split_k => try qkvAttnSplitKKernel(self.s, q_rope, &kv_view, attn_scale, ""),
                 .dense => null,
@@ -43383,6 +43397,50 @@ test "mimoGlobalDecodeArm: matmul2d with matrix units, otherwise split-K from it
     var dense = sk_floor;
     dense.has_quant_triple = false;
     try testing.expectEqual(MimoDecodeArm.dense, mimoGlobalDecodeArm(&dense, 1, false));
+}
+
+test "mimoGlobalDecodeArm: a packed cache grown one token at a time switches to the packed arm at the floor" {
+    const s = mlx.gpuStream();
+    var cache = try KVCache.init(testing.allocator, 1);
+    defer cache.deinit();
+    try cache.reinit(1, KVQuantConfig.affine(8));
+    const floor: usize = @intCast(QKV_MPP_DECODE_MIN_TK);
+    {
+        const k = testKVWide(floor - 2, 192, s);
+        defer _ = mlx.mlx_array_free(k);
+        const v = testKVWide(floor - 2, 128, s);
+        defer _ = mlx.mlx_array_free(v);
+        var dv = try cache.update(0, k, v, s, 0);
+        dv.deinit();
+    }
+    for (floor - 1..floor + 2) |keys| {
+        const k = testKVWide(1, 192, s);
+        defer _ = mlx.mlx_array_free(k);
+        const v = testKVWide(1, 128, s);
+        defer _ = mlx.mlx_array_free(v);
+        var dv = try cache.update(0, k, v, s, 0);
+        defer dv.deinit();
+        const packed_arm = keys >= floor;
+        for ([_]bool{ true, false }) |nax| {
+            const arm = mimoGlobalDecodeArm(&dv, 1, nax);
+            try testing.expectEqual(packed_arm, arm != .dense);
+            try testing.expectEqual(!packed_arm, keys <= mimoGlobalDecodeRebuildMaxKeys());
+        }
+    }
+}
+
+test "mimoGlobalDecodeRebuildMaxKeys: the dense decode arm serves every length once the kill switch takes the packed arms" {
+    const s = mlx.gpuStream();
+    const saved = kv_attn_fused_override;
+    defer kv_attn_fused_override = saved;
+    kv_attn_fused_override = false;
+    var q = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(q);
+    try mlx.check(mlx.mlx_zeros(&q, &[_]c_int{ 1, 4, 1 << 16, 48 }, 4, .uint32, s));
+    const view: DenseKVView = .{ .k = .{ .ctx = null }, .v = .{ .ctx = null }, .owned = false, .has_quant_triple = true, .k_triple_q = q };
+    try testing.expectEqual(MimoDecodeArm.dense, mimoGlobalDecodeArm(&view, 1, true));
+    try testing.expectEqual(MimoDecodeArm.dense, mimoGlobalDecodeArm(&view, 1, false));
+    try testing.expectEqual(std.math.maxInt(u64), mimoGlobalDecodeRebuildMaxKeys());
 }
 
 test "kvAttnFusedEligible: fused reads are decode-width (t_q == 1) only" {

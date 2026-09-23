@@ -17,8 +17,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-prefix-cache](engi
 - `--kv-quant 4|8|off` (`src/kv_quant.zig`, `configuredKvQuantFor(config)`); an explicit flag beats
   `model-settings.json` `kv_quant`, which beats the default. A per-model setting of `kv_quant: off` still wins over
   the default.
-- `--kv-attn-mode auto|dense|fused` picks the packed-read arm; `--decode-attn-quant` (default ON, LOSSY) requants
-  dense attention at decode AND verify.
+- `--kv-attn-mode auto|dense|fused` picks the packed-read arm (`auto` from an 8K PROMPT, fixed at admission); MiMo's
+  global-layer decode ignores it and picks per step from the cache's length. `--decode-attn-quant` (default ON,
+  LOSSY) requants dense attention at decode AND verify.
 
 ## The kv-quant contract
 

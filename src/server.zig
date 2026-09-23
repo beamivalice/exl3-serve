@@ -2812,9 +2812,9 @@ pub fn kvDequantScratchBytes(config: *const model_mod.ModelConfig, seq: u64, fwd
     // dispatch's keys, at `MOE_PREFILL_COEXIST` of them — the dispatches are
     // serially dependent through the softmax carry, so this is the ceiling.
     // The kill switch takes the width off `prefillHeadDimFused` and the whole
-    // rebuild comes back with it.
+    // rebuild comes back with it. A decode rebuilds whole below the packed arms' floor.
     const seq_rows: u64 = if (qsa_rows) |rows| rows else if (transformer_mod.prefillHeadDimFused(config.prefillScoreHeadDim()))
-        MOE_PREFILL_COEXIST *| @as(u64, @intCast(transformer_mod.PACKED_KV_SLICE_MAX))
+        @max(MOE_PREFILL_COEXIST *| @as(u64, @intCast(transformer_mod.PACKED_KV_SLICE_MAX)), transformer_mod.mimoGlobalDecodeRebuildMaxKeys())
     else
         seq;
     var widest: u64 = 0;
@@ -23309,6 +23309,18 @@ test "a ringed arch's kv-quant dequant scratch is one layer's rebuild, not the m
         fused,
     );
     try t.expectEqual(fused, kvDequantScratchBytes(&cfg, 2 * seq, 1024));
+    transformer_mod.fused256_override = false;
+
+    // A decode forward bills whatever the global-layer decode rebuilds whole: a
+    // floor's worth of keys while the packed arms serve, the whole cache under
+    // the kill switch that takes them away.
+    transformer_mod.fused256_override = true;
+    try t.expectEqual(fused, kvDequantScratchBytes(&cfg, seq, 1));
+    const saved_fused = transformer_mod.kv_attn_fused_override;
+    defer transformer_mod.kv_attn_fused_override = saved_fused;
+    transformer_mod.kv_attn_fused_override = false;
+    try t.expectEqual(seq * 2 * (192 + 128) * 2, kvDequantScratchBytes(&cfg, seq, 1));
+    transformer_mod.kv_attn_fused_override = saved_fused;
     transformer_mod.fused256_override = false;
 
     // A short prompt never rebuilds more than it stores, and below the ring the

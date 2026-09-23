@@ -142,6 +142,11 @@ bill 95.42 → 94.32 GB, decode not yet measured on a quiet box (microbench pred
 at one row; o_proj via MLX affine-8 qmv only 363 GB/s (a dedicated kernel could save ~1 ms/token). Sliding-layer fused prefill with sinks, 39-layer ubench: 39.5 → 20.3 ms at chunk 512, 603 → 95.5 at 2048,
 2439 → 181 at 4096.
 
+Per-step packed decode (11a0912; MCG K2.5 w12, FP8 trunk, kv8, no MTP, ctx 81920, 2026-09-24): the global-layer arm
+is chosen from the cache's CURRENT key count each step (switch logged at `Tk=4096` inside a request admitted at 3.6k
+tokens); 16k decode 41.2 tok/s with auto = dense, 64k 36.8 with auto = dense (bf16-trunk ladder: dense 15.4-17.3 vs
+packed 26.0); prefill 660 tok/s at 16k, 465 at 64k (chunk auto). Raw: session scratchpad `live/out.jsonl`, `server.log`.
+
 MiMo EXL3 kernel history (n=40 readers, codebook-generic): the n=40 prefill reader took the synthetic MoE layer from
 12.45 to 8.48 ms at 512 rows; the prefill scatter fused into the finish reduce added +5-9%; the n=40 decode lane
 funnel cut the decode chain 20% at one row and 36% at seven; the prepared-mid dispatch took rows-1 from 0.524 to
