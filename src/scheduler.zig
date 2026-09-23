@@ -3270,6 +3270,24 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
                 @as(f64, @floatFromInt(eval_ns)) / 1.0e6 / dn,
                 @as(f64, @floatFromInt(ops_total)) / dn,
             });
+            // SUSHI_DECODE_FWD_GRAPH=<abs path>: one forward's unevaluated tape, one primitive per
+            // line; a primitive is at most one dispatch, so a histogram of it is the dispatch plan.
+            if (std.c.getenv("SUSHI_DECODE_FWD_GRAPH")) |path| {
+                const ti = mlx.mlx_array_new_data(tok, &tsh, 2, .int32);
+                defer _ = mlx.mlx_array_free(ti);
+                const lg = try xfm_ptr.forwardWith(&ctx, ti);
+                defer _ = mlx.mlx_array_free(lg);
+                if (std.c.fopen(path, "w")) |f| {
+                    const outs = mlx.mlx_vector_array_new_value(lg);
+                    defer _ = mlx.mlx_vector_array_free(outs);
+                    const namer = mlx.mlx_node_namer_new();
+                    defer _ = mlx.mlx_node_namer_free(namer);
+                    _ = mlx.mlx_print_graph(f, namer, outs);
+                    _ = std.c.fclose(f);
+                    log.info("[fwd-ubench] graph written to {s}\n", .{std.mem.sliceTo(path, 0)});
+                }
+                _ = mlx.mlx_array_eval(lg);
+            }
 
             // Same forward with the vocab projection suppressed. lm_head is
             // terminal — nothing downstream depends on it — so dropping it

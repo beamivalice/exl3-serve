@@ -145,6 +145,12 @@ pub extern "c" fn mlx_vector_array_get(res: *mlx_array, vec: mlx_vector_array, i
 pub extern "c" fn mlx_vector_array_new_value(val: mlx_array) mlx_vector_array;
 pub extern "c" fn mlx_vector_array_append_value(vec: mlx_vector_array, val: mlx_array) c_int;
 
+// Graph utils (diagnostics)
+pub const mlx_node_namer = extern struct { ctx: ?*anyopaque = null };
+pub extern "c" fn mlx_node_namer_new() mlx_node_namer;
+pub extern "c" fn mlx_node_namer_free(namer: mlx_node_namer) c_int;
+pub extern "c" fn mlx_print_graph(os: *std.c.FILE, namer: mlx_node_namer, outputs: mlx_vector_array) c_int;
+
 // Closure + compile
 pub extern "c" fn mlx_closure_new_func_payload(
     fun: *const fn (*mlx_vector_array, mlx_vector_array, ?*anyopaque) callconv(.c) c_int,
