@@ -2076,6 +2076,61 @@ test "kld: a resident mimo_v2 load takes the source trunk and its logits follow 
     try testing.expect(!std.mem.eql(f32, &rows[0], &rows[1]));
 }
 
+test "kld: an imatrix capture records every mimo_v2 o_proj input and the lm_head input the forward read" {
+    const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var metal: bool = false;
+    mlx.check(mlx.mlx_metal_is_available(&metal)) catch return error.SkipZigTest;
+    if (!metal) return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try tmp.dir.createDirPath(io, "pack");
+    var dir = try tmp.dir.openDir(io, "pack", .{});
+    defer dir.close(io);
+    try writeTinyMimoResidentPack(io, arena, dir, 1);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try dir.realPath(io, &path_buf);
+
+    const loaded = try loadModel(io, allocator, .{ .model_dir = path_buf[0..path_len] });
+    defer loaded.deinit();
+    const imatrix = @import("imatrix.zig");
+    const col = try imatrix.Collector.init(allocator, loaded.xfm.s, "/dev/null", TinyMimo.layers, TinyMimo.experts, .mimo_v2);
+    defer col.deinit();
+    loaded.xfm.imatrix = col;
+    defer loaded.xfm.imatrix = null;
+
+    const ids = [_]u32{ 1, 3, 5, 2, 7, 0 };
+    var hidden = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(hidden);
+    var ctx = loaded.xfm.defaultCtx();
+    ctx.capture_hidden_all = &hidden;
+    const logits = try forwardPrompt(allocator, loaded, &ctx, &ids);
+    defer _ = mlx.mlx_array_free(logits);
+    try mlx.check(mlx.mlx_array_eval(logits));
+
+    for (col.o_proj) |d| try testing.expectEqual(@as(u64, ids.len), d.rows);
+    try testing.expectEqual(@as(u64, ids.len), col.lm_head.rows);
+
+    // lm_head's statistic is the per-channel sum of squares of the final
+    // normed hidden rows, the same rows the logits were projected from.
+    var h32 = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(h32);
+    try mlx.check(mlx.mlx_astype(&h32, hidden, .float32, loaded.xfm.s));
+    try mlx.check(mlx.mlx_array_eval(h32));
+    try mlx.check(mlx.mlx_array_eval(col.lm_head.acc));
+    const h = mlx.mlx_array_data_float32(h32) orelse return error.KldLogitsUnreadable;
+    const acc = mlx.mlx_array_data_float32(col.lm_head.acc) orelse return error.KldLogitsUnreadable;
+    for (0..TinyMimo.hidden) |c| {
+        var want: f32 = 0;
+        for (0..ids.len) |r| want += h[r * TinyMimo.hidden + c] * h[r * TinyMimo.hidden + c];
+        try testing.expectApproxEqRel(want, acc[c], 1e-5);
+    }
+}
+
 test "kld: a pack declaring trunk_quant serves an affine o_proj; its source-shaped twin keeps bf16" {
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();

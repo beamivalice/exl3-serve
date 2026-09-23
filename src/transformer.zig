@@ -24395,6 +24395,9 @@ pub const Transformer = struct {
             break :blk c;
         } else try self.rmsNorm(h, self.final_norm);
         _ = mlx.mlx_array_free(h);
+        // Every row, even when this chunk skips the projection: each is a row
+        // some position's logits are read from.
+        if (self.imatrix) |c| try c.observeLinear(.lm_head, final_normed);
 
         // Inkling muP logit scaling: hidden ÷ logits_mup_width_multiplier
         // before the unembed projection (0-dim scalar — no dtype promotion).
@@ -27061,6 +27064,7 @@ pub const Transformer = struct {
         var attn_flat = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(attn_flat);
         try mlx.check(mlx.mlx_reshape(&attn_flat, attn_t, &flat_shape, 3, self.s));
+        if (self.imatrix) |c| try c.observeLinear(.{ .o_proj = layer }, attn_flat);
         return self.qmatmul(attn_flat, fa.o_w, fa.o_s, fa.o_b);
     }
 

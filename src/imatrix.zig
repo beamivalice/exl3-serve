@@ -20,6 +20,11 @@
 //! above; a converter slices expert e out of it. gate and up share one statistic
 //! because they read the same MLP input row.
 //!
+//! A dense linear the forward reports (`observeLinear`: MiMo's o_proj and
+//! lm_head) is keyed by its source weight name, e.g.
+//! `model.layers.{L}.self_attn.o_proj.weight` [in] = sum(x^2) over the rows it
+//! read divided by that row count, beside `<name>.rows` [1].
+//!
 //! Opt-in through `SUSHI_IMATRIX_OUT=<abs>.safetensors`; absent or empty = off,
 //! and nothing is allocated.
 
@@ -72,6 +77,22 @@ const Layer = struct {
     }
 };
 
+/// A dense linear whose input rows the forward reports.
+pub const Linear = union(enum) {
+    o_proj: usize,
+    lm_head,
+};
+
+const Dense = struct {
+    acc: mlx.mlx_array = .{ .ctx = null },
+    rows: u64 = 0,
+
+    fn deinit(self: *Dense) void {
+        if (self.acc.ctx != null) _ = mlx.mlx_array_free(self.acc);
+        self.* = .{};
+    }
+};
+
 pub const Collector = struct {
     allocator: std.mem.Allocator,
     s: mlx.mlx_stream,
@@ -81,6 +102,8 @@ pub const Collector = struct {
     /// arange [1, E] int32 — the comparand every one-hot count broadcasts against.
     axis: mlx.mlx_array,
     layers: []Layer,
+    o_proj: []Dense,
+    lm_head: Dense = .{},
 
     pub fn init(allocator: std.mem.Allocator, s: mlx.mlx_stream, path: []const u8, num_layers: usize, experts: c_int, arch: Arch) !*Collector {
         if (experts <= 0 or num_layers == 0) return error.ImatrixBadGeometry;
@@ -91,6 +114,9 @@ pub const Collector = struct {
         const layers = try allocator.alloc(Layer, num_layers);
         errdefer allocator.free(layers);
         for (layers) |*l| l.* = .{};
+        const o_proj = try allocator.alloc(Dense, num_layers);
+        errdefer allocator.free(o_proj);
+        for (o_proj) |*d| d.* = .{};
         var axis = mlx.mlx_array_new();
         errdefer _ = mlx.mlx_array_free(axis);
         try mlx.check(mlx.mlx_arange(&axis, 0, @floatFromInt(experts), 1, .int32, s));
@@ -106,6 +132,7 @@ pub const Collector = struct {
             .arch = arch,
             .axis = axis_2d,
             .layers = layers,
+            .o_proj = o_proj,
         };
         return self;
     }
@@ -126,6 +153,9 @@ pub const Collector = struct {
     pub fn deinit(self: *Collector) void {
         for (self.layers) |*l| l.deinit();
         self.allocator.free(self.layers);
+        for (self.o_proj) |*d| d.deinit();
+        self.allocator.free(self.o_proj);
+        self.lm_head.deinit();
         _ = mlx.mlx_array_free(self.axis);
         self.allocator.free(self.path);
         self.allocator.destroy(self);
@@ -230,6 +260,63 @@ pub const Collector = struct {
         try self.addOuter(&self.layers[layer].down, cnt, act_rows);
     }
 
+    /// A dense linear's input `x` ([..., in], any leading shape): its per-channel
+    /// sum of squares over every row.
+    pub fn observeLinear(self: *Collector, which: Linear, x: mlx.mlx_array) !void {
+        const slot = switch (which) {
+            .o_proj => |layer| if (layer < self.o_proj.len) &self.o_proj[layer] else return error.ImatrixLayerOutOfRange,
+            .lm_head => &self.lm_head,
+        };
+        const xs = mlx.getShape(x);
+        if (xs.len == 0 or xs[xs.len - 1] <= 0) return error.ImatrixBadShape;
+        const channels = xs[xs.len - 1];
+        const rows = mlx.mlx_array_size(x) / @as(usize, @intCast(channels));
+        if (rows == 0) return;
+        var flat = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(flat);
+        try mlx.check(mlx.mlx_reshape(&flat, x, &[_]c_int{ @intCast(rows), channels }, 2, self.s));
+        var v32 = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(v32);
+        try mlx.check(mlx.mlx_astype(&v32, flat, .float32, self.s));
+        var sq = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(sq);
+        try mlx.check(mlx.mlx_square(&sq, v32, self.s));
+        var sum = mlx.mlx_array_new();
+        mlx.check(mlx.mlx_sum_axis(&sum, sq, 0, false, self.s)) catch |e| {
+            _ = mlx.mlx_array_free(sum);
+            return e;
+        };
+        try self.fold(&slot.acc, sum);
+        slot.rows += rows;
+    }
+
+    /// `name` = sum / rows beside `name.rows`; nothing for a linear that never ran.
+    fn putDense(self: *Collector, map: mlx.mlx_map_string_to_array, held: *std.ArrayList(mlx.mlx_array), name: []const u8, d: *const Dense) !usize {
+        if (d.rows == 0 or d.acc.ctx == null) return 0;
+        var key_buf: [192]u8 = undefined;
+        const denom = mlx.mlx_array_new_float(@floatFromInt(d.rows));
+        defer _ = mlx.mlx_array_free(denom);
+        var mean = mlx.mlx_array_new();
+        mlx.check(mlx.mlx_divide(&mean, d.acc, denom, self.s)) catch |e| {
+            _ = mlx.mlx_array_free(mean);
+            return e;
+        };
+        held.append(self.allocator, mean) catch |e| {
+            _ = mlx.mlx_array_free(mean);
+            return e;
+        };
+        try mlx.check(mlx.mlx_array_eval(mean));
+        try mlx.check(mlx.mlx_map_string_to_array_insert(map, try std.fmt.bufPrintSentinel(&key_buf, "{s}", .{name}, 0), mean));
+        const count: f32 = @floatFromInt(d.rows);
+        const rows = mlx.mlx_array_new_data(&count, &[_]c_int{1}, 1, .float32);
+        held.append(self.allocator, rows) catch |e| {
+            _ = mlx.mlx_array_free(rows);
+            return e;
+        };
+        try mlx.check(mlx.mlx_map_string_to_array_insert(map, try std.fmt.bufPrintSentinel(&key_buf, "{s}.rows", .{name}, 0), rows));
+        return 2;
+    }
+
     fn scaledFlat(self: *Collector, acc: mlx.mlx_array, denom: mlx.mlx_array) !mlx.mlx_array {
         var scaled = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(scaled);
@@ -271,12 +358,18 @@ pub const Collector = struct {
             try mlx.check(mlx.mlx_map_string_to_array_insert(map, down_key.ptr, down));
             entries += 3;
         }
+        var name_buf: [192]u8 = undefined;
+        for (self.o_proj, 0..) |*d, li| {
+            const name = try std.fmt.bufPrint(&name_buf, "{s}{d}.self_attn.o_proj.weight", .{ self.arch.layerPrefix(), li });
+            entries += try self.putDense(map, &held, name, d);
+        }
+        entries += try self.putDense(map, &held, "lm_head.weight", &self.lm_head);
         if (entries == 0) return error.ImatrixNothingCaptured;
 
         const meta = mlx.mlx_map_string_to_string_new();
         defer _ = mlx.mlx_map_string_to_string_free(meta);
         _ = mlx.mlx_map_string_to_string_insert(meta, "keys", "SOURCE checkpoint weight names");
-        _ = mlx.mlx_map_string_to_string_insert(meta, "values", "experts: sum(x^2)/layer tokens, per expert concatenated");
+        _ = mlx.mlx_map_string_to_string_insert(meta, "values", "experts: sum(x^2)/layer tokens, per expert concatenated; dense linears: sum(x^2)/rows");
         _ = mlx.mlx_map_string_to_string_insert(meta, "producer", "sushi " ++ ENV_VAR);
 
         const path_z = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{self.path}, 0);
@@ -502,4 +595,62 @@ test "the mimo_v2 arch keys the same per-layer layout by MiMo's own expert names
     var absent = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(absent);
     try testing.expect(mlx.mlx_map_string_to_array_get(&absent, loaded, QWEN_PREFIX ++ "2.mlp.experts.gate_up_proj") != 0);
+}
+
+test "imatrix records a dense linear's input rows under its source weight name" {
+    const s = mlx.gpuStream();
+    const alloc = testing.allocator;
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    const dir = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const out = try std.fs.path.join(alloc, &.{ dir, "trunk.safetensors" });
+    defer alloc.free(out);
+
+    const col = try Collector.init(alloc, s, out, 3, 4, .mimo_v2);
+    defer col.deinit();
+
+    // o_proj of layer 1 sees [batch 1, 2 rows, 2 channels] twice; lm_head one [1, 3, 2].
+    const x = [_]f32{ 1, 2, 3, 4 };
+    const xa = mlx.mlx_array_new_data(&x, &[_]c_int{ 1, 2, 2 }, 3, .float32);
+    defer _ = mlx.mlx_array_free(xa);
+    try col.observeLinear(.{ .o_proj = 1 }, xa);
+    try col.observeLinear(.{ .o_proj = 1 }, xa);
+    const h = [_]f32{ 1, 0, 2, 0, 3, 6 };
+    const ha = mlx.mlx_array_new_data(&h, &[_]c_int{ 1, 3, 2 }, 3, .float32);
+    defer _ = mlx.mlx_array_free(ha);
+    try col.observeLinear(.lm_head, ha);
+    try testing.expectError(error.ImatrixLayerOutOfRange, col.observeLinear(.{ .o_proj = 3 }, xa));
+    try testing.expect(try col.flush() > 0);
+
+    const path_z = try std.fmt.allocPrintSentinel(alloc, "{s}", .{out}, 0);
+    defer alloc.free(path_z);
+    var loaded = mlx.mlx_map_string_to_array_new();
+    defer _ = mlx.mlx_map_string_to_array_free(loaded);
+    var meta = mlx.mlx_map_string_to_string_new();
+    defer _ = mlx.mlx_map_string_to_string_free(meta);
+    const cpu = mlx.mlx_default_cpu_stream_new();
+    try mlx.check(mlx.mlx_load_safetensors(&loaded, &meta, path_z, cpu));
+
+    const Want = struct { key: [:0]const u8, vals: []const f32 };
+    for ([_]Want{
+        // (1+9)*2 / 4 rows, (4+16)*2 / 4 rows
+        .{ .key = "model.layers.1.self_attn.o_proj.weight", .vals = &.{ 5, 10 } },
+        .{ .key = "model.layers.1.self_attn.o_proj.weight.rows", .vals = &.{4} },
+        .{ .key = "lm_head.weight", .vals = &.{ 14.0 / 3.0, 12 } },
+        .{ .key = "lm_head.weight.rows", .vals = &.{3} },
+    }) |want| {
+        var arr = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(arr);
+        try mlx.check(mlx.mlx_map_string_to_array_get(&arr, loaded, want.key));
+        try testing.expectEqualSlices(c_int, &[_]c_int{@intCast(want.vals.len)}, mlx.getShape(arr));
+        for (want.vals, 0..) |v, i| try testing.expectApproxEqRel(v, try f32At(arr, i), 1e-6);
+    }
+    // A layer whose o_proj never ran, and the expert blocks nobody routed, write nothing.
+    var absent = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(absent);
+    try testing.expect(mlx.mlx_map_string_to_array_get(&absent, loaded, "model.layers.0.self_attn.o_proj.weight") != 0);
+    try testing.expect(mlx.mlx_map_string_to_array_get(&absent, loaded, "model.layers.1.mlp.experts.gate_up_proj") != 0);
 }

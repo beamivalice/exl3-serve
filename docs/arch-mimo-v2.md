@@ -84,6 +84,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   reaches the streamed QUANTIZED layer through the routing override's tap; armed, it forces the SORTED expert arm —
   the fused decode kernels never materialize the activation rows the down statistic needs. The driver lives in the
   private converter repo.
+- The same capture records the trunk's dense inputs (`Collector.observeLinear`): every layer's o_proj input
+  (`model.layers.{L}.self_attn.o_proj.weight`, [heads x v_head_dim]) in `mimoAttnWith`, and the final normed hidden
+  as `lm_head.weight` [hidden] in `forwardMoeWith` (every row, also where a chunk skips the projection); each as
+  sum(x²)/rows beside `<name>.rows`. embed_tokens has no input activation and gets no entry.
 
 ## Sliding layers: the ring
 

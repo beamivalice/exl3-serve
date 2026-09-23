@@ -80,7 +80,8 @@ zero-copy slabs. With no budget a pack loads resident as before.
 Imatrix capture rides the streamed bf16 forward (`SUSHI_IMATRIX_OUT=<abs>.safetensors`, `src/imatrix.zig`):
 per-layer per-expert sum(x²) and routed counts accumulate ON the GPU keyed by GLOBAL expert ids (slab slots are
 remapped), in the collector's contract the converter reads; the flush runs on the INFERENCE thread (loop exit or
-`/v1/unload-model`), never on `Scheduler.deinit`'s caller thread. The drivers that feed it a corpus live in the private
+`/v1/unload-model`), never on `Scheduler.deinit`'s caller thread. MiMo's o_proj and lm_head inputs ride the same
+file as per-channel mean squares under their source weight names ([arch-mimo-v2](arch-mimo-v2.md)). The drivers that feed it a corpus live in the private
 converter repo. Routed counts reconcile to
 tokens x top-k exactly on every layer; the two load-time warmup forwards add a few tokens.
 
