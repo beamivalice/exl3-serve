@@ -7,7 +7,7 @@ reference in several places and is not usable as ground truth). Decode is
 token-by-token FULL re-forward — O(n^2) but stateless, so none of the
 reference's incremental ring-buffer machinery needs transcribing.
 
-Runs the converted mirror (tests/convert_dsv4_weights.py output: affine-
+Runs the converted mirror (PonyExl3 `serve_convert pack-dsv4` output: affine-
 quantized, stacked expert banks, bare inference-style names).
 
 Usage:

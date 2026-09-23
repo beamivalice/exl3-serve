@@ -159,9 +159,8 @@ expert banks or invoking GPU computation.
 
 ```sh
 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
-  PYTHONPATH=tests \
   /Users/beam/llm/ponyexl3/.venv/bin/python \
-  tests/qwen38_exl3_k3_weights.py --workers 4 \
+  -m ponyexl3.serve_convert weights-k3 --workers 4 \
   --output measurements/qwen38-exl3-k3/weights.json
 ```
 

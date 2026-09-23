@@ -1466,7 +1466,7 @@ pub fn rerankSelectBatched(
 /// Root-level names are what others publish (mutual compat: their
 /// loader accepts our `mtp/weights.safetensors` too).
 pub const sidecar_rel_paths = [_][]const u8{
-    "mtp/weights.safetensors", // mlx-serve native (ddalcu repos, build_mtp_sidecar.py)
+    "mtp/weights.safetensors", // mlx-serve native (ddalcu repos, serve_convert mtp-sidecar)
     "mtp.safetensors", // others
     "model-mtp.safetensors", // others
     "optiq/mtp.safetensors", // oMLX OptiQ (delta-encoded norms — folded at load)
@@ -1671,7 +1671,7 @@ fn negFraction(arr: mlx.mlx_array, s: mlx.mlx_stream) !f32 {
 }
 
 /// Fold `+1` into a delta-encoded RMSNorm weight, preserving its dtype. Mirrors
-/// tests/build_mtp_sidecar.py (upcast f32 → add 1 → cast back), so a folded
+/// the sidecar builder (upcast f32 → add 1 → cast back), so a folded
 /// bf16 head is byte-identical to a natively-folded mlx-serve sidecar.
 fn foldNormPlusOne(arr: mlx.mlx_array, s: mlx.mlx_stream) !mlx.mlx_array {
     const dt = mlx.mlx_array_dtype(arr);
@@ -1692,7 +1692,7 @@ fn foldNormPlusOne(arr: mlx.mlx_array, s: mlx.mlx_stream) !mlx.mlx_array {
 /// Whether the head's RMSNorm weights are stored DELTA-encoded (the layer
 /// computes `1 + w`, so `w` clusters near 0 with a large NEGATIVE fraction) vs
 /// pre-folded (`1 + w` baked in → strictly positive weights, which is what
-/// mlx-serve's runtime `rmsnorm(x) * w` and build_mtp_sidecar.py expect). The
+/// mlx-serve's runtime `rmsnorm(x) * w` and the sidecar builder expect). The
 /// Qwen original checkpoints and oMLX's OptiQ export ship delta norms; a naive
 /// copy of such a head loads but accepts ~0% (see the CLAUDE.md gotcha), so we
 /// detect and fold at load. Folded RMSNorm scales are positive by construction;

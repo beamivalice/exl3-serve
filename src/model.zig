@@ -3245,7 +3245,7 @@ pub fn parseConfigFromJson(allocator: std.mem.Allocator, content: []const u8) !M
         // DeepSeek V4 Flash (284B-A13B, 1M ctx). See the dsv4_* field block
         // for the architecture summary; reference is the release's own
         // inference/{model,kernel}.py (torch). Loaded from OUR converted
-        // mixed-quant mirror (tests/convert_dsv4_weights.py) — bare
+        // mixed-quant mirror (PonyExl3 `serve_convert pack-dsv4`) — bare
         // inference-style tensor names, stacked expert banks.
         config.model_type = "deepseek_v4";
         config.weight_prefix = ""; // release ships bare names (embed.weight, layers.N....)

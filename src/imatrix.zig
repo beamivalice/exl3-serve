@@ -1,7 +1,7 @@
 //! Per-input-channel activation statistics ("imatrix") captured while the engine
 //! serves a checkpoint with expert streaming, in the exact contract
-//! `tests/qwen38_flash_next_imatrix_collect.py` writes and
-//! `tests/convert_qwen38_flash_next_exl3.py` reads.
+//! PonyExl3's `ponyexl3.serve_convert` writes (`imatrix-qwen4`) and reads
+//! (`exl3-qwen4`).
 //!
 //! Per layer the file carries three entries, whatever the architecture:
 //!   <experts>.gate_up_proj        [E * hidden], expert e at [e*hidden, (e+1)*hidden)

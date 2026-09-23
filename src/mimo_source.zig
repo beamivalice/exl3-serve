@@ -44,10 +44,11 @@ const SourceIndex = struct {
     stamps: std.StringHashMap(ShardStamp),
 };
 
-/// The decoder a shard was written for, as `tests/convert_mimo_v26_exl3.py`
-/// stamps it. Every value is a string there. A shard naming none predates the
-/// stamp and is admitted; one that names a decoder the config does not is
-/// refused, because the same bytes decode to different weights under each.
+/// The decoder a shard was written for, as PonyExl3's `serve_convert exl3-mimo`
+/// stamps it (docs/pack-format.md). Every value is a string there. A shard
+/// naming none predates the stamp and is admitted; one that names a decoder
+/// the config does not is refused, because the same bytes decode to different
+/// weights under each.
 const ShardStamp = struct {
     k: ?[]const u8 = null,
     codebook: ?[]const u8 = null,
@@ -179,7 +180,7 @@ pub fn residentBytesWithConfig(
     return countResidentBytes(&source, scratch, config);
 }
 
-/// E4M3FN as used by `convert_mimo_v2.py`: exponent 0 is subnormal,
+/// E4M3FN as used by the MiMo pack converter: exponent 0 is subnormal,
 /// exponent 15/mantissa 7 is NaN, and the other exponent-15 values are
 /// finite (the maximum is 448).
 pub fn fp8E4M3FnValue(code: u8) f32 {

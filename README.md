@@ -23,9 +23,10 @@ no Python or converted copy is required. Vision/audio and MTP are omitted.
   --no-mtp --no-pld --no-vision --prefix-cache-entries 0
 ```
 
-Existing converted MXFP4 packs remain supported. The optional
-`tests/convert_mimo_v2.py` converter performs the same trunk preparation ahead
-of time. Both paths preload 80% of expert-cache slots before readiness.
+Existing converted MXFP4 packs remain supported. The optional pack converter
+(PonyExl3, `python -m ponyexl3.serve_convert pack-mimo-v2`) performs the same
+trunk preparation ahead of time. Both paths preload 80% of expert-cache slots
+before readiness.
 
 `--ssd-budget-gb` is a total resident target in GiB, including the trunk,
 expert cache, and streaming workspaces. It must leave room for KV and serving
@@ -48,7 +49,7 @@ Each expert shard contains gate/up/down trellis and scale tensors.
 Repack an existing K3 **or** K4 pack with the Python standard library:
 
 ```sh
-python3 scripts/repack_exl3.py /path/to/old-pack /path/to/new-pack
+python -m ponyexl3.serve_convert repack /path/to/old-pack /path/to/new-pack
 ```
 
 This creates a new directory, never overwrites an existing one, and copies tensor
@@ -59,8 +60,8 @@ must remain unchanged during the operation.
 For a development machine with both variants:
 
 ```sh
-python3 scripts/repack_exl3.py /models/old-k3 /models/k3-components
-python3 scripts/repack_exl3.py /models/old-k4 /models/k4-components \
+python -m ponyexl3.serve_convert repack /models/old-k3 /models/k3-components
+python -m ponyexl3.serve_convert repack /models/old-k4 /models/k4-components \
   --share-with /models/k3-components
 ```
 
@@ -86,11 +87,9 @@ Verify a repacked model in your normal serving workflow before replacing the
 old pack. Repacking does not delete originals, so keeping both temporarily uses
 extra space for rewritten weights, but not for a hard-linked n-gram table.
 
-Hermetic repacker tests:
-
-```sh
-python3 tests/test_repack_exl3.py
-```
+The repacker and its hermetic tests live in PonyExl3
+(`ponyexl3/serve_convert/`, `tests/test_repack_exl3.py`). What a pack owes this
+engine is `docs/pack-format.md`.
 
 ### Local K3/K4 launchers
 

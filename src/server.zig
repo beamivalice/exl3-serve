@@ -12894,7 +12894,7 @@ pub const LoadRefusal = struct { type: []const u8, message: []const u8 };
 
 test "streaming layout refusal explains MiMo repacking without assuming Qwen" {
     const layout = loadRefusalFor(error.ExpertStreamingUnsupportedLayout).?;
-    try std.testing.expect(std.mem.indexOf(u8, layout.message, "convert_mimo_v2.py") != null);
+    try std.testing.expect(std.mem.indexOf(u8, layout.message, "pack-mimo-v2") != null);
     const budget = loadRefusalFor(error.ExpertStreamingRequired).?;
     try std.testing.expect(std.mem.indexOf(u8, budget.message, "qwen4_exp") == null);
     try std.testing.expect(std.mem.indexOf(u8, budget.message, "--ssd-budget-gb") != null);
@@ -12908,7 +12908,7 @@ pub fn loadRefusalFor(err: anyerror) ?LoadRefusal {
         error.ExpertCacheDoesNotFit => .{ .type = "expert_cache_does_not_fit", .message = "The requested expert cache, full-union workspace, bounce buffers, resident trunk, and serving state do not fit under the GPU memory ceiling. Lower --expert-cache-gb or free memory." },
         error.ExpertStreamingMtpUnsupported => .{ .type = "expert_streaming_mtp_unsupported", .message = expert_stream_mod.MTP_UNSUPPORTED },
         error.ExpertStreamingRequired => .{ .type = "expert_streaming_required", .message = "This checkpoint streams its experts from SSD and needs a resident budget: set this model's \"ssd_budget_gb\" in model-settings.json, or launch with --ssd-budget-gb <n> (or --expert-cache-gb <n>)." },
-        error.ExpertStreamingUnsupportedLayout => .{ .type = "expert_streaming_unsupported_layout", .message = "This checkpoint has no complete expert-bank layout this build can stream. Check the pack and all indexed shards. For MiMo, first repack with tests/convert_mimo_v2.py; raw per-expert HF shards cannot be streamed directly." },
+        error.ExpertStreamingUnsupportedLayout => .{ .type = "expert_streaming_unsupported_layout", .message = "This checkpoint has no complete expert-bank layout this build can stream. Check the pack and all indexed shards. For MiMo, first repack with the PonyExl3 pack converter (serve_convert pack-mimo-v2); raw per-expert HF shards cannot be streamed directly." },
         error.ExpertSlabImportCopied => .{ .type = "expert_slab_import_copied", .message = "MLX copied the expert slab instead of aliasing it, so this machine cannot stream experts zero-copy. Report the Mac model and macOS version." },
         error.ExpertLayoutUnsupported => .{ .type = "expert_layout_unsupported", .message = "This qwen4_exp checkpoint's routed experts are not a uniform EXL3 K4 MUL1 pack this build can load. Re-convert with k=4 and codebook mul1, or serve an affine pack." },
         error.Exl3TopKExceedsReduceBank => .{ .type = "exl3_topk_exceeds_reduce_bank", .message = "This EXL3 pack's num_experts_per_tok exceeds the decode reduce-bank (32). Re-convert with top-k <= 32." },

@@ -5,7 +5,7 @@ Two phases, run from the torch venv (transformers main carries the arch):
 
   1. `build`  — a random Qwen4ExpForCausalLM at toy geometry, saved in the
      real checkpoint's naming (model.language_model.*, sharded n-gram table),
-     so `tests/convert_qwen38_flash_next.py --src` converts it verbatim.
+     so PonyExl3's `serve_convert affine-qwen4 --src` converts it verbatim.
   2. `dump`   — the reference forward on OUR dequantized pack (mx.dequantize
      of every quantized tensor written back into the torch model), so the
      fixture measures the ENGINE, not the quantizer. Writes input_ids, the
@@ -13,7 +13,7 @@ Two phases, run from the torch venv (transformers main carries the arch):
      budget, plus the per-layer residual stream for bisecting.
 
   venv/bin/python tests/dump_qwen4_exp_fixtures.py build --out ~/claude-tmp/qwen4-tiny/hf
-  python3 tests/convert_qwen38_flash_next.py --src ~/claude-tmp/qwen4-tiny/hf --dst ~/claude-tmp/qwen4-tiny/pack
+  python -m ponyexl3.serve_convert affine-qwen4 --src ~/claude-tmp/qwen4-tiny/hf --dst ~/claude-tmp/qwen4-tiny/pack
   venv/bin/python tests/dump_qwen4_exp_fixtures.py dump --hf ~/claude-tmp/qwen4-tiny/hf \
       --pack ~/claude-tmp/qwen4-tiny/pack --out ~/claude-tmp/qwen4-tiny/fixture.safetensors
   QWEN4_TEST_MODEL=~/claude-tmp/qwen4-tiny/pack QWEN4_FIXTURE=~/claude-tmp/qwen4-tiny/fixture.safetensors \
@@ -31,6 +31,7 @@ import argparse
 import os
 import json
 import os
+import struct
 import sys
 from pathlib import Path
 
@@ -43,8 +44,24 @@ REF_DTYPE = torch.bfloat16 if os.environ.get("QWEN4_REF_DTYPE", "f32") == "bf16"
 from safetensors.numpy import save_file
 from safetensors.torch import save_file as save_torch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from convert_qwen38_flash_next import read_header, read_raw  # noqa: E402
+
+def read_header(path):
+    with open(path, "rb") as f:
+        hlen = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(hlen))
+    header.pop("__metadata__", None)
+    return header, 8 + hlen
+
+
+def read_raw(path, data_off, meta):
+    b, e = meta["data_offsets"]
+    with open(path, "rb") as f:
+        f.seek(data_off + b)
+        raw = f.read(e - b)
+    assert len(raw) == e - b, f"{path}: short read"
+    np_dt = {"BF16": np.uint16, "F16": np.float16, "F32": np.float32, "U32": np.uint32,
+             "I32": np.int32, "I64": np.int64, "U8": np.uint8}[meta["dtype"]]
+    return np.frombuffer(raw, dtype=np_dt).reshape(meta["shape"])
 
 
 def load_raw(path):
