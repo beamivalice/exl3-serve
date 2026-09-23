@@ -54,8 +54,8 @@ Its rows ride the decode chain and refuse wider
 (`expert_exl3.prepareInput` / `finishOutput`), both through f16 rounding. The
 converter's per-expert global codebook scale is **folded into `suh`** — it is
 divided out there and never stored as a separate field, so the engine applies
-one scale vector per side and nothing else. A pack converted without the g-scale
-search and one converted with it differ only in these `suh` values.
+one scale vector per side and nothing else. The search runs on `inner * g`, so a pack converted with the g-scale search
+and one without it differ in their trellis codewords as well as in `suh`.
 
 ## `config.json`
 
@@ -113,15 +113,18 @@ string, because that is all safetensors stores:
 | `k` | the rate as written, e.g. `2.5` or `4` |
 | `codebook` | `mul1` \| `mcg` (`tiny` refused) |
 | `window` | the codeword width, e.g. `12` |
-| `quantizer` | which search wrote it (`ldlq` / `direct`) |
+| `quantizer` | which search wrote it (`ldlq-rotated` / `direct`) |
 | `g_scale` | the global-scale mode, e.g. `gss` |
 | `imatrix_sha256` | the imatrix's digest, or `none` |
 | `converter` | the calling converter's own `CONVERTER_VERSION` |
+| `source_sha256` | digest of the source checkpoint's index (new shards; older ones lack it) |
+| `seed_scheme` | which per-expert seed formula produced suh/svh signs (new shards) |
+| `out_scales_mode` | the output-scale rule, `auto` \| `always` \| `never` (new shards) |
 
 Two rules run off it:
 
-**Load (`mimo_source.validateShardStamps`).** Before any bytes are uploaded, a
-stamped shard's `codebook`, `window` and `k` are checked against `expert_quant`.
+**Load (`mimo_source.validateShardStamps`, the MiMo loader only — Flash-Next packs are not stamp-checked today).**
+Before any bytes are uploaded, a stamped shard's `codebook`, `window` and `k` are checked against `expert_quant`.
 A disagreement is `Exl3ShardStampMismatch` — a named refusal, never garbage
 weights. An **unstamped** shard is legacy and is admitted. `k` is compared as
 halfwords: at or below the config's rate passes, wider refuses.
@@ -132,8 +135,9 @@ alone cannot tell a K3/w8/LDLQ shard from a K3/w16/direct one.
 
 These strings are load-bearing across repos: packs already on disk carry
 `converter: qwen4-exl3-1-rotated-gss` and
-`converter: mimo-exl3-3-calibrated-regularize`, and changing either string
-invalidates every resume and every verify against those packs.
+`converter: mimo-exl3-3-calibrated-regularize` (the pre-2026-09-24 output-scale rule); packs converted after the
+upstream skew fix carry `qwen4-exl3-2-upstream-skew` / `mimo-exl3-4-upstream-skew`. A converter also writes
+`exl3-prior-experts.json` beside the shards, naming every expert that fell back to the prior (no imatrix rows).
 
 ## Component packs
 
