@@ -23227,6 +23227,9 @@ fn mimoV2BillConfig() model_mod.ModelConfig {
     c.global_head_dim = 192;
     c.global_v_head_dim = 128;
     c.num_global_key_value_heads = 2;
+    // Pinned as a load pins it: unpinned, the reservation's headroom follows an auto-context
+    // sized from live GPU memory and from the attention switches a test flips between bills.
+    c.pinned_context = 1 << 20;
     return c;
 }
 
