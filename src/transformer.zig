@@ -2124,7 +2124,8 @@ fn runVerifyQmmNax(
 // v2 tiles (BQ=64, BK=32, 8 simdgroups, register-resident Q, uint4 staging
 // — see the geometry comment above ATTN_PD_KERNEL_SOURCE) are our own,
 // picked by micro-bench sweep. An optional sliding-window band covers
-// Gemma's local layers ("array" mask during prefill) too. The score tensor
+// Gemma's local layers ("array" mask during prefill) too, and an optional
+// per-head sink column mimo_v2's sliding layers. The score tensor
 // never exists — O(tile) working memory — so the three prefill OOM guards
 // (generate.boundedPrefillChunk / prefillEvalCadence / server.prefillMemoryNeeded)
 // drop their score term via `prefillHeadDimFused` when this kernel is active.
@@ -2309,6 +2310,13 @@ const ATTN_PD_KERNEL_SOURCE =
     \\    }
     \\  }
     \\}
+    \\// Learned per-head sink (template SINK=1): one extra softmax column that
+    \\// joins the max and the sum and carries no value row, so it is exactly a
+    \\// running state of (max = sink, sum = 1, O = 0) before the first key.
+    \\if (SINK && !has_carry) {
+    \\  max_score = sinks[hq] * 1.44269504088896340736f;
+    \\  sum_score = 1.0f;
+    \\}
     \\
     \\const int NK = (k_end + BK - 1) / BK;
     \\const int q_lo = tqx * BQ + q_off;
@@ -2470,7 +2478,7 @@ var attn_pd_kernel_cached: ?mlx.mlx_fast_metal_kernel = null;
 
 fn getAttnPdKernel() !mlx.mlx_fast_metal_kernel {
     if (attn_pd_kernel_cached) |kk| return kk;
-    const input_names = [_][*:0]const u8{ "q", "k", "v", "scl", "win", "kr", "phase", "m_in", "l_in", "o_in", "mask", "skip" };
+    const input_names = [_][*:0]const u8{ "q", "k", "v", "scl", "win", "kr", "phase", "m_in", "l_in", "o_in", "mask", "skip", "sinks" };
     const output_names = [_][*:0]const u8{ "out", "m_out", "l_out", "o_out" };
     const in_vec = mlx.mlx_vector_string_new_data(&input_names, input_names.len);
     defer _ = mlx.mlx_vector_string_free(in_vec);
@@ -2610,8 +2618,8 @@ pub fn fusedPdDims(qk_dim: c_int, v_dim: c_int) bool {
 ///
 /// A width listed here owes a dispatch at EVERY prefill site that scores at
 /// it: 192 covers mimo_v2's global layers and MLA. mimo_v2's SLIDING layers
-/// still compose (sinks + an array mask), and `server.slidingBandScoreBytes`
-/// bills them.
+/// (band + sinks) ride their own predicate, `slidingPrefillFused`, which
+/// `server.slidingBandScoreBytes` reads too.
 pub fn prefillHeadDimFused(head_dim: u32) bool {
     if (head_dim <= 128) return true;
     if (head_dim != 256 and head_dim != 192) return false;
@@ -2644,35 +2652,40 @@ pub fn fusedSdpaPrefill(
     scale: f32,
     window: c_int,
 ) !?mlx.mlx_array {
+    if (!fusedPrefillArmOn(q, window)) return null;
+    return fusedSdpaPrefillImpl(s, q, k, v, scale, window, null, null, .{ .ctx = null });
+}
+
+fn fusedPrefillArmOn(q: mlx.mlx_array, window: c_int) bool {
     // Band arm rides the master switch; plain causal is opt-in (see
     // fused256CausalMode — composed wins live on qwen chunked prefill).
-    if (window > 0) {
-        if (!fused256Enabled()) return null;
-    } else {
-        if (fused256CausalMode() == .off) return null;
-        // The band arm stays ours (mlx's NAX kernel takes no band); the
-        // causal arm yields to the stock fused kernel on NAX — which exists
-        // at hd 256 only, so a narrower-value shape keeps our kernel.
-        if (naxSdpaPreferred() and mlx.mlx_array_ndim(q) == 4 and
-            mlx.getShape(q)[3] == 256) return null;
-    }
-    return fusedSdpaPrefillImpl(s, q, k, v, scale, window, null, null);
+    if (window > 0) return fused256Enabled();
+    if (fused256CausalMode() == .off) return false;
+    // The band arm stays ours (mlx's NAX kernel takes no band); the
+    // causal arm yields to the stock fused kernel on NAX — which exists
+    // at hd 256 only, so a narrower-value shape keeps our kernel.
+    return !(naxSdpaPreferred() and mlx.mlx_array_ndim(q) == 4 and mlx.getShape(q)[3] == 256);
 }
 
 /// The causal arm over a KV cache view. When the cache is quantized the kernel
 /// reads it one dispatch at a time (`PackedKv`) and `view.k`/`view.v` — the
 /// lazy dense rebuild `denseView` set up — are never evaluated. Falls through
 /// to the dense arm on an `off`-scheme cache or a shape the slicing cannot
-/// serve, so the caller has one entry either way.
+/// serve, so the caller has one entry either way. The band arm reads the view
+/// whole: a ringed sliding view is already one dispatch's rows. `sinks` ([Hq],
+/// null = none) is a learned logit per head that joins the softmax as one
+/// extra column with no value row.
 pub fn fusedSdpaPrefillKv(
     s: mlx.mlx_stream,
     q: mlx.mlx_array,
     view: *const DenseKVView,
     scale: f32,
     window: c_int,
+    sinks: mlx.mlx_array,
 ) !?mlx.mlx_array {
     if (window > 0 or !view.has_quant_triple or view.bits == 0 or view.group_size == 0) {
-        return fusedSdpaPrefill(s, q, view.k, view.v, scale, window);
+        if (!fusedPrefillArmOn(q, window)) return null;
+        return fusedSdpaPrefillImpl(s, q, view.k, view.v, scale, window, null, null, sinks);
     }
     if (fused256CausalMode() == .off) return null;
     return fusedSdpaPrefillImpl(s, q, view.k, view.v, scale, 0, null, .{
@@ -2684,7 +2697,41 @@ pub fn fusedSdpaPrefillKv(
         .v_biases = view.v_triple_biases,
         .bits = view.bits,
         .group_size = view.group_size,
-    });
+    }, sinks);
+}
+
+/// Test seam for the switch half of `slidingPrefillFused` (never the shape half).
+pub var sliding_prefill_fused_override: ?bool = null;
+
+/// ONE predicate for a sliding layer's prefill dispatch (`slidingPrefillAttn`)
+/// and `server.slidingBandScoreBytes`: true when the band + sink attention runs
+/// in `msv_attn_pd` and no [heads, q, window + q - 1] score sheet exists.
+pub fn slidingPrefillFused(cfg: *const ModelConfig, q_len: u64) bool {
+    const on = sliding_prefill_fused_override orelse fused256Enabled();
+    const v_dim = if (cfg.v_head_dim > 0) cfg.v_head_dim else cfg.head_dim;
+    return on and q_len >= FUSED256_MIN_Q_LEN and fusedPdDims(@intCast(cfg.head_dim), @intCast(v_dim));
+}
+
+var sliding_prefill_engaged_logged = false;
+
+/// A sliding layer's prefill attention over its (ringed) view, sinks included.
+/// Null = the composed path serves.
+pub fn slidingPrefillAttn(
+    s: mlx.mlx_stream,
+    cfg: *const ModelConfig,
+    q: mlx.mlx_array,
+    view: *const DenseKVView,
+    scale: f32,
+    sinks: mlx.mlx_array,
+) !?mlx.mlx_array {
+    const q_len = mlx.getShape(q)[2];
+    if (!slidingPrefillFused(cfg, @intCast(q_len))) return null;
+    const out = try fusedSdpaPrefillKv(s, q, view, scale, @intCast(cfg.sliding_window), sinks);
+    if (out != null and !sliding_prefill_engaged_logged) {
+        sliding_prefill_engaged_logged = true;
+        log.info("[attn-pd] sliding band engaged: msv_attn_pd window={d} sinks={} qL={d} kL={d} (MLX_SERVE_FUSED_256=0 restores composed)\n", .{ cfg.sliding_window, sinks.ctx != null, q_len, mlx.getShape(view.k)[2] });
+    }
+    return out;
 }
 
 /// One line per (qk, value) width the kernel actually serves in this process:
@@ -2736,7 +2783,7 @@ pub fn fusedSdpa256Masked(
     const qs = mlx.getShape(q);
     const ks = mlx.getShape(k);
     if (ms[0] != qs[0] or ms[1] != 1 or ms[2] != qs[2] or ms[3] != ks[2]) return null;
-    const out = try fusedSdpaPrefillImpl(s, q, k, v, scale, 0, mask, null);
+    const out = try fusedSdpaPrefillImpl(s, q, k, v, scale, 0, mask, null, .{ .ctx = null });
     if (out != null and !qsa_fused_logged) {
         qsa_fused_logged = true;
         log.info("[qsa-fused] engaged: msv_attn_p256 mask arm qL={d} kL={d} Hq={d} Hkv={d} (MLX_SERVE_QSA_FUSED=0 restores stock sdpa)\n", .{ qs[2], ks[2], qs[1], ks[1] });
@@ -6947,12 +6994,15 @@ fn fusedSdpaPrefillImpl(
     window: c_int,
     mask: ?mlx.mlx_array,
     packed_kv: ?PackedKv,
+    sinks: mlx.mlx_array,
 ) !?mlx.mlx_array {
     if (mlx.mlx_array_ndim(q) != 4 or mlx.mlx_array_ndim(k) != 4 or mlx.mlx_array_ndim(v) != 4) return null;
     const qs = mlx.getShape(q);
     const ks = mlx.getShape(k);
     const vs = mlx.getShape(v);
     if (ks[3] != qs[3] or !fusedPdDims(qs[3], vs[3])) return null;
+    const has_sinks = sinks.ctx != null;
+    if (has_sinks and (mlx.mlx_array_ndim(sinks) != 1 or mlx.getShape(sinks)[0] != qs[1])) return null;
     // Short sequences (< 16: decode AND spec-decode VERIFY forwards) belong
     // to MLX's sdpa_vector, which covers hd 256 natively and beats a 64-row
     // prefill tile walking the whole KV for a few-row query — dispatching
@@ -7002,6 +7052,14 @@ fn fusedSdpaPrefillImpl(
         _ = mlx.mlx_array_free(skip);
     };
     if (mask) |m| skip = try qsaSkipTable(s, m);
+    var sinks_f32 = mlx.mlx_array{ .ctx = null };
+    defer if (sinks_f32.ctx != null) {
+        _ = mlx.mlx_array_free(sinks_f32);
+    };
+    if (has_sinks) {
+        sinks_f32 = mlx.mlx_array_new();
+        try mlx.check(mlx.mlx_astype(&sinks_f32, sinks, .float32, s));
+    }
 
     var m_prev = mlx.mlx_array{ .ctx = null };
     var l_prev = mlx.mlx_array{ .ctx = null };
@@ -7076,6 +7134,7 @@ fn fusedSdpaPrefillImpl(
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "BDK", qs[3]));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "BDV", vs[3]));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "QSA", if (mask != null) 1 else 0));
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "SINK", if (has_sinks) 1 else 0));
 
         const inputs_arr = [_]mlx.mlx_array{
             q,                                if (packed_kv != null) k_slice else k,
@@ -7084,6 +7143,7 @@ fn fusedSdpaPrefillImpl(
             phase,                            if (has_carry) m_prev else dummy,
             if (has_carry) l_prev else dummy, if (has_carry) o_prev else dummy,
             if (mask) |m| m else dummy_b,     if (mask != null) skip else dummy_b,
+            if (has_sinks) sinks_f32 else dummy,
         };
         const inputs_vec = mlx.mlx_vector_array_new_data(&inputs_arr, inputs_arr.len);
         defer _ = mlx.mlx_vector_array_free(inputs_vec);
@@ -26629,8 +26689,9 @@ pub const Transformer = struct {
 
     /// MiMo V2 attention (XiaomiMiMo/MiMo-V2.6-Flash-RL, Apache-2.0):
     /// per-layer GQA geometry, asymmetric K/V widths, and
-    /// optional sink columns. Sink-free global layers take the qk 192 / v 128
-    /// kernels (`msv_attn_pd` prefill, `msv_qkv_mpp` packed decode); the rest is native SDPA.
+    /// optional sink columns. Prefill takes `msv_attn_pd` at qk 192 / v 128 (sliding
+    /// layers with their sinks, sink-free global layers), a packed global decode
+    /// `msv_qkv_mpp`; the rest is native SDPA.
     fn mimoAttnWith(
         self: *Transformer,
         ctx: *ForwardCtx,
@@ -26731,11 +26792,11 @@ pub const Transformer = struct {
         if (is_global) {
             // MLX has no fused prefill kernel at qk 192 (steel_attention ships
             // bd 64/96/128 and a 256 dsplit), so the composed arm materializes
-            // [heads, chunk, total_kv] — 32 GiB at a 512k prompt. A layer that
-            // carries sinks keeps it: the kernel has no sink column. A packed
+            // [heads, chunk, total_kv] — 32 GiB at a 512k prompt. A global layer
+            // that carries sinks keeps it: only the band arm's sink is proven. A packed
             // decode reads the cache in place rather than dequantizing it whole.
             const pd: ?mlx.mlx_array = if (is_prefill and fa.sinks.ctx == null)
-                try fusedSdpaPrefillKv(self.s, q_rope, &kv_view, attn_scale, 0)
+                try fusedSdpaPrefillKv(self.s, q_rope, &kv_view, attn_scale, 0, .{ .ctx = null })
             else if (!is_prefill and fa.sinks.ctx == null and ctx.kv_attn_fused and qkvMppDecodeServes(&kv_view, seq_len))
                 try qkvAttnMppKernel(self.s, q_rope, &kv_view, attn_scale, "")
             else
@@ -26760,7 +26821,14 @@ pub const Transformer = struct {
         } else {
             const sw: c_int = @intCast(cfg.sliding_window);
             const total_kv = offset + seq_len;
-            if (is_prefill and total_kv <= sw) {
+            const fused: ?mlx.mlx_array = if (is_prefill)
+                try slidingPrefillAttn(self.s, cfg, q_rope, &kv_view, attn_scale, fa.sinks)
+            else
+                null;
+            if (fused) |out| {
+                _ = mlx.mlx_array_free(attn_out);
+                attn_out = out;
+            } else if (is_prefill and total_kv <= sw) {
                 try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(
                     &attn_out,
                     q_rope,
@@ -53654,7 +53722,7 @@ test "fusedSdpaPrefillKv: a quantized cache is read per dispatch, never rebuilt 
     // Force several slices so the absolute-offset arithmetic is exercised.
     fused256_budget_override = 16 * 70 * 256;
     defer fused256_budget_override = null;
-    const sliced = (try fusedSdpaPrefillKv(s, q, &qv.view, scale, 0)) orelse return error.FusedDeclined;
+    const sliced = (try fusedSdpaPrefillKv(s, q, &qv.view, scale, 0, .{ .ctx = null })) orelse return error.FusedDeclined;
     defer _ = mlx.mlx_array_free(sliced);
     try std.testing.expect(fused256_last_dispatch_count > 1);
 
@@ -53694,11 +53762,329 @@ test "fusedSdpaPrefillKv: an unquantized cache view takes the dense arm unchange
     defer _ = mlx.mlx_array_free(v);
     const scale: f32 = 1.0 / @sqrt(192.0);
     const off = DenseKVView{ .k = k, .v = v, .owned = false };
-    const via_view = (try fusedSdpaPrefillKv(s, q, &off, scale, 0)) orelse return error.FusedDeclined;
+    const via_view = (try fusedSdpaPrefillKv(s, q, &off, scale, 0, .{ .ctx = null })) orelse return error.FusedDeclined;
     defer _ = mlx.mlx_array_free(via_view);
     const direct = (try fusedSdpaPrefill(s, q, k, v, scale, 0)) orelse return error.FusedDeclined;
     defer _ = mlx.mlx_array_free(direct);
     try std.testing.expectEqual(@as(f32, 0), try attn256MaxDiff(via_view, direct, s));
+}
+
+const SWA_TEST_WINDOW: u32 = 128;
+
+/// mimo_v2's sliding-layer attention geometry, enough for the ring and the arm.
+fn swaSinkTestConfig() ModelConfig {
+    var c = ModelConfig{};
+    c.model_type = "mimo_v2";
+    c.has_sliding_window = true;
+    c.sliding_window = SWA_TEST_WINDOW;
+    c.head_dim = 192;
+    c.v_head_dim = 128;
+    return c;
+}
+
+fn swaHostF32(alloc: std.mem.Allocator, a: mlx.mlx_array, s: mlx.mlx_stream) ![]f32 {
+    var c = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(c);
+    try mlx.check(mlx.mlx_contiguous(&c, a, false, s));
+    var f = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(f);
+    try mlx.check(mlx.mlx_astype(&f, c, .float32, s));
+    try mlx.check(mlx.mlx_array_eval(f));
+    const n = mlx.mlx_array_size(f);
+    const src = mlx.mlx_array_data_float32(f) orelse return error.Unreadable;
+    const out = try alloc.alloc(f32, n);
+    @memcpy(out, src[0..n]);
+    return out;
+}
+
+const SwaGeom = struct { hq: usize, hk: usize, qk: usize, vd: usize, t: usize };
+
+/// fp64 truth for one chunk of a sliding layer with sinks, read off the FULL
+/// history at absolute positions: a ring or band offset bug cannot hide in it.
+/// `q` is the chunk `[hq, ql, qk]`; `k`/`v` the whole history `[hk, t, *]`.
+fn swaSinkTruth(
+    alloc: std.mem.Allocator,
+    g: SwaGeom,
+    q: []const f32,
+    k: []const f32,
+    v: []const f32,
+    sinks: []const f32,
+    pos: usize,
+    ql: usize,
+    scale: f64,
+) ![]f64 {
+    const out = try alloc.alloc(f64, g.hq * ql * g.vd);
+    @memset(out, 0);
+    var logits: [SWA_TEST_WINDOW]f64 = undefined;
+    for (0..g.hq) |h| {
+        const kh = h / (g.hq / g.hk);
+        for (0..ql) |r| {
+            const p = pos + r;
+            const lo = (p + 1) -| SWA_TEST_WINDOW;
+            const qrow = q[(h * ql + r) * g.qk ..][0..g.qk];
+            var m: f64 = sinks[h];
+            for (lo..p + 1, 0..) |j, i| {
+                const krow = k[(kh * g.t + j) * g.qk ..][0..g.qk];
+                var dot: f64 = 0;
+                for (qrow, krow) |a, b| dot += @as(f64, a) * b;
+                logits[i] = dot * scale;
+                m = @max(m, logits[i]);
+            }
+            var denom: f64 = @exp(@as(f64, sinks[h]) - m);
+            for (logits[0 .. p + 1 - lo]) |l| denom += @exp(l - m);
+            const orow = out[(h * ql + r) * g.vd ..][0..g.vd];
+            for (lo..p + 1, 0..) |j, i| {
+                const w = @exp(logits[i] - m) / denom;
+                const vrow = v[(kh * g.t + j) * g.vd ..][0..g.vd];
+                for (orow, vrow) |*o, x| o.* += w * x;
+            }
+        }
+    }
+    return out;
+}
+
+/// `[1, 1, ql, kl]` bool band: the mask the composed arm reads, bottom-right aligned.
+fn swaBandMask(ql: c_int, kl: c_int) !mlx.mlx_array {
+    const alloc = std.testing.allocator;
+    const n: usize = @intCast(ql * kl);
+    const buf = try alloc.alloc(bool, n);
+    defer alloc.free(buf);
+    for (0..@intCast(ql)) |r| {
+        const row: c_int = kl - ql + @as(c_int, @intCast(r));
+        for (0..@intCast(kl)) |c| {
+            const col: c_int = @intCast(c);
+            buf[r * @as(usize, @intCast(kl)) + c] = col <= row and row - col < @as(c_int, SWA_TEST_WINDOW);
+        }
+    }
+    const shape = [_]c_int{ 1, 1, ql, kl };
+    return mlx.mlx_array_new_data(buf.ptr, &shape, 4, .bool_);
+}
+
+fn swaMaxErr(got: []const f32, truth: []const f64) f64 {
+    var e: f64 = 0;
+    for (got, truth) |a, b| e = @max(e, @abs(@as(f64, a) - b));
+    return e;
+}
+
+fn sliceSeq(s: mlx.mlx_stream, a: mlx.mlx_array, start: c_int, end: c_int) !mlx.mlx_array {
+    const sh = mlx.getShape(a);
+    var out = mlx.mlx_array_new();
+    try mlx.check(mlx.mlx_slice(&out, a, &.{ 0, 0, start, 0 }, 4, &.{ sh[0], sh[1], end, sh[3] }, 4, &.{ 1, 1, 1, 1 }, 4, s));
+    return out;
+}
+
+/// Walk a ringed sliding cache through `schedule` and hold every chunk's fused
+/// band + sink attention to fp64 truth, no worse than the composed arm it replaces.
+fn swaSinkParityWalk(kv_cfg: KVQuantConfig, seed: u64, schedule: []const c_int) !void {
+    const alloc = std.testing.allocator;
+    const s = mlx.gpuStream();
+    const cfg = swaSinkTestConfig();
+    const g = SwaGeom{ .hq = 16, .hk = 2, .qk = 192, .vd = 128, .t = blk: {
+        var t: usize = 0;
+        for (schedule) |w| t += @intCast(w);
+        break :blk t;
+    } };
+    const t: c_int = @intCast(g.t);
+    const scale: f32 = 1.0 / @sqrt(192.0);
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rnd = prng.random();
+
+    // Peaked scores, so both the band edge and the sink move the output.
+    const q_all = try attn256RandBf16Scaled(rnd, &[_]c_int{ 1, 16, t, 192 }, 8.0, s);
+    defer _ = mlx.mlx_array_free(q_all);
+    const k_all = try attn256RandBf16(rnd, &[_]c_int{ 1, 2, t, 192 }, s);
+    defer _ = mlx.mlx_array_free(k_all);
+    const v_all = try attn256RandBf16(rnd, &[_]c_int{ 1, 2, t, 128 }, s);
+    defer _ = mlx.mlx_array_free(v_all);
+    // bf16 like the checkpoint's `attention_sink_bias`, spread so some heads' sink dominates.
+    var sink_f: [16]f32 = undefined;
+    for (&sink_f) |*x| x.* = rnd.float(f32) * 6.0 - 2.0;
+    const sink_shape = [_]c_int{16};
+    const sinks_f32 = mlx.mlx_array_new_data(&sink_f, &sink_shape, 1, .float32);
+    defer _ = mlx.mlx_array_free(sinks_f32);
+    var sinks = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(sinks);
+    try mlx.check(mlx.mlx_astype(&sinks, sinks_f32, .bfloat16, s));
+
+    // Truth reads the values the kernel reads: a quantized cache's are dequantized.
+    var k_read = k_all;
+    var v_read = v_all;
+    var kq: ?kv_quant.QuantizedKV = null;
+    var vq: ?kv_quant.QuantizedKV = null;
+    defer if (kq) |*x| x.deinit();
+    defer if (vq) |*x| x.deinit();
+    defer if (kv_cfg.isQuant()) {
+        _ = mlx.mlx_array_free(k_read);
+        _ = mlx.mlx_array_free(v_read);
+    };
+    if (kv_cfg.isQuant()) {
+        kq = try kv_quant.quantizeAffine(s, k_all, kv_cfg.group_size, kv_cfg.bits);
+        vq = try kv_quant.quantizeAffine(s, v_all, kv_cfg.group_size, kv_cfg.bits);
+        k_read = try kv_quant.dequantizeAffine(s, kq.?.q, kq.?.scales, kq.?.biases, kv_cfg.group_size, kv_cfg.bits);
+        v_read = try kv_quant.dequantizeAffine(s, vq.?.q, vq.?.scales, vq.?.biases, kv_cfg.group_size, kv_cfg.bits);
+    }
+    const q_h = try swaHostF32(alloc, q_all, s);
+    defer alloc.free(q_h);
+    const k_h = try swaHostF32(alloc, k_read, s);
+    defer alloc.free(k_h);
+    const v_h = try swaHostF32(alloc, v_read, s);
+    defer alloc.free(v_h);
+    const sink_h = try swaHostF32(alloc, sinks, s);
+    defer alloc.free(sink_h);
+
+    var cache = try KVCache.initWithConfig(alloc, 1, kv_cfg);
+    defer cache.deinit();
+    cache.setSwaRing(SWA_TEST_WINDOW);
+
+    var pos: c_int = 0;
+    for (schedule) |ql| {
+        const q_c = try sliceSeq(s, q_all, pos, pos + ql);
+        defer _ = mlx.mlx_array_free(q_c);
+        const k_c = try sliceSeq(s, k_all, pos, pos + ql);
+        defer _ = mlx.mlx_array_free(k_c);
+        const v_c = try sliceSeq(s, v_all, pos, pos + ql);
+        defer _ = mlx.mlx_array_free(v_c);
+        var view = try cache.update(0, k_c, v_c, s, slidingViewFor(&cfg, pos + ql, ql).span);
+        defer view.deinit();
+
+        const fused = (try slidingPrefillAttn(s, &cfg, q_c, &view, scale, sinks)) orelse return error.FusedDeclined;
+        defer _ = mlx.mlx_array_free(fused);
+        const mask = try swaBandMask(ql, mlx.getShape(view.k)[2]);
+        defer _ = mlx.mlx_array_free(mask);
+        var composed = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(composed);
+        try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&composed, q_c, view.k, view.v, scale, "array", mask, sinks, false, s));
+
+        const q_ch = try swaHostF32(alloc, q_c, s);
+        defer alloc.free(q_ch);
+        const truth = try swaSinkTruth(alloc, g, q_ch, k_h, v_h, sink_h, @intCast(pos), @intCast(ql), scale);
+        defer alloc.free(truth);
+        const fused_h = try swaHostF32(alloc, fused, s);
+        defer alloc.free(fused_h);
+        const composed_h = try swaHostF32(alloc, composed, s);
+        defer alloc.free(composed_h);
+
+        var scale_of: f64 = 0;
+        for (truth) |x| scale_of = @max(scale_of, @abs(x));
+        try std.testing.expect(std.math.isFinite(scale_of) and scale_of > 0);
+        const fused_err = swaMaxErr(fused_h, truth);
+        const composed_err = swaMaxErr(composed_h, truth);
+        try std.testing.expect(std.math.isFinite(fused_err) and std.math.isFinite(composed_err));
+        // One bf16 ulp of slack at the truth's own scale: the arms round in different places.
+        try std.testing.expect(fused_err <= composed_err + scale_of * 0.00390625);
+        pos += ql;
+    }
+    // The walk really wrapped: the ring holds a window, not the history.
+    try std.testing.expect(cache.seqLen(0) < g.t);
+}
+
+// A first chunk inside the window, two chunks that push the ring past its cap
+// (the next reads window rows an earlier chunk wrote), the arm's shortest q, a
+// 2048 chunk, and a ragged tail — every key length a partial 32-key block.
+const SWA_SINK_SCHEDULE = [_]c_int{ 100, 512, 512, 16, 2048, 37 };
+
+test "sliding band + sink prefill matches fp64 truth over a ringed dense cache" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    fused256_override = true;
+    defer fused256_override = null;
+    for (0..ATTN_PD_PARITY_SEEDS) |i| try swaSinkParityWalk(KVQuantConfig.dense, 0x5a1c + i, &SWA_SINK_SCHEDULE);
+}
+
+test "sliding band + sink prefill matches fp64 truth over a ringed kv8 cache" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    fused256_override = true;
+    defer fused256_override = null;
+    for (0..ATTN_PD_PARITY_SEEDS) |i| try swaSinkParityWalk(KVQuantConfig.affine(8), 0x5a2c + i, &SWA_SINK_SCHEDULE);
+}
+
+test "the sliding arm engages exactly where slidingPrefillFused says it does" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    const cfg = swaSinkTestConfig();
+    fused256_override = true;
+    defer fused256_override = null;
+    defer sliding_prefill_fused_override = null;
+    var prng = std.Random.DefaultPrng.init(0x5a3c);
+    const rnd = prng.random();
+    const sinks = try attn256RandBf16(rnd, &[_]c_int{4}, s);
+    defer _ = mlx.mlx_array_free(sinks);
+    var engaged_any = false;
+    for ([_]?bool{ null, false }) |ov| {
+        sliding_prefill_fused_override = ov;
+        for ([_]c_int{ 8, 15, 16, 64 }) |ql| {
+            const q = try attn256RandBf16(rnd, &[_]c_int{ 1, 4, ql, 192 }, s);
+            defer _ = mlx.mlx_array_free(q);
+            const k = try attn256RandBf16(rnd, &[_]c_int{ 1, 1, ql + 127, 192 }, s);
+            defer _ = mlx.mlx_array_free(k);
+            const v = try attn256RandBf16(rnd, &[_]c_int{ 1, 1, ql + 127, 128 }, s);
+            defer _ = mlx.mlx_array_free(v);
+            const view = DenseKVView{ .k = k, .v = v, .owned = false };
+            const out = try slidingPrefillAttn(s, &cfg, q, &view, 1.0 / @sqrt(192.0), sinks);
+            defer if (out) |o| {
+                _ = mlx.mlx_array_free(o);
+            };
+            try std.testing.expectEqual(slidingPrefillFused(&cfg, @intCast(ql)), out != null);
+            engaged_any = engaged_any or out != null;
+        }
+    }
+    try std.testing.expect(engaged_any);
+}
+
+test "sliding band + sink prefill µbench: composed vs fused, 39 layers (MLX_SERVE_SWA_FUSED_UBENCH=1)" {
+    if (!diagEnvOn("MLX_SERVE_SWA_FUSED_UBENCH")) return;
+    const s = mlx.gpuStream();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const cfg = swaSinkTestConfig();
+    fused256_override = true;
+    defer fused256_override = null;
+    var prng = std.Random.DefaultPrng.init(0x5a4c);
+    const rnd = prng.random();
+    const layers: usize = 39;
+    const rounds: usize = 7;
+    const scale: f32 = 1.0 / @sqrt(192.0);
+    const sinks = try attn256RandBf16(rnd, &[_]c_int{64}, s);
+    defer _ = mlx.mlx_array_free(sinks);
+    std.debug.print("\n[swa-ubench] chunk kL  composed_ms  fused_ms  (median of {d}, {d} layers, Hq 64 / Hk 8, qk 192 / v 128)\n", .{ rounds, layers });
+    for ([_]c_int{ 512, 2048, 4096 }) |ql| {
+        const kl = ql + 127;
+        const q = try attn256RandBf16Scaled(rnd, &[_]c_int{ 1, 64, ql, 192 }, 8.0, s);
+        defer _ = mlx.mlx_array_free(q);
+        const k = try attn256RandBf16(rnd, &[_]c_int{ 1, 8, kl, 192 }, s);
+        defer _ = mlx.mlx_array_free(k);
+        const v = try attn256RandBf16(rnd, &[_]c_int{ 1, 8, kl, 128 }, s);
+        defer _ = mlx.mlx_array_free(v);
+        try mlx.check(mlx.mlx_array_eval(q));
+        try mlx.check(mlx.mlx_array_eval(k));
+        try mlx.check(mlx.mlx_array_eval(v));
+        const view = DenseKVView{ .k = k, .v = v, .owned = false };
+        // Built once per forward in serving (`local_prefill_mask`), so once here.
+        const mask = try swaBandMask(ql, kl);
+        defer _ = mlx.mlx_array_free(mask);
+        try mlx.check(mlx.mlx_array_eval(mask));
+        var ms: [2][rounds]f64 = undefined;
+        for (0..rounds + 1) |round| {
+            // Interleaved arms in one process; round 0 warms both.
+            for (0..2) |arm| {
+                const mark = std.Io.Timestamp.now(io, .boot);
+                for (0..layers) |_| {
+                    var out: mlx.mlx_array = .{ .ctx = null };
+                    if (arm == 0) {
+                        out = mlx.mlx_array_new();
+                        try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&out, q, k, v, scale, "array", mask, sinks, false, s));
+                    } else {
+                        out = (try slidingPrefillAttn(s, &cfg, q, &view, scale, sinks)) orelse return error.FusedDeclined;
+                    }
+                    defer _ = mlx.mlx_array_free(out);
+                    try mlx.check(mlx.mlx_array_eval(out));
+                }
+                const ns: f64 = @floatFromInt(mark.untilNow(io, .boot).nanoseconds);
+                if (round > 0) ms[arm][round - 1] = ns / 1e6;
+            }
+        }
+        std.mem.sort(f64, &ms[0], {}, std.sort.asc(f64));
+        std.mem.sort(f64, &ms[1], {}, std.sort.asc(f64));
+        std.debug.print("[swa-ubench] {d:>5} {d:>5}  {d:>10.2}  {d:>8.2}\n", .{ @as(u32, @intCast(ql)), @as(u32, @intCast(kl)), ms[0][rounds / 2], ms[1][rounds / 2] });
+    }
 }
 
 /// A QSA-shaped bool mask [1,1,qL,kL]: causal, bottom-right aligned, with a

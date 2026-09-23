@@ -101,18 +101,23 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 
 ## Attention kernels
 
-- **Global layers PREFILL FUSED** (`msv_attn_pd`, qk 192 / v 128, no sink there); the sliding layers still compose
-  their band sheet and `server.slidingBandScoreBytes` bills it. A quantized cache is read one DISPATCH at a time
-  (`fusedSdpaPrefillKv`; `kr` = {begin, end, koff, kL_abs} puts every causal comparison in CACHE coordinates),
-  never rebuilt whole.
+- **Every layer PREFILLS FUSED** (`msv_attn_pd`, qk 192 / v 128). A sliding layer's learned sink joins the online
+  max and sum with no value row (template flag `SINK`; `SINK=0` compiles the global layers' code unchanged, proven
+  byte-identical); `slidingPrefillFused` gates the dispatch AND `server.slidingBandScoreBytes`, so the band sheet is
+  billed only where it still composes (chunks under 16 rows, `MLX_SERVE_FUSED_256=0`). A quantized cache is read one
+  DISPATCH at a time (`fusedSdpaPrefillKv`; `kr` = {begin, end, koff, kL_abs} puts every causal comparison in CACHE
+  coordinates), never rebuilt whole; the sliding ring view is window + chunk rows, dequantized per view.
+  Landed 2026-09-23 (668278c): 39-layer band attention 39.5 -> 20.3 ms at chunk 512, 603 -> 95.5 at 2048, 2439 -> 181
+  at 4096; live prefill (back-to-back pair) 886 -> 1059 tok/s at 4k and 526 -> 603 at 64k, chunk 2048; a 500k prompt
+  admits at chunk 2048 (`needed=10262 MB available=17538 MB`); 16x512 KLD 0.07747 vs 0.07761.
 - **A packed-cache global-layer DECODE reads in place** via `msv_qkv_mpp` (matmul2d, `qkvMppDecodeServes`, from
   `QKV_MPP_DECODE_MIN_TK` = 4096 keys; qk192/v128, gqa16, kv8/kv4; engagement line
   `[kv-attn] matmul2d packed attention engaged`); the SIMD kernel cannot stage gqa 16 x qk 192. Attention-only microbench vs the dense rebuild:
   1.5x at 16k, 1.9x at 64k, 1.75-2.1x at 512k (~235 GB/s at 512k, headroom remains).
-- A sliding-layer fused prefill with the sink column is in flight on a branch (39-layer ubench 603 → 95.5 ms at
-  chunk 2048); it zeroes the band bill in the same commit. The composed band+sink sheet is the biggest
-  chunk-dependent term today (0.17 GB at chunk 512, 2.28 GB at 2048): 500k at chunk 2048 bills ~14.3 GB against
-  ~12.4 GB of headroom, chunk 1024 (~10.8 GB) fits.
+- Before the sliding fusion landed, the composed band+sink sheet was the biggest chunk-dependent bill term (0.17 GB
+  at chunk 512, 2.28 GB at 2048), so 500k at chunk 2048 billed ~14.3 GB against ~12.4 GB of headroom. That term is
+  now zero wherever the fused arm serves. On M4-class GPUs (no NAX) global-layer decode falls to the dense rebuild
+  until a SIMD split-K packed decode lands (in progress).
 
 ## Bills (the bill follows the storage in the SAME commit)
 

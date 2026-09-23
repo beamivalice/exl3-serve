@@ -2765,17 +2765,15 @@ pub fn prefillTransientReserveAtKv(
         (if (config.expert_streaming) config.expert_fill_peak_bytes else 0);
 }
 
-/// The composed score sheet a ringed arch's SLIDING layers still build once
-/// its global layers are fused. Their attention is a band, so one layer's
-/// sheet is `[heads, fwd, window + fwd - 1]` whatever the prompt length — but
-/// they carry sinks and an array mask, which `msv_attn_pd` has no arm for, so
-/// the sheet is real where the global layers' (32 GiB at a 512k prompt) is
-/// gone. Billed at `MOE_PREFILL_COEXIST` layers, the same coexistence the
-/// other per-layer prefill transients are billed at. Zero unless the arch
-/// rings a sliding window AND its score width is one the kernel serves.
+/// The composed score sheet a ringed arch's SLIDING layers build where
+/// `msv_attn_pd` does not serve their band + sink attention. Their attention
+/// is a band, so one layer's sheet is `[heads, fwd, window + fwd - 1]` whatever
+/// the prompt length. Billed at `MOE_PREFILL_COEXIST` layers, the same
+/// coexistence the other per-layer prefill transients are billed at. Zero
+/// exactly where the dispatch's own predicate (`slidingPrefillFused`) holds.
 pub fn slidingBandScoreBytes(config: *const model_mod.ModelConfig, fwd: u64) u64 {
     if (config.swaRingTokens() == 0) return 0;
-    if (!transformer_mod.prefillHeadDimFused(config.prefillScoreHeadDim())) return 0;
+    if (transformer_mod.slidingPrefillFused(config, fwd)) return 0;
     const keys: u64 = @as(u64, config.sliding_window) +| fwd -| 1;
     return MOE_PREFILL_COEXIST *| @as(u64, config.num_attention_heads) *| fwd *| keys *| 2;
 }
@@ -23372,7 +23370,7 @@ test "a ringed arch reserves its KV capacity once and bills the ring it holds" {
     try t.expectEqual(@as(u64, 0), generate_mod.reservedPrefillTokens(&plain, seq, 2048, chunk));
 }
 
-test "mimo_v2 prefill bill: fusing qk 192 drops the global score sheet and bills the band's" {
+test "mimo_v2 prefill bill: fusing qk 192 drops the global and the band score sheets" {
     const t = std.testing;
     const cfg = mimoV2BillConfig();
     const seq: u64 = 512 * 1024;
@@ -23386,18 +23384,14 @@ test "mimo_v2 prefill bill: fusing qk 192 drops the global score sheet and bills
     const fused_bill = prefillNeededAtChunk(&cfg, seq, 2048, 8, chunk, .{});
     try t.expect(fused_bill < global_sheet);
 
-    // What is left is the band sheet the sliding layers still compose: prompt-length
-    // independent, `window + fwd - 1` keys wide, at the same coexistence the other
-    // per-layer prefill transients are billed at.
-    const band = slidingBandScoreBytes(&cfg, chunk);
-    try t.expectEqual(MOE_PREFILL_COEXIST * @as(u64, cfg.num_attention_heads) * chunk * (128 + chunk - 1) * 2, band);
-    // Prompt-length independent: the same sheet at 64k as at 512k.
-    try t.expectEqual(band, slidingBandScoreBytes(&cfg, chunk));
-    try t.expect(prefillNeededAtChunk(&cfg, 64 * 1024, 2048, 8, chunk, .{}) > band);
-
-    // Kill switch: composed causal restores the whole sheet, and the bill with it.
-    transformer_mod.fused256_override = false;
+    // The sliding layers' band + sink attention runs in the same kernel: no sheet left.
     try t.expectEqual(@as(u64, 0), slidingBandScoreBytes(&cfg, chunk));
+
+    // Kill switch: composed attention restores both sheets, and the bill with them. The
+    // band sheet is prompt-length independent, `window + fwd - 1` keys wide, at the same
+    // coexistence the other per-layer prefill transients are billed at.
+    transformer_mod.fused256_override = false;
+    try t.expectEqual(MOE_PREFILL_COEXIST * @as(u64, cfg.num_attention_heads) * chunk * (128 + chunk - 1) * 2, slidingBandScoreBytes(&cfg, chunk));
     try t.expect(prefillNeededAtChunk(&cfg, seq, 2048, 8, chunk, .{}) > fused_bill +| global_sheet);
 
     // An arch with no ring never acquires the band term.
@@ -23423,6 +23417,39 @@ test "mimo_v2 prefill bill carries the FP8 trunk's dequant scratch past the GEMV
     try t.expectEqual(@as(u64, 0), fp8DequantScratchBytes(&dense, 512));
     try t.expectEqual(scratch, prefillNeededAtChunk(&cfg, 4096, 256, 8, 512, .{}) - prefillNeededAtChunk(&dense, 4096, 256, 8, 512, .{}));
     try t.expectEqual(scratch, prefillTransientReserveAtKv(&cfg, 8, 512, 4096) - prefillTransientReserveAtKv(&dense, 8, 512, 4096));
+}
+
+test "mimo_v2 at 500k, kv8, chunk 2048: the fused sliding arm drops exactly the band sheet" {
+    const t = std.testing;
+    var cfg = mimoV2BillConfig();
+    // The Flash geometry the band sheet scales with: 64 query heads, 39 of 48 layers sliding.
+    cfg.num_hidden_layers = 48;
+    cfg.hidden_size = 4096;
+    cfg.num_attention_heads = 64;
+    cfg.num_key_value_heads = 8;
+    cfg.num_global_key_value_heads = 4;
+    cfg.layer_is_global[3] = false;
+    for ([_]u32{ 0, 5, 11, 17, 23, 29, 35, 41, 47 }) |li| cfg.layer_is_global[li] = true;
+    const seq: u64 = 500_000;
+    const chunk: u64 = 2048;
+    transformer_mod.fused256_override = true;
+    defer transformer_mod.fused256_override = null;
+    defer transformer_mod.sliding_prefill_fused_override = null;
+
+    transformer_mod.sliding_prefill_fused_override = false;
+    const band = slidingBandScoreBytes(&cfg, chunk);
+    try t.expectEqual(MOE_PREFILL_COEXIST * 64 * chunk * (128 + chunk - 1) * 2, band);
+    const composed = prefillNeededAtChunk(&cfg, seq, 2048, 8, chunk, .{});
+    transformer_mod.sliding_prefill_fused_override = null;
+    try t.expectEqual(composed - band, prefillNeededAtChunk(&cfg, seq, 2048, 8, chunk, .{}));
+
+    // One predicate decides the dispatch and the bill, at every width and switch state.
+    for ([_]?bool{ null, false }) |ov| {
+        transformer_mod.sliding_prefill_fused_override = ov;
+        for ([_]u64{ 1, 8, 15, 16, 512, 2048, 4096 }) |fwd| {
+            try t.expectEqual(transformer_mod.slidingPrefillFused(&cfg, fwd), slidingBandScoreBytes(&cfg, fwd) == 0);
+        }
+    }
 }
 
 test "generated think tags require an unambiguous literal template opener" {
