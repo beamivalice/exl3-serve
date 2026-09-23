@@ -54,11 +54,12 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   binds the raw FP8 fused QKV and its logits stop following the routed experts (two packs sharing a hard-linked
   trunk produced bit-identical logits until `kld` took the served loader).
 - **Stored-affine trunk**: a SERVED pack stores o_proj, lm_head and embed_tokens as affine triples (8-bit g64,
-  imatrix-weighted for o_proj and lm_head, written by the private converter); the loader serves and bills them as
+  round-to-nearest, exactly `mx.quantize`'s bytes, written by the private converter); the loader serves and bills them as
   stored (lm_head via quantized matmul, embed via the quantized row gather), with no load-time step. The source
   checkpoint stores them bf16, so the teacher keeps bf16. Contract: [pack-format](pack-format.md). Measured on the
-  MCG K2.5 w12 pack against the load-time product: decode 44.2 vs 44.0 tok/s, 16x512 KLD 0.07793 vs 0.07761 (NLL
-  and top-1 slightly better), same 94.32 GB bill, same boot time ([quality-kld](quality-kld.md#mimo)).
+  MCG K2.5 w12 pack against the load-time product: decode 44.2 vs 44.0 tok/s, same 94.32 GB bill, same boot time.
+  An imatrix-weighted search of the same tensors scored 0.07793 against round-to-nearest's 0.07783, inside the
+  rounding-flip floor, so the pack ships round-to-nearest ([quality-kld](quality-kld.md#mimo)).
 - History: the load-time `trunk_quant` policy (4cb68cc..a1fb67f, MLX's minmax packer at every load) measured on the
   MCG K2.5 w12 pack (kv8, no MTP, ctx 32768): decode 32.4 (bf16 trunk) -> 39.0 (FP8 native) -> 43.5 tok/s
   (+ o_proj affine-8); resident 107.03 -> 103.96 -> 102.45 -> 101.28 GB (+ lm_head, embed); 16x512 KLD to EOS

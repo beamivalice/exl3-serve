@@ -108,12 +108,15 @@ EXL3 K4 (turboderp), 60x64 screen: the f32 SwiGLU widening moved mean KLD 0.0187
 | MCG K2.5 w12, fused sliding prefill (branch) | 2.5 | 0.0775 | | | | |
 | MCG K2.5 w12, load-time affine-8 o_proj + lm_head + embed | 2.5 | 0.07761 | 92.09% | 1.96% | 0.07884 | 3b27c11 |
 | MCG K2.5 w12, stored imatrix affine-8 o_proj + lm_head + embed | 2.5 | 0.07793 | 92.14% | 1.97% | 0.07944 | 28d8a4b |
+| MCG K2.5 w12, stored round-to-nearest affine-8 o_proj + lm_head + embed (served) | 2.5 | 0.07783 | 91.92% | 1.97% | 0.07937 | 8341222 |
 
 Stored imatrix-weighted affine-8 trunk vs the load-time MLX packer: the weighted weight error of the three tensors is
 ~45% lower (most of it from the error-minimizing search with scale/bias rounded to bf16 before the codes, which the
 same search unweighted also gets; the imatrix weighting adds 4-7%), yet 16x512
 KLD moves +0.0003 (NLL 0.3480 -> 0.3462, top-1 +0.05 pt): at 8 bits these tensors sit below the pack's noise floor,
 which the K2.5 experts set. Raw: `scratchpad/trunkq/live/kld_new.{json,log}`.
+The served pack stores the three tensors round-to-nearest (exactly `mx.quantize`'s bytes, owner choice): 0.07783
+against the searched shards' 0.07793, inside the rounding-flip floor, so the search buys nothing measurable at 8 bits.
 
 The FP8-native teacher against the bf16-rounded teacher: 0.0034 nats. The affine 2.70 bpw MiMo pack is coherent but
 degenerates after a few chat turns in use; its KLD had foreshadowed it.
