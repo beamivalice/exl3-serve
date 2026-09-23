@@ -702,14 +702,46 @@ pub fn buildReplChatBody(allocator: std.mem.Allocator, history: []const Turn) ![
     return out.toOwnedSlice(allocator);
 }
 
+/// The server's own `timings` for a turn; a client cannot time our stream.
+pub const ReplStats = struct {
+    /// Whole prompt, cached prefix included.
+    prompt_n: u64 = 0,
+    cached_n: u64 = 0,
+    /// Over the tokens actually prefilled (prompt_n - cached_n).
+    prompt_per_second: f64 = 0,
+    eval_count: u64 = 0,
+    eval_duration_ns: u64 = 0,
+};
+
 pub const ReplDelta = struct {
     /// Owned by caller.
     content: []u8,
     done: bool,
-    eval_count: u64 = 0,
-    eval_duration_ns: u64 = 0,
+    stats: ReplStats = .{},
     err: ?[]u8 = null,
 };
+
+/// `[prefill P tok (C cached), R tok/s | N tokens, D tok/s]`; either half drops
+/// out when the server did not report it, "" when neither was reported.
+pub fn formatReplStats(buf: []u8, s: ReplStats) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    const has_prefill = s.prompt_n > 0;
+    const has_decode = s.eval_count > 0 and s.eval_duration_ns > 0;
+    if (!has_prefill and !has_decode) return "";
+    w.writeByte('[') catch return "";
+    if (has_prefill) {
+        w.print("prefill {d} tok", .{s.prompt_n -| s.cached_n}) catch return "";
+        if (s.cached_n > 0) w.print(" ({d} cached)", .{s.cached_n}) catch return "";
+        if (s.prompt_per_second > 0) w.print(", {d:.1} tok/s", .{s.prompt_per_second}) catch return "";
+        if (has_decode) w.writeAll(" | ") catch return "";
+    }
+    if (has_decode) {
+        const tok_s = @as(f64, @floatFromInt(s.eval_count)) * 1e9 / @as(f64, @floatFromInt(s.eval_duration_ns));
+        w.print("{d} tokens, {d:.1} tok/s", .{ s.eval_count, tok_s }) catch return "";
+    }
+    w.writeByte(']') catch return "";
+    return w.buffered();
+}
 
 /// One SSE line from /v1/chat/completions → the piece the REPL prints.
 /// Non-event lines (blank, `:` comments) return null.
@@ -744,26 +776,33 @@ pub fn parseReplLine(allocator: std.mem.Allocator, line: []const u8) ?ReplDelta 
             }
         }
     }
-    var eval_count: u64 = 0;
-    var eval_ns: u64 = 0;
+    var stats: ReplStats = .{};
     if (root.get("timings")) |t| if (t == .object) {
-        if (t.object.get("predicted_n")) |v| {
-            if (v == .integer and v.integer > 0) eval_count = @intCast(v.integer);
-        }
-        if (t.object.get("predicted_ms")) |v| {
-            const ms: f64 = switch (v) {
-                .float => |f| f,
-                .integer => |n| @floatFromInt(n),
-                else => 0,
-            };
-            if (ms > 0) eval_ns = @intFromFloat(ms * 1e6);
-        }
+        stats.prompt_n = jsonCount(t.object.get("prompt_n"));
+        stats.cached_n = jsonCount(t.object.get("cached_n"));
+        stats.prompt_per_second = jsonNumber(t.object.get("prompt_per_second"));
+        stats.eval_count = jsonCount(t.object.get("predicted_n"));
+        const ms = jsonNumber(t.object.get("predicted_ms"));
+        if (ms > 0) stats.eval_duration_ns = @intFromFloat(ms * 1e6);
     };
     return .{
         .content = allocator.dupe(u8, content) catch return null,
         .done = false,
-        .eval_count = eval_count,
-        .eval_duration_ns = eval_ns,
+        .stats = stats,
+    };
+}
+
+fn jsonCount(v: ?std.json.Value) u64 {
+    const n = v orelse return 0;
+    return if (n == .integer and n.integer > 0) @intCast(n.integer) else 0;
+}
+
+fn jsonNumber(v: ?std.json.Value) f64 {
+    const n = v orelse return 0;
+    return switch (n) {
+        .float => |f| f,
+        .integer => |i| @floatFromInt(i),
+        else => 0,
     };
 }
 
@@ -877,8 +916,7 @@ fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body
 
     var full = std.ArrayList(u8).empty;
     errdefer full.deinit(allocator);
-    var eval_count: u64 = 0;
-    var eval_ns: u64 = 0;
+    var stats: ReplStats = .{};
 
     while (true) {
         const line = r.takeDelimiter('\n') catch break orelse break;
@@ -896,15 +934,11 @@ fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body
             try w.flush();
             try full.appendSlice(allocator, delta.content);
         }
-        if (delta.eval_count > 0) {
-            eval_count = delta.eval_count;
-            eval_ns = delta.eval_duration_ns;
-        }
+        if (delta.stats.eval_count > 0 or delta.stats.prompt_n > 0) stats = delta.stats;
         if (delta.done) {
-            if (eval_count > 0 and eval_ns > 0) {
-                const tok_s = @as(f64, @floatFromInt(eval_count)) * 1e9 / @as(f64, @floatFromInt(eval_ns));
-                try w.print("\n[{d} tokens, {d:.1} tok/s]", .{ eval_count, tok_s });
-            }
+            var stats_buf: [160]u8 = undefined;
+            const stats_line = formatReplStats(&stats_buf, stats);
+            if (stats_line.len > 0) try w.print("\n{s}", .{stats_line});
             break;
         }
     }
@@ -1081,8 +1115,20 @@ test "cli: buildReplChatBody and parseReplLine speak /v1/chat/completions SSE" {
     const d2 = parseReplLine(allocator, "data: {\"choices\":[],\"usage\":{\"completion_tokens\":50},\"timings\":{\"predicted_n\":50,\"predicted_ms\":2000.0}}").?;
     defer allocator.free(d2.content);
     try testing.expect(!d2.done);
-    try testing.expectEqual(@as(u64, 50), d2.eval_count);
-    try testing.expectEqual(@as(u64, 2_000_000_000), d2.eval_duration_ns);
+    try testing.expectEqual(@as(u64, 50), d2.stats.eval_count);
+    try testing.expectEqual(@as(u64, 2_000_000_000), d2.stats.eval_duration_ns);
+    var stats_buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("[50 tokens, 25.0 tok/s]", formatReplStats(&stats_buf, d2.stats));
+
+    const cold = parseReplLine(allocator, "data: {\"choices\":[],\"timings\":{\"prompt_n\":4204,\"cached_n\":0,\"prompt_ms\":4934.272,\"prompt_per_second\":852.3,\"predicted_n\":128,\"predicted_ms\":4309.764}}").?;
+    defer allocator.free(cold.content);
+    try testing.expectEqual(@as(u64, 4204), cold.stats.prompt_n);
+    try testing.expectEqualStrings("[prefill 4204 tok, 852.3 tok/s | 128 tokens, 29.7 tok/s]", formatReplStats(&stats_buf, cold.stats));
+
+    const warm = parseReplLine(allocator, "data: {\"choices\":[],\"timings\":{\"prompt_n\":4204,\"cached_n\":4192,\"prompt_ms\":40.0,\"prompt_per_second\":300.0,\"predicted_n\":128,\"predicted_ms\":4309.764}}").?;
+    defer allocator.free(warm.content);
+    try testing.expectEqualStrings("[prefill 12 tok (4192 cached), 300.0 tok/s | 128 tokens, 29.7 tok/s]", formatReplStats(&stats_buf, warm.stats));
+    try testing.expectEqualStrings("", formatReplStats(&stats_buf, d1.stats));
 
     const d3 = parseReplLine(allocator, "data: [DONE]").?;
     defer allocator.free(d3.content);
