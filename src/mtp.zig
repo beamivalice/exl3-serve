@@ -136,6 +136,8 @@ pub const MtpCostProfile = enum {
     g17_nax_oq4e_q4_gs64,
     g17_nax_qwen4_q4_gs64,
     g17_nax_qwen4_mixed_4_8_gs64,
+    /// MiMo's three heads over the MCG K2.5 EXL3 pack: a verify row is ~45% of a forward.
+    mimo_exl3,
 };
 
 /// Target-side tensors that contribute materially to a complete MTP round.
@@ -736,12 +738,12 @@ pub const MtpModel = struct {
             .g17_nax_q4_gs32, .g17_nax_q4_gs64, .g17_nax_oq4e_q4_gs64 => 4,
             // The sidecar fingerprint classifier above never returns the
             // qwen4 profile; keep the fallback honest anyway.
-            .generic, .g17_nax_qwen4_q4_gs64, .g17_nax_qwen4_mixed_4_8_gs64 => return .generic,
+            .generic, .g17_nax_qwen4_q4_gs64, .g17_nax_qwen4_mixed_4_8_gs64, .mimo_exl3 => return .generic,
         };
         const sidecar_group_size: u32 = switch (profile) {
             .g17_nax_q8_gs32, .g17_nax_q4_gs32 => 32,
             .g17_nax_q4_gs64, .g17_nax_q6_gs64, .g17_nax_q8_gs64, .g17_nax_oq4e_q4_gs64 => 64,
-            .generic, .g17_nax_qwen4_q4_gs64, .g17_nax_qwen4_mixed_4_8_gs64 => return .generic,
+            .generic, .g17_nax_qwen4_q4_gs64, .g17_nax_qwen4_mixed_4_8_gs64, .mimo_exl3 => return .generic,
         };
 
         const cfg = &target.config;

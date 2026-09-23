@@ -529,7 +529,7 @@ pub const MtpHeadRef = union(enum) {
         return switch (self) {
             .qwen => |h| h.m5NaxCostProfile(target),
             .qwen4 => |t| mtp_mod.qwen4G17CostProfileForKv(t, kv),
-            .mimo => .generic,
+            .mimo => if (target.config.expert_layout == .exl3_k4) .mimo_exl3 else .generic,
         };
     }
 
@@ -8385,6 +8385,10 @@ pub const Generator = struct {
     /// T(1)=45.4, T(2)=53.3 → .10/.10/.24@3/.01 on a ~37.9 ms floor.
     /// Refit #2, 2026-07-13, post-verify-qmm: T(1)=44.6, T(3)=54.4,
     /// T(6)=89.9 → .06/.06/.24/.02 on a ~40 ms floor.)
+    /// MiMo MCG K2.5 w12 on M5 Max (2026-09-24, kv8, 4k): a serial forward 24.2 ms, verify
+    /// forwards 34.9 / 44.7 / 59.8 ms at 2 / 3 / 4 rows, three pre-drafted head steps ~2.5-3 ms.
+    /// Each position's own routed experts make a verify row ~.45 of a forward, flat to depth 3.
+    pub const MTP_EV_MIMO_EXL3_COSTS: MtpEvCosts = .{ .draft = 0.04, .per_pos_lo = 0.44, .per_pos_hi = 0.44, .flat_max = 3, .sync = 0.02 };
     pub const MTP_EV_DEFAULT_COSTS: MtpEvCosts = .{ .draft = 0.10, .per_pos_lo = 0.10, .per_pos_hi = 0.26, .flat_max = 4, .sync = 0.01, .nax_from = 7, .per_pos_nax = 0.52 };
     /// M5 Max/G17 refit (2026-07-17), same-session saturated fixed-depth
     /// sweep after the NAX m16 verify lane landed: T(1..4) ~= 41.35 ms,
@@ -8714,6 +8718,8 @@ pub const Generator = struct {
             // saturated echo, so the calibrated cap keeps the default — the
             // NAX cap exists for surfaces that flatten past position 6.
             .g17_nax_qwen4_q4_gs64, .g17_nax_qwen4_mixed_4_8_gs64 => MTP_ADAPTIVE_DEFAULT_CAP,
+            // Three trained heads; the depth cap clamps to them at load.
+            .mimo_exl3 => MTP_ADAPTIVE_DEFAULT_CAP,
         };
     }
 
@@ -9311,6 +9317,7 @@ pub const Generator = struct {
             .g17_nax_oq4e_q4_gs64 => MTP_EV_G17_NAX_OQ4E_Q4_GS64_COSTS,
             .g17_nax_qwen4_q4_gs64 => MTP_EV_G17_NAX_QWEN4_Q4_GS64_COSTS,
             .g17_nax_qwen4_mixed_4_8_gs64 => MTP_EV_G17_NAX_QWEN4_MIXED_4_8_GS64_COSTS,
+            .mimo_exl3 => MTP_EV_MIMO_EXL3_COSTS,
         };
         if (override) |raw| {
             return parseMtpEvCostsOverride(raw) orelse selected;
@@ -15925,6 +15932,16 @@ test "MTP_EV_G17_NAX_OQ4E_Q4_GS64_COSTS reproduces the measured M5 surface" {
     try testing.expectApproxEqAbs(@as(f32, 1.945), t6, 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 1.995), t8, 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 62.79 / 61.20), t8 / t6, 5e-4);
+}
+
+test "mtpEvPlanFor: MiMo's surface drafts one on prose and three on code, where generic costs over-draft prose" {
+    // Conditional per-index acceptance measured with the three heads (forced depth 3).
+    const prose = [_]f32{ 0.59, 0.53, 0.42, 0, 0, 0, 0, 0 };
+    const code = [_]f32{ 1.0, 0.91, 0.89, 0, 0, 0, 0, 0 };
+    const mimo = Generator.mtpEvCostsForProfile(.mimo_exl3, null);
+    try testing.expectEqual(@as(u32, 1), Generator.mtpEvPlanFor(&prose, 3, mimo, 3).m_lo);
+    try testing.expectEqual(@as(u32, 3), Generator.mtpEvPlanFor(&code, 3, mimo, 3).m_lo);
+    try testing.expect(Generator.mtpEvPlanFor(&prose, 3, Generator.MTP_EV_DEFAULT_COSTS, 3).m_lo > 1);
 }
 
 test "mtpEvPlanFor: M5 NAX surfaces open depth 8 from realistic warmup EMAs" {

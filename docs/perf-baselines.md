@@ -179,6 +179,57 @@ reads 0.07772 / 0.07754 / 0.07771 / 0.07836. Per call on real prefills (4 chunks
 sinks) the two arms' error against an f32 reference agrees to 1e-4 relative RMS; a NAX-vs-SIMD KLD delta under ~1% is
 noise.
 
+<a id="mimo-verify-rows"></a>
+Verify-row cost (binary 37d5f0d = main 7ed9795 + the MTP branch, pre-00:55 layout of the MCG K2.5 w12 pack with
+`trunk_quant` o_proj/lm_head/embed affine-8, kv8, 4096 KV, `SUSHI_DECODE_FWD_UBENCH=40` with
+`_S=1,2,3,4 _ROW_ARMS=1 _PROFILE=1`, one boot, `taskpolicy -a`, lock `mimo-mtp`, 2026-09-24; raw
+`/Users/beam/claude-tmp/mimo-mtp/runs/boot1_forced3.log`). ms/forward, lm_head in brackets:
+
+| rows | prefill-shaped (main) | verify rows (decode arithmetic) | expert-grouped reads |
+|---|---|---|---|
+| 1 | 24.15 (1.13) | | |
+| 2 | 34.14 (1.15) | 34.92 (1.36) | 36.39 |
+| 3 | 46.46 (1.03) | 44.72 (1.14) | 47.85 |
+| 4 | 60.04 | 59.80 (1.08) | 64.64 |
+
+An extra row costs ~10-12 ms, ~45% of a forward (the a73713d bf16-trunk ladder had 26.7 ms: its bf16 projections
+went row-serial through `denseMatmul`; the FP8 GEMV and the affine-8 row kernels share weight reads). lm_head stays
+~1.1 ms at 1-4 rows. The profiled pass puts ~85% of the extra row in the MLP (+8.5-9 ms/row: each row's own 8
+routed experts, ~3 GB of EXL3 bytes) and ~1.5-2 ms in attention and projections. Row-identical verify costs what the
+prefill-shaped forward did. Expert-grouped reads (the first slot of an expert running every slot of that expert in
+one threadgroup) lost 1.5-5 ms and were dropped.
+
+MTP (same binary and pack, kv8, ctx 32768, `--prefix-cache-entries 0`, one boot per arm, same session;
+llmprobe `--bench-only`; raw `/Users/beam/claude-tmp/mimo-mtp/runs/boot{1,2,3}*`):
+
+| cell | serial (`--no-mtp`) | MTP auto (`--mtp`) |
+|---|---|---|
+| decode tok/s (192) | 44.9 | 56.0 |
+| predictable / novel | 44.4 / 44.3 | 63.1 / 43.5 |
+| context 0.5k / 4k / 8k / 16k | 44.4 / 43.4 / 43.9 / 43.5 | 47.8 / 50.1 / 51.8 / 44.7 (2.0-2.9 tok/step) |
+| prefill 2k | 1049 | 1041 |
+
+Same-boot A/B, 256 greedy tokens, serial vs MTP: forced depth 3 code 44.1 -> 56.4, count 44.2 -> 66.9, JSON 44.0 ->
+66.5, story 44.1 -> 36.0, explain 43.8 -> 39.4, novel recipe 43.6 -> 47.1; auto (cold-start cap 2, generic EV
+costs) code 59.6-60.0, count 64.5-65.1, JSON 63.3-65.3, story 40.0-42.1, explain 45.2-45.4, recipe 47.5-48.8. All 18
+pairs byte-identical (plus 6/6 with the MiMo EV surface as `SUSHI_MTP_EV_COSTS=0.04,0.44,0.44,0.02`: code 59.6,
+count 65.6, JSON 64.2, story 38.0, explain 44.5, recipe 49.5 — one rep, not separable from run noise). Forced-depth-3 rounds: verify ~56 ms at 4 rows, three drafts ~2.5-3 ms (pre-drafted), per-index
+acceptance code 1.00/0.91/0.81, count/JSON 1.00/1.00/1.00, story 0.56-0.59/0.31-0.41/0.13-0.16, explain
+0.59-0.84/0.28-0.44/0.16-0.31.
+
+With the MiMo EV surface (binary add003d, same pack and flags, `--mtp` auto, raw `runs/boot5*`): llmprobe decode 51.0,
+predictable / novel 63.8 / 43.3, context 47.7 / 49.2 / 41.3 / 46.5; 256-token A/B serial 42.8-43.2 vs MTP code 57.9,
+count 62.4, JSON 62.7, story 41.2, explain 42.4, recipe 46.3, 6/6 byte-identical. That boot's box ran ~3% slower
+serial and read prefill 880 with an unchanged prefill path and cold TTFT (1670 vs 1618 ms). Rebased on 9dbe85e
+(forced depth 3, `runs/boot6*`): 6/6 byte-identical, seeded sampled requests stream == non-stream on both arms.
+
+On main 9942e8e (head 83b564a, binary built 04:41, the served pack as stored, same flags, `taskpolicy -a`, lock
+`mimo-mtp`, raw `runs/boot7*`): forced depth 3 code / count / story byte-identical, serial 52.4 -> MTP 66.6 / 84.3 /
+46.2, verify 44.6 ms at 4 rows. One auto boot, llmprobe `--bench-only` MTP direct vs serial through an
+`enable_mtp: false` proxy: decode 59.1 vs 49.6, predictable / novel 71.1 / 50.5 vs 49.6 / 49.9, context 0.5k / 4k / 8k
+/ 16k 55.3 / 60.3 / 60.3 / 58.9 vs 49.7 / 49.4 / 48.9 / 47.6, prefill 2k 925 vs 1007 (the heads' prompt history costs
+~8% of a prefill); auto A/B 3/3 byte-identical. That boot's serial ran 49.6, below the first boot's 52.4.
+
 MiMo EXL3 kernel history (n=40 readers, codebook-generic): the n=40 prefill reader took the synthetic MoE layer from
 12.45 to 8.48 ms at 512 rows; the prefill scatter fused into the finish reduce added +5-9%; the n=40 decode lane
 funnel cut the decode chain 20% at one row and 36% at seven; the prepared-mid dispatch took rows-1 from 0.524 to

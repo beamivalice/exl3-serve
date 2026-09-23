@@ -58,6 +58,12 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
   serial router rows, the EXL3 decode chain). A partial accept truncates the cache (attention-only trunk).
 - Oracle: `tests/dump_mimo_v2_mtp_fixtures.py` renders the heads from the HF reference's own modules on the tiny
   fixture model; `mimo mtp heads track the torch rendering…` replays history, rounds, wrong drafts and rollbacks.
+- **A MiMo verify row is ~45% of a forward** (~10-12 ms of 24; its own 8 routed experts), so depth pays only on
+  predictable text: forced depth 3 is +27-52% on code/lists/JSON and -10 to -18% on prose; per-index acceptance on
+  code 1.00/0.91/0.81 confirms the non-chained semantics. Greedy MTP is byte-identical to serial (18/18 pairs at 256
+  tokens, forced and auto). Numbers: [perf-baselines](perf-baselines.md#mimo-verify-rows).
+- The EV planner prices a MiMo EXL3 round with its own surface (`.mimo_exl3`, `MTP_EV_MIMO_EXL3_COSTS`: draft
+  .04, verify row .44 of a forward, flat to depth 3); the generic surface prices a row at .20 and over-drafts prose.
 
 ## Spec verify invariant
 
