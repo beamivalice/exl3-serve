@@ -868,22 +868,30 @@ pub const ModelConfig = struct {
     pub fn swaRingBytes(self: *const ModelConfig) u64 {
         const rows = self.swaRingTokens();
         if (rows == 0) return 0;
-        return rows * self.slidingLayerKvBytesPerToken();
+        return rows * self.slidingLayerKvBytesPerToken(self.num_hidden_layers);
     }
 
     /// Dense bytes one CHUNK token stages in the ringed layers: a prefill chunk
     /// is written whole before the ring compacts down to its window, so the
     /// rows exist for the width of the forward and nothing else bills them.
-    pub fn swaStreamBytesPerToken(self: *const ModelConfig) u64 {
+    /// `max_layers` is how many of them coexist — `ringCompact` runs after the
+    /// layer's view is built and the pre-compaction buffer lives until that
+    /// view evaluates, so the prefill loop's eval cadence is the bound, the
+    /// same one the linear-attention stream term applies to itself.
+    pub fn swaStreamBytesPerToken(self: *const ModelConfig, max_layers: u64) u64 {
         if (self.swaRingTokens() == 0) return 0;
-        return self.slidingLayerKvBytesPerToken();
+        return self.slidingLayerKvBytesPerToken(max_layers);
     }
 
-    fn slidingLayerKvBytesPerToken(self: *const ModelConfig) u64 {
+    /// Dense per-token KV of the sliding layers, at most `max_layers` of them.
+    fn slidingLayerKvBytesPerToken(self: *const ModelConfig, max_layers: u64) u64 {
         var total: u64 = 0;
+        var seen: u64 = 0;
         var li: u32 = 0;
-        while (li < self.num_hidden_layers) : (li += 1) {
-            if (!self.isGlobalLayer(li)) total += self.layerKvBytes(li);
+        while (li < self.num_hidden_layers and seen < max_layers) : (li += 1) {
+            if (self.isGlobalLayer(li)) continue;
+            total += self.layerKvBytes(li);
+            seen += 1;
         }
         return total;
     }
@@ -8334,8 +8342,11 @@ test "mimo_v2 bills per-layer KV geometry and the sliding window once per slot" 
     // `swaRingTokens` rows however long the session runs.
     try testing.expectEqual(@as(u64, 128) + ModelConfig.SWA_RING_SLACK, c.swaRingTokens());
     try testing.expectEqual(c.swaRingTokens() * 2 * 3 * (192 + 128) * 2, c.swaRingBytes());
-    // What one chunk token stages in those layers before the ring compacts.
-    try testing.expectEqual(@as(u64, 2 * 3 * (192 + 128) * 2), c.swaStreamBytesPerToken());
+    // What one chunk token stages in those layers before the ring compacts,
+    // for as many of them as one eval-cadence window lets coexist.
+    try testing.expectEqual(@as(u64, 2 * 3 * (192 + 128) * 2), c.swaStreamBytesPerToken(5));
+    try testing.expectEqual(@as(u64, 1 * 3 * (192 + 128) * 2), c.swaStreamBytesPerToken(1));
+    try testing.expectEqual(@as(u64, 0), c.swaStreamBytesPerToken(0));
 }
 
 test "a non-ringing sliding arch keeps the uniform KV bill" {
@@ -8354,7 +8365,7 @@ test "a non-ringing sliding arch keeps the uniform KV bill" {
     g.layer_is_global[2] = true;
     try testing.expectEqual(@as(u64, 0), g.swaRingTokens());
     try testing.expectEqual(@as(u64, 0), g.swaRingBytes());
-    try testing.expectEqual(@as(u64, 0), g.swaStreamBytesPerToken());
+    try testing.expectEqual(@as(u64, 0), g.swaStreamBytesPerToken(5));
     try testing.expectEqual(@as(u64, 48 * 8 * 2 * 256 * 2), g.kvBytesPerToken());
 
     // qwen4_exp: 12 caching layers of 48, uniform geometry, no ring.

@@ -5551,8 +5551,12 @@ fn prefillStreamBytesPerToken(config: *const model_mod.ModelConfig) u64 {
     }
     // A ringed sliding layer stages the WHOLE chunk before it compacts back to
     // its window, so the rows exist for the width of the forward and the
-    // per-token KV term (global layers only) does not carry them.
-    per_tok += config.swaStreamBytesPerToken();
+    // per-token KV term (global layers only) does not carry them. Bounded by
+    // the same eval-cadence window as the linear term above: older layers'
+    // staging is released inside the loop, so five coexist, not thirty-nine.
+    per_tok += config.swaStreamBytesPerToken(
+        @as(u64, transformer_mod.Transformer.PREFILL_EVAL_CADENCE_DEFAULT) + 1,
+    );
     return per_tok;
 }
 
@@ -24717,7 +24721,19 @@ test "the sliding ring is billed once per slot and staged per chunk token" {
     // Per token of context only the two global layers count.
     try t.expectEqual(@as(u64, 2 * 2 * (192 + 128) * 2), sessionBytesPerToken(&cfg, 16));
     // The chunk the ring has not compacted yet rides the prefill envelope.
-    try t.expect(prefillStreamBytesPerToken(&cfg) >= cfg.swaStreamBytesPerToken());
+    try t.expect(prefillStreamBytesPerToken(&cfg) >= cfg.swaStreamBytesPerToken(5));
+    // At a 48-layer geometry the cadence window is the bound: five sliding
+    // layers stage a chunk at once, not forty.
+    var full = cfg;
+    full.num_hidden_layers = 48;
+    var li: u32 = 0;
+    while (li < 48) : (li += 1) full.layer_is_global[li] = (li % 6) == 0;
+    try t.expectEqual(
+        @as(u64, 5 * 3 * (192 + 128) * 2),
+        full.swaStreamBytesPerToken(@as(u64, transformer_mod.Transformer.PREFILL_EVAL_CADENCE_DEFAULT) + 1),
+    );
+    // The ring itself still holds every sliding layer.
+    try t.expectEqual(full.swaRingTokens() * 40 * 3 * (192 + 128) * 2, full.swaRingBytes());
     // An arch that stores every layer full-length keeps a zero ring.
     var plain = cfg;
     plain.model_type = "qwen3";
