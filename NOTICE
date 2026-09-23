@@ -93,6 +93,18 @@ matmul2d tensor extents and strides in our NAX kernel are dflash's working
 convention.
 
 --------------------------------------------------------------------------------
+Inco Splash
+https://github.com/incoai/splash
+Licensed under the Apache License, Version 2.0.
+
+The matmul2d packed-KV attention kernel (msv_qkv_mpp in src/transformer.zig)
+follows the structure of Splash's q8 attention tile
+(runtime/metal/kernels/common/q8_attention_tile.h): per-page QK and PV through
+the MetalPerformancePrimitives tensor op with an online softmax and split-KV
+partials. Re-implemented over MLX's affine group-quantized cache, reached here
+through upstream mlx-serve's port and extended to separate key and value widths.
+
+--------------------------------------------------------------------------------
 oMLX, by jundot
 Copyright oMLX contributors
 Licensed under the Apache License, Version 2.0.

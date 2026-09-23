@@ -45,7 +45,6 @@ Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds)
 | `json_schema.zig` / `json_grammar.zig` / `token_mask.zig` / `regex.zig` | Schema IR → streaming grammar → per-token mask for constrained decoding |
 | `server.zig` | All HTTP: `/v1/*` (chat/completions/messages/responses/embeddings/models/load/unload), `/metrics(.json)`, WS, `--api-key`, console at `GET /` |
 | `responses.zig` / `ws.zig` | Responses API data + `ResponseStore`; RFC 6455 framing |
-| `ollama.zig` / `providers.zig` / `lan.zig` | Inherited surfaces (Ollama `/api/*`, upstream providers, LAN sharing); untouched |
 | `model_settings.zig` | Per-model `~/.mlx-serve/model-settings.json` (`ctx_size`, `kv_quant`, `mtp`, `mtp_acceptance`, `ssd_budget_gb`), stamped at BOTH load construction sites |
 | `model_discovery.zig` / `model_registry.zig` | Discovery (two-level org/name, multi-root, streaming stubs), multi-model registry |
 | `tokenize_cache.zig` | Per-LoadedModel LRU of rendered+encoded prompts |
@@ -103,6 +102,7 @@ Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter=
 - **A ringed entry's `offset` is LOCAL**; absolute = `base + offset` (`absSeqLen`). A clamp or trim below the retained window declines by NAME (`SlidingRingRewindPastWindow`) — the hot-cache restore cold-prefills, the SSD tier skips such an entry.
 - **A hot entry holds a ringed layer's RETAINED ROWS, never the ring's capacity** (`KVCache.snapshotRetained`): the buffer is allocated at `ringCap` from token one, so a plain share billed and pinned rows no restore can read.
 - **mimo_v2's global layers PREFILL FUSED** (`msv_attn_pd`, qk 192 / v 128, no sink there); the sliding layers still compose their band sheet and `server.slidingBandScoreBytes` bills it. A quantized cache is read one DISPATCH at a time (`fusedSdpaPrefillKv`; `kr` = {begin, end, koff, kL_abs} puts every causal comparison in CACHE coordinates), never rebuilt whole.
+- **A packed-cache global-layer DECODE reads in place** via `msv_qkv_mpp` (matmul2d, `qkvMppDecodeServes`); the SIMD kernel cannot stage gqa 16 x qk 192.
 - **The bill follows the storage in the SAME commit**: `kvBytesPerToken` counts the 9 global layers per token (spread over `kvPerTokenLayerCount`, never every caching layer), `swaRingBytes` the ring once per slot (`server.slotRingBytes`, at `kv_bits`), `swaStreamBytesPerToken` the chunk a prefill stages before compaction, for the layers one eval-cadence window lets coexist. `server.kvDequantScratchBytes` bills the kv-quant dense rebuild as ONE layer at the rows that layer stores.
 - **A ringed arch RESERVES its cache capacity up front** (`ModelConfig.reservesKvCapacity`, narrower than `longCtxGated`) and bills the reservation headroom and the ring: growing +25% at a time duplicated a global layer mid-prefill.
 - **Evidence**: `tests/dump_mimo_v2_fixtures.py` supplies the independent HF oracle; `MIMO_V2_SOURCE` tests the downloaded Flash config/template. Native-byte preservation, forward parity, and live serving are separate gates; a header audit proves neither numerical parity nor generation.
