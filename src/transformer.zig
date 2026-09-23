@@ -24174,6 +24174,14 @@ pub const Transformer = struct {
             ctx.cache.config.scheme != .off,
         );
 
+        // MiMo: each residual add runs fused with the norm that reads its sum
+        // next, so the next layer's input norm arrives with the add.
+        const fuse_norms = is_mimo and cfg.norm_groups <= 1;
+        var carried_normed: mlx.mlx_array = .{ .ctx = null };
+        defer if (carried_normed.ctx != null) {
+            _ = mlx.mlx_array_free(carried_normed);
+        };
+
         // DIAGNOSTIC (SUSHI_LAYER_CAP=N): run only the first N layers, so a
         // ms-vs-N sweep separates the forward's per-layer slope from its fixed
         // cost. Every layer that runs does its complete real work, so the slope
@@ -24183,7 +24191,11 @@ pub const Transformer = struct {
             const lw = &ml[layer_idx];
 
             if (dumping) moe_dump_layer = li;
-            const normed = try self.rmsNorm(h, lw.input_norm);
+            const normed = if (carried_normed.ctx != null) blk: {
+                const c = carried_normed;
+                carried_normed = .{ .ctx = null };
+                break :blk c;
+            } else try self.rmsNorm(h, lw.input_norm);
             defer _ = mlx.mlx_array_free(normed);
 
             // Inkling: the attention call also advances the k/v short-conv
@@ -24304,11 +24316,21 @@ pub const Transformer = struct {
                 // on the norm), so one kernel does both — see fusedAddRmsNorm.
                 var ff_normed = mlx.mlx_array_new();
                 defer _ = mlx.mlx_array_free(ff_normed);
-                if (try fusedAddRmsNorm(self.s, h, attn_out, lw.post_attn_norm, self.rms_eps_arr)) |fused| {
+                // MiMo's router reads the same normed row widened to f32.
+                var router_x32: mlx.mlx_array = .{ .ctx = null };
+                defer if (router_x32.ctx != null) {
+                    _ = mlx.mlx_array_free(router_x32);
+                };
+                const post_fused = if (fuse_norms)
+                    try fusedAddRmsNormRouted(self.s, h, attn_out, lw.post_attn_norm, self.rms_eps_arr)
+                else
+                    try fusedAddRmsNorm(self.s, h, attn_out, lw.post_attn_norm, self.rms_eps_arr);
+                if (post_fused) |fused| {
                     _ = mlx.mlx_array_free(h);
                     h = fused.sum;
                     _ = mlx.mlx_array_free(ff_normed);
                     ff_normed = fused.normed;
+                    router_x32 = fused.normed_f32;
                 } else {
                     var h_new = mlx.mlx_array_new();
                     try mlx.check(mlx.mlx_add(&h_new, h, attn_out, self.s));
@@ -24321,6 +24343,8 @@ pub const Transformer = struct {
                 const mlp_out = switch (lw.mlp) {
                     .moe => |*mw| if (is_mimo and self.expert_stream != null)
                         try self.moeMLPStreamed(ctx, ff_normed, mw, @intCast(layer_idx))
+                    else if (router_x32.ctx != null)
+                        try self.moeMLP2(router_x32, ff_normed, mw)
                     else
                         try self.moeMLP(ff_normed, mw),
                     // ANE prefill split rides here when armed (--ane-prefill);
@@ -24329,10 +24353,17 @@ pub const Transformer = struct {
                 };
                 defer _ = mlx.mlx_array_free(mlp_out);
 
-                var h_next = mlx.mlx_array_new();
-                try mlx.check(mlx.mlx_add(&h_next, h, mlp_out, self.s));
-                _ = mlx.mlx_array_free(h);
-                h = h_next;
+                const next_norm = if (layer_idx + 1 < layerCap(cfg.num_hidden_layers)) ml[layer_idx + 1].input_norm else self.final_norm;
+                if (if (fuse_norms) try fusedAddRmsNormUngated(self.s, h, mlp_out, next_norm, self.rms_eps_arr) else null) |fused| {
+                    _ = mlx.mlx_array_free(h);
+                    h = fused.sum;
+                    carried_normed = fused.normed;
+                } else {
+                    var h_next = mlx.mlx_array_new();
+                    try mlx.check(mlx.mlx_add(&h_next, h, mlp_out, self.s));
+                    _ = mlx.mlx_array_free(h);
+                    h = h_next;
+                }
             }
 
             if (prof) {
@@ -24358,7 +24389,11 @@ pub const Transformer = struct {
         ctx.moe_seq_offset.* += @intCast(seq_len);
         dt.end(h);
 
-        var final_normed = try self.rmsNorm(h, self.final_norm);
+        var final_normed = if (carried_normed.ctx != null) blk: {
+            const c = carried_normed;
+            carried_normed = .{ .ctx = null };
+            break :blk c;
+        } else try self.rmsNorm(h, self.final_norm);
         _ = mlx.mlx_array_free(h);
 
         // Inkling muP logit scaling: hidden ÷ logits_mup_width_multiplier
@@ -26854,8 +26889,9 @@ pub const Transformer = struct {
             _ = mlx.mlx_array_free(a);
         };
         if (mlx.mlx_array_dtype(fa.q_w) == .uint8) {
-            // The source FP8 QKV: q_w holds all three, rank-local.
-            const split = try fp8_block.RowSplit.qkv(@intCast(h_count * hd), @intCast(kv_h * hd), @intCast(kv_h * vhd), @intCast(mlx.getShape(fa.q_s)[0]));
+            // The source FP8 QKV: q_w holds all three, rank-local; V leaves it already scaled.
+            var split = try fp8_block.RowSplit.qkv(@intCast(h_count * hd), @intCast(kv_h * hd), @intCast(kv_h * vhd), @intCast(mlx.getShape(fa.q_s)[0]));
+            split.v_scale = cfg.attention_value_scale;
             try fp8_block.project(self.s, x, fa.q_w, fa.q_s, split, &proj);
         } else {
             proj[0] = try self.qmatmul(x, fa.q_w, fa.q_s, fa.q_b);
@@ -26897,7 +26933,7 @@ pub const Transformer = struct {
         try mlx.check(mlx.mlx_transpose_axes(&v_t, v_r, &perm, 4, self.s));
         var v_scaled = v_t;
         var v_scale: mlx.mlx_array = .{ .ctx = null };
-        const value_scale = cfg.attention_value_scale;
+        const value_scale: f32 = if (mlx.mlx_array_dtype(fa.q_w) == .uint8) 1.0 else cfg.attention_value_scale;
         if (value_scale != 1.0) {
             v_scale = try scalarOf(value_scale, mlx.mlx_array_dtype(v_t), self.s);
             var scaled = mlx.mlx_array_new();
@@ -36239,18 +36275,23 @@ const ADD_RMSNORM_SOURCE =
     \\
     \\if (int(lid) * NR + NR <= AXIS) {
     \\  for (int i = 0; i < NR; i++) {
-    \\    out[base + i] = w[lid * NR + i] * T(thread_x[i] * local_inv_mean[0]);
+    \\    SUSHI_NORM_STORE(base + i, w[lid * NR + i] * T(thread_x[i] * local_inv_mean[0]));
     \\  }
     \\} else {
     \\  for (int i = 0; i < NR; i++) {
     \\    if (int(lid) * NR + i < AXIS) {
-    \\      out[base + i] = w[lid * NR + i] * T(thread_x[i] * local_inv_mean[0]);
+    \\      SUSHI_NORM_STORE(base + i, w[lid * NR + i] * T(thread_x[i] * local_inv_mean[0]));
     \\    }
     \\  }
     \\}
 ;
 
-var add_rmsnorm_kernel: ?mlx.mlx_fast_metal_kernel = null;
+/// Index 1 also stores the normed row widened to f32 (`out32`), exact from any T.
+const ADD_RMSNORM_STORE = [2][:0]const u8{
+    "#define SUSHI_NORM_STORE(j, v) out[j] = v;\n",
+    "#define SUSHI_NORM_STORE(j, v) { T o_ = v; out[j] = o_; out32[j] = float(o_); }\n",
+};
+var add_rmsnorm_kernel: [2]?mlx.mlx_fast_metal_kernel = .{ null, null };
 var add_rmsnorm_engaged: bool = false;
 pub var add_rmsnorm_override: ?bool = null;
 var add_rmsnorm_env: ?bool = null;
@@ -36264,33 +36305,34 @@ fn addRmsNormFusedEnabled() bool {
     return enabled;
 }
 
-fn getAddRmsNormKernel() !mlx.mlx_fast_metal_kernel {
-    if (add_rmsnorm_kernel) |k| return k;
+fn getAddRmsNormKernel(f32_copy: bool) !mlx.mlx_fast_metal_kernel {
+    const v = @intFromBool(f32_copy);
+    if (add_rmsnorm_kernel[v]) |k| return k;
     const input_names = [_][*:0]const u8{ "a", "b", "w", "eps" };
-    const output_names = [_][*:0]const u8{ "sum", "out" };
+    const output_names = [_][*:0]const u8{ "sum", "out", "out32" };
     const in_vec = mlx.mlx_vector_string_new_data(&input_names, input_names.len);
     defer _ = mlx.mlx_vector_string_free(in_vec);
-    const out_vec = mlx.mlx_vector_string_new_data(&output_names, output_names.len);
+    const out_vec = mlx.mlx_vector_string_new_data(&output_names, 2 + @as(usize, v));
     defer _ = mlx.mlx_vector_string_free(out_vec);
     const kernel = mlx.mlx_fast_metal_kernel_new(
-        "sushi_add_rmsnorm",
+        if (f32_copy) "sushi_add_rmsnorm_f32" else "sushi_add_rmsnorm",
         in_vec,
         out_vec,
         ADD_RMSNORM_SOURCE,
-        "",
+        ADD_RMSNORM_STORE[v],
         true,
         false,
     );
     if (kernel.ctx == null) return error.MetalKernelCompileFailed;
-    add_rmsnorm_kernel = kernel;
+    add_rmsnorm_kernel[v] = kernel;
     return kernel;
 }
 
 const AddNormCfgKey = struct { shape: ShapeKey, dtype: mlx.mlx_dtype };
-var add_rmsnorm_cfg: ?mlx.mlx_fast_metal_kernel_config = null;
-var add_rmsnorm_cfg_key: AddNormCfgKey = std.mem.zeroes(AddNormCfgKey);
+var add_rmsnorm_cfg: [2]?mlx.mlx_fast_metal_kernel_config = .{ null, null };
+var add_rmsnorm_cfg_key: [2]AddNormCfgKey = @splat(std.mem.zeroes(AddNormCfgKey));
 
-pub const AddNormResult = struct { sum: mlx.mlx_array, normed: mlx.mlx_array };
+pub const AddNormResult = struct { sum: mlx.mlx_array, normed: mlx.mlx_array, normed_f32: mlx.mlx_array = .{ .ctx = null } };
 
 /// `sum = a + b` and `normed = rms_norm(sum, w, eps)` in one dispatch.
 /// Null → caller keeps the two ops. This wrapper carries the laguna lever
@@ -36318,6 +36360,29 @@ pub fn fusedAddRmsNormUngated(
     w: mlx.mlx_array,
     eps_arr: mlx.mlx_array,
 ) !?AddNormResult {
+    return addRmsNormKernel(s, a, b, w, eps_arr, false);
+}
+
+/// `fusedAddRmsNormUngated` plus `normed_f32`, the normed row as `astype(f32)`
+/// would widen it: MiMo's f32 router input without its own dispatch.
+pub fn fusedAddRmsNormRouted(
+    s: mlx.mlx_stream,
+    a: mlx.mlx_array,
+    b: mlx.mlx_array,
+    w: mlx.mlx_array,
+    eps_arr: mlx.mlx_array,
+) !?AddNormResult {
+    return addRmsNormKernel(s, a, b, w, eps_arr, true);
+}
+
+fn addRmsNormKernel(
+    s: mlx.mlx_stream,
+    a: mlx.mlx_array,
+    b: mlx.mlx_array,
+    w: mlx.mlx_array,
+    eps_arr: mlx.mlx_array,
+    f32_copy: bool,
+) !?AddNormResult {
     // A Transformer built by a construction site that predates `rms_eps_arr`
     // would hand us a null handle; decline rather than pass it to mlx.
     if (w.ctx == null or eps_arr.ctx == null) return null;
@@ -36343,39 +36408,48 @@ pub fn fusedAddRmsNormUngated(
     const tg: c_int = @divTrunc(@divTrunc(axis + 3, 4) + 31, 32) * 32;
     if (tg > 1024) return null;
 
+    const v = @intFromBool(f32_copy);
     const key = AddNormCfgKey{ .shape = ShapeKey.from(ash), .dtype = dt };
-    if (add_rmsnorm_cfg == null or !std.meta.eql(add_rmsnorm_cfg_key, key)) {
-        if (add_rmsnorm_cfg) |c| _ = mlx.mlx_fast_metal_kernel_config_free(c);
+    if (add_rmsnorm_cfg[v] == null or !std.meta.eql(add_rmsnorm_cfg_key[v], key)) {
+        if (add_rmsnorm_cfg[v]) |c| _ = mlx.mlx_fast_metal_kernel_config_free(c);
+        add_rmsnorm_cfg[v] = null;
         const config = mlx.mlx_fast_metal_kernel_config_new();
+        errdefer _ = mlx.mlx_fast_metal_kernel_config_free(config);
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(config, ash.ptr, ash.len, dt));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(config, ash.ptr, ash.len, dt));
+        if (f32_copy) try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(config, ash.ptr, ash.len, .float32));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(config, tg, rows, 1));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(config, tg, 1, 1));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_dtype(config, "T", dt));
         try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "AXIS", axis));
-        add_rmsnorm_cfg = config;
-        add_rmsnorm_cfg_key = key;
+        add_rmsnorm_cfg[v] = config;
+        add_rmsnorm_cfg_key[v] = key;
     }
 
     const inputs_arr = [_]mlx.mlx_array{ a, b, w, eps_arr };
     const inputs_vec = mlx.mlx_vector_array_new_data(&inputs_arr, inputs_arr.len);
     defer _ = mlx.mlx_vector_array_free(inputs_vec);
-    const kernel = try getAddRmsNormKernel();
+    const kernel = try getAddRmsNormKernel(f32_copy);
     var outputs_vec = mlx.mlx_vector_array_new();
     defer _ = mlx.mlx_vector_array_free(outputs_vec);
-    try mlx.check(mlx.mlx_fast_metal_kernel_apply(&outputs_vec, kernel, inputs_vec, add_rmsnorm_cfg.?, s));
-    if (mlx.mlx_vector_array_size(outputs_vec) != 2) return error.MetalKernelBadOutputCount;
+    try mlx.check(mlx.mlx_fast_metal_kernel_apply(&outputs_vec, kernel, inputs_vec, add_rmsnorm_cfg[v].?, s));
+    if (mlx.mlx_vector_array_size(outputs_vec) != 2 + @as(usize, v)) return error.MetalKernelBadOutputCount;
     var sum = mlx.mlx_array_new();
     errdefer _ = mlx.mlx_array_free(sum);
     try mlx.check(mlx.mlx_vector_array_get(&sum, outputs_vec, 0));
     var normed = mlx.mlx_array_new();
     errdefer _ = mlx.mlx_array_free(normed);
     try mlx.check(mlx.mlx_vector_array_get(&normed, outputs_vec, 1));
+    var normed_f32: mlx.mlx_array = .{ .ctx = null };
+    if (f32_copy) {
+        normed_f32 = mlx.mlx_array_new();
+        try mlx.check(mlx.mlx_vector_array_get(&normed_f32, outputs_vec, 2));
+    }
     if (!add_rmsnorm_engaged) {
         add_rmsnorm_engaged = true;
         log.info("[layer] fused residual+RMSNorm kernel engaged: axis={d} tg={d}\n", .{ axis, tg });
     }
-    return .{ .sum = sum, .normed = normed };
+    return .{ .sum = sum, .normed = normed, .normed_f32 = normed_f32 };
 }
 
 // ── Fused per-head attention output gate ──
@@ -46067,7 +46141,7 @@ test "fused residual+RMSNorm is bit-identical to mlx_add + mlx_fast_rms_norm" {
     const eps_arr = mlx.mlx_array_new_float(EPS);
     defer _ = mlx.mlx_array_free(eps_arr);
 
-    for ([_]c_int{ 512, 1536, 2048, 2050 }) |axis| {
+    for ([_]c_int{ 512, 1536, 2048, 2050, 4096 }) |axis| {
         for ([_]c_int{ 1, 3 }) |rows| {
             for ([_]mlx.mlx_dtype{ .bfloat16, .float32 }) |dt| {
                 const cnt: usize = @intCast(rows * axis);
@@ -46119,6 +46193,20 @@ test "fused residual+RMSNorm is bit-identical to mlx_add + mlx_fast_rms_norm" {
                 try testing.expectEqualSlices(f32, h1, h2);
                 try testReadF32(ref_norm, h1, s);
                 try testReadF32(got.normed, h2, s);
+                try testing.expectEqualSlices(f32, h1, h2);
+
+                // The routed variant adds the norm's exact f32 widening, a router's input.
+                const routed = (try fusedAddRmsNormRouted(s, a, b, w, eps_arr)) orelse return error.FusedAddNormDeclined;
+                defer _ = mlx.mlx_array_free(routed.sum);
+                defer _ = mlx.mlx_array_free(routed.normed);
+                defer _ = mlx.mlx_array_free(routed.normed_f32);
+                try testing.expectEqual(mlx.mlx_dtype.float32, mlx.mlx_array_dtype(routed.normed_f32));
+                try testReadF32(routed.normed, h2, s);
+                try testing.expectEqualSlices(f32, h1, h2);
+                try testReadF32(routed.normed_f32, h2, s);
+                try testing.expectEqualSlices(f32, h1, h2);
+                try testReadF32(routed.sum, h2, s);
+                try testReadF32(ref_sum, h1, s);
                 try testing.expectEqualSlices(f32, h1, h2);
             }
         }

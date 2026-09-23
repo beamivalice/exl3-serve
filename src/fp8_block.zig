@@ -25,6 +25,9 @@ pub var gemv_stage_tiles: c_int = 0;
 pub const RowSplit = struct {
     tp: u32 = 1,
     parts: [3]u32,
+    /// Factor on the third output, rounded to the output dtype first: the
+    /// `v * scalar` MiMo applies before caching (`attention_value_scale`).
+    v_scale: f32 = 1.0,
 
     pub fn dense(rows: u32) RowSplit {
         return .{ .parts = .{ rows, 0, 0 } };
@@ -193,7 +196,7 @@ const GEMV_STORE_1 =
 const GEMV_STORE_3 =
     \\      if (local < uint(P0)) yq[(size_t)m * (TP * P0) + rank * P0 + local] = T(total);
     \\      else if (local < uint(P0 + P1)) yk[(size_t)m * (TP * P1) + rank * P1 + (local - P0)] = T(total);
-    \\      else yv[(size_t)m * (TP * P2) + rank * P2 + (local - P0 - P1)] = T(total);
+    \\      else yv[(size_t)m * (TP * P2) + rank * P2 + (local - P0 - P1)] = T(float(T(total)) * as_type<float>(uint(VSB)));
     \\    }
     \\  }
     \\}
@@ -278,6 +281,8 @@ const CfgKey = struct {
     nr: c_int,
     sgs: c_int,
     tiles: c_int,
+    /// f32 bits of `RowSplit.v_scale` rounded to `dtype`.
+    vsb: u32 = 0,
 };
 
 const CFG_CAP = 32;
@@ -332,6 +337,7 @@ fn buildConfig(key: CfgKey) !mlx.mlx_fast_metal_kernel_config {
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "P1", @intCast(split.parts[1])));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "P2", @intCast(split.parts[2])));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "BPR", @intCast(split.blocksPerRank())));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "VSB", @bitCast(key.vsb)));
     return cfg;
 }
 
@@ -394,7 +400,16 @@ fn gemvKey(dtype: mlx.mlx_dtype, m: c_int, k: c_int, split: RowSplit) CfgKey {
     const sgs: c_int = if (gemv_sgs > 0) gemv_sgs else if (direct) 2 else 8;
     var tiles: c_int = if (gemv_stage_tiles > 0) gemv_stage_tiles else 1;
     if (@rem(k, 128 * tiles) != 0) tiles = 1;
-    return .{ .kind = if (direct) .gemv else .staged, .dtype = dtype, .m = m, .k = k, .tp = split.tp, .parts = split.parts, .nr = nr, .sgs = sgs, .tiles = if (direct) 0 else tiles };
+    return .{ .kind = if (direct) .gemv else .staged, .dtype = dtype, .m = m, .k = k, .tp = split.tp, .parts = split.parts, .nr = nr, .sgs = sgs, .tiles = if (direct) 0 else tiles, .vsb = @bitCast(roundedTo(dtype, split.v_scale)) };
+}
+
+/// `v` as `mlx_astype` would store it in `dtype`, widened back to f32.
+fn roundedTo(dtype: mlx.mlx_dtype, v: f32) f32 {
+    return switch (dtype) {
+        .bfloat16 => bfToF32(bf16Rne(v)),
+        .float16 => @floatCast(@as(f16, @floatCast(v))),
+        else => v,
+    };
 }
 
 /// `out[p] = x @ W_p^T` for each output of `split`, shaped `x.shape[:-1] + [rows_p]`.
@@ -448,6 +463,17 @@ pub fn project(
         defer _ = mlx.mlx_array_free(wt);
         try mlx.check(mlx.mlx_transpose(&wt, dense[p], s));
         try mlx.check(mlx.mlx_matmul(&out[p], x, wt, s));
+    }
+    if (split.outputs() == 3 and split.v_scale != 1.0) {
+        const raw = mlx.mlx_array_new_float(split.v_scale);
+        defer _ = mlx.mlx_array_free(raw);
+        var scalar = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(scalar);
+        try mlx.check(mlx.mlx_astype(&scalar, raw, mlx.mlx_array_dtype(out[2]), s));
+        var scaled = mlx.mlx_array_new();
+        try mlx.check(mlx.mlx_multiply(&scaled, out[2], scalar, s));
+        _ = mlx.mlx_array_free(out[2]);
+        out[2] = scaled;
     }
 }
 
@@ -791,6 +817,54 @@ test "fp8 block QKV split routes rank-local rows and their partial tiles" {
                     const want: f32 = if (r < 32) tile + 2 else tile + 3;
                     try testing.expectEqual(128 * want, parts[2][last * tp * v_per + rank * v_per + r]);
                 }
+            }
+        }
+    }
+}
+
+test "fp8 block QKV folds the value scale into V as the composed multiply rounds it" {
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7A1E);
+    const rnd = prng.random();
+    var tw = try TestWeight.init(alloc, rnd, PARITY_SPLITS[1], 512);
+    defer tw.deinit(alloc);
+    var scaled_split = tw.split;
+    scaled_split.v_scale = 0.707;
+    // The direct GEMV, the staged GEMV and the dequant route.
+    for ([_]usize{ 1, 3, 8, 16, 24 }) |m| {
+        for ([_]mlx.mlx_dtype{ .bfloat16, .float16, .float32 }) |dt| {
+            const x = try randomX(alloc, rnd, m, tw.k);
+            defer alloc.free(x);
+            const xa = try uploadX(s, x, m, tw.k, dt);
+            defer _ = mlx.mlx_array_free(xa);
+            var plain: [3]mlx.mlx_array = .{ .{}, .{}, .{} };
+            try project(s, xa, tw.w, tw.sc, tw.split, &plain);
+            defer for (plain) |a| {
+                _ = mlx.mlx_array_free(a);
+            };
+            var folded: [3]mlx.mlx_array = .{ .{}, .{}, .{} };
+            try project(s, xa, tw.w, tw.sc, scaled_split, &folded);
+            defer for (folded) |a| {
+                _ = mlx.mlx_array_free(a);
+            };
+            const raw = mlx.mlx_array_new_float(0.707);
+            defer _ = mlx.mlx_array_free(raw);
+            var scalar = mlx.mlx_array_new();
+            defer _ = mlx.mlx_array_free(scalar);
+            try mlx.check(mlx.mlx_astype(&scalar, raw, mlx.mlx_array_dtype(plain[2]), s));
+            var composed = mlx.mlx_array_new();
+            defer _ = mlx.mlx_array_free(composed);
+            try mlx.check(mlx.mlx_multiply(&composed, plain[2], scalar, s));
+            try testing.expectEqual(mlx.mlx_array_dtype(plain[2]), mlx.mlx_array_dtype(folded[2]));
+            const refs = [_]mlx.mlx_array{ plain[0], plain[1], composed };
+            for (refs, folded) |want_arr, got_arr| {
+                const want = try readAs32(alloc, s, want_arr);
+                defer alloc.free(want);
+                const got = try readAs32(alloc, s, got_arr);
+                defer alloc.free(got);
+                try testing.expectEqualSlices(f32, want, got);
             }
         }
     }
