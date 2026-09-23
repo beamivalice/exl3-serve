@@ -5378,11 +5378,11 @@ fn attnLayersPerEvalWindow(config: *const model_mod.ModelConfig, window: u32) u3
         var count: u32 = 0;
         var i: u32 = start;
         while (i < start + window) : (i += 1) {
-            if (!config.isLinearLayer(i)) count += 1;
+            if (config.isKvPerTokenLayer(i)) count += 1;
         }
         if (count > best) best = count;
     }
-    return @min(best, config.attnCacheLayerCount());
+    return @min(best, config.kvPerTokenLayerCount());
 }
 
 /// PURE: bytes of OLD KV buffer alive beside the new ones while a warm append grows the cache.
@@ -5392,7 +5392,9 @@ fn attnLayersPerEvalWindow(config: *const model_mod.ModelConfig, window: u32) u3
 /// the whole layer loop and therefore does pay the whole old cache.
 fn growCoexistBytes(config: *const model_mod.ModelConfig, warm: WarmPrefix, seq: u64, kv_per_tok: u64) u64 {
     if (!warm.grows(seq)) return 0;
-    const attn = config.attnCacheLayerCount();
+    // The layers `kv_per_tok` is the sum over, not every caching layer: on a
+    // ringed arch those are nine of forty-eight.
+    const attn = config.kvPerTokenLayerCount();
     if (attn == 0) return 0;
     const span: u64 = seq -| warm.matched_tokens;
     const window: u32 = if (transformer_mod.Transformer.prefillEvalCadenceApplies(@intCast(@min(span, 1 << 20))))
@@ -5645,8 +5647,10 @@ fn sessionBytesPerToken(config: *const model_mod.ModelConfig, kv_bits: u64) u64 
 pub fn prefillRequestTerms(config: *const model_mod.ModelConfig, seq: u64, max_tokens: u64, kv_bits: u64, chunk: u64, warm: WarmPrefix) PrefillRequestTerms {
     // Arch gate for every term (all new, all measured on qwen4_exp alone; the reservation's
     // allocator twin is gated too, so an ungated guard billed memory never reserved). `.{}` is
-    // the identity: `prefillMemoryNeeded` then reduces to the previous expression.
-    if (!config.longCtxGated()) return .{};
+    // the identity: `prefillMemoryNeeded` then reduces to the previous expression. A ringed arch
+    // joins through the narrower `reservesKvCapacity`; every term it does not have stays zero on
+    // its own (no QSA history, no SSM checkpoints, MTP refused while it rings).
+    if (!config.reservesKvCapacity()) return .{};
     // `reservedTokens` returns 0 below its length threshold; floor the reserved length at `seq`.
     const reserved = @max(reservedCacheTokens(seq, max_tokens, chunk, getEffectiveContextLength(config)), seq);
     // Only the headroom is new here: the prompt's own rows are already billed.
@@ -24689,6 +24693,50 @@ test "the sliding ring is billed once per slot and staged per chunk token" {
     plain.model_type = "qwen3";
     try t.expectEqual(@as(u64, 0), slotRingBytes(&plain, 16));
     try t.expectEqual(@as(u64, 0), prefillStreamBytesPerToken(&plain));
+}
+
+test "a ringed arch reserves its KV capacity once and bills the ring it holds" {
+    const t = std.testing;
+    const cfg = mimoV2BillConfig();
+    const seq: u64 = 512 * 1024;
+    const chunk: u64 = 1024;
+
+    // The allocator side: the prefill loop asks for the whole request's capacity
+    // before the first chunk writes, so no buffer grows mid-prefill.
+    try t.expect(generate_mod.reservedPrefillTokens(&cfg, seq, 2048, chunk) > seq);
+    try t.expectEqual(@as(u64, 0), generate_mod.reservedPrefillTokens(&cfg, 1024, 2048, chunk));
+
+    // The bill side: headroom and the per-slot ring, nothing else acquired.
+    const terms = prefillRequestTerms(&cfg, seq, 2048, 8, chunk, .{});
+    try t.expect(terms.reserved_kv_bytes > 0);
+    try t.expectEqual(slotRingBytes(&cfg, 8), terms.qsa_ring_bytes);
+    try t.expect(terms.qsa_ring_bytes > 0);
+    try t.expectEqual(@as(u64, 0), terms.state_bytes);
+    try t.expectEqual(@as(u64, 0), terms.checkpoint_bytes);
+    try t.expectEqual(@as(u64, 0), terms.mtp_head_kv_bytes);
+    // A cold prefill reserves; nothing coexists because nothing grows.
+    try t.expectEqual(@as(u64, 0), terms.grow_coexist_bytes);
+
+    // A warm append that outruns its restored capacity DOES grow, and the old
+    // buffer it carries is spread over the layers that store the sequence —
+    // nine of forty-eight here, not all of them.
+    try t.expectEqual(@as(u32, 2), cfg.kvPerTokenLayerCount());
+    try t.expectEqual(cfg.num_hidden_layers, cfg.attnCacheLayerCount());
+    const warm = WarmPrefix{ .matched_tokens = seq / 2, .capacity_tokens = seq / 2, .will_donate = true };
+    const grown = prefillRequestTerms(&cfg, seq, 2048, 8, chunk, warm);
+    try t.expect(grown.grow_coexist_bytes > 0);
+    const kv_per_tok = kvBytesPerTokenAtBits(cfg.kvBytesPerToken(), 8);
+    try t.expectEqual(
+        (seq / 2) * kv_per_tok / cfg.kvPerTokenLayerCount() * attnLayersPerEvalWindow(&cfg, transformer_mod.Transformer.MOE_EVAL_EVERY_N_LAYERS),
+        grown.grow_coexist_bytes,
+    );
+
+    // Every arch outside the gate keeps exactly the terms it had.
+    var plain = cfg;
+    plain.model_type = "qwen3";
+    try t.expect(!plain.reservesKvCapacity());
+    try t.expectEqual(PrefillRequestTerms{}, prefillRequestTerms(&plain, seq, 2048, 8, chunk, .{}));
+    try t.expectEqual(@as(u64, 0), generate_mod.reservedPrefillTokens(&plain, seq, 2048, chunk));
 }
 
 test "mimo_v2 prefill bill: fusing qk 192 drops the global score sheet and bills the band's" {

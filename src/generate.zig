@@ -1176,7 +1176,7 @@ pub fn reservedPrefillTokens(
     max_tokens: u64,
     chunk: u64,
 ) u64 {
-    if (!config.longCtxGated()) return 0;
+    if (!config.reservesKvCapacity()) return 0;
     return transformer_mod.KVCache.reservedTokens(
         seq,
         max_tokens,

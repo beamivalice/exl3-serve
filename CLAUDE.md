@@ -103,7 +103,8 @@ Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter=
 - **A ringed entry's `offset` is LOCAL**; absolute = `base + offset` (`absSeqLen`). A clamp or trim below the retained window declines by NAME (`SlidingRingRewindPastWindow`) — the hot-cache restore cold-prefills, the SSD tier skips such an entry.
 - **A hot entry holds a ringed layer's RETAINED ROWS, never the ring's capacity** (`KVCache.snapshotRetained`): the buffer is allocated at `ringCap` from token one, so a plain share billed and pinned rows no restore can read.
 - **mimo_v2's global layers PREFILL FUSED** (`msv_attn_pd`, qk 192 / v 128, no sink there); the sliding layers still compose their band sheet and `server.slidingBandScoreBytes` bills it.
-- **The bill follows the storage in the SAME commit**: `kvBytesPerToken` counts the 9 global layers per token, `swaRingBytes` the ring once per slot (`server.slotRingBytes`, at `kv_bits`), `swaStreamBytesPerToken` the chunk a prefill stages before compaction.
+- **The bill follows the storage in the SAME commit**: `kvBytesPerToken` counts the 9 global layers per token (spread over `kvPerTokenLayerCount`, never every caching layer), `swaRingBytes` the ring once per slot (`server.slotRingBytes`, at `kv_bits`), `swaStreamBytesPerToken` the chunk a prefill stages before compaction.
+- **A ringed arch RESERVES its cache capacity up front** (`ModelConfig.reservesKvCapacity`, narrower than `longCtxGated`) and bills the reservation headroom and the ring: growing +25% at a time duplicated a global layer mid-prefill.
 - **Evidence**: `tests/dump_mimo_v2_fixtures.py` supplies the independent HF oracle; `MIMO_V2_SOURCE` tests the downloaded Flash config/template. Native-byte preservation, forward parity, and live serving are separate gates; a header audit proves neither numerical parity nor generation.
 
 ## Qwen3.8-Flash-Next (`qwen4_exp`)

@@ -1072,6 +1072,36 @@ pub const ModelConfig = struct {
         return self.isQwen4();
     }
 
+    /// Does a request reserve its whole cache capacity up front instead of
+    /// growing +25% at a time? Narrower than `longCtxGated`: a ringed arch
+    /// joins because its per-token KV is nine layers of a 48-layer trunk, so a
+    /// mid-prefill grow duplicates gigabytes the bill never modelled — but
+    /// none of the other long-context mechanisms come with it.
+    pub fn reservesKvCapacity(self: *const ModelConfig) bool {
+        return self.longCtxGated() or self.swaRingTokens() > 0;
+    }
+
+    /// Layers `kvBytesPerToken` is the sum over. Every caching layer normally;
+    /// on a ringed arch only the GLOBAL ones, because the sliding half stores a
+    /// window rather than the sequence. Dividing the per-token bill by every
+    /// caching layer under-bills a ringed arch by 48/9.
+    pub fn kvPerTokenLayerCount(self: *const ModelConfig) u32 {
+        if (self.swaRingTokens() == 0) return self.attnCacheLayerCount();
+        var n: u32 = 0;
+        var li: u32 = 0;
+        while (li < self.num_hidden_layers) : (li += 1) {
+            if (self.isGlobalLayer(li)) n += 1;
+        }
+        return n;
+    }
+
+    /// Does layer `li` carry a share of `kvBytesPerToken`? The per-layer twin
+    /// of `kvPerTokenLayerCount`, so a window count and a total cannot drift.
+    pub fn isKvPerTokenLayer(self: *const ModelConfig, li: u32) bool {
+        if (self.swaRingTokens() > 0) return self.isGlobalLayer(li);
+        return !self.isLinearLayer(li);
+    }
+
     pub fn batchedEffectiveKvLen(self: *const ModelConfig, kv: u32, gather_on: bool, gather_min_kv: u32) u32 {
         if (!self.isQwen4() or !gather_on) return kv;
         if (kv <= gather_min_kv) return kv;
