@@ -406,7 +406,7 @@ const GEMM_NAX_FRAGS: [:0]const u8 =
     \\template<uint N>
     \\static inline nfrag nax_wfrag_k(const device uint *words, uint lane) {
     \\  if (N == 40u) return nax_wfrag_n40(words, lane);
-    \\  if (N == 48u && EXL3_TINY) return nax_wfrag_n48(words, lane);
+    \\  if (N == 48u && EXL3_FUNNEL48) return nax_wfrag_n48(words, lane);
     \\  const uint tau_0 = 64u * (lane >> 4u) + ((lane & 7u) << 3u) + ((lane >> 3u) & 1u);
     \\  const half2 p0 = nax_funnel_pair<N>(words, tau_0);
     \\  const half2 p1 = nax_funnel_pair<N>(words, tau_0 + 2u);
@@ -767,7 +767,10 @@ fn codebookHelpers(comptime cb: exl3.Codebook, comptime win: exl3.Window) [:0]co
     };
     const mask: [:0]const u8 = comptime if (win == .w16) "" else std.fmt.comptimePrint("  cw &= uint2(0x{X}u);\n", .{win.mask()});
     const pair = comptime "static inline half2 exl3_pairh(uint2 cw) {\n" ++ mask ++ body ++ "\n}\n";
-    return comptime std.fmt.comptimePrint("#define EXL3_TINY {d}\n", .{@intFromBool(cb == .tiny)}) ++ pair ++
+    // The n48 eight-weight funnel readers are bit plumbing around exl3_pairh,
+    // which is built per codebook, so every codebook takes them; MUL1 keeps its
+    // own readers, measured separately.
+    return comptime std.fmt.comptimePrint("#define EXL3_FUNNEL48 {d}\n", .{@intFromBool(cb != .mul1)}) ++ pair ++
         \\static inline float2 exl3_decode2(uint2 cw) { return float2(exl3_pairh(cw)); }
         \\static inline float exl3_decode1(uint cw) { return exl3_decode2(uint2(cw, 0u)).x; }
         \\static inline ulong exl3_n40_lane(const device uint *words, uint lane) {
@@ -1326,7 +1329,7 @@ fn innerGemmSortedTable(
                     gemm_n40_engaged = true;
                     log.info("[exl3-gemm] n40 two-funnel reader engaged dtype={s}\n", .{@tagName(mlx.mlx_array_dtype(x))});
                 }
-                logTinyN48(rate.n, .nax, mlx.mlx_array_dtype(x));
+                logN48Funnel(rate.n, .nax, mlx.mlx_array_dtype(x));
                 return nout;
             }
             gemm_nax_failed = true;
@@ -1788,7 +1791,7 @@ const DOWN_FUSED_SOURCE: [:0]const u8 =
     \\  }
     \\}
     \\}
-    \\else if (N == 40u || (N == 48u && EXL3_TINY)) {
+    \\else if (N == 40u || (N == 48u && EXL3_FUNNEL48)) {
     \\for (uint tk = tk0 + sg; tk < tk1; tk += SGS) {
     \\  const device uint* words = trellis_e + ((size_t)tk * (size_t)OT + ot) * PACKED_W;
     \\  const ulong merged = N == 40u ? exl3_n40_lane(words, lane) : exl3_n48_lane(words, lane);
@@ -1891,7 +1894,7 @@ fn downGemvFusedMid(
     const outs = [_][*:0]const u8{"y"};
     const kernel = try codebookKernel(&down_fused_kernel, "mlxserve_exl3_k4_down_fused", &ins, &outs, DOWN_FUSED_SOURCE);
     const ov = try applyOuts(s, kernel, &.{ ig, iu, trellis, svhg, svhu, suhd, slots }, cfg, 1);
-    logTinyN48(rate.n, .fused_mid_down, mlx.mlx_array_dtype(ig));
+    logN48Funnel(rate.n, .fused_mid_down, mlx.mlx_array_dtype(ig));
     defer _ = mlx.mlx_vector_array_free(ov);
     var a = mlx.mlx_array_new();
     errdefer _ = mlx.mlx_array_free(a);
@@ -2003,7 +2006,7 @@ const PAIR_GEMV_SOURCE: [:0]const u8 =
     \\    }
     \\  }
     \\  }
-    \\  else if (N == 40u || (N == 48u && EXL3_TINY)) {
+    \\  else if (N == 40u || (N == 48u && EXL3_FUNNEL48)) {
     \\  for (uint tk = tk0 + sg; tk < tk1; tk += SGS) {
     \\    const device uint *words = trellis_e + ((size_t)tk * (size_t)OT + ot) * PACKED_W;
     \\    const ulong merged = N == 40u ? exl3_n40_lane(words, lane) : exl3_n48_lane(words, lane);
@@ -2212,13 +2215,13 @@ const REDUCE_SOURCE: [:0]const u8 =
 ;
 
 var n40_decode_engaged: bool = false;
-const TinyN48Arm = enum { pair, fused_mid_down, prepared_down, nax };
-var tiny_n48_engaged: [4]bool = @splat(false);
+const N48FunnelArm = enum { pair, fused_mid_down, prepared_down, nax };
+var n48_funnel_engaged: [4]bool = @splat(false);
 
-fn logTinyN48(n: u32, arm: TinyN48Arm, dtype: mlx.mlx_dtype) void {
-    if (n != 48 or active_decode.codebook != .tiny or tiny_n48_engaged[@backingInt(arm)]) return;
-    tiny_n48_engaged[@backingInt(arm)] = true;
-    log.info("[exl3] TINY n48 funnel engaged arm={s} dtype={s} window={d}\n", .{ @tagName(arm), @tagName(dtype), active_decode.window.bits() });
+fn logN48Funnel(n: u32, arm: N48FunnelArm, dtype: mlx.mlx_dtype) void {
+    if (n != 48 or active_decode.codebook == .mul1 or n48_funnel_engaged[@backingInt(arm)]) return;
+    n48_funnel_engaged[@backingInt(arm)] = true;
+    log.info("[exl3] n48 funnel engaged arm={s} codebook={s} dtype={s} window={d}\n", .{ @tagName(arm), @tagName(active_decode.codebook), @tagName(dtype), active_decode.window.bits() });
 }
 
 var pair_gemv_kernel: KernelSlots = no_kernels;
@@ -2284,7 +2287,7 @@ fn pairGemv(s: mlx.mlx_stream, x: mlx.mlx_array, suhg: mlx.mlx_array, suhu: mlx.
     const outs = [_][*:0]const u8{ "yg", "yu" };
     const kernel = try codebookKernel(&pair_gemv_kernel, "mlxserve_exl3_pair_gemv", &ins, &outs, PAIR_GEMV_SOURCE);
     const ov = try applyOuts(s, kernel, &.{ x, suhg, suhu, tg, tu, slots }, cfg, 2);
-    logTinyN48(rate.n, .pair, mlx.mlx_array_dtype(x));
+    logN48Funnel(rate.n, .pair, mlx.mlx_array_dtype(x));
     if (rate.n == 40 and !n40_decode_engaged) {
         n40_decode_engaged = true;
         log.info("[exl3-decode] n40 eight-weight lane reader engaged dtype={s}\n", .{@tagName(mlx.mlx_array_dtype(x))});
@@ -7435,7 +7438,7 @@ fn downGemvPreparedMid(s: mlx.mlx_stream, ig: mlx.mlx_array, iu: mlx.mlx_array, 
     };
     const kernel = try codebookKernel(&down_prepared_kernel, "mlxserve_exl3_down_prepared", &.{ "middle", "trellis", "slots" }, &.{"y"}, DOWN_PREPARED_SOURCE);
     const outputs = try applyOuts(s, kernel, &.{ middle, trellis, slots }, cfg, 1);
-    logTinyN48(rate.n, .prepared_down, mlx.mlx_array_dtype(middle));
+    logN48Funnel(rate.n, .prepared_down, mlx.mlx_array_dtype(middle));
     defer _ = mlx.mlx_vector_array_free(outputs);
     var y = mlx.mlx_array_new();
     errdefer _ = mlx.mlx_array_free(y);
@@ -7507,11 +7510,36 @@ test "exl3 TINY half pairs preserve every codeword at windows 8 through 16" {
     }
 }
 
-test "exl3 n48 TINY funnel readers preserve codewords and weights" {
-    inline for ([_]bool{ false, true }) |lane_reader| {
-        try weightReaderExact(48, .tiny, .w12, true, lane_reader);
-        inline for (8..17) |bits| try weightReaderExact(48, .tiny, comptime exl3.Window.fromBits(bits).?, false, lane_reader);
+test "exl3 n48 funnel readers preserve codewords and weights on every non-MUL1 codebook" {
+    inline for ([_]exl3.Codebook{ .tiny, .mcg }) |cb| {
+        inline for ([_]bool{ false, true }) |lane_reader| {
+            try weightReaderExact(48, cb, .w12, true, lane_reader);
+            inline for (8..17) |bits| try weightReaderExact(48, cb, comptime exl3.Window.fromBits(bits).?, false, lane_reader);
+        }
     }
+}
+
+fn n48FunnelCase(cb: exl3.Codebook, rows: usize, seed: u64, decode: bool, prepared: ?bool) !void {
+    prepared_mid_force = prepared;
+    defer prepared_mid_force = null;
+    try bf16TruthCase(.{ .e = 16, .hidden = 256, .inter = 128, .topk = 10, .rows = rows, .rate = .{ .n = 48 }, .dec = .{ .codebook = cb, .window = .w12 }, .seed = seed, .banks = MIMO_BANKS, .x_scale = 3 }, 32, decode);
+}
+
+test "exl3 the n48 funnel engages for every non-MUL1 codebook" {
+    for ([_]exl3.Codebook{ .tiny, .mcg, .mul1 }) |cb| {
+        n48_funnel_engaged = @splat(false);
+        try n48FunnelCase(cb, 4, 318, true, null);
+        try std.testing.expectEqual(cb != .mul1, n48_funnel_engaged[@backingInt(N48FunnelArm.pair)]);
+    }
+}
+
+test "exl3 MCG n48 BF16 decode and NAX preserve f32 truth across seeds" {
+    for ([_]bool{ false, true }) |prepared| {
+        for (1..9) |rows| {
+            for (0..PARITY_SEEDS) |seed| try n48FunnelCase(.mcg, rows, 318 + seed, true, prepared);
+        }
+    }
+    for (0..PARITY_SEEDS) |seed| try n48FunnelCase(.mcg, 33, 318 + seed, false, null);
 }
 
 test "exl3 TINY served rates BF16 decode and NAX preserve f32 truth across seeds" {
