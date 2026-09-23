@@ -110,14 +110,17 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   Landed 2026-09-23 (668278c): 39-layer band attention 39.5 -> 20.3 ms at chunk 512, 603 -> 95.5 at 2048, 2439 -> 181
   at 4096; live prefill (back-to-back pair) 886 -> 1059 tok/s at 4k and 526 -> 603 at 64k, chunk 2048; a 500k prompt
   admits at chunk 2048 (`needed=10262 MB available=17538 MB`); 16x512 KLD 0.07747 vs 0.07761.
-- **A packed-cache global-layer DECODE reads in place** via `msv_qkv_mpp` (matmul2d, `qkvMppDecodeServes`, from
-  `QKV_MPP_DECODE_MIN_TK` = 4096 keys; qk192/v128, gqa16, kv8/kv4; engagement line
-  `[kv-attn] matmul2d packed attention engaged`); the SIMD kernel cannot stage gqa 16 x qk 192. Attention-only microbench vs the dense rebuild:
-  1.5x at 16k, 1.9x at 64k, 1.75-2.1x at 512k (~235 GB/s at 512k, headroom remains).
+- **A packed-cache global-layer DECODE reads in place** (`mimoGlobalDecodeArm`): with matrix units (M5) the matmul2d
+  `msv_qkv_mpp` (`qkvMppDecodeServes`, from `QKV_MPP_DECODE_MIN_TK` = 4096 keys); without them (M4) the QSA split-K
+  body over the whole causal range (`qkvAttnSplitKKernel`, from `QKV_SPLITK_DECODE_MIN_TK` = 4096 keys; 512 keys per
+  split, 64-128 splits, split count a runtime value); else the dense rebuild. `MLX_SERVE_KVQ_FORCE_SPLITK=1` takes
+  the split-K arm on an M5 for A/B. The older SIMD `qkvAttnDecodeKernel` cannot stage gqa 16 x qk 192.
+  Attention-only microbench (9 layers, kv8) vs the per-call dequant+SDPA rebuild: split-K 0.62x at 4k, 0.50x at 16k,
+  0.42x at 64k, 0.35-0.36x at 512k (M5 proxy for M4; split-K is compute-bound, the rebuild bandwidth-bound);
+  matmul2d is ~1.2-1.4x faster than split-K at 16k-512k (cross-run). Live 64k split-K decode not yet measured.
 - Before the sliding fusion landed, the composed band+sink sheet was the biggest chunk-dependent bill term (0.17 GB
   at chunk 512, 2.28 GB at 2048), so 500k at chunk 2048 billed ~14.3 GB against ~12.4 GB of headroom. That term is
-  now zero wherever the fused arm serves. On M4-class GPUs (no NAX) global-layer decode falls to the dense rebuild
-  until a SIMD split-K packed decode lands (in progress).
+  now zero wherever the fused arm serves. Global-layer decode no longer rebuilds on M4-class GPUs (split-K, above).
 
 ## Bills (the bill follows the storage in the SAME commit)
 
