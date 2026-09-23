@@ -33,7 +33,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 
 MODELS_ROOT="$HOME/.sushi/models"
 CHAT_A="${STRESS_CHAT_A:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
-CHAT_B="${STRESS_CHAT_B:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}"
+CHAT_B="${STRESS_CHAT_B:-/Users/beam/llm/models/MiMo-V2.6-Flash-Sushi2.5bpw}"
 N_AGENTS=${N_AGENTS:-3}
 N_PLAIN=${N_PLAIN:-2}
 N_ABORT=${N_ABORT:-0}

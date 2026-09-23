@@ -13,7 +13,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 ## Product policy
 
 - **MCG EXL3 only.** The served MiMo target is the K2.5 MCG EXL3 pack
-  (`/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal`). The affine pack
+  (`/Users/beam/llm/models/MiMo-V2.6-Flash-Sushi2.5bpw`). The affine pack
   (`MiMo-V2.6-Flash-RL-affine-iq2.7`) stays on disk and servable as a BENCHMARK REFERENCE only: no fixes, features
   or tuning for it, but do not delete its serving path while it is the reference.
 - The TINY K2.5 pack (`MiMo-V2.6-Flash-RL-tiny-k2.5-w12-cal`) is retired with the TINY codebook.

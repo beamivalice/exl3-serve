@@ -43,7 +43,7 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 # layer (pi's driver boots without the streaming budget MiMo needs).
 MODELS=(
     "qwen4_exp|Qwen3.8 Flash-Next (qwen4_exp)|${QWEN4_EXP_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}|html-qwen4|240|"
-    "mimo_v2|MiMo-V2.6-Flash EXL3 (mimo_v2)|${MIMO_MODEL:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}||240|--no-vision"
+    "mimo_v2|MiMo-V2.6-Flash EXL3 (mimo_v2)|${MIMO_MODEL:-/Users/beam/llm/models/MiMo-V2.6-Flash-Sushi2.5bpw}||240|--no-vision"
 )
 
 if [[ -n "${VALIDATOR_MODELS:-}" ]]; then

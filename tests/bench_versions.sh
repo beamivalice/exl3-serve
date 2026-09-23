@@ -87,7 +87,7 @@ RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[0;33m'; DIM='\033[2m'; NC='\033[0m
 
 TARGETS=(
   # ── mimo_v2: sliding layers ring, so this is where the trim pays ──
-  "mimo-v2-flash-k2.5|/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal|--no-vision|EXL3 K2.5 experts, resident; sliding layers ring"
+  "mimo-v2-flash-k2.5|/Users/beam/llm/models/MiMo-V2.6-Flash-Sushi2.5bpw|--no-vision|EXL3 K2.5 experts, resident; sliding layers ring"
   # ── qwen4_exp: hyper-connections + n-gram PLE + QSA; MTP is opt-in on MoE, forced like bench.sh ──
   "qwen38-flash-next-k3|/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged|--mtp|125B-A6B EXL3 K3, no sliding; in-checkpoint MTP head (opt-in), QSA past 2048"
 )

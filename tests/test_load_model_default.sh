@@ -22,7 +22,7 @@ BIN="$ROOT/zig-out/bin/sushi"
 
 MODELS_ROOT="${MODELS_ROOT:-$HOME/.sushi/models}"
 BOOT_MODEL="${BOOT_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
-SWITCH_MODEL="${SWITCH_MODEL:-/Users/beam/llm/models/exl3/MiMo-V2.6-Flash-RL-mcg-k2.5-w12-cal}"
+SWITCH_MODEL="${SWITCH_MODEL:-/Users/beam/llm/models/MiMo-V2.6-Flash-Sushi2.5bpw}"
 if [ ! -f "$BOOT_MODEL/config.json" ] || [ ! -f "$SWITCH_MODEL/config.json" ]; then
     echo "SKIP: needs two local chat models (BOOT_MODEL=$BOOT_MODEL, SWITCH_MODEL=$SWITCH_MODEL)"
     exit 0
