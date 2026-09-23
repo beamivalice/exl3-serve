@@ -79,28 +79,31 @@ and one without it differ in their trellis codewords as well as in `suh`.
 `num_experts_per_tok` must be ≤ 32 (the decode reduce bank,
 `Exl3TopKExceedsReduceBank`).
 
-### `trunk_quant` (`mimo_v2`)
+### Stored-affine trunk linears (`mimo_v2`)
 
-```json
-"trunk_quant": {
-  "o_proj":       { "mode": "affine", "bits": 8, "group_size": 64 },
-  "lm_head":      { "mode": "affine", "bits": 8, "group_size": 64 },
-  "embed_tokens": { "mode": "affine", "bits": 8, "group_size": 64 }
-}
-```
+A MiMo pack may STORE `o_proj` (every layer's `model.layers.{L}.self_attn.o_proj`),
+`lm_head` and `model.embed_tokens` packed, each as MLX's affine triple under the
+source name:
 
-A pack field, never the source checkpoint's. At load the engine requantizes
-each named bf16 tensor with MLX's own affine packer (deterministic) and bills
-it at the packed bytes: `o_proj` = every layer's `self_attn.o_proj.weight` and
-`lm_head` = `lm_head.weight`, both served through `quantized_matmul`;
-`embed_tokens` = `model.embed_tokens.weight`, served by the quantized row
-gather. The original checkpoint `kld capture` reads never carries the field,
-so the teacher keeps all three as stored.
+| tensor | dtype | shape |
+|---|---|---|
+| `<base>.weight` | `U32` | `[out, in * bits / 32]` |
+| `<base>.scales` | `BF16` | `[out, in / group_size]` |
+| `<base>.biases` | `BF16` | `[out, in / group_size]` |
 
-- Keys are `o_proj`, `lm_head` and `embed_tokens`, each optional; `mode` must
-  be `affine`, `bits` one of 2, 3, 4, 5, 6, 8 and `group_size` one of 32, 64,
-  128. Anything else is `UnsupportedTrunkQuant`, never a silent bf16 fallback.
-- The pack's bytes stay the source's bf16; only the served copy is packed.
+The index points all three names at the shard holding them; a source shard that
+still carries the bf16 `<base>.weight` is simply not indexed for it. The engine
+serves the bytes as stored (o_proj and lm_head through `quantized_matmul`, the
+embedding through the quantized row gather) and bills them as stored; there is
+no load-time quantization. (bits, group_size) is solved from the shapes like
+every affine weight (bits 2, 3, 4, 5, 6, 8; group 32, 64, 128); a triple that is
+incomplete, or grids beside a bf16 weight, is `AffineTrunkIncomplete`, shapes
+that solve to no admitted width are `MimoTensorShapeMismatch`. Any subset of
+the three linears may be stored; the rest stay bf16. The original checkpoint
+`kld capture` reads stores all three bf16, so the teacher is unchanged.
+
+The retired load-time policy, a `config.json` `trunk_quant` block, is refused
+by name (`TrunkQuantRetired`) rather than ignored.
 
 ## The shard stamp
 
@@ -120,6 +123,10 @@ string, because that is all safetensors stores:
 | `source_sha256` | digest of the source checkpoint's index (new shards; older ones lack it) |
 | `seed_scheme` | which per-expert seed formula produced suh/svh signs (new shards) |
 | `out_scales_mode` | the output-scale rule, `auto` \| `always` \| `never` (new shards) |
+
+A stored-affine trunk shard stamps `format: affine` with `bits`, `group_size`,
+`quantizer`, `imatrix_sha256` and `converter`, and carries no `k`, `codebook`
+or `window`, so the load check below has nothing to compare on it.
 
 Two rules run off it:
 

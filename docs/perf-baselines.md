@@ -151,7 +151,12 @@ decode against the affine-8 trunk it replaced (31.1 → ~26 tok/s; +2.7 GiB read
 Landed 4cb68cc..a1fb67f (measured on f72f989/3b27c11, kv8, no MTP, ctx 32768, llmprobe `--bench-only`, A B B A;
 raw files `scratchpad/fp8/live/`): decode 32.4/32.5 (bf16 trunk) → 39.0/39.0 (FP8 native) → 43.5/43.6 (+ o_proj
 affine-8); affine-8 for the FP8 linears 43.3/43.2 (no faster, lossy, not shipped). + lm_head and embed affine-8: load
-bill 95.42 → 94.32 GB, decode not yet measured on a quiet box (microbench predicts ~45.5). FP8 GEMV runs 465-488 GB/s
+bill 95.42 → 94.32 GB, decode not yet measured on a quiet box (microbench predicts ~45.5).
+Stored imatrix affine-8 o_proj + lm_head + embed (28d8a4b, overlay pack, kv8, no MTP, ctx 32768, llmprobe
+`--bench-only`, `taskpolicy -a`, lock `mimo-trunk-affine`; raw `scratchpad/trunkq/live/`): decode 44.2 tok/s (a
+first run read 40.5 with 4.6 GB less free memory and a -12% sustained slide: box interference, discarded); the same
+format packed at load by main (4c8367f, taken once because that product had no quiet number) 44.0. Bill 94.32 GB both;
+boot to `/health` 24.0-25.5 s stored vs 25.1 s load-time: the load-time packing was not a measurable cost. FP8 GEMV runs 465-488 GB/s
 at one row; o_proj via MLX affine-8 qmv only 363 GB/s (a dedicated kernel could save ~1 ms/token). Sliding-layer fused prefill with sinks, 39-layer ubench: 39.5 → 20.3 ms at chunk 512, 603 → 95.5 at 2048,
 2439 → 181 at 4096.
 

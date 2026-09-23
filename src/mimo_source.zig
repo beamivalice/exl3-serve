@@ -12,7 +12,6 @@ const model = @import("model.zig");
 const expert_exl3 = @import("expert_exl3.zig");
 const expert_quant = @import("expert_quant.zig");
 const fp8_block = @import("fp8_block.zig");
-const log = @import("log.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -91,10 +90,6 @@ pub fn loadWeights(
     const scratch = arena.allocator();
     var source = try loadSourceIndex(io, scratch, model_dir);
     try validatePlan(&source, scratch, config);
-    inline for (@typeInfo(model.TrunkQuantSpec).@"struct".field_names) |name| {
-        if (@field(config.trunk_quant, name)) |q|
-            log.info("[mimo-source] trunk_quant: " ++ name ++ " packed affine {d}-bit g{d} at load\n", .{ q.bits, q.group_size });
-    }
 
     var weights = model.Weights.init(allocator);
     errdefer weights.deinit();
@@ -111,14 +106,10 @@ pub fn loadWeights(
             .resident, .routed_expert => {
                 const raw = try readTensor(allocator, model_dir, meta);
                 defer allocator.free(raw);
-                const arr = try uploadDense(raw, meta, stream);
-                if (trunkQuantFor(key, config)) |q| {
-                    defer _ = mlx.mlx_array_free(arr);
-                    try putAffine(&weights, allocator, key, arr, q);
-                } else {
-                    errdefer _ = mlx.mlx_array_free(arr);
-                    try putWeight(&weights, allocator, key, arr);
-                }
+                var arr = try uploadDense(raw, meta, stream);
+                errdefer _ = mlx.mlx_array_free(arr);
+                try putWeight(&weights, allocator, key, arr);
+                arr = .{};
             },
             .fp8_weight => try loadFp8Weight(&weights, allocator, model_dir, key, meta, &source),
         }
@@ -469,7 +460,8 @@ fn classifyKey(key: []const u8, config: *const model.ModelConfig) !TensorKind {
 
     if (std.mem.eql(u8, key, "model.embed_tokens.weight") or
         std.mem.eql(u8, key, "lm_head.weight") or
-        std.mem.eql(u8, key, "model.norm.weight"))
+        std.mem.eql(u8, key, "model.norm.weight") or
+        affineGridOf(key, "model.embed_tokens") or affineGridOf(key, "lm_head"))
         return .resident;
 
     const ref = layerKey(key) orelse return error.UnclassifiedMimoTensor;
@@ -490,6 +482,7 @@ fn classifyKey(key: []const u8, config: *const model.ModelConfig) !TensorKind {
     if (std.mem.eql(u8, ref.rest, "input_layernorm.weight") or
         std.mem.eql(u8, ref.rest, "post_attention_layernorm.weight") or
         std.mem.eql(u8, ref.rest, "self_attn.o_proj.weight") or
+        affineGridOf(ref.rest, "self_attn.o_proj") or
         std.mem.eql(u8, ref.rest, "self_attn.attention_sink_bias") or
         std.mem.eql(u8, ref.rest, "mlp.gate.weight") or
         std.mem.eql(u8, ref.rest, "mlp.gate.e_score_correction_bias"))
@@ -727,6 +720,43 @@ fn validateExl3Expert(key: []const u8, meta: TensorMeta, config: *const model.Mo
     _ = try payloadBytes(meta, meta.dtype);
 }
 
+/// o_proj, lm_head and embed_tokens may be STORED affine (docs/pack-format.md):
+/// U32 `<base>.weight` codes beside bf16 `<base>.scales` and `<base>.biases`.
+fn affineGridOf(key: []const u8, base: []const u8) bool {
+    if (!std.mem.startsWith(u8, key, base)) return false;
+    const part = key[base.len..];
+    return std.mem.eql(u8, part, ".scales") or std.mem.eql(u8, part, ".biases");
+}
+
+/// The linear `key` is a part of when that linear may be stored affine.
+fn affineTrunkBase(key: []const u8) ?[]const u8 {
+    const dot = std.mem.lastIndexOfScalar(u8, key, '.') orelse return null;
+    const base = key[0..dot];
+    if (!std.mem.eql(u8, key[dot..], ".weight") and !affineGridOf(key, base)) return null;
+    if (std.mem.eql(u8, base, "lm_head") or std.mem.eql(u8, base, "model.embed_tokens")) return base;
+    const ref = layerKey(base) orelse return null;
+    return if (std.mem.eql(u8, ref.rest, "self_attn.o_proj")) base else null;
+}
+
+fn validateResident(source: *const SourceIndex, allocator: Allocator, key: []const u8, meta: TensorMeta, config: *const model.ModelConfig) !void {
+    const base = affineTrunkBase(key) orelse return validateDense(key, meta, config);
+    if (std.mem.endsWith(u8, key, ".weight") and meta.dtype != .u32) return validateDense(key, meta, config);
+    const w_key = try std.fmt.allocPrint(allocator, "{s}.weight", .{base});
+    const w = source.tensors.get(w_key) orelse return error.AffineTrunkIncomplete;
+    const s = source.tensors.get(try std.fmt.allocPrint(allocator, "{s}.scales", .{base})) orelse return error.AffineTrunkIncomplete;
+    const b = source.tensors.get(try std.fmt.allocPrint(allocator, "{s}.biases", .{base})) orelse return error.AffineTrunkIncomplete;
+    if (w.dtype != .u32) return error.AffineTrunkIncomplete;
+    const dense = try denseExpectedShape(w_key, config);
+    if (w.shape.len != 2 or s.shape.len != 2 or w.shape[0] != dense.shape[0]) return error.MimoTensorShapeMismatch;
+    try expectShape(s, &[_]u64{ dense.shape[0], s.shape[1] });
+    try expectShape(b, s.shape);
+    if (expert_quant.affineGeomFromShapes(w.shape[1], s.shape[1], dense.shape[1]) == null)
+        return error.MimoTensorShapeMismatch;
+    _ = try payloadBytes(w, .u32);
+    _ = try payloadBytes(s, .bf16);
+    _ = try payloadBytes(b, .bf16);
+}
+
 fn validateDense(key: []const u8, meta: TensorMeta, config: *const model.ModelConfig) !void {
     const expected = try denseExpectedShape(key, config);
     if (meta.dtype != expected.dtype) return error.MimoTensorDtypeMismatch;
@@ -746,7 +776,7 @@ fn requireKind(
     if (try classifyKey(key, config) != expected)
         return error.MimoRequiredTensorKindMismatch;
     switch (expected) {
-        .resident => try validateDense(key, meta, config),
+        .resident => try validateResident(source, allocator, key, meta, config),
         .routed_expert => try validateRoutedExpert(key, meta, config),
         .fp8_weight => try validateFp8Pair(source, allocator, config, key, meta),
         .fp8_scale, .skipped => {},
@@ -810,10 +840,7 @@ fn validatePlan(source: *const SourceIndex, allocator: Allocator, config: *const
         const meta = entry.value_ptr.*;
         switch (try classifyKey(key, config)) {
             .skipped => {},
-            .resident => {
-                try validateDense(key, meta, config);
-                if (trunkQuantFor(key, config)) |q| _ = try affineBytes(meta, q);
-            },
+            .resident => try validateResident(source, allocator, key, meta, config),
             .routed_expert => try validateRoutedExpert(key, meta, config),
             .fp8_weight => try validateFp8Pair(source, allocator, config, key, meta),
             .fp8_scale => {
@@ -842,7 +869,7 @@ fn countResidentBytes(
         switch (try classifyKey(key, config)) {
             .skipped, .fp8_scale => {},
             .resident, .routed_expert => {
-                var bytes = if (trunkQuantFor(key, config)) |q| try affineBytes(meta, q) else try payloadBytes(meta, null);
+                var bytes = try payloadBytes(meta, null);
                 // The transformer loader keeps an f32 copy of each router for f32 routing.
                 if (layerKey(key)) |ref| if (std.mem.eql(u8, ref.rest, "mlp.gate.weight")) {
                     bytes += try shapeProduct(meta.shape) * 4;
@@ -919,42 +946,6 @@ fn validateFp8Payload(codes: []const u8, scales: []const u8) !void {
     for (0..scales.len / 4) |i| {
         const scale: f32 = @bitCast(std.mem.readInt(u32, scales[i * 4 ..][0..4], .little));
         if (!std.math.isFinite(scale) or @abs(scale) * 448.0 > bf16_max) return error.InvalidFp8Scale;
-    }
-}
-
-/// The pack's `trunk_quant` for a resident tensor, when it names one.
-fn trunkQuantFor(key: []const u8, config: *const model.ModelConfig) ?model.TrunkQuant {
-    if (std.mem.eql(u8, key, "lm_head.weight")) return config.trunk_quant.lm_head;
-    if (std.mem.eql(u8, key, "model.embed_tokens.weight")) return config.trunk_quant.embed_tokens;
-    const ref = layerKey(key) orelse return null;
-    return if (std.mem.eql(u8, ref.rest, "self_attn.o_proj.weight")) config.trunk_quant.o_proj else null;
-}
-
-/// Packed codes plus bf16 scales and biases, one pair per group.
-fn affineBytes(meta: TensorMeta, q: model.TrunkQuant) !u64 {
-    if (meta.shape.len != 2 or meta.shape[1] % q.group_size != 0 or meta.shape[1] * q.bits % 32 != 0)
-        return error.UnsupportedTrunkQuant;
-    const rows = meta.shape[0];
-    const cols = meta.shape[1];
-    return rows * cols * q.bits / 8 + 2 * rows * (cols / q.group_size) * 2;
-}
-
-/// MLX's own affine packer over the stored bf16 (deterministic), kept as the
-/// `.weight/.scales/.biases` triple the quantized binder reads.
-fn putAffine(weights: *model.Weights, allocator: Allocator, key: []const u8, dense: mlx.mlx_array, q: model.TrunkQuant) !void {
-    const s = mlx.gpuStream();
-    defer _ = mlx.mlx_stream_free(s);
-    var parts = mlx.mlx_vector_array_new();
-    defer _ = mlx.mlx_vector_array_free(parts);
-    try mlx.check(mlx.mlx_quantize(&parts, dense, mlx.mlx_optional_int.some(@intCast(q.group_size)), mlx.mlx_optional_int.some(q.bits), "affine", .{ .ctx = null }, s));
-    for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, i| {
-        var arr = mlx.mlx_array_new();
-        errdefer _ = mlx.mlx_array_free(arr);
-        try mlx.check(mlx.mlx_vector_array_get(&arr, parts, i));
-        try mlx.check(mlx.mlx_array_eval(arr));
-        const name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ fp8Base(key), suffix });
-        defer allocator.free(name);
-        try putWeight(weights, allocator, name, arr);
     }
 }
 
@@ -1142,6 +1133,44 @@ const TinySourceFixture = struct {
     }
 };
 
+const TINY_SOURCE_INDEX = [_]TestIndexEntry{
+    .{ .key = "model.embed_tokens.weight", .file = "model-00001.safetensors" },
+    .{ .key = "model.layers.0.self_attn.qkv_proj.weight", .file = "model-00001.safetensors" },
+    .{ .key = "lm_head.weight", .file = "model-00002.safetensors" },
+    .{ .key = "model.norm.weight", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.input_layernorm.weight", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.post_attention_layernorm.weight", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.self_attn.o_proj.weight", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.mlp.gate_proj.weight", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.mlp.gate_proj.weight_scale_inv", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.mlp.up_proj.weight", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.mlp.up_proj.weight_scale_inv", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.mlp.down_proj.weight", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.mlp.down_proj.weight_scale_inv", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.mlp.experts.0.gate_proj.weight", .file = "model-00002.safetensors" },
+    .{ .key = "model.mtp.layers.0.fake.weight", .file = "model-00002.safetensors" },
+    .{ .key = "visual.fake", .file = "model-00002.safetensors" },
+    .{ .key = "model.layers.0.self_attn.qkv_proj.weight_scale_inv", .file = "model-00003.safetensors" },
+};
+
+/// A pack's surgery on the tiny source: `tensors` land in a NEW shard and the
+/// index points their names at it; the old bf16 bytes stay, unindexed.
+fn redirectToNewShard(io: std.Io, allocator: Allocator, tmp: *std.testing.TmpDir, tensors: []const TestTensor) !void {
+    var dir = try tmp.dir.openDir(io, "mimo-source", .{});
+    defer dir.close(io);
+    try writeTestShard(io, allocator, dir, "model-affine.safetensors", tensors);
+    var entries: std.ArrayList(TestIndexEntry) = .empty;
+    defer entries.deinit(allocator);
+    for (TINY_SOURCE_INDEX) |e| {
+        const moved = for (tensors) |t| {
+            if (std.mem.eql(u8, t.key, e.key)) break true;
+        } else false;
+        if (!moved) try entries.append(allocator, e);
+    }
+    for (tensors) |t| try entries.append(allocator, .{ .key = t.key, .file = "model-affine.safetensors" });
+    try writeTestIndex(io, allocator, dir, entries.items);
+}
+
 fn makeTinySourceFixture(
     io: std.Io,
     allocator: Allocator,
@@ -1220,26 +1249,7 @@ fn makeTinySourceFixture(
     try writeTestShard(io, allocator, dir, "model-00002.safetensors", &shard_b);
     try writeTestShard(io, allocator, dir, "model-00003.safetensors", &shard_c);
 
-    const entries = [_]TestIndexEntry{
-        .{ .key = "model.embed_tokens.weight", .file = "model-00001.safetensors" },
-        .{ .key = "model.layers.0.self_attn.qkv_proj.weight", .file = "model-00001.safetensors" },
-        .{ .key = "lm_head.weight", .file = "model-00002.safetensors" },
-        .{ .key = "model.norm.weight", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.input_layernorm.weight", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.post_attention_layernorm.weight", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.self_attn.o_proj.weight", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.mlp.gate_proj.weight", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.mlp.gate_proj.weight_scale_inv", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.mlp.up_proj.weight", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.mlp.up_proj.weight_scale_inv", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.mlp.down_proj.weight", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.mlp.down_proj.weight_scale_inv", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.mlp.experts.0.gate_proj.weight", .file = "model-00002.safetensors" },
-        .{ .key = "model.mtp.layers.0.fake.weight", .file = "model-00002.safetensors" },
-        .{ .key = "visual.fake", .file = "model-00002.safetensors" },
-        .{ .key = "model.layers.0.self_attn.qkv_proj.weight_scale_inv", .file = "model-00003.safetensors" },
-    };
-    try writeTestIndex(io, allocator, dir, &entries);
+    try writeTestIndex(io, allocator, dir, &TINY_SOURCE_INDEX);
 
     return .{
         .allocator = allocator,
@@ -1701,49 +1711,16 @@ test "mimo source refuses NaN codes and scales whose products leave bf16" {
     }
 }
 
-test "mimo source requantizes o_proj only when the pack declares trunk_quant" {
-    const t = std.testing;
-    const io = t.io;
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    var fixture = try makeTinySourceFixture(io, t.allocator, &tmp);
-    defer fixture.deinit();
-    const key = "model.layers.0.self_attn.o_proj.weight";
-
-    var plain = try loadWeights(io, t.allocator, fixture.path, &fixture.config);
-    defer plain.deinit();
-    try t.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(plain.get(key).?));
-    try t.expect(plain.get("model.layers.0.self_attn.o_proj.scales") == null);
-    const plain_bytes = try residentBytesWithConfig(io, t.allocator, fixture.path, &fixture.config);
-
-    var config = fixture.config;
-    config.trunk_quant.o_proj = .{ .bits = 8, .group_size = 64 };
-    var packed_weights = try loadWeights(io, t.allocator, fixture.path, &config);
-    defer packed_weights.deinit();
-    const w = packed_weights.get(key).?;
-    const sc = packed_weights.get("model.layers.0.self_attn.o_proj.scales").?;
-    const bi = packed_weights.get("model.layers.0.self_attn.o_proj.biases").?;
-    try t.expectEqual(mlx.mlx_dtype.uint32, mlx.mlx_array_dtype(w));
-    try t.expectEqualSlices(c_int, &[_]c_int{ 128, 32 }, mlx.getShape(w));
-    try t.expectEqualSlices(c_int, &[_]c_int{ 128, 2 }, mlx.getShape(sc));
-    try t.expectEqualSlices(c_int, &[_]c_int{ 128, 2 }, mlx.getShape(bi));
-    // The fixture's o_proj is all ones, which affine packs exactly.
-    const s = mlx.gpuStream();
-    defer _ = mlx.mlx_stream_free(s);
-    var back = mlx.mlx_array_new();
-    defer _ = mlx.mlx_array_free(back);
-    try mlx.check(mlx.mlx_dequantize(&back, w, sc, bi, mlx.mlx_optional_int.some(64), mlx.mlx_optional_int.some(8), "affine", .{ .ctx = null }, .{ .value = .bfloat16, .has_value = true }, s));
-    var back32 = mlx.mlx_array_new();
-    defer _ = mlx.mlx_array_free(back32);
-    try mlx.check(mlx.mlx_astype(&back32, back, .float32, s));
-    try mlx.check(mlx.mlx_array_eval(back32));
-    const vals = mlx.mlx_array_data_float32(back32) orelse return error.TestUnexpectedNullData;
-    for (vals[0 .. 128 * 128]) |v| try t.expectEqual(@as(f32, 1), v);
-    // Billed at the packed bytes: [128,32] u32 codes + two [128,2] bf16 grids.
-    try t.expectEqual(plain_bytes - 128 * 128 * 2 + 128 * 32 * 4 + 2 * 128 * 2 * 2, try residentBytesWithConfig(io, t.allocator, fixture.path, &config));
+/// An 8-bit g64 stored-affine triple for `base` over a [rows, 128] linear.
+fn affineTriple(allocator: Allocator, base: []const u8, rows: u64, out: *std.ArrayList(TestTensor)) !void {
+    const shapes = try allocator.alloc(u64, 4);
+    shapes[0..4].* = .{ rows, 32, rows, 2 };
+    try out.append(allocator, .{ .key = try std.fmt.allocPrint(allocator, "{s}.weight", .{base}), .dtype = "U32", .shape = shapes[0..2], .bytes = try testBf16Bytes(allocator, rows * 64, 0x1234 + @as(u16, @intCast(rows))) });
+    try out.append(allocator, .{ .key = try std.fmt.allocPrint(allocator, "{s}.scales", .{base}), .dtype = "BF16", .shape = shapes[2..4], .bytes = try testBf16Bytes(allocator, rows * 2, 0x3c00) });
+    try out.append(allocator, .{ .key = try std.fmt.allocPrint(allocator, "{s}.biases", .{base}), .dtype = "BF16", .shape = shapes[2..4], .bytes = try testBf16Bytes(allocator, rows * 2, 0xbf00) });
 }
 
-test "mimo source packs lm_head and embed_tokens only when the pack declares them" {
+test "mimo source serves a pack's stored affine o_proj, lm_head and embed_tokens as stored and bills those bytes" {
     const t = std.testing;
     const io = t.io;
     var tmp = t.tmpDir(.{});
@@ -1752,21 +1729,69 @@ test "mimo source packs lm_head and embed_tokens only when the pack declares the
     defer fixture.deinit();
     const plain_bytes = try residentBytesWithConfig(io, t.allocator, fixture.path, &fixture.config);
 
-    var config = fixture.config;
-    config.trunk_quant = .{ .lm_head = .{ .bits = 8, .group_size = 64 }, .embed_tokens = .{ .bits = 8, .group_size = 64 } };
-    var weights = try loadWeights(io, t.allocator, fixture.path, &config);
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tensors: std.ArrayList(TestTensor) = .empty;
+    try affineTriple(a, "model.layers.0.self_attn.o_proj", 128, &tensors);
+    try affineTriple(a, "lm_head", 2, &tensors);
+    try affineTriple(a, "model.embed_tokens", 2, &tensors);
+    try redirectToNewShard(io, a, &tmp, tensors.items);
+
+    var weights = try loadWeights(io, t.allocator, fixture.path, &fixture.config);
     defer weights.deinit();
-    for ([_][]const u8{ "lm_head", "model.embed_tokens" }) |base| {
-        var name_buf: [64]u8 = undefined;
-        const w = weights.get(try std.fmt.bufPrint(&name_buf, "{s}.weight", .{base})).?;
-        try t.expectEqual(mlx.mlx_dtype.uint32, mlx.mlx_array_dtype(w));
-        try t.expectEqualSlices(c_int, &[_]c_int{ 2, 32 }, mlx.getShape(w));
-        try t.expect(weights.get(try std.fmt.bufPrint(&name_buf, "{s}.biases", .{base})) != null);
+    for (tensors.items) |want| {
+        const got = weights.get(want.key) orelse return error.TestMissingWeight;
+        const is_codes = std.mem.endsWith(u8, want.key, ".weight");
+        try t.expectEqual(if (is_codes) mlx.mlx_dtype.uint32 else mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(got));
+        try t.expectEqual(want.shape[0], @as(u64, @intCast(mlx.getShape(got)[0])));
+        try t.expectEqual(want.shape[1], @as(u64, @intCast(mlx.getShape(got)[1])));
+        try mlx.check(mlx.mlx_array_eval(got));
+        const bytes: [*]const u8 = if (is_codes)
+            @ptrCast(mlx.mlx_array_data_uint32(got) orelse return error.TestUnexpectedNullData)
+        else
+            @ptrCast(mlx.mlx_array_data_bfloat16(got) orelse return error.TestUnexpectedNullData);
+        try t.expectEqualSlices(u8, want.bytes, bytes[0..want.bytes.len]);
     }
-    try t.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(weights.get("model.layers.0.self_attn.o_proj.weight").?));
-    // Each [2,128] bf16 table becomes [2,32] u32 codes + two [2,2] bf16 grids.
-    const per_table: u64 = 2 * 128 * 2 - (2 * 32 * 4 + 2 * 2 * 2 * 2);
-    try t.expectEqual(plain_bytes - 2 * per_table, try residentBytesWithConfig(io, t.allocator, fixture.path, &config));
+    // Billed as stored: the three bf16 tensors leave, the packed triples arrive.
+    const bf16_bytes: u64 = 128 * 128 * 2 + 2 * (2 * 128 * 2);
+    const packed_bytes: u64 = (128 * 32 * 4 + 2 * 128 * 2 * 2) + 2 * (2 * 32 * 4 + 2 * 2 * 2 * 2);
+    try t.expectEqual(plain_bytes - bf16_bytes + packed_bytes, try residentBytesWithConfig(io, t.allocator, fixture.path, &fixture.config));
+}
+
+test "mimo source refuses a stored affine trunk triple that is incomplete or does not solve" {
+    const t = std.testing;
+    const io = t.io;
+    const o = "model.layers.0.self_attn.o_proj";
+    const Case = struct { shapes: [3][]const u64, parts: []const u8, want: anyerror };
+    const cases = [_]Case{
+        // codes without their grids; grids beside the bf16 weight
+        .{ .shapes = .{ &.{ 128, 32 }, &.{ 128, 2 }, &.{ 128, 2 } }, .parts = "w", .want = error.AffineTrunkIncomplete },
+        .{ .shapes = .{ &.{ 128, 32 }, &.{ 128, 2 }, &.{ 128, 2 } }, .parts = "sb", .want = error.AffineTrunkIncomplete },
+        // 7 words cover 128 inputs at no admitted width; 3 groups split no row; rows short
+        .{ .shapes = .{ &.{ 128, 7 }, &.{ 128, 2 }, &.{ 128, 2 } }, .parts = "wsb", .want = error.MimoTensorShapeMismatch },
+        .{ .shapes = .{ &.{ 128, 32 }, &.{ 128, 3 }, &.{ 128, 3 } }, .parts = "wsb", .want = error.MimoTensorShapeMismatch },
+        .{ .shapes = .{ &.{ 128, 32 }, &.{ 128, 2 }, &.{ 128, 4 } }, .parts = "wsb", .want = error.MimoTensorShapeMismatch },
+        .{ .shapes = .{ &.{ 64, 32 }, &.{ 64, 2 }, &.{ 64, 2 } }, .parts = "wsb", .want = error.MimoTensorShapeMismatch },
+    };
+    for (cases) |case| {
+        var tmp = t.tmpDir(.{});
+        defer tmp.cleanup();
+        var fixture = try makeTinySourceFixture(io, t.allocator, &tmp);
+        defer fixture.deinit();
+        var arena = std.heap.ArenaAllocator.init(t.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var tensors: std.ArrayList(TestTensor) = .empty;
+        for ([_][]const u8{ "w", "s", "b" }, [_][]const u8{ "weight", "scales", "biases" }, [_][]const u8{ "U32", "BF16", "BF16" }, case.shapes) |tag, part, dtype, shape| {
+            if (std.mem.indexOf(u8, case.parts, tag) == null) continue;
+            const elem: u64 = if (tag[0] == 'w') 4 else 2;
+            try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.{s}", .{ o, part }), .dtype = dtype, .shape = shape, .bytes = try a.alloc(u8, shape[0] * shape[1] * elem) });
+        }
+        try redirectToNewShard(io, a, &tmp, tensors.items);
+        try t.expectError(case.want, residentBytesWithConfig(io, t.allocator, fixture.path, &fixture.config));
+        try t.expectError(case.want, loadWeights(io, t.allocator, fixture.path, &fixture.config));
+    }
 }
 
 test "mimo source keeps the FP8 trunk in its source bytes and bills them" {

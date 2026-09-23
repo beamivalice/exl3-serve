@@ -1973,11 +1973,12 @@ fn writeTinyShard(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, tensors: []
 /// (layer 0 dense) beside RESIDENT affine routed banks (layer 1). `expert_seed`
 /// is the only thing that differs between two arms.
 fn writeTinyMimoResidentPack(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expert_seed: u64) !void {
-    return writeTinyMimoPackWith(io, a, dir, expert_seed, "");
+    return writeTinyMimoPackWith(io, a, dir, expert_seed, &.{});
 }
 
-/// `extra_config` is spliced into config.json as further top-level fields.
-fn writeTinyMimoPackWith(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expert_seed: u64, extra_config: []const u8) !void {
+/// `stored_affine` names `.weight` tensors the pack stores 8-bit g64 affine
+/// (MLX's own packer over the same bf16), the way a converted pack carries them.
+fn writeTinyMimoPackWith(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expert_seed: u64, stored_affine: []const []const u8) !void {
     const H = TinyMimo.hidden;
     try dir.writeFile(io, .{ .sub_path = "config.json", .data = try std.mem.concat(a, u8, &.{
         \\{"model_type":"mimo_v2","vocab_size":8,"hidden_size":128,
@@ -1992,7 +1993,6 @@ fn writeTinyMimoPackWith(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expe
         \\ "add_swa_attention_sink_bias":false,
         \\ "add_full_attention_sink_bias":false
         ,
-        extra_config,
         "}",
     }) });
     try dir.writeFile(io, .{ .sub_path = "tokenizer_config.json", .data = "{}" });
@@ -2033,7 +2033,47 @@ fn writeTinyMimoPackWith(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expe
             try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.switch_mlp.{s}_proj.biases", .{ p, proj }), .dtype = "BF16", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.experts, H, TinyMimo.groups }), .bytes = try tinyBf16(a, rows * TinyMimo.groups, expert_seed * 1000 + 20 + j) });
         }
     }
-    try writeTinyShard(io, a, dir, tensors.items);
+    var stored: std.ArrayList(TinyTensor) = .empty;
+    defer stored.deinit(a);
+    for (tensors.items) |t| {
+        for (stored_affine) |name| {
+            if (std.mem.eql(u8, name, t.key)) break;
+        } else {
+            try stored.append(a, t);
+            continue;
+        }
+        try appendAffine8(a, &stored, t);
+    }
+    try writeTinyShard(io, a, dir, stored.items);
+}
+
+fn appendAffine8(a: std.mem.Allocator, out: *std.ArrayList(TinyTensor), t: TinyTensor) !void {
+    const s = mlx.gpuStream();
+    defer _ = mlx.mlx_stream_free(s);
+    const dense = mlx.mlx_array_new_data(t.bytes.ptr, &[_]c_int{ @intCast(t.shape[0]), @intCast(t.shape[1]) }, 2, .bfloat16);
+    defer _ = mlx.mlx_array_free(dense);
+    var parts = mlx.mlx_vector_array_new();
+    defer _ = mlx.mlx_vector_array_free(parts);
+    try mlx.check(mlx.mlx_quantize(&parts, dense, mlx.mlx_optional_int.some(64), mlx.mlx_optional_int.some(8), "affine", .{ .ctx = null }, s));
+    const base = t.key[0 .. t.key.len - ".weight".len];
+    for ([_][]const u8{ "weight", "scales", "biases" }, [_][]const u8{ "U32", "BF16", "BF16" }, 0..) |part, dtype, i| {
+        var arr = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(arr);
+        try mlx.check(mlx.mlx_vector_array_get(&arr, parts, i));
+        try mlx.check(mlx.mlx_array_eval(arr));
+        const shape = mlx.getShape(arr);
+        const bytes = mlx.mlx_array_size(arr) * @as(usize, if (i == 0) 4 else 2);
+        const src: [*]const u8 = if (i == 0)
+            @ptrCast(mlx.mlx_array_data_uint32(arr) orelse return error.KldLogitsUnreadable)
+        else
+            @ptrCast(mlx.mlx_array_data_bfloat16(arr) orelse return error.KldLogitsUnreadable);
+        try out.append(a, .{
+            .key = try std.fmt.allocPrint(a, "{s}.{s}", .{ base, part }),
+            .dtype = dtype,
+            .shape = try a.dupe(u64, &[_]u64{ @intCast(shape[0]), @intCast(shape[1]) }),
+            .bytes = try a.dupe(u8, src[0..bytes]),
+        });
+    }
 }
 
 test "kld: a resident mimo_v2 load takes the source trunk and its logits follow the routed experts" {
@@ -2131,7 +2171,7 @@ test "kld: an imatrix capture records every mimo_v2 o_proj input and the lm_head
     }
 }
 
-test "kld: a pack declaring trunk_quant serves an affine o_proj; its source-shaped twin keeps bf16" {
+test "kld: a pack storing o_proj, lm_head and embed_tokens affine serves them packed beside its bf16 twin" {
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var metal: bool = false;
@@ -2144,23 +2184,29 @@ test "kld: a pack declaring trunk_quant serves an affine o_proj; its source-shap
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    const o_proj = [_][]const u8{ "model.layers.0.self_attn.o_proj.weight", "model.layers.1.self_attn.o_proj.weight" };
+    const tables = [_][]const u8{ "lm_head.weight", "model.embed_tokens.weight" };
+    const arms = [_][]const []const u8{ &.{}, &o_proj, &tables, tables[1..] };
     const ids = [_]u32{ 1, 3, 5, 2, 7, 0 };
-    var rows: [2][TinyMimo.vocab]f32 = undefined;
-    const arms = [_][]const u8{ "", ",\"trunk_quant\":{\"o_proj\":{\"mode\":\"affine\",\"bits\":8,\"group_size\":64}}" };
-    for (arms, 0..) |extra, arm| {
-        const sub = if (arm == 0) "source" else "pack";
+    var rows: [arms.len][TinyMimo.vocab]f32 = undefined;
+    for (arms, 0..) |stored, arm| {
+        const sub = ([_][]const u8{ "source", "o_proj", "tables", "embed" })[arm];
         try tmp.dir.createDirPath(io, sub);
         var dir = try tmp.dir.openDir(io, sub, .{});
         defer dir.close(io);
-        try writeTinyMimoPackWith(io, arena, dir, 1, extra);
+        try writeTinyMimoPackWith(io, arena, dir, 1, stored);
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path_len = try dir.realPath(io, &path_buf);
 
         const loaded = try loadModel(io, allocator, .{ .model_dir = path_buf[0..path_len] });
         defer loaded.deinit();
-        const o = loaded.weights.get("model.layers.1.self_attn.o_proj.weight") orelse return error.MissingWeight;
-        try testing.expectEqual(if (arm == 0) mlx.mlx_dtype.bfloat16 else mlx.mlx_dtype.uint32, mlx.mlx_array_dtype(o));
-        try testing.expectEqual(arm == 1, loaded.weights.get("model.layers.1.self_attn.o_proj.biases") != null);
+        for (o_proj ++ tables) |name| {
+            const packed_here = for (stored) |s| {
+                if (std.mem.eql(u8, s, name)) break true;
+            } else false;
+            const w = loaded.weights.get(name) orelse return error.MissingWeight;
+            try testing.expectEqual(if (packed_here) mlx.mlx_dtype.uint32 else mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(w));
+        }
 
         var ctx = loaded.xfm.defaultCtx();
         const logits = try forwardPrompt(allocator, loaded, &ctx, &ids);
@@ -2168,57 +2214,9 @@ test "kld: a pack declaring trunk_quant serves an affine o_proj; its source-shap
         try readLastRow(&loaded.xfm, logits, &rows[arm]);
         for (rows[arm]) |v| try testing.expect(std.math.isFinite(v));
     }
-    // 8-bit o_proj moves the logits, but only by its own rounding.
-    try testing.expect(!std.mem.eql(f32, &rows[0], &rows[1]));
-    for (rows[0], rows[1]) |a, b| try testing.expect(@abs(a - b) <= 0.05 * (@abs(a) + 1));
-}
-
-test "kld: a pack declaring lm_head and embed_tokens trunk_quant serves both packed" {
-    const allocator = testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var metal: bool = false;
-    mlx.check(mlx.mlx_metal_is_available(&metal)) catch return error.SkipZigTest;
-    if (!metal) return error.SkipZigTest;
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const ids = [_]u32{ 1, 3, 5, 2, 7, 0 };
-    var rows: [3][TinyMimo.vocab]f32 = undefined;
-    const q8 = "{\"mode\":\"affine\",\"bits\":8,\"group_size\":64}";
-    const arms = [_][]const u8{
-        "",
-        ",\"trunk_quant\":{\"lm_head\":" ++ q8 ++ ",\"embed_tokens\":" ++ q8 ++ "}",
-        ",\"trunk_quant\":{\"embed_tokens\":" ++ q8 ++ "}",
-    };
-    for (arms, 0..) |extra, arm| {
-        const sub = ([_][]const u8{ "source", "both", "embed" })[arm];
-        try tmp.dir.createDirPath(io, sub);
-        var dir = try tmp.dir.openDir(io, sub, .{});
-        defer dir.close(io);
-        try writeTinyMimoPackWith(io, arena, dir, 1, extra);
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path_len = try dir.realPath(io, &path_buf);
-
-        const loaded = try loadModel(io, allocator, .{ .model_dir = path_buf[0..path_len] });
-        defer loaded.deinit();
-        const head = loaded.weights.get("lm_head.weight") orelse return error.MissingWeight;
-        const emb = loaded.weights.get("model.embed_tokens.weight") orelse return error.MissingWeight;
-        try testing.expectEqual(if (arm == 1) mlx.mlx_dtype.uint32 else mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(head));
-        try testing.expectEqual(if (arm == 0) mlx.mlx_dtype.bfloat16 else mlx.mlx_dtype.uint32, mlx.mlx_array_dtype(emb));
-
-        var ctx = loaded.xfm.defaultCtx();
-        const logits = try forwardPrompt(allocator, loaded, &ctx, &ids);
-        defer _ = mlx.mlx_array_free(logits);
-        try readLastRow(&loaded.xfm, logits, &rows[arm]);
-        for (rows[arm]) |v| try testing.expect(std.math.isFinite(v));
-    }
-    // 8-bit tables move the logits only by their own rounding; a bf16 head
+    // 8-bit weights move the logits only by their own rounding; a bf16 head
     // beside a packed embedding keeps its own (absent) scales.
-    for (1..3) |arm| {
+    for (1..arms.len) |arm| {
         try testing.expect(!std.mem.eql(f32, &rows[0], &rows[arm]));
         var dot: f64 = 0;
         var na: f64 = 0;
@@ -2231,3 +2229,4 @@ test "kld: a pack declaring lm_head and embed_tokens trunk_quant serves both pac
         try testing.expect(dot / @sqrt(na * nb) > 0.98);
     }
 }
+

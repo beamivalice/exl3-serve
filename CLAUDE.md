@@ -80,7 +80,7 @@ no `libllama` (`tests/test_serving_deps.sh`). Box: M5 Max 128 GB, macOS 27.
 | `model.zig` / `model_settings.zig` / `model_discovery.zig` / `model_registry.zig` | config + weights, per-model settings, discovery, registry | server-lifecycle |
 | `transformer.zig` | forward pass, arch dispatch, quant resolution, custom kernels, `KVCache` | arch-*, engine-* |
 | `qwen4_exp.zig` / `hc_prefill.zig` | Flash-Next n-gram host side; fused HC prefill | arch-qwen4exp |
-| `mimo_source.zig` / `fp8_block.zig` | MiMo source headers, FP8 trunk kept as stored + its GEMV, rank-local QKV, `trunk_quant`, shard-stamp check | arch-mimo-v2 |
+| `mimo_source.zig` / `fp8_block.zig` | MiMo source headers, FP8 trunk kept as stored + its GEMV, rank-local QKV, stored-affine trunk, shard-stamp check | arch-mimo-v2 |
 | `expert_quant.zig` / `expert_exl3.zig` / `expert_exl3_kernels.zig` | expert layout, EXL3 decoders and kernels | engine-exl3-experts |
 | `expert_stream.zig` / `expert_io.zig` / `expert_bf16_kernels.zig` / `imatrix.zig` | SSD expert streaming | engine-expert-streaming |
 | `mtp*.zig` / `round_cost.zig` | MTP head, acceptance, planner, round-cost table | engine-mtp |

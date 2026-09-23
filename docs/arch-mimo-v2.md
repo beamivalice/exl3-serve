@@ -53,14 +53,18 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 - **The weight loader is ONE decision** (`model.loadWeightsForConfig`): a MiMo pack read without its source trunk
   binds the raw FP8 fused QKV and its logits stop following the routed experts (two packs sharing a hard-linked
   trunk produced bit-identical logits until `kld` took the served loader).
-- **`trunk_quant` (landed 4cb68cc..a1fb67f)**: a SERVED pack declares o_proj, lm_head and embed_tokens as
-  affine-8 gs64 and the loader packs them at load (lm_head via quantized matmul, embed via the quantized row gather);
-  the source checkpoint never declares it, so the teacher keeps bf16. Contract: [pack-format](pack-format.md).
-  Measured on the MCG K2.5 w12 pack (kv8, no MTP, ctx 32768): decode 32.4 (bf16 trunk) -> 39.0 (FP8 native) -> 43.5
-  tok/s (+ o_proj affine-8); resident 107.03 -> 103.96 -> 102.45 -> 101.28 GB (+ lm_head, embed); 16x512 KLD to EOS
+- **Stored-affine trunk**: a SERVED pack stores o_proj, lm_head and embed_tokens as affine triples (8-bit g64,
+  imatrix-weighted for o_proj and lm_head, written by the private converter); the loader serves and bills them as
+  stored (lm_head via quantized matmul, embed via the quantized row gather), with no load-time step. The source
+  checkpoint stores them bf16, so the teacher keeps bf16. Contract: [pack-format](pack-format.md). Measured on the
+  MCG K2.5 w12 pack against the load-time product: decode 44.2 vs 44.0 tok/s, 16x512 KLD 0.07793 vs 0.07761 (NLL
+  and top-1 slightly better), same 94.32 GB bill, same boot time ([quality-kld](quality-kld.md#mimo)).
+- History: the load-time `trunk_quant` policy (4cb68cc..a1fb67f, MLX's minmax packer at every load) measured on the
+  MCG K2.5 w12 pack (kv8, no MTP, ctx 32768): decode 32.4 (bf16 trunk) -> 39.0 (FP8 native) -> 43.5 tok/s
+  (+ o_proj affine-8); resident 107.03 -> 103.96 -> 102.45 -> 101.28 GB (+ lm_head, embed); 16x512 KLD to EOS
   0.07761 / 0.07756 / 0.07745 / 0.07761 (product). Affine-8 for the FP8 linears instead: 43.3 tok/s, 0.07774 —
-  no faster, lossy, not shipped. FP8-native vs old bf16-rounded teacher: 0.0034 KLD. Details:
-  [perf-baselines](perf-baselines.md#mimo-decode).
+  no faster, lossy, not shipped. FP8-native vs old bf16-rounded teacher: 0.0034 KLD. A config still carrying
+  `trunk_quant` is refused (`TrunkQuantRetired`). Details: [perf-baselines](perf-baselines.md#mimo-decode).
 
 ## Geometry and math
 
