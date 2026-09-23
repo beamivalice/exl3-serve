@@ -59,13 +59,14 @@ for _ in $(seq 1 240); do
 done
 [ "$UP" = "1" ] || { echo "FAIL: server never became healthy"; tail -5 "$LOG"; exit 1; }
 
-row() { # row <model path> <field> — top-level context_length or meta.kv_quant of the READY row
+row() { # row <model path> <ctx|kv|src> — context_length, meta.kv_quant or meta.kv_cache.source of the READY row
     curl -s "http://127.0.0.1:$PORT/v1/models" | python3 -c "
 import sys, json
 want = sys.argv[1].rstrip('/')
 for m in json.load(sys.stdin)['data']:
     if want.endswith('/' + m['id']):
-        print(m['context_length'] if sys.argv[2] == 'ctx' else m['meta'].get('kv_quant'))
+        f = sys.argv[2]
+        print(m['context_length'] if f == 'ctx' else m['meta']['kv_cache']['source'] if f == 'src' else m['meta'].get('kv_quant'))
         break
 " "$1" "$2"
 }
@@ -77,6 +78,8 @@ post() { # post <route> <json>
 # [1] boot load honours the file
 check "[1] boot: context_length 4096 from the file (got $(row "$MODEL_A" ctx))" "$([ "$(row "$MODEL_A" ctx)" = "4096" ] && echo 1 || echo 0)"
 check "[1] boot: meta.kv_quant 8 from the file (got $(row "$MODEL_A" kv))" "$([ "$(row "$MODEL_A" kv)" = "8" ] && echo 1 || echo 0)"
+check "[1] boot: kv_cache source model-settings.json (got $(row "$MODEL_A" src))" "$([ "$(row "$MODEL_A" src)" = "model-settings.json" ] && echo 1 || echo 0)"
+check "[1] load log names the KV choice" "$(grep -q "\[kv-cache\] kv8 (model-settings.json)" "$LOG" && echo 1 || echo 0)"
 check "[1] log names the override" "$(grep -q "\[model-settings\] .*ctx=4096 kv=8" "$LOG" && echo 1 || echo 0)"
 check "[1] log names the MTP acceptance mode" "$(grep -q "\[model-settings\] .*accept=typical" "$LOG" && echo 1 || echo 0)"
 
@@ -84,7 +87,9 @@ check "[1] log names the MTP acceptance mode" "$(grep -q "\[model-settings\] .*a
 CODE="$(post load-model "{\"model\":\"$MODEL_B\"}")"
 check "[2] cold load of model B -> 200 (got $CODE)" "$([ "$CODE" = "200" ] && echo 1 || echo 0)"
 check "[2] model B keeps --ctx-size 16384 (got $(row "$MODEL_B" ctx))" "$([ "$(row "$MODEL_B" ctx)" = "16384" ] && echo 1 || echo 0)"
-check "[2] model B keeps kv off (got $(row "$MODEL_B" kv))" "$([ "$(row "$MODEL_B" kv)" = "off" ] && echo 1 || echo 0)"
+check "[2] model B keeps the kv8 default (got $(row "$MODEL_B" kv))" "$([ "$(row "$MODEL_B" kv)" = "8" ] && echo 1 || echo 0)"
+check "[2] model B kv_cache source default (got $(row "$MODEL_B" src))" "$([ "$(row "$MODEL_B" src)" = "default" ] && echo 1 || echo 0)"
+check "[2] cold-load log names the KV choice" "$(grep -q "\[kv-cache\] kv8 (default)" "$LOG" && echo 1 || echo 0)"
 check "[2] model A still 4096 (got $(row "$MODEL_A" ctx))" "$([ "$(row "$MODEL_A" ctx)" = "4096" ] && echo 1 || echo 0)"
 
 # [3] edit + unload + load applies the new values, no restart

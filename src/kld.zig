@@ -31,6 +31,7 @@ pub const Options = struct {
     limit: u32 = 0,
     no_template: bool = false,
     ctx_size: u32 = 0,
+    /// Dense, not the serving default: the teacher adds no quantization of its own.
     kv_quant_config: transformer_mod.KVQuantConfig = transformer_mod.KVQuantConfig.dense,
     expert_cache_bytes: u64 = 0,
     ssd_budget_bytes: u64 = 0,
@@ -1784,6 +1785,13 @@ test "kld: the argument parser reads every flag and refuses an unknown one" {
     try testing.expectError(error.MissingOut, parseArgs(&.{ "capture", "--model", "/m", "--prompts", "/p" }));
     try testing.expectError(error.MissingFixture, parseArgs(&.{ "compare", "--model", "/m" }));
     try testing.expect((try parseArgs(&.{ "capture", "--help" })).help);
+}
+
+test "kld: an unflagged capture keeps a full-width teacher KV, never the serving kv8 default" {
+    const capture = try parseArgs(&.{ "capture", "--model", "/m", "--prompts", "/p", "--out", "/o" });
+    try testing.expectEqual(transformer_mod.KVQuantConfig.dense, capture.kv_quant_config);
+    try testing.expect(transformer_mod.KVQuantConfig.engine_default.isQuant());
+    try testing.expectEqualStrings("bf16", kvCacheFormat(capture.kv_quant_config));
 }
 
 test "kld: the recorded strict NLL is the teacher's own log-softmax, as the capture wrote it" {

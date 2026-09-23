@@ -9,7 +9,7 @@
 #   SMOKE_CONFIGS=default,kv4 ./tests/test_smoke_matrix.sh
 #   SMOKE_MAX_GB=20 ./tests/test_smoke_matrix.sh  # skip bigger packs (default 40)
 #
-# Configs: default | kv4 (--kv-quant 4) | kv8 (--kv-quant 8) | mtp (--mtp, only
+# Configs: default (kv8) | off (--kv-quant off) | kv4 (--kv-quant 4) | kv8 (--kv-quant 8) | mtp (--mtp, only
 # where the pack ships a head) | nospec (--no-pld --no-mtp --no-drafter).
 # Per boot: chat non-stream/stream, thinking on/off, tools, json_schema,
 # logprobs, max_tokens cap, prefix-cache hit, 2-way concurrency, /v1/completions,
@@ -50,7 +50,7 @@ ARCHES=(
     "laguna|yes|$GD/models/poolside/Laguna-XS-2.1-NVFP4-mlx"
     "qwen4_exp|yes|$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
 )
-CONFIGS="${SMOKE_CONFIGS:-default,kv4,kv8,mtp,nospec}"
+CONFIGS="${SMOKE_CONFIGS:-default,off,kv4,mtp,nospec}"
 
 PASS=0; FAIL=0; SKIP=0
 declare -a FAILS=()
@@ -266,6 +266,7 @@ for entry in "${ARCHES[@]}"; do
         flags=()
         case "$cfg" in
             default) ;;
+            off)     flags=(--kv-quant off) ;;
             kv4)     flags=(--kv-quant 4) ;;
             kv8)     flags=(--kv-quant 8) ;;
             mtp)     has_mtp_head "$model" || { skip "$CELL" "no MTP head"; continue; }; flags=(--mtp) ;;

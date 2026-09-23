@@ -80,8 +80,8 @@ echo "[5b] MTP past the QSA budget (verify rows under the QSA mask)"
 longm=$(echo "$long" | python3 -c "import sys,json; d=json.load(sys.stdin); d['enable_mtp']=True; print(json.dumps(d))")
 lm=$(curl -s -m 1200 "$U/v1/chat/completions" -H 'content-type: application/json' -d "$longm" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])")
 check "needle recovered under MTP" "$(echo "$lm" | grep -c 'PELICAN-42')" "1"
-# Verify widths: the fused kernel serves only a quantized cache; this boot is dense, so the
-# union gather or the masked split arm serves. Any of the three satisfies the invariant.
+# Verify widths: the fused kernel serves a quantized cache (this boot's kv8 default); a dense
+# cache takes the union gather or the masked split arm. Any of the three satisfies the invariant.
 check "verify-width masked attention arm engaged" "$(grep -cE '\[qsa-attn\] engaged|\[qsa-verify-gather\] engaged|\[sdpa-split\] masked arm engaged' "$LOG" | sed 's/^[1-9][0-9]*$/1/')" "1"
 echo "[6] MTP head: engagement + greedy equivalence"
 base=$(curl -s -m 600 "$U/v1/chat/completions" -H 'content-type: application/json' -d '{"messages":[{"role":"user","content":"Write a limerick about a cat."}],"max_tokens":80,"temperature":0,"enable_thinking":false,"enable_mtp":false}' | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'])")

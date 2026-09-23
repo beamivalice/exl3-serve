@@ -243,7 +243,9 @@ fn printUsage(io: std.Io) void {
         \\                        for the last <n> (default: 0 = full history;
         \\                        windowing costs acceptance on stock Qwen heads).
         \\  --kv-quant <mode>   KV-cache quantization scheme:
-        \\                        off (default), 4, 8     — affine group quant.
+        \\                        off, 4, 8 (default)     — affine group quant.
+        \\                          `off` keeps dense bf16 KV. A model's
+        \\                          model-settings.json `kv_quant` outranks it.
         \\                          Per-request override via the `kv_quant`
         \\                          body field.
         \\  --kv-attn-mode {{auto|dense|fused}}
@@ -541,7 +543,8 @@ pub fn main(init: std.process.Init) !void {
     // Default ON in serve mode — small boot-time cost, big cold-prefill win.
     // --no-warmup-eager opts out for benchmarking / minimal-footprint deployments.
     var warmup_eager: bool = true;
-    var kv_quant_config: transformer_mod.KVQuantConfig = transformer_mod.KVQuantConfig.dense;
+    var kv_quant_config: transformer_mod.KVQuantConfig = transformer_mod.KVQuantConfig.engine_default;
+    var kv_quant_explicit = false;
     // Phase 2 (Plan ricky): fused attention reads K/V triples directly via
     // mlx_quantized_matmul instead of dequantizing through DenseKVView.
     // Off by default — only the `.affine` cache scheme has a fused path.
@@ -896,6 +899,7 @@ pub fn main(init: std.process.Init) !void {
             idle_evict_secs = if (n > 0) n else null;
         } else if (std.mem.eql(u8, args[i], "--kv-quant") and i + 1 < args.len) {
             i += 1;
+            kv_quant_explicit = true;
             if (std.mem.eql(u8, args[i], "off") or std.mem.eql(u8, args[i], "0")) {
                 kv_quant_config = transformer_mod.KVQuantConfig.dense;
             } else if (std.mem.eql(u8, args[i], "4")) {
@@ -1197,7 +1201,7 @@ pub fn main(init: std.process.Init) !void {
         if (model_dir.len == 0) {
             const discovery_for_registry = discovery_storage;
             discovery_storage = null; // ownership moves to the registry
-            try runHeadlessServe(io, allocator, discovery_for_registry, host, port, ctx_size, timeout, reasoning_budget, max_resident_models, max_resident_mem, max_resident_mem_explicit, idle_evict_secs, kv_quant_config, force_mtp, cli_pld);
+            try runHeadlessServe(io, allocator, discovery_for_registry, host, port, ctx_size, timeout, reasoning_budget, max_resident_models, max_resident_mem, max_resident_mem_explicit, idle_evict_secs, kv_quant_config, kv_quant_explicit, force_mtp, cli_pld);
             return;
         }
 
@@ -1419,6 +1423,7 @@ pub fn main(init: std.process.Init) !void {
             .draft_block_size = draft_block_size,
             .draft_block_size_explicit = draft_block_size_explicit,
             .kv_quant_config = kv_quant_config,
+            .kv_quant_explicit = kv_quant_explicit,
             .prefix_cache_capacity = server_mod.prefix_cache_capacity,
             .prefix_cache_mem_bytes = server_mod.prefix_cache_mem_bytes,
             .prefix_cache_mem_resolver = server_mod.prefixCacheMemForLoad,
@@ -1475,10 +1480,12 @@ pub fn main(init: std.process.Init) !void {
         // Honor --kv-quant in offline mode too. The serve path threads this
         // through Slot caches via the scheduler; here we swap the
         // Transformer's own legacy cache to match.
-        if (kv_quant_config.scheme != .off) {
-            try xfm.cache.reinit(config.num_hidden_layers, kv_quant_config);
+        const kv_cache = transformer_mod.KvCacheChoice.resolve(config.kv_quant_override, kv_quant_config, kv_quant_explicit);
+        log.info("[kv-cache] {s} ({s})\n", .{ kv_cache.label(), kv_cache.sourceName() });
+        if (kv_cache.config.scheme != .off) {
+            try xfm.cache.reinit(config.num_hidden_layers, kv_cache.config);
         }
-        try xfm.qwen4MtpApplyKvQuant(kv_quant_config);
+        try xfm.qwen4MtpApplyKvQuant(kv_cache.config);
 
         // JIT-compile + wire memory limits (policy: mlx.applyWiredPolicy).
         {
@@ -1916,6 +1923,7 @@ fn runHeadlessServe(
     max_resident_mem_explicit: bool,
     idle_evict_secs: ?u32,
     kv_quant_config: transformer_mod.KVQuantConfig,
+    kv_quant_explicit: bool,
     force_mtp: bool,
     pld: server_mod.PldDefaults,
 ) !void {
@@ -1984,6 +1992,7 @@ fn runHeadlessServe(
         .warmup_eager = false,
         .draft_block_size = 0,
         .kv_quant_config = kv_quant_config,
+        .kv_quant_explicit = kv_quant_explicit,
         .mtp_head_kv_quant = transformer_mod.Transformer.mtp_head_kv_quant_flag,
         // Seed the scheduler's prefix-cache config from the server globals so
         // on-demand (headless/discover-mode) loads get the SAME hot prefix

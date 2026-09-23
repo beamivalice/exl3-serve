@@ -60,7 +60,7 @@ start_server() {
     local model="$1"
     pkill -9 -f "mlx-serve.*port $PORT" 2>/dev/null
     sleep 1
-    "$BIN" --model "$model" --serve --port "$PORT" --ctx-size 8192 \
+    "$BIN" --model "$model" --serve --port "$PORT" --ctx-size 8192 --kv-quant off \
         --prefix-cache-entries 4 --log-level warn > "$LOG" 2>&1 &
     SERVER_PID=$!
     for _ in $(seq 1 180); do

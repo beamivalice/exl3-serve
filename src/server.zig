@@ -672,21 +672,20 @@ fn getTimeoutNs() u64 {
 /// inference thread is the single mlx-call site.
 var global_scheduler: ?*scheduler_mod.Scheduler = null;
 
-/// The boot's parsed `--kv-quant`, published by `serve()` before `Scheduler.init` so a
+/// The boot's explicit `--kv-quant`, published by `serve()` before `Scheduler.init` so a
 /// load-time bill sees it (the scheduler does not exist yet during the load; asking it billed
-/// the SSD-first session at bf16, ~8.6 GB of idle allowance lost at 786k).
+/// the SSD-first session at bf16, ~8.6 GB of idle allowance lost at 786k). Null = unflagged.
 var configured_kv_quant: ?transformer_mod.KVQuantConfig = null;
 
-/// The process-wide kv-quant config at any point: the scheduler's once it exists, the boot's
-/// published value during the load, dense when no flag was given.
-fn configuredKvQuant() transformer_mod.KVQuantConfig {
-    if (global_scheduler) |sch| return sch.kv_quant_config;
-    return configured_kv_quant orelse transformer_mod.KVQuantConfig.dense;
+/// THIS model's KV scheme and its source, the one answer the load log, `/props` and every bill read.
+pub fn kvCacheFor(config: *const model_mod.ModelConfig) transformer_mod.KvCacheChoice {
+    if (global_scheduler) |sch| return transformer_mod.KvCacheChoice.resolve(config.kv_quant_override, sch.kv_quant_config, sch.kv_quant_explicit);
+    const launch = configured_kv_quant orelse transformer_mod.KVQuantConfig.engine_default;
+    return transformer_mod.KvCacheChoice.resolve(config.kv_quant_override, launch, configured_kv_quant != null);
 }
 
-/// The width THIS model stores at: its `model-settings.json` override, else the process default.
 pub fn configuredKvQuantFor(config: *const model_mod.ModelConfig) transformer_mod.KVQuantConfig {
-    return config.kv_quant_override orelse configuredKvQuant();
+    return kvCacheFor(config).config;
 }
 
 /// The explicit context for THIS model: its `model-settings.json` `ctx_size`, else `--ctx-size`.
@@ -1605,7 +1604,7 @@ pub fn serve(
     server_config = cfg;
     // Before `Scheduler.init`: that call is the model load and every load-time bill inside it
     // asks for the KV width.
-    configured_kv_quant = load_params.kv_quant_config;
+    configured_kv_quant = if (load_params.kv_quant_explicit) load_params.kv_quant_config else null;
     defer configured_kv_quant = null;
 
     // ── Phase A1: spin up the scheduler. Its inference thread does the
@@ -4260,6 +4259,18 @@ test "a quantized pack loaded resident advertises no streaming, the same pack st
     defer t.allocator.free(streamed_row);
     try t.expect(std.mem.indexOf(u8, streamed_row, "\"streaming\":true") != null);
     try t.expectEqual(@as(?usize, null), std.mem.indexOf(u8, streamed_row, "\"streaming_required\":true"));
+
+    // A ready row names the load's KV scheme and where it came from.
+    const saved_kv = configured_kv_quant;
+    defer configured_kv_quant = saved_kv;
+    configured_kv_quant = null;
+    const default_row = try renderModelEntry(t.allocator, io, &entry);
+    defer t.allocator.free(default_row);
+    try t.expect(std.mem.indexOf(u8, default_row, "\"kv_quant\":\"8\",\"kv_cache\":{\"scheme\":\"kv8\",\"source\":\"default\"}") != null);
+    cfg.kv_quant_override = transformer_mod.KVQuantConfig.dense;
+    const setting_row = try renderModelEntry(t.allocator, io, &entry);
+    defer t.allocator.free(setting_row);
+    try t.expect(std.mem.indexOf(u8, setting_row, "\"kv_quant\":\"off\",\"kv_cache\":{\"scheme\":\"off\",\"source\":\"model-settings.json\"}") != null);
 }
 
 test "a streaming row carries the marker and its ssd budget at top level" {
@@ -4819,13 +4830,37 @@ test "the load-time session bill is billed at the boot's --kv-quant, not bf16" {
         ssdFirstSessionKvBytes(&cfg, defaultKvBits(&cfg), ceiling, active, chunk),
     );
     configured_kv_quant = null;
-    try t.expectEqual(@as(u64, 16), defaultKvBits(&cfg));
+    try t.expectEqual(@as(u64, 8), defaultKvBits(&cfg));
 
     const idle: u64 = 10 * 1024 * MiB;
     const transient: u64 = prefillTransientReserve(&cfg, 8, chunk);
     const at8 = ssdFirstPrefixCacheMem(idle, ceiling, active, 13_824 * MiB, transient);
     const at16 = ssdFirstPrefixCacheMem(idle, ceiling, active, 22_464 * MiB, transient);
     try t.expectEqual(@as(u64, 8_640 * MiB), at16 -| at8);
+}
+
+test "with no --kv-quant, the per-token KV bill and the auto-context follow the kv8 engine default" {
+    const qsa_fused_off = qsaScoreFusedOffGuard();
+    defer qsa_fused_off.deinit();
+    const t = std.testing;
+    var cfg = qwen4RequestTestConfig();
+    const saved_kv = configured_kv_quant;
+    defer configured_kv_quant = saved_kv;
+
+    configured_kv_quant = null;
+    try t.expectEqual(@as(u64, 8), defaultKvBits(&cfg));
+    try t.expectEqual(sessionBytesPerToken(&cfg, 8), sessionBytesPerToken(&cfg, defaultKvBits(&cfg)));
+    const ctx_default = computeMemoryContext(&cfg);
+
+    configured_kv_quant = transformer_mod.KVQuantConfig.affine(8);
+    try t.expectEqual(ctx_default, computeMemoryContext(&cfg));
+    configured_kv_quant = transformer_mod.KVQuantConfig.dense;
+    try t.expect(computeMemoryContext(&cfg) < ctx_default);
+
+    // A per-model setting still outranks the default.
+    configured_kv_quant = null;
+    cfg.kv_quant_override = transformer_mod.KVQuantConfig.dense;
+    try t.expectEqual(@as(u64, 16), defaultKvBits(&cfg));
 }
 
 test "an explicit --ctx-size boot never consults the session reserve" {
@@ -6764,7 +6799,7 @@ fn renderModelEntry(
         );
 
         return std.fmt.allocPrint(allocator,
-            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"mlx-serve","loaded":true,"state":"ready","bytes_resident":{d},"bytes_on_disk":{s},"context_length":{s},"max_model_len":{s}{s},"batched_decode":{s},"capabilities":{s},"input_modalities":{s},"meta":{{"architecture":"{s}","engine":"{s}","vocab_size":{d},"hidden_size":{d},"num_layers":{d},"quantization":"{d}-bit","context_length":{s},"model_max_tokens":{d},"embedding_max_length":{s},"is_moe":{s},"drafter_loaded":{s},"drafter_path":{s},"mtp_loaded":{s},"mtp_available":{s},"kv_quant":"{s}","gen_temperature":{s},"gen_top_p":{s},"gen_top_k":{s}}}}}
+            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"mlx-serve","loaded":true,"state":"ready","bytes_resident":{d},"bytes_on_disk":{s},"context_length":{s},"max_model_len":{s}{s},"batched_decode":{s},"capabilities":{s},"input_modalities":{s},"meta":{{"architecture":"{s}","engine":"{s}","vocab_size":{d},"hidden_size":{d},"num_layers":{d},"quantization":"{d}-bit","context_length":{s},"model_max_tokens":{d},"embedding_max_length":{s},"is_moe":{s},"drafter_loaded":{s},"drafter_path":{s},"mtp_loaded":{s},"mtp_available":{s},"kv_quant":"{s}","kv_cache":{{"scheme":"{s}","source":"{s}"}},"gen_temperature":{s},"gen_top_p":{s},"gen_top_k":{s}}}}}
         , .{
             model_id,
             nowSecs(io),
@@ -6794,7 +6829,9 @@ fn renderModelEntry(
             drafter_path_json,
             if (mtp_loaded) "true" else "false",
             if (mtp_loaded or model_discovery.readStubMeta(io, allocator, entry.path).has_mtp) "true" else "false",
-            configuredKvQuantFor(config).wireName(),
+            kvCacheFor(config).config.wireName(),
+            kvCacheFor(config).label(),
+            kvCacheFor(config).sourceName(),
             gen_temp_str,
             gen_top_p_str,
             gen_top_k_str,
@@ -7461,6 +7498,7 @@ fn ngramWarmPropsJson(allocator: std.mem.Allocator, bytes: u64, total: u64) ![]u
 const PropsSettings = struct {
     engine: []const u8,
     kv_quant: []const u8,
+    kv_cache: transformer_mod.KvCacheChoice = transformer_mod.KvCacheChoice.resolve(null, transformer_mod.KVQuantConfig.engine_default, false),
     kv_attn_mode: KvAttnMode,
     decode_attn_quant: bool,
     prefill_chunk: usize,
@@ -7505,10 +7543,12 @@ fn propsSettingsFor(lm: *LoadedModel) PropsSettings {
 
 fn mlxPropsSettings(lm: *LoadedModel) PropsSettings {
     const config = lm.config.?;
-    const kv = configuredKvQuantFor(config);
+    const kv_cache = kvCacheFor(config);
+    const kv = kv_cache.config;
     return .{
         .engine = "mlx",
         .kv_quant = if (kv.isQuant()) (if (kv.bits == 4) "4" else "8") else "off",
+        .kv_cache = kv_cache,
         .kv_attn_mode = server_config.kv_attn_mode,
         .decode_attn_quant = transformer_mod.decodeAttnQuantEnabled() and (if (lm.transformer) |x| x.dense_attn_proj else false),
         .prefill_chunk = generate_mod.prefill_chunk_override,
@@ -7534,9 +7574,10 @@ fn settingsPropsJson(allocator: std.mem.Allocator, st: PropsSettings) ![]u8 {
         .typical => |t| try std.fmt.bufPrint(&param_buf, "{d}", .{t.delta}),
         .tokenv3 => |a| try std.fmt.bufPrint(&param_buf, "{d}", .{a}),
     };
-    return std.fmt.allocPrint(allocator, ",\"settings\":{{\"version\":\"{s}\",\"engine\":\"{s}\",\"kv_quant\":\"{s}\",\"kv_attn_mode\":\"{s}\",\"decode_attn_quant\":{},\"prefill_chunk\":{d},\"mtp\":{{\"loaded\":{},\"default_on\":{},\"acceptance\":\"{s}\",\"acceptance_param\":{s},\"depth\":{d},\"adaptive\":{},\"max_ctx\":{d}}},\"drafter\":\"{s}\",\"pld\":{{\"default_on\":{},\"draft_len\":{d},\"key_len\":{d}}},\"max_concurrent\":{d},\"prefix_cache\":{{\"mem_bytes\":{d},\"disk_bytes\":{d}}}}}", .{
+    return std.fmt.allocPrint(allocator, ",\"settings\":{{\"version\":\"{s}\",\"engine\":\"{s}\",\"kv_quant\":\"{s}\",\"kv_cache\":{{\"scheme\":\"{s}\",\"source\":\"{s}\"}},\"kv_attn_mode\":\"{s}\",\"decode_attn_quant\":{},\"prefill_chunk\":{d},\"mtp\":{{\"loaded\":{},\"default_on\":{},\"acceptance\":\"{s}\",\"acceptance_param\":{s},\"depth\":{d},\"adaptive\":{},\"max_ctx\":{d}}},\"drafter\":\"{s}\",\"pld\":{{\"default_on\":{},\"draft_len\":{d},\"key_len\":{d}}},\"max_concurrent\":{d},\"prefix_cache\":{{\"mem_bytes\":{d},\"disk_bytes\":{d}}}}}", .{
         build_options.version,                      st.engine,
-        st.kv_quant,                                @tagName(st.kv_attn_mode),
+        st.kv_quant,                                st.kv_cache.label(),
+        st.kv_cache.sourceName(),                   @tagName(st.kv_attn_mode),
         st.decode_attn_quant,                       st.prefill_chunk,
         st.mtp_loaded,                              st.mtp_default_on,
         mtp_acceptance_mod.name(st.mtp_acceptance), param,
@@ -21023,7 +21064,8 @@ test "queryModel: GET /props?model=<id> routes to that model, percent-decoded" {
 test "settingsPropsJson: /props names the effective serving settings a benchmark ran under" {
     const frag = try settingsPropsJson(testing.allocator, .{
         .engine = "mlx",
-        .kv_quant = "8",
+        .kv_quant = "4",
+        .kv_cache = transformer_mod.KvCacheChoice.resolve(transformer_mod.KVQuantConfig.affine(4), transformer_mod.KVQuantConfig.engine_default, false),
         .kv_attn_mode = .auto,
         .decode_attn_quant = true,
         .prefill_chunk = 8192,
@@ -21048,7 +21090,10 @@ test "settingsPropsJson: /props names the effective serving settings a benchmark
     defer parsed.deinit();
     const st = (parsed.value.object.get("settings") orelse return error.MissingSettings).object;
     try testing.expectEqualStrings(build_options.version, st.get("version").?.string);
-    try testing.expectEqualStrings("8", st.get("kv_quant").?.string);
+    try testing.expectEqualStrings("4", st.get("kv_quant").?.string);
+    const kv_cache = st.get("kv_cache").?.object;
+    try testing.expectEqualStrings("kv4", kv_cache.get("scheme").?.string);
+    try testing.expectEqualStrings("model-settings.json", kv_cache.get("source").?.string);
     try testing.expectEqualStrings("auto", st.get("kv_attn_mode").?.string);
     try testing.expect(st.get("decode_attn_quant").?.bool);
     const mtp = st.get("mtp").?.object;

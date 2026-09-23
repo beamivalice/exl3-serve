@@ -35,6 +35,8 @@ pub const KVQuantConfig = struct {
     group_size: u32,
 
     pub const dense: KVQuantConfig = .{ .scheme = .off, .bits = 0, .group_size = 0 };
+    /// What a load stores at when neither `--kv-quant` nor `model-settings.json` names a scheme.
+    pub const engine_default: KVQuantConfig = .{ .scheme = .affine, .bits = 8, .group_size = 64 };
 
     pub fn affine(bits: u8) KVQuantConfig {
         std.debug.assert(bits == 4 or bits == 8);
@@ -70,6 +72,36 @@ pub const KVQuantConfig = struct {
         return switch (self.scheme) {
             .off => "off",
             .affine => if (self.bits == 4) "4" else "8",
+        };
+    }
+};
+
+/// Where a load's KV scheme came from. A request's own `kv_quant` outranks all three.
+pub const KvCacheSource = enum { model_settings, flag, default };
+
+/// The KV scheme a load stores at, with its provenance: per-model setting > `--kv-quant` >
+/// `KVQuantConfig.engine_default`. `launch` is the flag's value, or the default when unflagged.
+pub const KvCacheChoice = struct {
+    config: KVQuantConfig,
+    source: KvCacheSource,
+
+    pub fn resolve(setting: ?KVQuantConfig, launch: KVQuantConfig, launch_explicit: bool) KvCacheChoice {
+        if (setting) |s| return .{ .config = s, .source = .model_settings };
+        return .{ .config = launch, .source = if (launch_explicit) .flag else .default };
+    }
+
+    pub fn label(self: KvCacheChoice) []const u8 {
+        return switch (self.config.scheme) {
+            .off => "off",
+            .affine => if (self.config.bits == 4) "kv4" else "kv8",
+        };
+    }
+
+    pub fn sourceName(self: KvCacheChoice) []const u8 {
+        return switch (self.source) {
+            .model_settings => "model-settings.json",
+            .flag => "--kv-quant",
+            .default => "default",
         };
     }
 };
@@ -536,6 +568,22 @@ test "quantizeAffine + dequantizeAffine round-trip at 8 bits" {
     }
     // 8-bit affine: ~256x finer steps than 4-bit; expect < 0.005 on smooth data.
     try testing.expect(max_err < 0.01);
+}
+
+test "a load's KV choice: setting > --kv-quant > the kv8 default, each named by its source" {
+    const t = std.testing;
+    try t.expectEqual(KVQuantConfig.affine(8), KVQuantConfig.engine_default);
+    const unflagged = KvCacheChoice.resolve(null, KVQuantConfig.engine_default, false);
+    try t.expectEqual(KVQuantConfig.affine(8), unflagged.config);
+    try t.expectEqualStrings("kv8", unflagged.label());
+    try t.expectEqualStrings("default", unflagged.sourceName());
+    const flagged = KvCacheChoice.resolve(null, KVQuantConfig.affine(4), true);
+    try t.expectEqualStrings("kv4", flagged.label());
+    try t.expectEqualStrings("--kv-quant", flagged.sourceName());
+    const set = KvCacheChoice.resolve(KVQuantConfig.dense, KVQuantConfig.affine(4), true);
+    try t.expectEqual(KVQuantConfig.dense, set.config);
+    try t.expectEqualStrings("off", set.label());
+    try t.expectEqualStrings("model-settings.json", set.sourceName());
 }
 
 test "KVQuantConfig.affine builds a sane config" {

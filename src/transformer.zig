@@ -17,6 +17,7 @@ const mrope = @import("mrope.zig");
 const kv_quant = @import("kv_quant.zig");
 
 pub const KVQuantConfig = kv_quant.KVQuantConfig;
+pub const KvCacheChoice = kv_quant.KvCacheChoice;
 pub const KVQuantScheme = kv_quant.Scheme;
 
 /// `std.meta.fields` was replaced by parallel `fieldNames`/`fieldTypes`
@@ -60112,7 +60113,7 @@ test "qwen4 MTP head: last-row and no-logits projections match the full block (Q
     }
 }
 
-test "qwen4 MTP head KV scheme follows the trunk under kv-quant 8" {
+test "qwen4 MTP head KV stays dense under the engine-default trunk scheme unless opted in" {
     const t = std.testing;
     const saved = Transformer.mtp_head_kv_quant_override;
     defer Transformer.mtp_head_kv_quant_override = saved;
@@ -60128,7 +60129,8 @@ test "qwen4 MTP head KV scheme follows the trunk under kv-quant 8" {
     xfm.qwen4_mtp = head;
     defer xfm.qwen4_mtp.?.cache.deinit();
     try t.expectEqual(kv_quant.Scheme.off, xfm.qwen4_mtp.?.cache.config.scheme);
-    const trunk = kv_quant.KVQuantConfig.affine(8);
+    const trunk = kv_quant.KVQuantConfig.engine_default;
+    try t.expect(trunk.isQuant());
     try xfm.qwen4MtpApplyKvQuant(trunk);
     try t.expectEqual(kv_quant.Scheme.off, xfm.qwen4_mtp.?.cache.config.scheme);
     Transformer.mtp_head_kv_quant_override = true;

@@ -149,10 +149,11 @@ pub const LoadParams = struct {
     /// Whether the user passed --draft-block-size explicitly (used for
     /// human-readable startup logging). Ignored when `drafter_dir` is empty.
     draft_block_size_explicit: bool = false,
-    /// KV-cache storage backend. Defaults to dense bf16; user opts into
-    /// 4/8-bit affine quantization via `--kv-quant {4,8}`. Stored on every
+    /// KV-cache storage backend: `--kv-quant`, else the kv8 engine default. Stored on every
     /// per-slot KVCache and consulted at every read/write boundary.
-    kv_quant_config: transformer_mod.KVQuantConfig = transformer_mod.KVQuantConfig.dense,
+    kv_quant_config: transformer_mod.KVQuantConfig = transformer_mod.KVQuantConfig.engine_default,
+    /// `--kv-quant` was given; only the reported source of the scheme depends on it.
+    kv_quant_explicit: bool = false,
     /// Per-model hot prefix cache capacity (count). 0 disables.
     prefix_cache_capacity: u32 = 1,
     /// Per-model hot prefix cache KV-bytes budget. 0 disables the byte cap.
@@ -1131,7 +1132,8 @@ pub const LoadRequest = struct {
     warmup_eager: bool = true,
     draft_block_size: u32 = 4,
     draft_block_size_explicit: bool = false,
-    kv_quant_config: transformer_mod.KVQuantConfig = transformer_mod.KVQuantConfig.dense,
+    kv_quant_config: transformer_mod.KVQuantConfig = transformer_mod.KVQuantConfig.engine_default,
+    kv_quant_explicit: bool = false,
     prefix_cache_capacity: u32 = 1,
     prefix_cache_mem_bytes: u64 = 0,
     prefix_cache_mem_resolver: ?*const fn (*model_mod.ModelConfig, u64, BudgetRevise, *u64) u64 = null,
@@ -1241,6 +1243,7 @@ pub const Scheduler = struct {
     dflash: ?*DflashModel = null,
     drafter_block_size: u32,
     kv_quant_config: transformer_mod.KVQuantConfig,
+    kv_quant_explicit: bool,
     /// `LoadParams.ctx_size` — the --ctx-size launch flag, kept for sizing
     /// GGUF stub configs on cold loads (see preloadGgufCpuState).
     gguf_ctx_size: u32,
@@ -1451,6 +1454,7 @@ pub const Scheduler = struct {
             .drafter = null,
             .drafter_block_size = params.draft_block_size,
             .kv_quant_config = params.kv_quant_config,
+            .kv_quant_explicit = params.kv_quant_explicit,
             .gguf_ctx_size = params.ctx_size,
             .prefix_cache_capacity = params.prefix_cache_capacity,
             .prefix_cache_mem_bytes = params.prefix_cache_mem_bytes,
@@ -1964,6 +1968,7 @@ pub const Scheduler = struct {
             .draft_block_size = self.draft_block_size,
             .draft_block_size_explicit = self.draft_block_size_explicit,
             .kv_quant_config = self.kv_quant_config,
+            .kv_quant_explicit = self.kv_quant_explicit,
             // Cold loads get the SAME prefix-cache configuration as the
             // startup model — pre-plumbing these were (1, 0, stride 0),
             // which silently degraded warm reuse after every model switch.
@@ -3298,7 +3303,7 @@ test "the cold-load LoadRequest re-applies EVERY retained launch setting" {
         "no_drafter",                "draft_block_size",      "draft_block_size_explicit",
         "ane_prefill",               "ane_chunk_resolver",    "ane_headroom_resolver",
         "prefix_cache_mem_resolver", "expert_cache_bytes",    "expert_cache_fit_resolver",
-        "ssd_budget_bytes",
+        "ssd_budget_bytes",          "kv_quant_explicit",
     }) |field| {
         const needle = "." ++ field ++ " = self" ++ "." ++ field ++ ",";
         try testing.expect(std.mem.indexOf(u8, src, needle) != null);
@@ -3722,7 +3727,9 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // call covers any path that still touches `xfm.cache` directly (legacy
     // single-slot fallbacks, prompt-cache reuse).
     // Per-model settings (stamped on the config at BOTH construction sites) outrank the flags.
-    const kv_quant_config = params.config.kv_quant_override orelse params.kv_quant_config;
+    const kv_cache = transformer_mod.KvCacheChoice.resolve(params.config.kv_quant_override, params.kv_quant_config, params.kv_quant_explicit);
+    log.info("[kv-cache] {s} ({s})\n", .{ kv_cache.label(), kv_cache.sourceName() });
+    const kv_quant_config = kv_cache.config;
     const mtp_enabled = params.config.mtp_override orelse params.mtp_enabled;
     if (kv_quant_config.scheme != .off) {
         try xfm_ptr.cache.reinit(params.config.num_hidden_layers, kv_quant_config);
