@@ -6,6 +6,7 @@ earlier history is mlx-serve's, in that project's changelog.
 
 ## Unreleased
 
+- **A `system` turn in the middle of a `/v1/chat/completions` conversation reaches Qwen3.8 Flash Next through its own template**, folded into the leading system prompt; MiMo-V2.6-Flash, whose template renders it in place, is unchanged.
 - **A `system` or `developer` turn in the middle of a `/v1/responses` input joins the leading system prompt**, so Qwen3.8 Flash Next renders it with its own template instead of a fallback that repeated the tool schemas and dropped the stop token.
 - **Stopping a request while another stream decodes with MTP no longer crashes the server.**
 - **Large images need about half the free GPU memory they did**: the Qwen3.8 Flash Next vision tower now runs one block at a time, and a request is billed by its measured peak, so a 1536x1536 image is admitted with about 8 GB free instead of about 17 GB.

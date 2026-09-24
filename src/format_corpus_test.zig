@@ -2716,3 +2716,36 @@ test "format corpus: every wire shape's media renders its placeholder where it w
         };
     }
 }
+
+test "format corpus: a system turn past index 0 reaches the prompt once, on every template" {
+    // Refusing templates (Qwen3.8's raise) fold it into the leading system; templates that
+    // render it (MiMo's role loop) keep it in place. The fallback render carried it twice.
+    const chatml = "{% for message in messages %}{{ '<|im_start|>' ~ message.role ~ '\\n' ~ message.content ~ '<|im_end|>' }}{% endfor %}";
+    const Case = struct { name: []const u8, tpl: []const u8, system_headers: usize };
+    const cases = [_]Case{
+        .{ .name = "qwen3.8", .tpl = @embedFile("fixtures/qwen38_chat_template.jinja"), .system_headers = 1 },
+        .{ .name = "qwen3.8-27b", .tpl = @embedFile("fixtures/qwen38_27b_chat_template.jinja"), .system_headers = 1 },
+        .{ .name = "role loop", .tpl = chatml, .system_headers = 2 },
+    };
+    const messages = [_]chat.Message{
+        .{ .role = "system", .content = "LEAD_SYS" },
+        .{ .role = "user", .content = "hi" },
+        .{ .role = "system", .content = "LATE_SYS" },
+        .{ .role = "user", .content = "again" },
+    };
+    for (cases) |c| {
+        var config = chat.ChatConfig{
+            .chat_template = c.tpl,
+            .bos_token = null,
+            .eos_token = "<|im_end|>",
+            .add_bos_token = false,
+            .allocator = testing.allocator,
+        };
+        const rendered = try chat.renderChatTemplate(testing.allocator, &messages, &config, null, null, true, null, false);
+        defer testing.allocator.free(rendered);
+        errdefer std.debug.print("\n[{s}]\n{s}\n", .{ c.name, rendered });
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "LEAD_SYS"));
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "LATE_SYS"));
+        try testing.expectEqual(c.system_headers, std.mem.count(u8, rendered, "<|im_start|>system"));
+    }
+}

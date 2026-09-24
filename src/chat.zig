@@ -451,6 +451,16 @@ pub fn renderChatTemplate(
     var fallback_arena: ?std.heap.ArenaAllocator = null;
     defer if (fallback_arena) |*a| a.deinit();
     var effective_messages = msgs;
+    // A template that refuses a system turn past index 0 (Qwen's raises) gets it folded
+    // into the leading one; a template that renders it in place (MiMo's) keeps it there.
+    if (hasLateSystem(msgs) and !try templateProbeRendersLateSystem(allocator, tpl, extra_json)) {
+        fallback_arena = std.heap.ArenaAllocator.init(allocator);
+        const arena_alloc = fallback_arena.?.allocator();
+        var folded = try std.ArrayList(Message).initCapacity(arena_alloc, msgs.len);
+        folded.appendSliceAssumeCapacity(msgs);
+        _ = try foldSystemMessages(arena_alloc, &folded);
+        effective_messages = folded.items;
+    }
     var effective_tools_json = tools_json;
     // Optional keys a template may dump blindly (see fillOptionalToolDefKeys).
     // Arena-owned, so the rewritten bytes outlive the render with no free path
@@ -469,7 +479,7 @@ pub fn renderChatTemplate(
         const arena_alloc = fallback_arena.?.allocator();
         effective_messages = try synthesizeToolFallbackMessages(
             arena_alloc,
-            msgs,
+            effective_messages,
             tools_json,
             tool_choice_instruction,
             needs_inject_tools,
@@ -650,10 +660,41 @@ fn templateProbePreservesToolContent(
     extra_json: []const u8,
 ) !bool {
     const marker = "__mlx_tool_role_probe__";
-    const probe_messages = [_]Message{
+    return templateProbeRendersMarker(allocator, tpl, extra_json, &.{
         .{ .role = "tool", .content = marker },
-    };
-    const messages_json = try serializeMessagesJson(allocator, &probe_messages);
+    }, marker);
+}
+
+fn hasLateSystem(messages: []const Message) bool {
+    if (messages.len < 2) return false;
+    for (messages[1..]) |m| {
+        if (std.mem.eql(u8, m.role, "system")) return true;
+    }
+    return false;
+}
+
+/// False when the template raises on a system turn that is not first, or drops it.
+fn templateProbeRendersLateSystem(
+    allocator: std.mem.Allocator,
+    tpl: []const u8,
+    extra_json: []const u8,
+) !bool {
+    const marker = "__sushi_late_system_probe__";
+    return templateProbeRendersMarker(allocator, tpl, extra_json, &.{
+        .{ .role = "user", .content = "u" },
+        .{ .role = "system", .content = marker },
+        .{ .role = "user", .content = "u" },
+    }, marker);
+}
+
+fn templateProbeRendersMarker(
+    allocator: std.mem.Allocator,
+    tpl: []const u8,
+    extra_json: []const u8,
+    probe_messages: []const Message,
+    marker: []const u8,
+) !bool {
+    const messages_json = try serializeMessagesJson(allocator, probe_messages);
     defer allocator.free(messages_json);
 
     const tmpl_z = try allocator.dupeSentinel(u8, tpl, 0);
@@ -6906,6 +6947,23 @@ test "real mimo_v2 template preserves reasoning and XML tool history" {
     try testing.expectEqualStrings(expected ++ "<think></think>", plain);
 }
 
+test "real mimo_v2 template renders a late system turn in place" {
+    const raw = std.c.getenv("MIMO_V2_SOURCE") orelse return error.SkipZigTest;
+    const a = testing.allocator;
+    var config = try loadChatConfig(testing.io, a, std.mem.span(raw));
+    defer config.deinit();
+    const messages = [_]Message{
+        .{ .role = "system", .content = "S" },
+        .{ .role = "user", .content = "hi" },
+        .{ .role = "system", .content = "late" },
+        .{ .role = "user", .content = "again" },
+    };
+    const rendered = try renderChatTemplate(a, &messages, &config, null, null, true, null, false);
+    defer a.free(rendered);
+    try testing.expectEqualStrings("<|im_start|>system\nS<|im_end|><|im_start|>user\nhi<|im_end|>" ++
+        "<|im_start|>system\nlate<|im_end|><|im_start|>user\nagain<|im_end|><|im_start|>assistant\n", rendered);
+}
+
 test "collapseDoubledThinkTags collapses 2x → 1x" {
     const out = try collapseDoubledThinkTags(testing.allocator, "<|Assistant|></think></think>Hi!");
     defer testing.allocator.free(out);
@@ -9683,6 +9741,45 @@ test "renderChatTemplate: a tool with no description/parameters still renders (n
     try testing.expect(std.mem.indexOf(u8, filled, "\"parameters\"") != null);
     try testing.expect(std.mem.indexOf(u8, filled, "\"description\":\"d\"") != null);
     try testing.expect(std.mem.indexOf(u8, filled, "\"description\":\"e\"") != null);
+}
+
+test "renderChatTemplate folds a late system turn only where the template refuses it" {
+    const allocator = testing.allocator;
+    const messages = [_]Message{
+        .{ .role = "system", .content = "S" },
+        .{ .role = "user", .content = "hi" },
+        .{ .role = "system", .content = "late" },
+        .{ .role = "user", .content = "again" },
+    };
+    // Qwen3.8 raises on a system turn past index 0; the raise was the generic fallback.
+    {
+        var config = ChatConfig{
+            .chat_template = @embedFile("fixtures/qwen38_chat_template.jinja"),
+            .bos_token = null,
+            .eos_token = "<|im_end|>",
+            .add_bos_token = false,
+            .allocator = allocator,
+        };
+        const rendered = try renderChatTemplate(allocator, &messages, &config, null, null, true, null, false);
+        defer allocator.free(rendered);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "<|im_start|>system"));
+        try testing.expect(std.mem.indexOf(u8, rendered, "S\n\nlate") != null);
+        try testing.expect(std.mem.indexOf(u8, rendered, "Reasoning effort is set to low.") != null);
+    }
+    // A template that renders the late turn keeps it where it was sent, byte for byte.
+    {
+        var config = ChatConfig{
+            .chat_template = "{% for message in messages %}{{ '<|im_start|>' ~ message.role ~ '\\n' ~ message.content ~ '<|im_end|>' }}{% endfor %}",
+            .bos_token = null,
+            .eos_token = null,
+            .add_bos_token = false,
+            .allocator = allocator,
+        };
+        const rendered = try renderChatTemplate(allocator, &messages, &config, null, null, true, null, false);
+        defer allocator.free(rendered);
+        try testing.expectEqualStrings("<|im_start|>system\nS<|im_end|><|im_start|>user\nhi<|im_end|>" ++
+            "<|im_start|>system\nlate<|im_end|><|im_start|>user\nagain<|im_end|>", rendered);
+    }
 }
 
 test "renderChatTemplate: REAL Qwen3.8 chat_template.jinja renders without fallback (hermetic)" {

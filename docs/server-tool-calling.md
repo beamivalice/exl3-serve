@@ -33,6 +33,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
   as "no inline template" so the sidecar loads. Grep the log for `jinja` first.
 - A template can raise on OUR extra-context values: `serializeExtraContext` sniffs the family; tool-call `arguments`
   stay OBJECTS; history tool_calls carry `"id"`; only a refusing template gets `noThinkTailSuffix`.
+- **A system turn past index 0 renders where the template allows it**: a template that raises on it (Qwen3.8) or
+  drops it gets it folded into the leading system (`templateProbeRendersLateSystem`, every surface); MiMo's role
+  loop keeps it in place, byte for byte.
 - **A generic ChatML role header preserves tool roles**: absence of a literal `'tool'` branch does not license
   rewriting tool results as user text (`templateReferencesToolRole`).
 - **Assistant-history reasoning round-trips** (`Message.reasoning_content`, OMITTED when absent). A contract COMMENT
