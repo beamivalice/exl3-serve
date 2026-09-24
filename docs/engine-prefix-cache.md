@@ -28,13 +28,20 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
   scorer boots with the cache off.
 - The always-on SSM snapshot sits 30 tokens BEFORE prompt end; a restored tail inside that window forwards as ONE
   span (`ssmSnapshotBackoff`). Guard: `tests/test_hybrid_reuse_equivalence.sh`.
-- A ringed (sliding-window) entry cannot restore below its retained window: `SlidingRingRewindPastWindow` →
-  cold prefill; the SSD tier skips ringed entries ([arch-mimo-v2](arch-mimo-v2.md#sliding-layers-the-ring)).
+- **A ringed (sliding-window) entry restores at its end or at its prompt-end ring checkpoint**
+  (`KVCache.ringCheckpoint`, `Entry.ring_cp`): each ringed layer's window + 30 rows at the prompt end, taken right
+  after prefill. A reply longer than the ring's slack compacts it past where the next turn diverges (the previous
+  reply re-renders); the checkpoint's rows go under the ringed layers (`restoreRing`) and the usual clamp follows.
+  A checkpoint restore of fewer than `RING_RESTORE_MIN_TOKENS` (64) cold-prefills: on MiMo kv8 one costs +6 to
+  +41 ms over the cold prefill at 16-32 tokens, breaks even at 64, and saves ~180 ms at 256.
+  Below both, `SlidingRingRewindPastWindow` → cold prefill. The SSD tier skips ringed entries; persisting the global
+  prefix plus the checkpoint would lift that ([arch-mimo-v2](arch-mimo-v2.md#sliding-layers-the-ring)).
 
 ## Candidate ranking and trimming
 
 - **Hybrid candidates rank by RESTORABLE checkpoint position, not raw match** (`findBestRestorableMatch` RAM,
-  `bestHybridMatch` disk).
+  `bestHybridMatch` disk). Ringed candidates rank by `ringRestore`; an un-restorable one stays eligible at 0, so a
+  lookup with nothing better still declines by name.
 - Checkpoint retention thins the INTERIOR with a dense newest quarter (`spanPreservingDropIndex`, `ThinPolicy`).
 - An oversized candidate is TRIMMED to the longest restorable prefix that fits (`trimLenForBudget`,
   `KVCacheSnapshot.trimmedCopy` is a REAL copy); a QSA trim bills the bank on the final retained checkpoint.
@@ -72,4 +79,4 @@ SSD tier (`spec.safetensors`). An adopted spec cache has ONE owner at a time (`r
 ## Guards
 
 `tests/test_prefix_cache_*.sh` (budget revisit, disk, hot, mem, workloads), `tests/test_hybrid_reuse_equivalence.sh`,
-`tests/test_qwen4_mtp_head_persist.sh`. Grep the log for `[cache]`, `[hot-cache]`, `[disk-cache]`.
+`tests/test_mimo_ring_reuse.sh`, `tests/test_qwen4_mtp_head_persist.sh`. Grep the log for `[cache]`, `[hot-cache]`, `[disk-cache]`.

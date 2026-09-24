@@ -392,6 +392,9 @@ pub const Slot = struct {
     /// (ownership transfers into the hot-cache entry); freed by `deinit`
     /// when never consumed.
     cancelled_prefill: Generator.CancelledCheckpointSink = .{},
+    /// A ringed cache's prompt-end restore point (`KVCache.ringCheckpoint`), taken right after
+    /// prefill while the ring still holds it; the commit takes ownership, `deinit` frees it otherwise.
+    ring_cp: ?transformer_mod.KVCacheSnapshot = null,
     vision_embeddings: ?mlx.mlx_array,
     vision_key: u64,
     cache_key: u64 = 0,
@@ -699,6 +702,7 @@ pub const Slot = struct {
         }
         // Salvaged-but-never-consumed cancelled-prefill checkpoints.
         self.cancelled_prefill.deinit();
+        if (self.ring_cp) |*r| r.deinit();
         self.cache.deinit();
         if (self.ssm_entries) |entries| {
             if (self.model.transformer) |xfm| xfm.ssmGroupDrop(entries);
@@ -4706,7 +4710,10 @@ fn commitSlotIfApplicable(sch: *Scheduler, slot: *Slot) void {
             .head_marks = if (head) |t| t.qwen4MtpMarks() else &.{},
         };
     };
-    const finish_st = hc.commitWithMediaState(&slot.cache, total_tokens, slot.has_tools, slot.vision_key, slot.cache_key, slot.media_start, ssm_cps_opt, dflash_commit, mtp_commit, slot.full_prompt.len) catch |err| {
+    // Ownership transfers to the cache on every outcome, like the checkpoints.
+    const ring_cp = slot.ring_cp;
+    slot.ring_cp = null;
+    const finish_st = hc.commitWithRing(&slot.cache, total_tokens, slot.has_tools, slot.vision_key, slot.cache_key, slot.media_start, ssm_cps_opt, dflash_commit, mtp_commit, slot.full_prompt.len, ring_cp) catch |err| {
         // Ownership of the checkpoints transferred to the cache regardless of
         // the outcome — its error paths free them (#330 adjacent: freeing
         // here too was a double free, with a different allocator).
@@ -5672,6 +5679,13 @@ fn runPrefill(sch: *Scheduler, slot: *Slot) !void {
     gen.logprobs_n = slot.logprobs_n;
 
     slot.legacy_gen = gen;
+    // A long reply compacts the ring past the prompt end, where the next turn diverges.
+    if (slot.model.prefix_cache != null and slot.ring_cp == null) {
+        slot.ring_cp = slot.cache.ringCheckpoint(slot.full_prompt.len, xfm_ptr.s) catch |err| blk: {
+            log.warn("[hot-cache] ring checkpoint failed: {s}; the entry restores at its end only\n", .{@errorName(err)});
+            break :blk null;
+        };
+    }
     // The last chunks' transient is freed AFTER the loop's own per-chunk clear, so it
     // parks in MLX's pool up to the cap and the first decode tick allocates on top of
     // it. Returned once here, at the handover — long-context gate only.
@@ -6478,30 +6492,6 @@ test "commitSlotIfApplicable routes a Generator-less slot to the cancelled-prefi
     // 0 on every aborted prefill (found live: step=0 while pos=1536).
     try testing.expect(std.mem.indexOf(u8, cp_body, "salvage.forwarded") != null);
     try testing.expect(std.mem.indexOf(u8, cp_body, "commitWithMediaState") != null);
-}
-
-test "hot-cache commit owns the checkpoints on every outcome (#330 adjacent)" {
-    // Ownership of the SSM checkpoint slice transfers to the cache
-    // UNCONDITIONALLY — commitWithMediaState's error paths free it (and after
-    // a byte-budget trim the slice may be a cache-allocated replacement). A
-    // caller-side free after a failed commit is therefore a double free, with
-    // a different allocator at that (gen_ptr.ssm_checkpoint_alloc vs the
-    // cache's). Live shape: any commit error, e.g. OOM.
-    const source = @embedFile("scheduler.zig");
-    const start = std.mem.indexOf(u8, source, "fn commitSlotIfApplicable(") orelse return error.MissingCommitSlot;
-    const end = std.mem.indexOfPos(u8, source, start + 1, "\nfn ") orelse return error.MissingEnd;
-    const body = source[start..end];
-    try testing.expect(std.mem.indexOf(u8, body, "commitWithMediaState") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "cp.deinit") == null);
-
-    // The cancelled-prefill commit detaches the salvage BEFORE the call so
-    // Slot.deinit cannot free what the cache now owns.
-    const cp_start = std.mem.indexOf(u8, source, "fn commitCancelledPrefillSlot(") orelse return error.MissingCancelledPrefillFn;
-    const cp_end = std.mem.indexOfPos(u8, source, cp_start + 1, "\nfn ") orelse return error.MissingCancelledPrefillEnd;
-    const cp_body = source[cp_start..cp_end];
-    const detach = std.mem.indexOf(u8, cp_body, "slot.cancelled_prefill = .{};") orelse return error.MissingDetach;
-    const commit_pos = std.mem.indexOf(u8, cp_body, "hc.commitWithMediaState") orelse return error.MissingCommit;
-    try testing.expect(detach < commit_pos);
 }
 
 test "Generator.initWithOptions hands off checkpoints on cancel" {

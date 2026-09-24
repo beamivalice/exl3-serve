@@ -106,6 +106,14 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 - **A ringed entry's `offset` is LOCAL**; absolute = `base + offset` (`absSeqLen`). A clamp or trim below the
   retained window declines by NAME (`SlidingRingRewindPastWindow`) — the hot-cache restore cold-prefills, the SSD
   tier skips such an entry.
+- **A hot entry keeps a prompt-end ring checkpoint** (window + 30 rows per sliding layer): a reply past ~256 tokens
+  compacts the ring past the prompt end, and a client that sends back content only diverges at prompt + 1 (history
+  renders `<think></think>` where the model wrote its thought; one that echoes `reasoning_content` matches the whole
+  entry). The content-only reply re-prefills at its new positions; the restore keeps the conversation before it
+  ([engine-prefix-cache](engine-prefix-cache.md#basics)). `swaRingCheckpointBytes` bills the slot's copy beside the
+  ring (158 rows: 30 MiB bf16, 16 MiB kv8); each entry bills its own in `kv_bytes`. Live (2026-09-24, kv8, default
+  cache, `taskpolicy -a`, main 298165c vs the landing commit): a 2000-word essay, a 600-word follow-up, then a
+  question: turn 3 TTFT 3.38 -> 1.34 s (cold -> restored 2525 of 3430).
 - **A hot entry holds a ringed layer's RETAINED ROWS, never the ring's capacity** (`KVCache.snapshotRetained`): the
   buffer is allocated at `ringCap` from token one, so a plain share billed and pinned rows no restore can read.
 - Per token: bf16 288 KiB → 22.5 KiB, kv8 153 KiB → 12.0 KiB; ring per slot 122 MiB bf16, 65 MiB kv8.

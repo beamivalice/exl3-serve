@@ -46,6 +46,9 @@ const ssmCheckpointBytes = transformer_mod.ssmCheckpointBytes;
 /// commit time instead of claim time.
 pub const MIN_CANCELLED_COMMIT_TOKENS: usize = 256;
 
+/// Shortest prefix a ring-checkpoint restore reuses; below it the request cold-prefills.
+pub const RING_RESTORE_MIN_TOKENS: usize = 64;
+
 /// Why a lookup that found a real raw token match still restored nothing.
 /// `findBestRestorableMatch` `continue`s every candidate whose highest SSM
 /// checkpoint sits past the shared prefix, so a hybrid lookup can return null
@@ -206,6 +209,10 @@ const Entry = struct {
     mtp: ?DflashSnap = null,
     /// Bytes resident in `mtp`, folded into `kv_bytes` like `ssm_bytes`.
     mtp_bytes: u64 = 0,
+    /// Ringed caches only: the prompt-end restore point (`KVCache.ringCheckpoint`), billed in
+    /// `kv_bytes`. The snapshot's ring holds the window at the entry's END, which a long reply
+    /// carries past where the next turn's rendering diverges.
+    ring_cp: ?KVCacheSnapshot = null,
     /// Restore by move: the slot that took ownership of this entry's KV buffers (`KVCache.adopt`).
     /// While set the snapshot holds empty handles and the entry is invisible to every other
     /// reader. Cleared by the commit that replaces it; dropped at slot end otherwise.
@@ -455,6 +462,10 @@ pub const HotPrefixCache = struct {
         if (e.mtp) |*m| {
             m.deinit();
             e.mtp = null;
+        }
+        if (e.ring_cp) |*r| {
+            r.deinit();
+            e.ring_cp = null;
         }
     }
 
@@ -982,11 +993,13 @@ pub const HotPrefixCache = struct {
                 if (shared > p.best_raw) p.best_raw = shared;
             }
 
+            // An un-restorable ringed candidate stays eligible at 0, so a lookup with nothing
+            // better still lands on it and declines by name.
             const effective = if (require_ssm_checkpoint) blk: {
                 const cps = e.ssm_checkpoints orelse continue;
                 const cp = highestCheckpointAtOrBelow(cps, shared) orelse continue;
                 break :blk cp.pos;
-            } else shared;
+            } else if (ringRestore(e, shared, prompt_ids.len)) |rr| rr.len else 0;
             if (effective > best_effective or
                 (effective == best_effective and shared > best_shared))
             {
@@ -997,6 +1010,25 @@ pub const HotPrefixCache = struct {
         }
         if (best_idx) |idx| return .{ .idx = idx, .shared = best_shared };
         return null;
+    }
+
+    const RingRestore = struct { len: usize, from_cp: bool };
+
+    /// Where an entry restores a match of `shared` tokens. A ringed entry's own ring holds the
+    /// window at its END; below that only its prompt-end checkpoint (`from_cp`) can serve, at
+    /// its position or the match, whichever is lower. Null = un-restorable. Any other entry
+    /// holds a prefix and restores at `shared`.
+    fn ringRestore(e: *const Entry, shared: usize, prompt_len: usize) ?RingRestore {
+        if (e.snapshot.ringServes(clampLen(shared, prompt_len))) return .{ .len = shared, .from_cp = false };
+        const cp = if (e.ring_cp) |*c| c else return null;
+        const at = @min(shared, cp.step);
+        if (at < RING_RESTORE_MIN_TOKENS or !cp.ringServes(clampLen(at, prompt_len))) return null;
+        return .{ .len = at, .from_cp = true };
+    }
+
+    /// The length a restore of `len` matched tokens clamps to: a full match re-forwards its last token.
+    fn clampLen(len: usize, prompt_len: usize) usize {
+        return if (len == prompt_len and len > 1) len - 1 else len;
     }
 
     fn findBestMatch(self: *const HotPrefixCache, prompt_ids: []const u32, has_tools: bool, vision_key: u64, quant_config: kv_quant.KVQuantConfig) ?struct { idx: usize, shared: usize } {
@@ -1331,6 +1363,12 @@ pub const HotPrefixCache = struct {
                 resetSsmEntries(entries);
                 effective_matched = 0;
             }
+        } else if (ringRestore(e, restore_cap, prompt_ids.len)) |rr| {
+            if (rr.from_cp) {
+                try target_cache.restoreRing(&e.ring_cp.?);
+                effective_matched = rr.len;
+                log.info("  [hot-cache] ring checkpoint @{d} serves the match of {d} (the entry's ring ends at {d})\n", .{ rr.len, m.shared, e.snapshot.step });
+            }
         }
         target_moe_seq_offset.* = effective_matched;
 
@@ -1536,6 +1574,29 @@ pub const HotPrefixCache = struct {
         mtp: ?DflashCommit,
         prompt_len: usize,
     ) !CommitStatus {
+        return self.commitWithRing(source_cache, tokens, has_tools, vision_key, cache_key, media_start, ssm_cps, dflash, mtp, prompt_len, null);
+    }
+
+    /// `ring_cp` is the prompt-end restore point of a ringed cache (`KVCache.ringCheckpoint`);
+    /// ownership transfers to the cache like `ssm_cps`.
+    pub fn commitWithRing(
+        self: *HotPrefixCache,
+        source_cache: *const KVCache,
+        tokens: []const u32,
+        has_tools: bool,
+        vision_key: u64,
+        cache_key: u64,
+        media_start: ?usize,
+        ssm_cps: ?[]SSMCheckpoint,
+        dflash: ?DflashCommit,
+        mtp: ?DflashCommit,
+        prompt_len: usize,
+        ring_cp: ?KVCacheSnapshot,
+    ) !CommitStatus {
+        // Freed on every path that does not move it into an entry.
+        var new_ring = ring_cp;
+        defer if (new_ring) |*r| r.deinit();
+        var new_ring_bytes: u64 = if (new_ring) |*r| snapshotBytes(r) else 0;
         const quant_config = source_cache.config;
 
         // Record what the live cache holds now, before any byte-budget trim.
@@ -1616,7 +1677,7 @@ pub const HotPrefixCache = struct {
         if (ssm_cps) |cps| {
             for (cps) |*cp| new_ssm_bytes += ssmCheckpointBytes(cp);
         }
-        var new_bytes = new_kv_bytes + new_ssm_bytes + new_dflash_bytes + new_mtp_bytes;
+        var new_bytes = new_kv_bytes + new_ssm_bytes + new_dflash_bytes + new_mtp_bytes + new_ring_bytes;
         // Effective candidate: a byte-budget trim below shortens these.
         var eff_tokens = tokens;
         var eff_cps = ssm_cps;
@@ -1740,7 +1801,14 @@ pub const HotPrefixCache = struct {
                 if (eff_cps) |cps| {
                     for (cps) |*cp| new_ssm_bytes += ssmCheckpointBytes(cp);
                 }
-                new_bytes = new_kv_bytes + new_ssm_bytes;
+                if (new_ring) |*r| {
+                    if (r.step > tl) {
+                        r.deinit();
+                        new_ring = null;
+                        new_ring_bytes = 0;
+                    }
+                }
+                new_bytes = new_kv_bytes + new_ssm_bytes + new_ring_bytes;
                 log.info("  [hot-cache] trimmed oversized entry to {d}/{d} tokens ({d:.2} MB before checkpoint shedding; {d:.2} MB budget)\n", .{
                     tl,
                     tokens.len,
@@ -1915,6 +1983,13 @@ pub const HotPrefixCache = struct {
             e.dflash = null;
             if (e.mtp) |*m4| m4.deinit();
             e.mtp = null;
+            // The old restore point sits inside the new tokens too; a newer one supersedes it.
+            if (new_ring) |r| {
+                if (e.ring_cp) |*old| old.deinit();
+                e.ring_cp = r;
+                new_ring = null;
+            }
+            const ring_bytes: u64 = if (e.ring_cp) |*r| snapshotBytes(r) else 0;
             self.current_kv_bytes -|= e.kv_bytes;
 
             // Recompute ssm bytes from the merged list.
@@ -1929,7 +2004,7 @@ pub const HotPrefixCache = struct {
             e.cache_key = cache_key;
             e.media_start = eff_media_start;
             e.quant_config = quant_config;
-            e.kv_bytes = new_kv_bytes + merged_ssm_bytes + new_dflash_bytes + new_mtp_bytes;
+            e.kv_bytes = new_kv_bytes + merged_ssm_bytes + new_dflash_bytes + new_mtp_bytes + ring_bytes;
             e.ssm_checkpoints = merged_cps;
             e.ssm_bytes = merged_ssm_bytes;
             e.dflash = new_dflash;
@@ -2000,6 +2075,7 @@ pub const HotPrefixCache = struct {
             .dflash_bytes = new_dflash_bytes,
             .mtp = new_mtp,
             .mtp_bytes = new_mtp_bytes,
+            .ring_cp = new_ring,
         }) catch |err| {
             self.allocator.free(tokens_owned);
             var snap = new_snap;
@@ -2012,6 +2088,7 @@ pub const HotPrefixCache = struct {
             }
             return err;
         };
+        new_ring = null;
         self.current_kv_bytes += new_bytes;
         // The trim prices a prefix against the checkpoints that survive a shed, so the shed runs here too.
         if (self.max_kv_bytes > 0) self.shedCheckpointsToFit();
@@ -3349,6 +3426,154 @@ test "a hot entry holds a ringed layer's retained rows, not the ring buffer's ca
         try testing.expectEqual(@as(f32, 0), try transformer_mod.maxAbsDiffF32(rv.v, sv.v, s));
         try testing.expectEqual(ref.absSeqLen(li), restored.absSeqLen(li));
     }
+}
+
+/// A MiMo-shaped turn: `prompt` rows, a ring checkpoint at the prompt end, then a reply long
+/// enough that the ring compacts past the prompt. The caller owns the checkpoint.
+fn ringTurn(live: *KVCache, s: mlx.mlx_stream, n_layers: u32, window: u32, prompt: u32, reply: u32) !?KVCacheSnapshot {
+    live.setSwaRing(window);
+    try ringFill(live, s, n_layers, window, 0, prompt, 64);
+    var cp = try live.ringCheckpoint(prompt, s);
+    errdefer if (cp) |*c| c.deinit();
+    try ringFill(live, s, n_layers, window, prompt, prompt + reply, 16);
+    return cp;
+}
+
+test "a ringed entry restores at its prompt-end checkpoint when the next turn diverges past the ring" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    const n_layers: u32 = 4; // layer 0 global, 1..3 sliding
+    const prompt: u32 = 700;
+    const reply: u32 = 600;
+
+    var toks: [prompt + reply]u32 = undefined;
+    for (&toks, 0..) |*t, i| t.* = @intCast(i + 1);
+    var live = try KVCache.init(testing.allocator, n_layers);
+    defer live.deinit();
+    const cp = try ringTurn(&live, s, n_layers, window, prompt, reply);
+
+    var end = try live.snapshotRetained(s);
+    const end_bytes = HotPrefixCache.snapshotBytes(&end);
+    end.deinit();
+    var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+    defer hc.deinit();
+    _ = try hc.commitWithRing(&live, &toks, false, 0, 0, null, null, null, null, prompt, cp);
+    // The bill: the window plus the backoff, per sliding layer, at the entry's KV width.
+    var cp_bytes: u64 = 0;
+    for (live.entries) |*e| {
+        if (e.ringed) cp_bytes += (window + model_mod.ModelConfig.SWA_RING_CHECKPOINT_BACKOFF) * (ringRowBytes(e.keys) + ringRowBytes(e.values));
+    }
+    try testing.expectEqual(end_bytes + cp_bytes, hc.current_kv_bytes);
+
+    // The next turn keeps the prompt and its first generated token, then diverges (the
+    // template re-renders the reply), far below what the ring kept at the entry's end.
+    var next: [prompt + 40]u32 = undefined;
+    @memcpy(next[0 .. prompt + 1], toks[0 .. prompt + 1]);
+    for (next[prompt + 1 ..], 0..) |*t, i| t.* = @intCast(900_000 + i);
+    var restored = try KVCache.init(testing.allocator, n_layers);
+    defer restored.deinit();
+    restored.setSwaRing(window);
+    var moe_off: usize = 0;
+    const hit = try hc.lookupAndRestore(&restored, &moe_off, null, s, &next, false, 0, null, null);
+    try testing.expectEqual(@as(usize, prompt), hit.matched);
+
+    var ref = try KVCache.init(testing.allocator, n_layers);
+    defer ref.deinit();
+    ref.setSwaRing(window);
+    try ringFill(&ref, s, n_layers, window, 0, prompt + 40, 64);
+    try ringFill(&restored, s, n_layers, window, prompt, prompt + 40, 40);
+    var li: u32 = 0;
+    while (li < n_layers) : (li += 1) {
+        var rv = try ringWriteLayer(&ref, s, li, prompt + 40, 1, window);
+        defer rv.deinit();
+        var sv = try ringWriteLayer(&restored, s, li, prompt + 40, 1, window);
+        defer sv.deinit();
+        try testing.expectEqual(@as(f32, 0), try transformer_mod.maxAbsDiffF32(rv.k, sv.k, s));
+        try testing.expectEqual(@as(f32, 0), try transformer_mod.maxAbsDiffF32(rv.v, sv.v, s));
+        try testing.expectEqual(ref.absSeqLen(li), restored.absSeqLen(li));
+    }
+
+    // A divergence below the checkpoint's rows is still un-restorable and cold-prefills.
+    var edited: [prompt]u32 = undefined;
+    @memcpy(edited[0 .. prompt - 40], toks[0 .. prompt - 40]);
+    for (edited[prompt - 40 ..], 0..) |*t, i| t.* = @intCast(800_000 + i);
+    var cold = try KVCache.init(testing.allocator, n_layers);
+    defer cold.deinit();
+    cold.setSwaRing(window);
+    const miss = try hc.lookupAndRestore(&cold, &moe_off, null, s, &edited, false, 0, null, null);
+    try testing.expectEqual(@as(usize, 0), miss.matched);
+}
+
+test "a ring checkpoint restore below the floor cold-prefills" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    const n_layers: u32 = 4;
+    const reply: u32 = 600;
+    const cases = [_]struct { prompt: u32, shared: u32, want: usize }{
+        // A short prompt's checkpoint covers it from row 0, so a shared chat header is servable.
+        .{ .prompt = 24, .shared = 3, .want = 0 },
+        .{ .prompt = RING_RESTORE_MIN_TOKENS + 20, .shared = RING_RESTORE_MIN_TOKENS + 21, .want = RING_RESTORE_MIN_TOKENS + 20 },
+    };
+    for (cases) |c| {
+        var toks: [RING_RESTORE_MIN_TOKENS + 20 + reply]u32 = undefined;
+        for (&toks, 0..) |*t, i| t.* = @intCast(i + 1);
+        var live = try KVCache.init(testing.allocator, n_layers);
+        defer live.deinit();
+        const cp = try ringTurn(&live, s, n_layers, window, c.prompt, reply);
+        var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+        defer hc.deinit();
+        _ = try hc.commitWithRing(&live, toks[0 .. c.prompt + reply], false, 0, 0, null, null, null, null, c.prompt, cp);
+
+        var next: [RING_RESTORE_MIN_TOKENS + 60]u32 = undefined;
+        @memcpy(next[0..c.shared], toks[0..c.shared]);
+        for (next[c.shared..], 0..) |*t, i| t.* = @intCast(900_000 + i);
+        var restored = try KVCache.init(testing.allocator, n_layers);
+        defer restored.deinit();
+        restored.setSwaRing(window);
+        var moe_off: usize = 0;
+        const hit = try hc.lookupAndRestore(&restored, &moe_off, null, s, &next, false, 0, null, null);
+        try testing.expectEqual(c.want, hit.matched);
+    }
+}
+
+test "ringed candidates rank by restorable position, not raw match" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    const n_layers: u32 = 4;
+    const prompt: u32 = 700;
+    const reply: u32 = 600;
+    const short: u32 = 400;
+
+    var toks: [prompt + reply]u32 = undefined;
+    for (&toks, 0..) |*t, i| t.* = @intCast(i + 1);
+    var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+    defer hc.deinit();
+    // The longer raw match carries no checkpoint, so its ring cannot reach the divergence.
+    var long = try KVCache.init(testing.allocator, n_layers);
+    defer long.deinit();
+    if (try ringTurn(&long, s, n_layers, window, prompt, reply)) |cp| {
+        var doomed = cp;
+        doomed.deinit();
+    }
+    _ = try hc.commitWithState(&long, &toks, false, 0, null, null, null);
+    var shorter = try KVCache.init(testing.allocator, n_layers);
+    defer shorter.deinit();
+    shorter.setSwaRing(window);
+    try ringFill(&shorter, s, n_layers, window, 0, short, 64);
+    _ = try hc.commitWithState(&shorter, toks[0..short], false, 0, null, null, null);
+
+    var next: [prompt + 40]u32 = undefined;
+    @memcpy(next[0 .. prompt + 1], toks[0 .. prompt + 1]);
+    for (next[prompt + 1 ..], 0..) |*t, i| t.* = @intCast(900_000 + i);
+    var restored = try KVCache.init(testing.allocator, n_layers);
+    defer restored.deinit();
+    restored.setSwaRing(window);
+    var moe_off: usize = 0;
+    const hit = try hc.lookupAndRestore(&restored, &moe_off, null, s, &next, false, 0, null, null);
+    try testing.expectEqual(@as(usize, short), hit.matched);
 }
 
 test "HotPrefixCache: disk tier restores across a fresh cache instance (restart shape)" {

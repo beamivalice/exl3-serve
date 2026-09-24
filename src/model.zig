@@ -869,6 +869,24 @@ pub const ModelConfig = struct {
         return rows * self.slidingLayerKvBytesPerToken(self.num_hidden_layers);
     }
 
+    /// Rows below the prompt end a ring checkpoint keeps past its window: the
+    /// next turn's match lands a few tokens short of the prompt when the
+    /// template re-renders the generation suffix (`generate.SSM_SNAPSHOT_BACKOFF`).
+    pub const SWA_RING_CHECKPOINT_BACKOFF: u64 = 30;
+
+    /// Rows per sliding layer of the prompt-end restore point
+    /// (`KVCache.ringCheckpoint`), 0 on an arch that does not ring.
+    pub fn swaRingCheckpointTokens(self: *const ModelConfig) u64 {
+        if (self.swaRingTokens() == 0) return 0;
+        return @as(u64, self.sliding_window) + SWA_RING_CHECKPOINT_BACKOFF;
+    }
+
+    /// Dense bytes of one ring checkpoint: a slot holds it from prefill end to
+    /// its commit, and each hot entry keeps the one it was committed with.
+    pub fn swaRingCheckpointBytes(self: *const ModelConfig) u64 {
+        return self.swaRingCheckpointTokens() * self.slidingLayerKvBytesPerToken(self.num_hidden_layers);
+    }
+
     /// Dense bytes one CHUNK token stages in the ringed layers: a prefill chunk
     /// is written whole before the ring compacts down to its window, so the
     /// rows exist for the width of the forward and nothing else bills them.
@@ -8467,6 +8485,9 @@ test "mimo_v2 bills per-layer KV geometry and the sliding window once per slot" 
     // `swaRingTokens` rows however long the session runs.
     try testing.expectEqual(@as(u64, 128) + ModelConfig.SWA_RING_SLACK, c.swaRingTokens());
     try testing.expectEqual(c.swaRingTokens() * 2 * 3 * (192 + 128) * 2, c.swaRingBytes());
+    // A restore point is the window plus the backoff, per sliding layer, at the same width.
+    try testing.expectEqual(@as(u64, 128) + ModelConfig.SWA_RING_CHECKPOINT_BACKOFF, c.swaRingCheckpointTokens());
+    try testing.expectEqual(c.swaRingCheckpointTokens() * 2 * 3 * (192 + 128) * 2, c.swaRingCheckpointBytes());
     // What one chunk token stages in those layers before the ring compacts,
     // for as many of them as one eval-cadence window lets coexist.
     try testing.expectEqual(@as(u64, 2 * 3 * (192 + 128) * 2), c.swaStreamBytesPerToken(5));
@@ -8490,6 +8511,7 @@ test "a non-ringing sliding arch keeps the uniform KV bill" {
     g.layer_is_global[2] = true;
     try testing.expectEqual(@as(u64, 0), g.swaRingTokens());
     try testing.expectEqual(@as(u64, 0), g.swaRingBytes());
+    try testing.expectEqual(@as(u64, 0), g.swaRingCheckpointBytes());
     try testing.expectEqual(@as(u64, 0), g.swaStreamBytesPerToken(5));
     try testing.expectEqual(@as(u64, 48 * 8 * 2 * 256 * 2), g.kvBytesPerToken());
 

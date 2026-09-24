@@ -7780,6 +7780,14 @@ pub fn newEmptyKVEntry() KVCacheEntry {
     };
 }
 
+/// Can this entry still show the window a query at `len` reads? A ringed entry's `base`
+/// rows are gone for good; every other entry holds a prefix and clamps anywhere.
+fn ringEntryServes(e: *const KVCacheEntry, window: u32, len: usize) bool {
+    if (!e.initialized or !e.ringed) return true;
+    if (len < e.base) return false;
+    return len - e.base >= @min(len, @as(usize, window));
+}
+
 /// Reset a cache entry to the empty state, freeing all storage + view
 /// handles. Mirror of the per-entry reset in `KVCache.restore`; used by the
 /// disk tier (kv_disk_cache.zig) when installing restored buffers.
@@ -8049,26 +8057,80 @@ pub const KVCache = struct {
     /// `update()` will recreate `*_view` fields from the restored buffers.
     pub fn restore(self: *KVCache, snap: *const KVCacheSnapshot) !void {
         std.debug.assert(self.entries.len == snap.entries.len);
-        for (self.entries, snap.entries) |*dst, src| {
-            freeKVEntry(dst);
-            dst.* = newEmptyKVEntry();
-            dst.offset = src.offset;
-            dst.base = src.base;
-            dst.ringed = src.ringed;
-            dst.initialized = src.initialized;
-            if (src.initialized) {
-                try mlx.check(mlx.mlx_array_set(&dst.keys, src.keys));
-                try mlx.check(mlx.mlx_array_set(&dst.values, src.values));
-                if (self.config.scheme != .off) {
-                    try mlx.check(mlx.mlx_array_set(&dst.keys_scales, src.keys_scales));
-                    try mlx.check(mlx.mlx_array_set(&dst.keys_biases, src.keys_biases));
-                    try mlx.check(mlx.mlx_array_set(&dst.values_scales, src.values_scales));
-                    try mlx.check(mlx.mlx_array_set(&dst.values_biases, src.values_biases));
-                }
-                dst.shared_view = true;
+        for (self.entries, snap.entries) |*dst, src| try self.bindEntry(dst, src);
+        self.step = snap.step;
+    }
+
+    fn bindEntry(self: *const KVCache, dst: *KVCacheEntry, src: KVCacheEntry) !void {
+        freeKVEntry(dst);
+        dst.* = newEmptyKVEntry();
+        dst.offset = src.offset;
+        dst.base = src.base;
+        dst.ringed = src.ringed;
+        dst.initialized = src.initialized;
+        if (src.initialized) {
+            try mlx.check(mlx.mlx_array_set(&dst.keys, src.keys));
+            try mlx.check(mlx.mlx_array_set(&dst.values, src.values));
+            if (self.config.scheme != .off) {
+                try mlx.check(mlx.mlx_array_set(&dst.keys_scales, src.keys_scales));
+                try mlx.check(mlx.mlx_array_set(&dst.keys_biases, src.keys_biases));
+                try mlx.check(mlx.mlx_array_set(&dst.values_scales, src.values_scales));
+                try mlx.check(mlx.mlx_array_set(&dst.values_biases, src.values_biases));
+            }
+            dst.shared_view = true;
+        }
+    }
+
+    /// The restore point a ringed cache keeps at its prompt end: each ringed layer's rows
+    /// `[pos - n, pos)` as owned copies, n = window + `SWA_RING_CHECKPOINT_BACKOFF` (all of
+    /// them on a shorter prompt). The global layers stay empty: they hold a prefix and
+    /// clamp anywhere. Null when no layer rings.
+    pub fn ringCheckpoint(self: *const KVCache, pos: usize, s: mlx.mlx_stream) !?KVCacheSnapshot {
+        if (self.swa_ring_window == 0) return null;
+        const rows: usize = @min(pos, @as(usize, self.swa_ring_window) + ModelConfig.SWA_RING_CHECKPOINT_BACKOFF);
+        const out = try self.allocator.alloc(KVCacheEntry, self.entries.len);
+        for (out) |*e| e.* = newEmptyKVEntry();
+        var cp: KVCacheSnapshot = .{ .entries = out, .step = pos, .allocator = self.allocator, .config = self.config, .swa_ring_window = self.swa_ring_window };
+        errdefer cp.deinit();
+        const vec = mlx.mlx_vector_array_new();
+        defer _ = mlx.mlx_vector_array_free(vec);
+        for (self.entries, out) |*src, *dst| {
+            if (!src.initialized or !src.ringed) continue;
+            if (pos < src.base + rows or pos > src.base + src.offset) return error.SlidingRingRewindPastWindow;
+            const from = pos - rows - src.base;
+            dst.initialized = true;
+            dst.ringed = true;
+            dst.base = pos - rows;
+            dst.offset = rows;
+            const pairs = [_]struct { *mlx.mlx_array, mlx.mlx_array }{
+                .{ &dst.keys, src.keys },                   .{ &dst.values, src.values },
+                .{ &dst.keys_scales, src.keys_scales },     .{ &dst.keys_biases, src.keys_biases },
+                .{ &dst.values_scales, src.values_scales }, .{ &dst.values_biases, src.values_biases },
+            };
+            const n: usize = if (self.config.scheme != .off) 6 else 2;
+            for (pairs[0..n]) |p| {
+                const owned = try rowsOwned(p[1], from, from + rows, s);
+                _ = mlx.mlx_array_free(p[0].*);
+                p[0].* = owned;
+                _ = mlx.mlx_vector_array_append_value(vec, owned);
             }
         }
-        self.step = snap.step;
+        if (mlx.mlx_vector_array_size(vec) == 0) {
+            cp.deinit();
+            return null;
+        }
+        // Without the eval the lazy copies pin the ring buffers they were sliced from.
+        _ = mlx.mlx_eval(vec);
+        return cp;
+    }
+
+    /// Put a ring checkpoint's rows under the ringed layers of a cache restored from the
+    /// same entry. `step` and the global layers stay; the caller's `truncate` clamps both.
+    pub fn restoreRing(self: *KVCache, cp: *const KVCacheSnapshot) !void {
+        std.debug.assert(self.entries.len == cp.entries.len);
+        for (self.entries, cp.entries) |*dst, src| {
+            if (src.initialized) try self.bindEntry(dst, src);
+        }
     }
 
     const chunk_step = 256;
@@ -8782,10 +8844,7 @@ pub const KVCache = struct {
     /// ring kept, not of the request.
     fn ringServesClamp(self: *const KVCache, len: usize) !void {
         for (self.entries) |*entry| {
-            if (!entry.initialized or !entry.ringed) continue;
-            if (len < entry.base) return error.SlidingRingRewindPastWindow;
-            const local = len - entry.base;
-            if (local < @min(len, @as(usize, self.swa_ring_window))) return error.SlidingRingRewindPastWindow;
+            if (!ringEntryServes(entry, self.swa_ring_window, len)) return error.SlidingRingRewindPastWindow;
         }
     }
 
@@ -8890,6 +8949,14 @@ pub const KVCacheSnapshot = struct {
         self.allocator.free(self.entries);
     }
 
+    /// Could a cache restored from this snapshot clamp to `len` (`KVCache.truncate`)?
+    pub fn ringServes(self: *const KVCacheSnapshot, len: usize) bool {
+        for (self.entries) |*e| {
+            if (!ringEntryServes(e, self.swa_ring_window, len)) return false;
+        }
+        return true;
+    }
+
     /// Give up every array handle this snapshot holds, leaving it empty but deinit-able. The
     /// second half of restore by move: `KVCache.restore` binds through `mlx_array_set`, so the
     /// snapshot's second reference made `is_donatable()` fail and the first `writeAtOffset`
@@ -8967,11 +9034,16 @@ pub const KVCacheSnapshot = struct {
 /// Slice `[0:rows]` on axis 2 and force a real copy (see
 /// `materializedOwnedCopy` for why a plain slice keeps the parent alive).
 fn trimRowsOwned(x: mlx.mlx_array, rows: usize, s: mlx.mlx_stream) !mlx.mlx_array {
+    return rowsOwned(x, 0, rows, s);
+}
+
+/// An owned copy of sequence rows `[from, to)` (axis 2).
+fn rowsOwned(x: mlx.mlx_array, from: usize, to: usize, s: mlx.mlx_stream) !mlx.mlx_array {
     const sh = mlx.mlx_array_shape(x);
     var sliced = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(sliced);
-    const start = [_]c_int{ 0, 0, 0, 0 };
-    const stop = [_]c_int{ sh[0], sh[1], @intCast(rows), sh[3] };
+    const start = [_]c_int{ 0, 0, @intCast(from), 0 };
+    const stop = [_]c_int{ sh[0], sh[1], @intCast(to), sh[3] };
     const strides = [_]c_int{ 1, 1, 1, 1 };
     try mlx.check(mlx.mlx_slice(&sliced, x, &start, 4, &stop, 4, &strides, 4, s));
     return materializedOwnedCopy(s, sliced);
@@ -50047,6 +50119,74 @@ test "a ring rewinds inside its retained window and declines below it" {
     // Zero is a reset, not a rewind.
     try c.truncate(0, s);
     try std.testing.expectEqual(@as(usize, 0), c.absSeqLen(0));
+}
+
+/// Layer 0 global, layer 1 sliding: rows `[from, to)` in `chunk`-wide forwards.
+fn ringCheckpointFeed(a: *KVCache, b: *KVCache, window: u32, from: usize, to: usize, chunk: usize) !void {
+    const s = mlx.gpuStream();
+    var pos = from;
+    while (pos < to) {
+        const q: c_int = @intCast(@min(chunk, to - pos));
+        const k = try swaRingChunk(s, @intCast(pos), q, 1, 64);
+        defer _ = mlx.mlx_array_free(k);
+        const v = try swaRingChunk(s, @as(c_int, @intCast(pos)) + 7919, q, 1, 64);
+        defer _ = mlx.mlx_array_free(v);
+        for ([_]u32{ 0, slidingTailSpan(window, @intCast(q), SLIDING_TRIM_UNBOUNDED) }, 0..) |span, li| {
+            var av = try a.update(@intCast(li), k, v, s, span);
+            defer av.deinit();
+            var bv = try b.update(@intCast(li), k, v, s, span);
+            defer bv.deinit();
+            try std.testing.expectEqual(@as(f32, 0), try maxAbsDiffF32(av.k, bv.k, s));
+            try std.testing.expectEqual(@as(f32, 0), try maxAbsDiffF32(av.v, bv.v, s));
+        }
+        pos += @intCast(q);
+    }
+}
+
+fn ringCheckpointRestore(kv_cfg: KVQuantConfig) !void {
+    const alloc = std.testing.allocator;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    const prompt: usize = 700;
+    const backoff: usize = ModelConfig.SWA_RING_CHECKPOINT_BACKOFF;
+
+    var live = try KVCache.initWithConfig(alloc, 2, kv_cfg);
+    defer live.deinit();
+    live.setSwaRing(window);
+    var plain = try KVCache.initWithConfig(alloc, 2, kv_cfg);
+    defer plain.deinit();
+    try ringCheckpointFeed(&live, &plain, window, 0, prompt, 250);
+
+    var cp = (try live.ringCheckpoint(prompt, s)) orelse return error.TestExpectedRingCheckpoint;
+    defer cp.deinit();
+    try std.testing.expect(cp.ringServes(prompt) and cp.ringServes(prompt - backoff));
+    try std.testing.expect(!cp.ringServes(prompt - backoff - 1));
+
+    // A reply long enough that the ring compacts past the prompt end.
+    try ringCheckpointFeed(&live, &plain, window, prompt, prompt + 600, 50);
+    var end = try live.snapshotRetained(s);
+    defer end.deinit();
+    try std.testing.expect(!end.ringServes(prompt));
+
+    var restored = try KVCache.initWithConfig(alloc, 2, kv_cfg);
+    defer restored.deinit();
+    restored.setSwaRing(window);
+    try restored.restore(&end);
+    try std.testing.expectError(error.SlidingRingRewindPastWindow, restored.truncate(prompt - 1, s));
+    // The checkpoint's rows take the ringed layers; the global layer clamps as always.
+    try restored.restoreRing(&cp);
+    try restored.truncate(prompt - 1, s);
+    try plain.truncate(prompt - 1, s);
+    try std.testing.expectEqual(prompt - 1, restored.absSeqLen(0));
+    try std.testing.expectEqual(prompt - 1, restored.absSeqLen(1));
+    // Every view after the restore is the full-length cache's, across a compaction.
+    try ringCheckpointFeed(&restored, &plain, window, prompt - 1, prompt + 700, 100);
+}
+
+test "a ring checkpoint serves the clamp the ring's end state declines" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    try ringCheckpointRestore(KVQuantConfig.dense);
+    try ringCheckpointRestore(.{ .scheme = .affine, .bits = 8, .group_size = 32 });
 }
 
 /// Max |a-b| between two same-shaped float arrays, with a NaN guard (a NaN
