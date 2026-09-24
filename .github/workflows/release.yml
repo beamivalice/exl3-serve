@@ -178,7 +178,7 @@ jobs:
       # ── CLI tarball (standalone binary + libs) ──
       - name: Package CLI binary
         env:
-          SIGNING_IDENTITY: "Developer ID Application: David Dalcu (${{ secrets.APPLE_TEAM_ID }})"
+          SIGNING_IDENTITY: "Developer ID Application: Theinruj Toranavikrai (${{ secrets.APPLE_TEAM_ID }})"
         run: |
           STAGING="sushi-macos-arm64"
           mkdir -p "$STAGING/lib"
