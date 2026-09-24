@@ -2645,6 +2645,23 @@ pub fn gateEstimateBytes(bytes_on_disk: ?u64, num_hidden_layers: u32, hidden_siz
     return base + base / 10;
 }
 
+/// A boot `--model` entry carries no discovery `bytes_on_disk`, so the measured shard sum is
+/// the answer before the layers x hidden guess (which read 1966080 for a ~64 GiB pack).
+pub fn residentWeightBytes(billed: ?u64, bytes_on_disk: ?u64, measured_disk: u64, num_hidden_layers: u32, hidden_size: u32) u64 {
+    if (billed) |b| return b;
+    if (bytes_on_disk) |b| return b;
+    if (measured_disk > 0) return measured_disk;
+    return @as(u64, num_hidden_layers) * @as(u64, hidden_size) * 4 * 4;
+}
+
+test "residentWeightBytes: a boot entry without a disk hint reports its measured shards" {
+    const gib: u64 = 1 << 30;
+    try testing.expectEqual(64 * gib, residentWeightBytes(null, null, 64 * gib, 48, 2560));
+    try testing.expectEqual(@as(u64, 97) * gib, residentWeightBytes(97 * gib, 64 * gib, 64 * gib, 48, 2560));
+    try testing.expectEqual(@as(u64, 5), residentWeightBytes(null, 5, 64 * gib, 48, 2560));
+    try testing.expectEqual(@as(u64, 48 * 2560 * 16), residentWeightBytes(null, null, 0, 48, 2560));
+}
+
 pub fn expertStreamingGateBytes(resident_bytes: u64, cache_bytes: u64, fill_peak_bytes: u64, bounce_bytes: u64) u64 {
     return resident_bytes +| cache_bytes +| fill_peak_bytes +| bounce_bytes;
 }
@@ -3961,11 +3978,8 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         );
     }
 
-    // Best-effort bytes_resident estimate: prefer the disk size hint when
-    // available (it's close to actual GPU resident bytes after Metal page-
-    // ins), else fall back to a rough multiple of layers × hidden. The
-    // value drives LRU eviction's "will the new model fit?" gate in Phase
-    // D; precise accounting isn't required here.
+    // The weights the load preflight billed. Drives the registry's resident-memory gate and
+    // `/v1/models` `bytes_resident`.
     const bytes_resident: u64 = if (params.config.expert_streaming)
         expertStreamingGateBytes(
             streaming_resident_bytes.?,
@@ -3973,12 +3987,8 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
             params.config.expert_fill_peak_bytes,
             params.config.expert_bounce_bytes,
         )
-    else if (streaming_resident_bytes) |b|
-        b
-    else if (entry.bytes_on_disk) |b|
-        b
     else
-        @as(u64, params.config.num_hidden_layers) * @as(u64, params.config.hidden_size) * 4 * 4;
+        residentWeightBytes(streaming_resident_bytes, entry.bytes_on_disk, modelDiskBytes(sch.io, params.model_dir), params.config.num_hidden_layers, params.config.hidden_size);
 
     sch.registry.mutex.lockUncancelable(sch.io);
     sch.registry.markReadyLocked(entry, bytes_resident);
