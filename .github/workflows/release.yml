@@ -16,7 +16,7 @@ on:
         type: boolean
         default: false
       pre_release:
-        description: "Cut this as a pre-release: tag v<YY.M.N>-pre-release.<n> instead of v<YY.M.N>"
+        description: "Cut this as a pre-release: tag v<MAJOR.MINOR.PATCH>-pre-release.<n> instead of v<MAJOR.MINOR.PATCH>"
         type: boolean
         default: false
 
@@ -109,50 +109,42 @@ jobs:
 
       - name: Extract version
         id: version
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # CalVer's YY.M comes from ONE pinned zone — cutting v26.8.1 is
-          # what forced this. The dispatch ran 01:26 UTC on
-          # Aug 1 while it was still Jul 31 locally, so CI minted 26.8.1 against
-          # a CHANGELOG and perf artifacts that all said 26.7.12.
-          # Runners are UTC; without the pin the two clocks disagree for a few
-          # hours around every month boundary. Guarded by
-          # tests/test_release_workflow_gates.sh.
-          TZ: America/New_York
+        # SemVer MAJOR.MINOR.PATCH from build.zig.zon, checked by the same
+        # release.sh functions a local dispatch runs.
         run: |
+          source ./release.sh
+          BASE="$(zon_version build.zig.zon)"
+          is_semver "$BASE" || { echo "::error::build.zig.zon version '$BASE' is not MAJOR.MINOR.PATCH"; exit 1; }
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # CalVer YY.M.N — N auto-increments from the last vYY.M.* release tag.
-            PREFIX="$(date +%y.%-m)"
-            LAST_N=$(gh release list --limit 100 --json tagName \
-              --jq "[.[] | .tagName | select(test(\"^v${PREFIX}\\\\.[0-9]+$\")) | sub(\"^v${PREFIX}\\\\.\"; \"\") | tonumber] | max // 0")
-            N=$((LAST_N + 1))
-            VERSION="${PREFIX}.${N}"
-            # A pre-release does NOT consume the version number: it tags
-            # v<VERSION>-pre-release.<P>, which the `^vYY.M.[0-9]+$` match above
-            # ignores, so the next run still mints the same N for the real
-            # release. P counts the pre-releases of THIS version from 1, read
-            # off the existing tags the same way N is, so a sequence reads
-            # v26.8.10-pre-release.1, .2, .3 and then v26.8.10. Every
-            # pre-release is numbered, including the first — an unnumbered one
-            # sorts ambiguously against .2 and reads like a different kind of
-            # thing rather than the first of a series.
             if [ "${{ inputs.pre_release }}" = "true" ]; then
-              LAST_P=$(git ls-remote --tags origin "v${VERSION}-pre-release.*" \
-                | sed -n "s#.*refs/tags/v${VERSION}-pre-release\\.\\([0-9][0-9]*\\)\$#\\1#p" \
+              # A pre-release does NOT consume the version: it tags
+              # v<BASE>-pre-release.<P>, P counting this version's pre-releases
+              # from 1 off the existing tags, so a sequence reads
+              # v1.0.0-pre-release.1, .2 and then v1.0.0.
+              LAST_P=$(git ls-remote --tags origin "v${BASE}-pre-release.*" \
+                | sed -n "s#.*refs/tags/v${BASE}-pre-release\\.\\([0-9][0-9]*\\)\$#\\1#p" \
                 | sort -n | tail -1)
-              VERSION="${VERSION}-pre-release.$(( ${LAST_P:-0} + 1 ))"
+              VERSION="${BASE}-pre-release.$(( ${LAST_P:-0} + 1 ))"
+            else
+              VERSION="$(release_version CHANGELOG.md build.zig.zon)"
             fi
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
             echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            # PR package: CalVer prefix + PR number + commit — never tagged,
-            # never released; only names the artifact and --version output.
-            PREFIX="$(date +%y.%-m)"
-            VERSION="${PREFIX}.0-pr${{ github.event.pull_request.number }}.$(git rev-parse --short HEAD)"
+            # PR package: never tagged, never released; only names the
+            # artifact and --version output. The g keeps an all-digit short
+            # sha a valid SemVer identifier.
+            VERSION="${BASE}-pr${{ github.event.pull_request.number }}.g$(git rev-parse --short HEAD)"
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
             echo "tag=" >> "$GITHUB_OUTPUT"
           else
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            VERSION="${GITHUB_REF_NAME#v}"
+            tag_version_ok "$VERSION" "$BASE" \
+              || { echo "::error::tag $GITHUB_REF_NAME is neither v$BASE nor v$BASE-pre-release.<n>"; exit 1; }
+            if [ "$VERSION" = "$BASE" ]; then
+              release_version CHANGELOG.md build.zig.zon >/dev/null
+            fi
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
@@ -308,7 +300,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           # PR versions embed the PR number + SHA, so the name is unambiguous
-          # either way (e.g. package-26.7.0-pr12.abc1234 / package-26.7.11).
+          # either way (e.g. package-1.0.0-pr12.gabc1234 / package-1.0.0).
           name: package-${{ steps.version.outputs.version }}
           path: |
             sushi-bin-macos-arm64.tar.gz

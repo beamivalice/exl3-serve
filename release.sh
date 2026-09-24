@@ -1,54 +1,99 @@
 #!/usr/bin/env bash
-# release.sh — trigger the GitHub "Release" workflow for the version documented
-# at the top of CHANGELOG.md, but ONLY if that version matches the version the
-# workflow will actually cut.
+# release.sh — trigger the GitHub "Release" workflow for the version in
+# build.zig.zon, but ONLY if the top CHANGELOG.md entry documents that same
+# version and no GitHub release or tag already carries it.
 #
-# The Release workflow computes its version as CalVer YY.M.N where N is one past
-# the last GitHub release for the current YY.M (see .github/workflows/release.yml
-# "Extract version"). If the newest CHANGELOG entry names a different version,
-# you'd ship release notes that don't match the tag — or forget to write them.
-# This guard refuses to dispatch unless the two agree.
+# Versions are SemVer MAJOR.MINOR.PATCH (tag v1.0.0). build.zig.zon's
+# `.version` is the one source: `zig build` stamps it into `sushi --version`,
+# and the workflow's "Extract version" step sources this file and applies the
+# same checks, so a dispatch can only cut the version both files name.
 #
 # Usage:
-#   ./release.sh            # verify match, confirm, then dispatch
+#   ./release.sh            # verify, confirm, then dispatch
 #   ./release.sh -y         # skip the confirmation prompt
 #   ./release.sh --dry-run  # print what it would do, never dispatch
 #
-# Env overrides: CHANGELOG, WORKFLOW (default release.yml), REF (default main).
+# Env overrides: CHANGELOG, ZON, WORKFLOW (default release.yml), REF (default main).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHANGELOG="${CHANGELOG:-$REPO_ROOT/CHANGELOG.md}"
+ZON="${ZON:-$REPO_ROOT/build.zig.zon}"
 WORKFLOW="${WORKFLOW:-release.yml}"
 REF="${REF:-main}"
 
 usage() {
-  sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-# Newest version documented in CHANGELOG.md, sans leading 'v' (e.g. "26.6.11").
-# Empty if the file has no "## vX.Y.Z" heading. Single awk pass (no pipe, so a
-# `set -o pipefail` caller can't trip on SIGPIPE).
-changelog_top_version() {
+is_semver() {
+  [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+}
+
+# The `.version = "X"` field of a build.zig.zon.
+zon_version() {
   awk '
-    /^##[[:space:]]*v[0-9]+\.[0-9]+\.[0-9]+/ {
-      line = $0
-      sub(/^##[[:space:]]*v/, "", line)
-      match(line, /^[0-9]+\.[0-9]+\.[0-9]+/)
-      print substr(line, RSTART, RLENGTH)
+    /^[[:space:]]*\.version[[:space:]]*=/ {
+      s = $0
+      sub(/^[^"]*"/, "", s)
+      sub(/".*$/, "", s)
+      print s
       exit
     }
   ' "$1"
 }
 
-# Version the Release workflow will produce on a fresh dispatch: CalVer YY.M.N
-# with N = (max N among existing vYY.M.* GitHub releases) + 1. Mirrors the
-# "Extract version" step in .github/workflows/release.yml verbatim.
-computed_release_version() {
-  local prefix last_n
-  prefix="$(date -u +%y.%-m)"
-  last_n="$(gh release list --limit 100 --json tagName \
-    --jq "[.[] | .tagName | select(test(\"^v${prefix}\\\\.[0-9]+$\")) | sub(\"^v${prefix}\\\\.\"; \"\") | tonumber] | max // 0")"
-  echo "${prefix}.$((last_n + 1))"
+# The version the FIRST "## " heading of CHANGELOG.md names, sans leading 'v'
+# ("## v1.0.0 — Headline" → "1.0.0"). Empty when that heading names none, e.g.
+# "## Unreleased". Single awk pass (no pipe, so a `set -o pipefail` caller
+# can't trip on SIGPIPE).
+changelog_top_version() {
+  awk '
+    /^##[[:space:]]/ {
+      if (match($0, /^##[[:space:]]*v[0-9][0-9A-Za-z.+-]*/)) {
+        s = substr($0, RSTART, RLENGTH)
+        sub(/^##[[:space:]]*v/, "", s)
+        print s
+      }
+      exit
+    }
+  ' "$1"
+}
+
+# Prints the release version when build.zig.zon and the top CHANGELOG entry
+# agree on one MAJOR.MINOR.PATCH; otherwise says why on stderr and fails.
+release_version() {
+  local changelog="$1" zon="$2" v cl
+  v="$(zon_version "$zon")"
+  if ! is_semver "$v"; then
+    echo "release.sh: $zon version '$v' is not MAJOR.MINOR.PATCH" >&2
+    return 1
+  fi
+  cl="$(changelog_top_version "$changelog")"
+  if [ -z "$cl" ]; then
+    echo "release.sh: the top entry of $changelog is not a '## v$v' heading" >&2
+    return 1
+  fi
+  if ! is_semver "$cl"; then
+    echo "release.sh: CHANGELOG heading v$cl is not MAJOR.MINOR.PATCH" >&2
+    return 1
+  fi
+  if [ "$cl" != "$v" ]; then
+    echo "release.sh: CHANGELOG top entry v$cl != build.zig.zon version v$v" >&2
+    return 1
+  fi
+  echo "$v"
+}
+
+# A pushed tag may cut the build.zig.zon version or a numbered pre-release of it.
+tag_version_ok() {
+  local tag_version="$1" base="$2"
+  [ "$tag_version" = "$base" ] && return 0
+  [[ "$tag_version" =~ ^${base//./\\.}-pre-release\.[1-9][0-9]*$ ]]
+}
+
+tag_exists() {
+  gh release view "$1" >/dev/null 2>&1 \
+    || git -C "$REPO_ROOT" ls-remote --exit-code --tags origin "refs/tags/$1" >/dev/null 2>&1
 }
 
 main() {
@@ -64,29 +109,14 @@ main() {
     esac
   done
 
-  local cl_version computed
-  cl_version="$(changelog_top_version "$CHANGELOG")"
-  if [ -z "$cl_version" ]; then
-    echo "release.sh: no '## vX.Y.Z' entry found at the top of $CHANGELOG" >&2
+  local version
+  version="$(release_version "$CHANGELOG" "$ZON")" || return 1
+  echo "Release version     : v$version (build.zig.zon = CHANGELOG top entry)"
+
+  if tag_exists "v$version"; then
+    echo "release.sh: v$version already exists as a GitHub release or tag — bump build.zig.zon and the CHANGELOG heading" >&2
     return 1
   fi
-  computed="$(computed_release_version)"
-
-  echo "CHANGELOG top entry : v$cl_version"
-  echo "Workflow will cut   : v$computed   (CalVer: last release + 1)"
-
-  if [ "$cl_version" != "$computed" ]; then
-    {
-      echo "release.sh: version mismatch — refusing to trigger a release."
-      echo "  CHANGELOG.md top entry : v$cl_version"
-      echo "  workflow would release : v$computed"
-      echo "Make the CHANGELOG heading match the next release version (or cut the"
-      echo "pending release first), then re-run."
-    } >&2
-    return 1
-  fi
-
-  echo "✓ versions match (v$computed)"
 
   if [ "$dry_run" -eq 1 ]; then
     echo "[dry-run] would run: gh workflow run $WORKFLOW --ref $REF"
@@ -94,7 +124,7 @@ main() {
   fi
 
   if [ "$assume_yes" -ne 1 ]; then
-    read -r -p "Trigger the Release workflow for v$computed on '$REF'? [y/N] " reply
+    read -r -p "Trigger the Release workflow for v$version on '$REF'? [y/N] " reply
     case "$reply" in
       [yY] | [yY][eE][sS]) ;;
       *) echo "aborted."; return 0 ;;
@@ -102,12 +132,12 @@ main() {
   fi
 
   gh workflow run "$WORKFLOW" --ref "$REF"
-  echo "✓ dispatched v$computed on '$REF'."
+  echo "✓ dispatched v$version on '$REF'."
   echo "  Watch:  gh run watch \$(gh run list --workflow=$WORKFLOW --limit 1 --json databaseId --jq '.[0].databaseId')"
 }
 
-# Only run main when executed directly — sourcing (e.g. tests) just loads the
-# functions.
+# Only run main when executed directly — sourcing (tests, the release
+# workflow) just loads the functions.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   main "$@"
 fi

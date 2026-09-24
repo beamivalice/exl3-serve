@@ -1,6 +1,6 @@
 ---
 name: release
-description: sushi pre-release validation checklist, CalVer versioning, release steps, and CHANGELOG style. Use when preparing or cutting a release, running pre-release validation, or writing CHANGELOG entries.
+description: sushi pre-release validation checklist, SemVer versioning, release steps, and CHANGELOG style. Use when preparing or cutting a release, running pre-release validation, or writing CHANGELOG entries.
 ---
 
 ## Pre-release validation — ALWAYS run this, same process every time
@@ -41,19 +41,17 @@ Rules:
 
 ## Versioning & Releases
 
-CalVer `YY.M.N` (e.g., `v26.4.25` = 2026, April, 25th release). `N` auto-increments from the last GitHub release for that `YY.M` prefix; release.yml computes it via `gh release list`.
+SemVer `MAJOR.MINOR.PATCH`, tagged `v1.0.0`. MAJOR breaks a public contract (HTTP API, flags, the pack format); MINOR adds a model, a feature or a flag; PATCH fixes without adding.
 
-**Version sources**: the top `## vYY.M.N` heading in `CHANGELOG.md` (what a plain `zig build` stamps), the Zig `-Dversion` build option (`build_options.version`), and the release tag. CI derives ONE version and passes it to `-Dversion`; `release.sh` refuses to dispatch unless the CHANGELOG heading agrees with the version the workflow would cut.
-
-**`YY.M` is TZ-pinned** (`America/New_York`, in release.yml): runners are UTC, so a `workflow_dispatch` cut after ~20:00 local otherwise rolls into next month. **Prefer a tag push over a dispatch** when the version is already decided — the tag-push path takes `version=${GITHUB_REF_NAME#v}` and never consults the clock.
+**The version source is `build.zig.zon`'s `.version`**: a plain `zig build` stamps it into `sushi --version`, and `-Dversion` (CI) must be SemVer or the build stops. `release.sh` dispatches only when the FIRST `## ` heading of `CHANGELOG.md` names that same version and no GitHub release or tag carries it yet; the workflow's "Extract version" step sources `release.sh` and applies the same checks (a pushed tag must be `v<zon>` or `v<zon>-pre-release.<n>`). Nothing is computed from the date.
 
 **Release**:
-1. Update `CHANGELOG.md` with NEXT version (check `gh release list --limit 1` first — never reuse an existing tag)
+1. Set `build.zig.zon`'s `.version` to the next version and rename the top `## Unreleased` entry to `## v<version> — Headline` (check `gh release list --limit 1` first — never reuse an existing tag)
 2. Dont commit or push
 
 ### CHANGELOG style
 
-**One entry per shipped release. No new entries for unshipped work — fold it into the next pending entry.** Always run `gh release list --limit 1` first; if the topmost CHANGELOG entry is newer than the latest GitHub release, that entry is unshipped and any new bullets get merged into it. Never bump version numbers ahead of an actual release.
+**One entry per shipped release. No new entries for unshipped work — fold it into the next pending entry.** Always run `gh release list --limit 1` first; if the topmost CHANGELOG entry is newer than the latest GitHub release, that entry is unshipped and any new bullets get merged into it. Unshipped work lives under `## Unreleased`; the version heading is written in the release step.
 
 Tone: high-level executive bullets, marketing-style. The audience is users/integrators, not contributors reading the diff.
 
@@ -66,7 +64,7 @@ Template:
 
 ```markdown
 
-## vYY.M.N — Two-to-five-word headline
+## vMAJOR.MINOR.PATCH — Two-to-five-word headline
 
 - **<User-visible thing>**: one or two sentences on the impact. Numbers if you have them.
 - **<New model / API / behavior>**: what unlocks, when it kicks in, what stays the same.
@@ -76,4 +74,4 @@ Template:
 ---
 ```
 
-When in doubt, look at the existing entries (v26.5.4 and earlier) — keep the same density and tone.
+When in doubt, look at the existing entries — keep the same density and tone.

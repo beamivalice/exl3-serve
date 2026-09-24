@@ -50,12 +50,13 @@ pub fn build(b: *std.Build) void {
 
     if (builtin.os.tag != .macos) return;
 
-    // Version. Release builds pass it explicitly (the release workflow passes
-    // the tag). A plain `zig build` used to fall back to a literal "0.1.0-dev",
-    // a version that exists nowhere. Default to the newest version the
-    // CHANGELOG documents instead: the one CalVer committed in the repo, and
-    // the same number release.sh gates a dispatch on.
-    const version = b.option([]const u8, "version", "Version string") orelse readChangelogVersion(b) orelse "0.0.0-dev";
+    // Version: SemVer, build.zig.zon's `.version` unless the release workflow
+    // passes the tag's version (release.sh checks the two agree).
+    const version = b.option([]const u8, "version", "SemVer version string (default: build.zig.zon)") orelse @import("build.zig.zon").version;
+    _ = std.SemanticVersion.parse(version) catch {
+        std.debug.print("[sushi] -Dversion={s} is not a SemVer version (MAJOR.MINOR.PATCH[-pre])\n", .{version});
+        std.process.exit(1);
+    };
 
     // Engine-version pins surfaced by `sushi --version` (the macOS app spawns
     // it and parses the output — see src/version.zig). These are the versions
@@ -275,30 +276,6 @@ fn verifyMlxStage(b: *std.Build) void {
         );
         std.process.exit(1);
     }
-}
-
-/// The newest version documented in CHANGELOG.md ("## vYY.M.N"), surfaced by
-/// `sushi --version`. Read at configure time so a plain `zig build`
-/// reports the release the tree is written against instead of a made-up
-/// literal. Same rule as release.sh's changelog_top_version; null → "0.0.0-dev".
-fn readChangelogVersion(b: *std.Build) ?[]const u8 {
-    const bytes = buildRootHandle(b).readFileAlloc(
-        b.graph.io,
-        "CHANGELOG.md",
-        b.allocator,
-        .limited(4 * 1024 * 1024),
-    ) catch return null;
-    var it = std.mem.splitScalar(u8, bytes, '\n');
-    while (it.next()) |line| {
-        const rest = std.mem.trimStart(u8, line, " ");
-        if (!std.mem.startsWith(u8, rest, "##")) continue;
-        const after = std.mem.trim(u8, rest[2..], " \t\r");
-        if (!std.mem.startsWith(u8, after, "v")) continue;
-        var end: usize = 1;
-        while (end < after.len and (std.ascii.isDigit(after[end]) or after[end] == '.')) end += 1;
-        if (end > 1) return b.dupe(after[1..end]);
-    }
-    return null;
 }
 
 /// The pinned mlx-c revision from lib/mlx/.version (written by

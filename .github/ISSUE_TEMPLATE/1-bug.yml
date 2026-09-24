@@ -37,7 +37,7 @@ body:
     attributes:
       label: sushi version
       description: From `sushi --version`
-      placeholder: "26.8.10"
+      placeholder: "1.0.0"
     validations:
       required: true
   - type: input

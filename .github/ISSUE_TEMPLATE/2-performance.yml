@@ -25,7 +25,7 @@ body:
     attributes:
       label: sushi version(s)
       description: If it's a regression, name BOTH versions
-      placeholder: "26.8.10 vs 26.8.9"
+      placeholder: "1.0.1 vs 1.0.0"
     validations:
       required: true
   - type: input

@@ -56,7 +56,7 @@ quote them from a committed file.
 | `docs/private/sashimi-codebooks.md` | MCG decision, decoder dead ends, fractional-rate trellis |
 | `docs/private/measurement-raw.md` | the raw-file path behind every committed measurement, keyed by doc and section |
 
-Skills: `/release` (CalVer, CHANGELOG), `/bench` (llmprobe methodology, comparison traps).
+Skills: `/release` (SemVer, CHANGELOG), `/bench` (llmprobe methodology, comparison traps).
 
 ## Stack
 
@@ -137,7 +137,7 @@ Hermetic suites: `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter=
 
 ## Releases & benchmarking
 
-`/release` for process, CalVer, CHANGELOG. Perf gate = `./tests/bench.sh` on the FINAL tree vs the previous column in
+`/release` for process, SemVer, CHANGELOG. Perf gate = `./tests/bench.sh` on the FINAL tree vs the previous column in
 `benchmarks.md` (ONE new column per release). `/bench` for methodology: same-methodology cells only, spec cells are
 variance (sample across boots), an A/B arm is proven by ENGAGEMENT lines in its log. Interleave A/B kernels in ONE
 process (separate runs drift 15%); same-boot medians per cell; sub-2% calls need an IDLE box. Recorded baselines to

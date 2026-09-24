@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Hermetic tests for release.sh — the CHANGELOG-version parse and the
-# "only dispatch when versions match" gate. No network and no real release:
-# release.sh is SOURCED (its main() doesn't auto-run), and the version
-# computation + `gh` dispatch are overridden with stubs.
+# Hermetic tests for release.sh — the SemVer parse and the "only dispatch when
+# build.zig.zon and the CHANGELOG agree on an unreleased version" gate. No
+# network and no real release: release.sh is SOURCED (its main() doesn't
+# auto-run), and the tag lookup + `gh` dispatch are overridden with stubs.
 #
 # Run: bash tests/test_release.sh
 set -u
@@ -16,8 +16,6 @@ ok() { # name  actual  expected
   else FAIL=$((FAIL + 1)); echo "  FAIL $1 — expected [$3], got [$2]"; fi
 }
 
-# Source the functions. main() is guarded by a BASH_SOURCE check, so this only
-# defines functions; it does not trigger a release.
 # shellcheck source=/dev/null
 source "$ROOT/release.sh"
 
@@ -25,48 +23,55 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 DISPATCH_LOG="$TMP/dispatched.log"
 
 # Stub the two externals so the gate can be exercised offline:
-#  - computed_release_version → whatever the test pins via FAKE_COMPUTED
+#  - tag_exists → true only for the tags listed in EXISTING_TAGS
 #  - gh → record the dispatch instead of calling GitHub
-FAKE_COMPUTED="26.6.11"
-computed_release_version() { echo "$FAKE_COMPUTED"; }
+EXISTING_TAGS=""
+tag_exists() { case " $EXISTING_TAGS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 gh() { echo "DISPATCHED $*" >> "$DISPATCH_LOG"; }
 
 dispatched() { [ -f "$DISPATCH_LOG" ] && echo yes || echo no; }
 reset_dispatch() { rm -f "$DISPATCH_LOG"; }
 
-echo "── changelog_top_version ──"
-printf '# Changelog\n\n## v26.6.11 — Headline\n\n- a bullet\n\n## v26.6.10 — Older\n' > "$TMP/normal.md"
-ok "parses the top entry's version"        "$(changelog_top_version "$TMP/normal.md")" "26.6.11"
-printf '# Changelog\n\nnothing released yet\n'                                          > "$TMP/none.md"
-ok "empty when no version heading present" "$(changelog_top_version "$TMP/none.md")"   ""
+printf '.{\n    .name = .sushi,\n    .version = "1.0.0",\n}\n' > "$TMP/build.zig.zon"
+export ZON="$TMP/build.zig.zon"
+
+echo "── parsing ──"
+ok "reads build.zig.zon's version"          "$(zon_version "$ZON")" "1.0.0"
+printf '# Changelog\n\n## v1.0.0 — Headline\n\n- a bullet\n\n## v0.9.0 — Older\n' > "$TMP/match.md"
+ok "parses the top entry's version"         "$(changelog_top_version "$TMP/match.md")" "1.0.0"
+printf '# Changelog\n\n## Unreleased\n\n- a bullet\n\n## v0.9.0 — Older\n'      > "$TMP/unreleased.md"
+ok "empty when the top entry is Unreleased" "$(changelog_top_version "$TMP/unreleased.md")" ""
+is_semver 1.0.0;   ok "1.0.0 is SemVer"            "$?" "0"
+is_semver 26.9;    ok "26.9 is not SemVer"         "$?" "1"
+is_semver 01.0.0;  ok "a leading zero is not SemVer" "$?" "1"
 
 echo "── dispatch gate ──"
-printf '## v26.6.11 — Match\n'    > "$TMP/match.md"
-printf '## v26.6.10 — Stale\n'    > "$TMP/stale.md"
+printf '## v26.9.1 — CalVer\n' > "$TMP/calver.md"
 
-# Match → dispatches, exit 0.
 reset_dispatch
 ( CHANGELOG="$TMP/match.md"; main -y ) >/dev/null 2>&1; rc=$?
 ok "matching versions dispatch"     "$(dispatched)" "yes"
 ok "matching versions exit 0"       "$rc"           "0"
 
-# Mismatch → refuse, no dispatch, exit 1.
 reset_dispatch
-( CHANGELOG="$TMP/stale.md"; main -y ) >/dev/null 2>&1; rc=$?
-ok "mismatched versions don't dispatch" "$(dispatched)" "no"
-ok "mismatched versions exit 1"         "$rc"           "1"
+( CHANGELOG="$TMP/calver.md"; main -y ) >/dev/null 2>&1; rc=$?
+ok "a 26.9.x heading doesn't dispatch" "$(dispatched)" "no"
+ok "a 26.9.x heading exit 1"           "$rc"           "1"
 
-# --dry-run on a match → no dispatch, exit 0.
+reset_dispatch
+( CHANGELOG="$TMP/unreleased.md"; main -y ) >/dev/null 2>&1; rc=$?
+ok "an Unreleased top entry doesn't dispatch" "$(dispatched)" "no"
+ok "an Unreleased top entry exit 1"           "$rc"           "1"
+
+reset_dispatch
+( CHANGELOG="$TMP/match.md"; EXISTING_TAGS="v1.0.0"; main -y ) >/dev/null 2>&1; rc=$?
+ok "an existing tag doesn't dispatch" "$(dispatched)" "no"
+ok "an existing tag exit 1"           "$rc"           "1"
+
 reset_dispatch
 ( CHANGELOG="$TMP/match.md"; main --dry-run ) >/dev/null 2>&1; rc=$?
 ok "dry-run never dispatches"       "$(dispatched)" "no"
 ok "dry-run exit 0"                 "$rc"           "0"
-
-# No CHANGELOG entry → refuse, exit 1.
-reset_dispatch
-( CHANGELOG="$TMP/none.md"; main -y ) >/dev/null 2>&1; rc=$?
-ok "missing changelog entry refuses" "$(dispatched)" "no"
-ok "missing changelog entry exit 1"  "$rc"           "1"
 
 echo ""
 TOTAL=$((PASS + FAIL))

@@ -53,9 +53,8 @@ check("workflow_dispatch" in step_if("Create tag (manual dispatch)"),
       "tag creation restricted to workflow_dispatch")
 
 # ── The pre_release checkbox exists so a build can be cut WITHOUT consuming the
-# version number: it tags v<YY.M.N>-pre-release.<n>, which the `^vYY.M.[0-9]+$`
-# match that picks N never sees, so the plain vYY.M.N is still there to cut
-# later. Two halves, both load-bearing:
+# version: it tags v<MAJOR.MINOR.PATCH>-pre-release.<n>, so the plain version is
+# still there to cut later. Two halves, both load-bearing:
 #   - the suffix must be applied where the tag is MINTED (the version step), not
 #     at the release step, or the tag consumes the number anyway;
 #   - the release must still be created as a DRAFT and must NOT set `prerelease`
@@ -108,14 +107,48 @@ upload = [s for s in job["steps"]
 check(any("pull_request" in str(s.get("if", "")) for s in upload),
       "artifact upload covers pull_request")
 
-# ── CalVer timezone: the release ran at 01:26 UTC on Aug 1 while it was still
-# Jul 31 locally, so CI minted 26.8.1 against a CHANGELOG and perf artifacts
-# that all said 26.7.12. Runners are UTC, so YY.M must come from a pinned zone
-# or it disagrees with the tree for a few hours around every month boundary.
+# ── SemVer. build.zig.zon's `.version` is the one version source; the version
+# step sources release.sh so a dispatch and a tag push apply the same checks
+# release.sh does, and no version comes from the clock.
 wf_text = open(".github/workflows/release.yml").read()
-check("date -u +%y" not in wf_text, "CalVer month is not computed in UTC")
-check(re.search(r"TZ[=:]\s*[\"']?([A-Za-z_]+/[A-Za-z_]+)", wf_text) is not None,
-      "release.yml pins the CalVer timezone")
+version_run = str(version_step.get("run", ""))
+check("release.sh" in version_run and "build.zig.zon" in version_run,
+      "the version step reads build.zig.zon through release.sh")
+check("release_version" in version_run and "tag_version_ok" in version_run,
+      "the version step checks the CHANGELOG heading and a pushed tag")
+check("date +%y" not in wf_text and "date -u +%y" not in wf_text,
+      "no version is computed from the date")
+
+import subprocess, tempfile
+def sh(script, *args):
+    r = subprocess.run(["bash", "-c", 'source ./release.sh; ' + script, "sh", *args],
+                       capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+zon = re.search(r'\.version\s*=\s*"([^"]*)"', open("build.zig.zon").read())
+check(zon is not None and sh('is_semver "$1"', zon.group(1))[0] == 0,
+      "build.zig.zon's version is MAJOR.MINOR.PATCH")
+
+with tempfile.TemporaryDirectory() as d:
+    def release_version(heading, zon_version):
+        cl, zf = os.path.join(d, "CHANGELOG.md"), os.path.join(d, "build.zig.zon")
+        open(cl, "w").write(f"# Changelog\n\n{heading}\n\n- a bullet\n\n## v0.9.0 — Older\n")
+        open(zf, "w").write(f'.{{\n    .name = .sushi,\n    .version = "{zon_version}",\n}}\n')
+        return sh('release_version "$1" "$2"', cl, zf)
+    check(release_version("## v1.0.0 — First", "1.0.0") == (0, "1.0.0"),
+          "a v1.0.0 heading matching build.zig.zon is the release version")
+    check(release_version("## v26.9.1 — CalVer", "1.0.0")[0] != 0,
+          "a 26.9.x CHANGELOG heading is refused")
+    check(release_version("## v26.9.1 — CalVer", "26.9")[0] != 0,
+          "a two-part version is refused")
+    check(release_version("## Unreleased", "1.0.0")[0] != 0,
+          "an Unreleased top entry is refused even with an older version below it")
+    check(release_version("## v1.1.0 — Next", "1.0.0")[0] != 0,
+          "a heading that disagrees with build.zig.zon is refused")
+for tag, ok in (("1.0.0", True), ("1.0.0-pre-release.2", True), ("26.9.1", False),
+                ("1.0.1", False), ("1.0.0-pre-release.0", False), ("1x0x0", False)):
+    check((sh('tag_version_ok "$1" 1.0.0', tag)[0] == 0) == ok,
+          f"a pushed tag v{tag} is {'accepted' if ok else 'refused'} for 1.0.0")
 
 # ── Third-party attribution must travel WITH the binary. The shipped binary
 # links Apache-2.0 code (MTPLX/dflash/oMLX Metal kernels, jinja.cpp), and

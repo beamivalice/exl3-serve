@@ -51,14 +51,14 @@ fn val(s: []const u8) []const u8 {
 
 test "version: report renders one name-value line per component" {
     const s = try report(std.testing.allocator, .{
-        .app = "26.7.9",
+        .app = "1.0.0",
         .mlx = "0.32.0",
         .mlx_c = "0.6.0",
         .nax = "on (M5 neural accelerators)",
     });
     defer std.testing.allocator.free(s);
     try std.testing.expectEqualStrings(
-        \\sushi 26.7.9
+        \\sushi 1.0.0
         \\mlx 0.32.0
         \\mlx-c 0.6.0
         \\nax on (M5 neural accelerators)
@@ -68,14 +68,14 @@ test "version: report renders one name-value line per component" {
 
 test "version: blank pins read as unknown" {
     const s = try report(std.testing.allocator, .{
-        .app = "26.7.9",
+        .app = "1.0.0",
         .mlx = "0.32.0",
         .mlx_c = "", // build.sh couldn't resolve it (dev build)
         .nax = "",
     });
     defer std.testing.allocator.free(s);
     try std.testing.expectEqualStrings(
-        \\sushi 26.7.9
+        \\sushi 1.0.0
         \\mlx 0.32.0
         \\mlx-c unknown
         \\nax unknown
