@@ -9464,9 +9464,11 @@ pub const Generator = struct {
         two_ms: f32 = 0,
         two_tok: f32 = 0,
         two_m: u32 = 0,
+        two_n: u32 = 0,
         one_ms: f32 = 0,
         one_tok: f32 = 0,
         one_m: u32 = 0,
+        one_n: u32 = 0,
         /// Shape of the previous round: a round whose shape differs from its
         /// predecessor is a TRANSITION and is not observed. The minority shape
         /// was only ever measured on transition rounds and read 5-7% slow
@@ -9508,9 +9510,11 @@ pub const Generator = struct {
     /// (unobserved), the second is the steady-state measurement.
     pub const MTP_REGIME_EXPLORE_BLOCK: u32 = 2;
 
-    fn regimeEma(prev: f32, sample: f32) f32 {
-        if (prev <= 0.0) return sample;
-        return prev + MTP_EV_COST_BETA * (sample - prev);
+    /// The running mean over a shape's first 1/beta samples, the cost EMA after, so no single
+    /// round (an all-rejected one emits 1 token) outweighs the rest.
+    fn regimeFold(prev: f32, sample: f32, n: u32) f32 {
+        const w = @max(MTP_EV_COST_BETA, 1.0 / @as(f32, @floatFromInt(n)));
+        return prev + w * (sample - prev);
     }
 
     /// Wall time since the previous round ended (the first round reads its
@@ -9538,20 +9542,20 @@ pub const Generator = struct {
         if (transition) return;
         if (two_chunk) {
             if (r.two_m != m_lo) {
-                r.two_ms = 0;
-                r.two_tok = 0;
+                r.two_n = 0;
                 r.two_m = m_lo;
             }
-            r.two_ms = regimeEma(r.two_ms, round_ms);
-            r.two_tok = regimeEma(r.two_tok, tokens);
+            r.two_n += 1;
+            r.two_ms = regimeFold(r.two_ms, round_ms, r.two_n);
+            r.two_tok = regimeFold(r.two_tok, tokens, r.two_n);
         } else {
             if (r.one_m != m_lo) {
-                r.one_ms = 0;
-                r.one_tok = 0;
+                r.one_n = 0;
                 r.one_m = m_lo;
             }
-            r.one_ms = regimeEma(r.one_ms, round_ms);
-            r.one_tok = regimeEma(r.one_tok, tokens);
+            r.one_n += 1;
+            r.one_ms = regimeFold(r.one_ms, round_ms, r.one_n);
+            r.one_tok = regimeFold(r.one_tok, tokens, r.one_n);
         }
     }
 
@@ -9560,6 +9564,13 @@ pub const Generator = struct {
     /// vs 13.0 homogeneous), so a throttle needs a margin the noise cannot
     /// cross; the M4 base loss it exists for is 21%.
     pub const MTP_REGIME_MARGIN: f32 = 0.05;
+    /// Rounds each shape is measured over before a verdict: a round's tokens run 1..m+1, so a
+    /// shape judged on one round is judged on its acceptance luck.
+    pub const MTP_REGIME_MIN_SAMPLES: u32 = 4;
+
+    fn mtpRegimeMeasured(n: u32) bool {
+        return n >= MTP_REGIME_MIN_SAMPLES;
+    }
 
     /// Null until BOTH shapes have been measured at the same base depth.
     pub fn mtpRegimeTwoChunkWorse(r: MtpRegime) ?bool {
@@ -9574,7 +9585,7 @@ pub const Generator = struct {
     /// verdict 5-7 times per boot on v5.2, each flip a run of two-chunk
     /// rounds on a box where that shape loses 10%.
     pub fn mtpRegimeVerdict(r: MtpRegime, prev: ?bool) ?bool {
-        if (r.two_tok <= 0.0 or r.one_tok <= 0.0 or r.two_m != r.one_m) return null;
+        if (!mtpRegimeMeasured(r.two_n) or !mtpRegimeMeasured(r.one_n) or r.two_m != r.one_m) return null;
         const ratio = (r.two_ms / r.two_tok) / (r.one_ms / r.one_tok);
         if (prev == true) return ratio > 1.0;
         return ratio > 1.0 + MTP_REGIME_MARGIN;
@@ -9608,8 +9619,8 @@ pub const Generator = struct {
     }
 
     fn mtpRegimeForceAt(r: *MtpRegime, round_idx: u32) ?bool {
-        if (r.two_tok <= 0.0) return null;
-        if (r.one_tok <= 0.0 or r.one_m != r.two_m) return false;
+        if (!mtpRegimeMeasured(r.two_n)) return null;
+        if (!mtpRegimeMeasured(r.one_n) or r.one_m != r.two_m) return false;
         const worse = mtpRegimeVerdict(r.*, r.sched_verdict) orelse return null;
         if (r.sched_verdict != worse) {
             if (r.sched_verdict == null) r.verdict_round = round_idx;
@@ -16094,20 +16105,25 @@ test "mtpEvPlanFor: unobserved deep indices at the prior still open the extensio
 }
 
 test "mtpRegime: the worse shape runs as a scheduled trial block, unmeasured runs as planned" {
+    const measure = struct {
+        fn shape(r: *Generator.MtpRegime, two_chunk: bool, ms: f32, tok: f32) void {
+            for (0..Generator.MTP_REGIME_MIN_SAMPLES) |_| Generator.mtpRegimeObserve(r, two_chunk, 4, ms, tok);
+        }
+    };
     var r = Generator.MtpRegime{};
     // Unseeded: the plan stands (two-chunk measures itself); once two-chunk
     // is measured, an unmeasured single is forced AT ONCE. The first round
     // of a shape is its transition and is not observed.
     try testing.expect(Generator.mtpRegimeTwoChunkWorse(r) == null);
     try testing.expect(Generator.mtpRegimeForce(&r, 1) == null);
-    Generator.mtpRegimeObserve(&r, true, 4, 129.0, 5.65); // first round counts
+    measure.shape(&r, true, 129.0, 5.65); // first round counts
     try testing.expect(Generator.mtpRegimeForce(&r, 2) == false);
     // M4 base echo (measured): two-chunk 22.83 vs single 18.11 ms/tok = 26%
     // worse, so a 2-round trial block recurs every 53 rounds (1% drag). The
-    // single's first round is a transition (dropped), the second seeds.
+    // single's first round is a transition (dropped), the next ones measure.
     Generator.mtpRegimeObserve(&r, false, 4, 90.5, 5.0);
     try testing.expect(Generator.mtpRegimeForce(&r, 3) == false);
-    Generator.mtpRegimeObserve(&r, false, 4, 90.5, 5.0);
+    measure.shape(&r, false, 90.5, 5.0);
     try testing.expect(Generator.mtpRegimeTwoChunkWorse(r).?);
     try testing.expectEqual(@as(u32, 53), Generator.mtpRegimeExplorePeriod(r));
     try testing.expect(Generator.mtpRegimeForce(&r, 14) == false); // verdict forms: next trial at 67
@@ -16128,9 +16144,9 @@ test "mtpRegime: the worse shape runs as a scheduled trial block, unmeasured run
     // two-chunk runs every round and a single-chunk block is scheduled once
     // per period to keep the other regime's EMA alive.
     var m = Generator.MtpRegime{};
-    Generator.mtpRegimeObserve(&m, true, 4, 64.0, 6.0);
+    measure.shape(&m, true, 64.0, 6.0);
     Generator.mtpRegimeObserve(&m, false, 4, 56.0, 4.96);
-    Generator.mtpRegimeObserve(&m, false, 4, 56.0, 4.96);
+    measure.shape(&m, false, 56.0, 4.96);
     try testing.expect(!Generator.mtpRegimeTwoChunkWorse(m).?);
     try testing.expectEqual(@as(u32, 12), Generator.mtpRegimeExplorePeriod(m)); // 5.8% gap
     try testing.expect(Generator.mtpRegimeForce(&m, 5) == null); // verdict forms: next trial at 17
@@ -16141,14 +16157,14 @@ test "mtpRegime: the worse shape runs as a scheduled trial block, unmeasured run
     // M4 Max 27B @16k: 13.4 vs 12.95 ms/tok is inside the margin — the plan
     // stands (two-chunk measured +3.7% at arm level).
     var n = Generator.MtpRegime{};
-    Generator.mtpRegimeObserve(&n, true, 4, 80.4, 6.0);
+    measure.shape(&n, true, 80.4, 6.0);
     Generator.mtpRegimeObserve(&n, false, 4, 64.75, 5.0);
-    Generator.mtpRegimeObserve(&n, false, 4, 64.75, 5.0);
+    measure.shape(&n, false, 64.75, 5.0);
     try testing.expect(!Generator.mtpRegimeTwoChunkWorse(n).?);
     // Hysteresis (M1 Pro 9B v5.2): a standing "worse" at 26.4 vs 23.8 does
     // not flip when the post-block single reads 25.3 (ratio 1.04, inside the
     // margin); it flips only once two-chunk is at or below single.
-    var h = Generator.MtpRegime{ .two_ms = 26.4, .two_tok = 1.0, .two_m = 4, .one_ms = 25.3, .one_tok = 1.0, .one_m = 4 };
+    var h = Generator.MtpRegime{ .two_ms = 26.4, .two_tok = 1.0, .two_m = 4, .two_n = 4, .one_ms = 25.3, .one_tok = 1.0, .one_m = 4, .one_n = 4 };
     try testing.expect(Generator.mtpRegimeVerdict(h, true).?);
     try testing.expect(!Generator.mtpRegimeVerdict(h, null).?);
     h.one_ms = 26.5;
@@ -16188,6 +16204,72 @@ test "mtpRegime: a simulated round loop reaches BOTH shapes, and the worse one k
     const better = Sim.run(64.0, 56.0, 200);
     try testing.expect(better.two > 160);
     try testing.expect(better.one >= 25 and better.one <= 40);
+}
+
+test "mtpRegime: one all-rejected round cannot set the verdict" {
+    // A request's first two-chunk round (Flash-Next @204k, depth 6) emitted 1 token in 61.19 ms and
+    // its first single round 3 in 33.09 ms; alone they read 61.2 vs 11.0 ms/tok. Pooled over the
+    // rounds that follow, two-chunk is the cheaper shape (14.3 vs 14.9 ms/tok).
+    var r = Generator.MtpRegime{};
+    Generator.mtpRegimeObserve(&r, true, 1, 61.19, 1.0);
+    Generator.mtpRegimeObserve(&r, false, 1, 33.0, 3.0); // transition
+    Generator.mtpRegimeObserve(&r, false, 1, 33.09, 3.0);
+    try testing.expect(Generator.mtpRegimeTwoChunkWorse(r) == null);
+    for ([_]f32{ 34.0, 33.0, 34.0 }) |ms| Generator.mtpRegimeObserve(&r, false, 1, ms, 2.0);
+    Generator.mtpRegimeObserve(&r, true, 1, 40.0, 4.0); // transition
+    for ([_]f32{ 42.0, 40.0, 43.0 }) |ms| Generator.mtpRegimeObserve(&r, true, 1, ms, 4.0);
+    try testing.expect(!Generator.mtpRegimeTwoChunkWorse(r).?);
+}
+
+test "mtpRegime: a shape is measured over MTP_REGIME_MIN_SAMPLES rounds before it is judged" {
+    const n = Generator.MTP_REGIME_MIN_SAMPLES;
+    var r = Generator.MtpRegime{};
+    var i: u32 = 0;
+    // The planned shape (two-chunk) runs until it has its samples, then single-chunk does:
+    // its first round is the transition, the next n are its samples.
+    while (i < n) : (i += 1) {
+        try testing.expect(Generator.mtpRegimeForce(&r, i) == null);
+        Generator.mtpRegimeObserve(&r, true, 4, 60.0, 3.0);
+    }
+    while (i < 2 * n + 1) : (i += 1) {
+        try testing.expect(Generator.mtpRegimeForce(&r, i) == false);
+        Generator.mtpRegimeObserve(&r, false, 4, 45.0, 2.0);
+    }
+    try testing.expect(!Generator.mtpRegimeTwoChunkWorse(r).?);
+    try testing.expect(Generator.mtpRegimeForce(&r, i) == null);
+    // A new base depth starts both shapes over.
+    Generator.mtpRegimeObserve(&r, true, 5, 70.0, 4.0); // transition
+    Generator.mtpRegimeObserve(&r, true, 5, 70.0, 4.0);
+    try testing.expect(Generator.mtpRegimeTwoChunkWorse(r) == null);
+    try testing.expect(Generator.mtpRegimeForce(&r, i + 1) == null);
+}
+
+test "mtpRegime: rounds with random acceptance run the cheaper shape most of the time" {
+    // Per-round tokens are the draft chain's accepted prefix + 1 (per-draft acceptance 0.6): a
+    // single-chunk round drafts 1, a two-chunk round 2, and two-chunk costs 15% less per token.
+    const p: f32 = 0.6;
+    const one_ms: f32 = 30.0;
+    const two_ms: f32 = 0.85 * one_ms * (1.0 + p + p * p) / (1.0 + p);
+    var two_rounds: u32 = 0;
+    var rounds: u32 = 0;
+    var seed: u64 = 0;
+    while (seed < 64) : (seed += 1) {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rand = prng.random();
+        var r = Generator.MtpRegime{};
+        var i: u32 = 0;
+        while (i < 300) : (i += 1) {
+            const two_chunk = Generator.mtpRegimeForce(&r, i) orelse true;
+            const drafts: u32 = if (two_chunk) 2 else 1;
+            var tokens: f32 = 1.0;
+            var d: u32 = 0;
+            while (d < drafts and rand.float(f32) < p) : (d += 1) tokens += 1.0;
+            if (two_chunk) two_rounds += 1;
+            rounds += 1;
+            Generator.mtpRegimeObserve(&r, two_chunk, 1, if (two_chunk) two_ms else one_ms, tokens);
+        }
+    }
+    try testing.expect(@as(f32, @floatFromInt(two_rounds)) > 0.72 * @as(f32, @floatFromInt(rounds)));
 }
 
 test "MtpCostSource: a measured cliff stops the plan where the fitted surface would extend" {
@@ -16344,7 +16426,7 @@ test "round_cost: a simulated round loop measures every width the chooser picks 
     try testing.expect(wt.trials >= 2);
 }
 
-test "mtpRegimeObserve: seeds on the first sample, moves by the cost beta, reseeds on a new base depth" {
+test "mtpRegimeObserve: averages the first 1/beta samples, then moves by the cost beta, reseeds on a new base depth" {
     var r = Generator.MtpRegime{};
     Generator.mtpRegimeObserve(&r, true, 3, 45.0, 4.0); // first round counts
     try testing.expect(r.two_tok > 0.0);
@@ -16354,8 +16436,12 @@ test "mtpRegimeObserve: seeds on the first sample, moves by the cost beta, resee
     try testing.expectApproxEqAbs(@as(f32, 50.0), r.one_ms, 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 4.0), r.one_tok, 1e-6);
     Generator.mtpRegimeObserve(&r, false, 3, 60.0, 5.0);
-    try testing.expectApproxEqAbs(50.0 + Generator.MTP_EV_COST_BETA * 10.0, r.one_ms, 1e-4);
-    try testing.expectApproxEqAbs(4.0 + Generator.MTP_EV_COST_BETA * 1.0, r.one_tok, 1e-4);
+    try testing.expectApproxEqAbs(@as(f32, 55.0), r.one_ms, 1e-4);
+    try testing.expectApproxEqAbs(@as(f32, 4.5), r.one_tok, 1e-4);
+    for (0..8) |_| Generator.mtpRegimeObserve(&r, false, 3, 60.0, 5.0);
+    try testing.expectApproxEqAbs(@as(f32, 59.0), r.one_ms, 1e-3);
+    Generator.mtpRegimeObserve(&r, false, 3, 70.0, 5.0);
+    try testing.expectApproxEqAbs(59.0 + Generator.MTP_EV_COST_BETA * 11.0, r.one_ms, 1e-3);
     // The climb moved m_lo: the depth-3 rounds are not the depth-4 regime.
     Generator.mtpRegimeObserve(&r, false, 4, 70.0, 5.0);
     try testing.expectApproxEqAbs(@as(f32, 70.0), r.one_ms, 1e-6);
