@@ -109,15 +109,7 @@ weights. This is **plain, uncalibrated MLX affine quantization**. All 48 trunk
 layers and the MTP layer use 3-bit/group128; the K3 donor supplies unchanged
 8-bit non-expert weights, configuration and raw BF16 n-grams.
 
-```sh
-PYTHONPATH=tests PYTHONUNBUFFERED=1 \
-<sashimi>/.venv/bin/python \
-tests/convert_qwen38_flash_next_affine_graft.py \
-  --src <models>/Qwen/Qwen3.8-Flash-Next \
-  --donor <models>/Qwen3.8-Flash-Next-EXL3-K3 \
-  --dst <models>/Qwen3.8-Flash-Next-Affine3-G128 \
-  --bits 3 --expert-gs 128 --batch-experts 64 --cpu-threads 4
-```
+The conversion recipe is kept with the private converter (sashimi).
 
 The destination must not exist. Conversion used CPU-only bounded batches.
 Unchanged donor files are hard-linked, never modified; the mixed MTP shard

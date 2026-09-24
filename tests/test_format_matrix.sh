@@ -47,7 +47,7 @@ NC='\033[0m'
 
 # logical|display|path|engine|has_thinking|extra server flags
 MODELS=(
-    "qwen4_exp|Qwen3.8 Flash-Next (think tags + XML tools)|${QWEN4_EXP_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}|mlx|yes|"
+    "qwen4_exp|Qwen3.8 Flash-Next (think tags + XML tools)|${QWEN4_EXP_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}|mlx|yes|"
     "mimo_v2|MiMo-V2.6-Flash (EXL3 experts)|${MIMO_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/MiMo-V2.6-Flash-Sushi2.5bpw}|mlx|yes|--no-vision"
 )
 

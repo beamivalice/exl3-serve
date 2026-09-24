@@ -2,8 +2,8 @@
 # DFlash block-drafter integration test — env-gated on a local target +
 # assistant pair (Muse-Glimmer-30B + its DFlash assistant today):
 #
-#   DFLASH_TEST_MODEL=${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged \
-#   DFLASH_TEST_DRAFTER=${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged \
+#   DFLASH_TEST_MODEL=${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw \
+#   DFLASH_TEST_DRAFTER=${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw \
 #       ./tests/test_dflash.sh
 #
 # Pins the live contract: the sidecar probe classifies the assistant as

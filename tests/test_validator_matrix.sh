@@ -42,7 +42,7 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 # pi_case must exist in pi_integration_run.sh's html matrix; empty = no pi
 # layer (pi's driver boots without the streaming budget MiMo needs).
 MODELS=(
-    "qwen4_exp|Qwen3.8 Flash-Next (qwen4_exp)|${QWEN4_EXP_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}|html-qwen4|240|"
+    "qwen4_exp|Qwen3.8 Flash-Next (qwen4_exp)|${QWEN4_EXP_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}|html-qwen4|240|"
     "mimo_v2|MiMo-V2.6-Flash EXL3 (mimo_v2)|${MIMO_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/MiMo-V2.6-Flash-Sushi2.5bpw}||240|--no-vision"
 )
 

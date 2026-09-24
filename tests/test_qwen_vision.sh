@@ -9,7 +9,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-MODEL="${1:-${QWEN_VISION_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
+MODEL="${1:-${QWEN_VISION_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}}"
 PORT="${2:-11385}"
 IMAGE="tests/fixtures/house.jpeg"
 

@@ -17,7 +17,7 @@
 #   - A built sushi binary (run `zig build -Doptimize=ReleaseFast` first)
 #   - Either:
 #       PLD_TEST_MODEL set to a model directory, OR
-#       a default MLX checkpoint at ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
+#       a default MLX checkpoint at ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw
 #
 # Usage:
 #   PLD_TEST_MODEL=/path/to/model ./tests/test_pld_equivalence.sh [port]
@@ -34,13 +34,13 @@ YELLOW='\033[0;33m'
 NC='\033[0m'
 
 # Resolve model directory: explicit env var first, else a sensible default.
-MODEL="${PLD_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+MODEL="${PLD_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}"
 
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_pld_equivalence: model directory not found."
     echo
     echo "  Set PLD_TEST_MODEL to a model directory, or place an MLX checkpoint"
-    echo "  at ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged (the default this test"
+    echo "  at ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw (the default this test"
     echo "  looks for). PLD works on any model so the choice is arbitrary."
     exit 0
 fi

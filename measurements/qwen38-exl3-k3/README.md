@@ -152,17 +152,12 @@ expert 447, down projection. Global loss by projection is 1.001869% gate,
 1.002092% up and 0.946143% down.
 
 The script reads original BF16 source experts, splits gate/up, transposes to
-the public `[in, out]` layout, and compares against PonyExl3's CPU reconstruction
+the public `[in, out]` layout, and compares against the private converter's CPU reconstruction
 including H128 transforms, input/output scales and final FP16 rounding.
 Dot products and norm sums use float64. Raw tensor reads avoid loading full
 expert banks or invoking GPU computation.
 
-```sh
-env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
-  <sashimi>/.venv/bin/python \
-  -m ponyexl3.serve_convert weights-k3 --workers 4 \
-  --output measurements/qwen38-exl3-k3/weights.json
-```
+The command is kept with the private converter (sashimi).
 
 The six hermetic Python tests passed, and the real-header audit validated all
 48 layers × 3 matrix layouts. The JSON contains exact sample IDs, moments,

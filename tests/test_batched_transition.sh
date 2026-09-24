@@ -22,7 +22,7 @@
 #
 # Requires:
 #   - A built sushi binary (zig build -Doptimize=ReleaseFast)
-#   - BATCH_TEST_MODEL or ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
+#   - BATCH_TEST_MODEL or ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw
 #
 # Usage:
 #   ./tests/test_batched_transition.sh [port]
@@ -36,11 +36,11 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${BATCH_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+MODEL="${BATCH_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}"
 
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_batched_transition: model directory not found."
-    echo "  Set BATCH_TEST_MODEL or place a checkpoint at ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged"
+    echo "  Set BATCH_TEST_MODEL or place a checkpoint at ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw"
     exit 0
 fi
 

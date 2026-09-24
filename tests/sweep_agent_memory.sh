@@ -21,7 +21,7 @@ RESULTS="${RESULTS:-AGENT_MEMORY_RESULTS.md}"
 # logical|display|path|engine — pipe-separated entries. MiMo is absent: it
 # streams its experts and this boot passes no --ssd-budget-gb.
 MODELS=(
-    "qwen4_exp|Qwen3.8 Flash-Next|${QWEN4_EXP_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}|mlx"
+    "qwen4_exp|Qwen3.8 Flash-Next|${QWEN4_EXP_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}|mlx"
 )
 
 if [[ -n "${SWEEP_MODELS:-}" ]]; then

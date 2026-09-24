@@ -23,7 +23,7 @@ set -u
 
 PORT="${1:-11499}"
 BINARY="${BINARY:-./zig-out/bin/sushi}"
-MODEL="${VISION_CHUNK_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+MODEL="${VISION_CHUNK_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}"
 WORK="$(mktemp -d)"
 SERVER_PID=""
 
