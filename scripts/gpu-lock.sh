@@ -23,7 +23,14 @@ POLL="${GPU_LOCK_POLL_S:-5}"
 # A ticket is a symlink $Q/<n> whose text is "<pid> <owner>": created atomically, contents
 # included. A served ticket reads "done" and stays until a higher ticket prunes it, so the
 # highest number is never deleted and ticket numbers only grow.
-tickets() { ls "$Q" 2>/dev/null | grep -E '^[0-9]+$' | sort -n; }
+# Listed with a glob, not ls: a waiter whose ls lists nothing would number itself 1 and jump the queue.
+tickets() {
+  local f
+  for f in "$Q"/*; do
+    f=${f##*/}
+    case "$f" in '' | *[!0-9]*) ;; *) echo "$f" ;; esac
+  done | sort -n
+}
 live() {
   local v pid
   v=$(readlink "$Q/$1" 2>/dev/null) && [ "$v" != done ] || return 1

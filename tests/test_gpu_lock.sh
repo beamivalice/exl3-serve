@@ -11,6 +11,7 @@
 #   7. a waiter that died leaves the queue: status drops it and the next waiter is served
 #   8. status lists the holder, then the queue in ticket order
 #   9. break (coordinator only, for a dead holder) frees the lock only when it names the holder
+#  10. a waiter whose environment breaks `ls` still takes its ticket behind the queue
 #
 # No GPU, no model, seconds.
 #
@@ -107,6 +108,20 @@ $LOCK break dead; check $? "break naming the holder succeeds"
 wait_exit $AFTER 5; check $? "the waiter behind a broken lock is served"
 $LOCK status | grep -q '^after '; check $? "status names the waiter served after the break"
 $LOCK release after
+
+# A waiter whose `ls` lists nothing (an odd PATH or environment) still takes a ticket behind the queue.
+mkdir -p "$TMP/nols"; printf '#!/bin/sh\nexit 0\n' > "$TMP/nols/ls"; chmod +x "$TMP/nols/ls"
+$LOCK acquire front
+GPU_LOCK_POLL_S=0.1 $LOCK acquire first & FIRST=$!; BG="$BG $FIRST"
+wait_queued first; check $? "first queues behind the holder"
+PATH="$TMP/nols:$PATH" GPU_LOCK_POLL_S=0.1 $LOCK acquire blind & BLIND=$!; BG="$BG $BLIND"
+wait_queued blind; check $? "a waiter with a blind ls still queues"
+[ "$(queued)" = "first blind " ]; check $? "the blind waiter queues behind first (got: $(queued))"
+$LOCK release front
+wait_exit $FIRST 5; check $? "first is served before the blind waiter"
+$LOCK release first
+wait_exit $BLIND 5; check $? "the blind waiter is served next"
+$LOCK release blind
 
 echo "gpu-lock: $PASS passed, $FAIL failed"
 [ $FAIL = 0 ]
