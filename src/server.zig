@@ -594,6 +594,14 @@ fn forceMtpFor(config: *const model_mod.ModelConfig) bool {
     return mtpChoiceFor(config).forced();
 }
 
+/// Will a request that omits `enable_mtp` run the head on this model? The load-time bills
+/// (`sessionBytesPerToken`) price its KV whenever it does, the request-time bill per request.
+fn mtpHeadDefaultOn(config: *const model_mod.ModelConfig) bool {
+    const choice = mtpChoiceFor(config);
+    if (choice.forced()) return true;
+    return choice.on and model_mod.isServedArch(config.model_type) and !config.expert_streaming;
+}
+
 const PldReport = struct { on: bool, source: []const u8 };
 
 /// `lm` null = no model known yet: the flag or the engine default alone.
@@ -617,15 +625,18 @@ pub fn mtpChoiceFor(config: *const model_mod.ModelConfig) model_settings.MtpChoi
     return model_settings.MtpChoice.resolve(flag, config.mtp_override, true);
 }
 
-pub fn defaultEnableMtp(mtp_loaded: bool, is_moe: bool, force: bool, dsv4_stages: bool, native_measured: bool) bool {
+///
+/// `served`: `model.served_model_types` default ON with a head loaded (owner policy: MTP is always
+/// on for the served packs). The expert-streaming path keeps the `force` rule.
+pub fn defaultEnableMtp(mtp_loaded: bool, is_moe: bool, force: bool, dsv4_stages: bool, native_measured: bool, served: bool) bool {
     if (dsv4_stages) return true;
     if (!mtp_loaded) return false;
-    return !is_moe or force or native_measured;
+    return !is_moe or force or native_measured or served;
 }
 
-fn defaultEnableMtpForStreaming(mtp_loaded: bool, is_moe: bool, force: bool, dsv4_stages: bool, native_measured: bool, expert_streaming: bool) bool {
+fn defaultEnableMtpForStreaming(mtp_loaded: bool, is_moe: bool, force: bool, dsv4_stages: bool, native_measured: bool, served: bool, expert_streaming: bool) bool {
     if (expert_streaming) return mtp_loaded and force;
-    return defaultEnableMtp(mtp_loaded, is_moe, force, dsv4_stages, native_measured);
+    return defaultEnableMtp(mtp_loaded, is_moe, force, dsv4_stages, native_measured, served);
 }
 
 /// Does this model's MTP head carry the measured native-MoE exemption above?
@@ -3956,7 +3967,8 @@ test "the clamp bills the context that will be SERVED, not the placeholder" {
     const t = std.testing;
     transformer_mod.qsa_score_fused_override = false;
     defer transformer_mod.qsa_score_fused_override = null;
-    const cfg = qwen4RequestTestConfig();
+    var cfg = qwen4RequestTestConfig();
+    cfg.mtp_override = false; // the MTP head's own term: `the load-time bill prices the MTP head ...`
     const kv_bits: u64 = 8;
     const MiB: u64 = 1 << 20;
     const active: u64 = 69_827 * MiB;
@@ -4147,7 +4159,8 @@ test "the load-time session bill is billed at the boot's --kv-quant, not bf16" {
     // `off` alike (dense 29,952 B/tok): `defaultKvBits` asked `global_scheduler`, which `serve`
     // assigns only after `Scheduler.init` performs the load.
     const t = std.testing;
-    const cfg = qwen4RequestTestConfig();
+    var cfg = qwen4RequestTestConfig();
+    cfg.mtp_override = false; // the MTP head's own term: `the load-time bill prices the MTP head ...`
     const MiB: u64 = 1 << 20;
     transformer_mod.qsa_history_share_override = true;
     defer transformer_mod.qsa_history_share_override = null;
@@ -5070,7 +5083,7 @@ fn mtpHeadStateBytesPerToken(config: *const model_mod.ModelConfig) u64 {
 }
 
 fn sessionBytesPerToken(config: *const model_mod.ModelConfig, kv_bits: u64) u64 {
-    const head: u64 = if (forceMtpFor(config)) mtpHeadKvBytesPerToken(config) +| mtpHeadStateBytesPerToken(config) else 0;
+    const head: u64 = if (mtpHeadDefaultOn(config)) mtpHeadKvBytesPerToken(config) +| mtpHeadStateBytesPerToken(config) else 0;
     return kvBytesPerTokenAtBits(config.kvBytesPerToken(), kv_bits) +| statePerTokenBilled(config) +| head;
 }
 
@@ -6707,7 +6720,7 @@ fn mlxPropsSettings(lm: *LoadedModel) PropsSettings {
         .decode_attn_quant = transformer_mod.decodeAttnQuantEnabled() and (if (lm.transformer) |x| x.dense_attn_proj else false),
         .prefill_chunk = generate_mod.prefill_chunk_override,
         .mtp_loaded = mtpCapable(lm),
-        .mtp_default_on = defaultEnableMtp(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm)),
+        .mtp_default_on = defaultEnableMtpForStreaming(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm), model_mod.isServedArch(config.model_type), config.expert_streaming),
         .mtp_choice = mtpChoiceFor(config),
         .mtp_acceptance = acceptance.value,
         .mtp_acceptance_source = model_settings.sourceLabel(acceptance.source, model_settings.acceptanceFlagName(acceptance.value)),
@@ -7873,7 +7886,7 @@ fn handleChatCompletions(
     var enable_mtp: bool = if (root.get("enable_mtp")) |v|
         (v == .bool and v.bool)
     else
-        defaultEnableMtpForStreaming(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm), config.expert_streaming);
+        defaultEnableMtpForStreaming(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm), model_mod.isServedArch(config.model_type), config.expert_streaming);
     if (enable_mtp and lm.mtp == null and !dsv4DraftStages(lm)) enable_mtp = false;
     if (enable_mtp and logprobs_n > 0) {
         log.info("  mtp=disabled (logprobs requested)\n", .{});
@@ -8238,7 +8251,7 @@ fn handleCompletions(
     var enable_mtp: bool = if (root.get("enable_mtp")) |v|
         (v == .bool and v.bool)
     else
-        defaultEnableMtpForStreaming(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm), config.expert_streaming);
+        defaultEnableMtpForStreaming(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm), model_mod.isServedArch(config.model_type), config.expert_streaming);
     if (enable_mtp and lm.mtp == null and !dsv4DraftStages(lm)) enable_mtp = false;
 
     // Log the request
@@ -14290,7 +14303,7 @@ fn handleAnthropicMessages(
     var enable_mtp: bool = if (root.get("enable_mtp")) |v|
         (v == .bool and v.bool)
     else
-        defaultEnableMtpForStreaming(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm), config.expert_streaming);
+        defaultEnableMtpForStreaming(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm), model_mod.isServedArch(config.model_type), config.expert_streaming);
     if (enable_mtp and lm.mtp == null and !dsv4DraftStages(lm)) enable_mtp = false;
 
     // `output_config.format` json_schema — the same two-layer enforcement as
@@ -16174,7 +16187,7 @@ fn handleResponsesInner(
     var enable_mtp_resp: bool = if (root.get("enable_mtp")) |v|
         (v == .bool and v.bool)
     else
-        defaultEnableMtpForStreaming(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm), config.expert_streaming);
+        defaultEnableMtpForStreaming(lm.mtp != null, config.isMoe(), forceMtpFor(config), dsv4DraftStages(lm), nativeMeasuredMoeHead(lm), model_mod.isServedArch(config.model_type), config.expert_streaming);
     if (enable_mtp_resp and lm.mtp == null and !dsv4DraftStages(lm)) enable_mtp_resp = false;
     enable_mtp_resp = admitMtpForCtx(enable_mtp_resp, prompt_ids.len);
 
@@ -21039,30 +21052,60 @@ test "resolveKvAttnFusedPure: explicit > mode; auto keys on scheme + crossover" 
 test "defaultEnableMtp: --mtp forces the native head on for MoE targets" {
     const t = std.testing;
     // No sidecar loaded → never on, whatever the operator asked for.
-    try t.expect(!defaultEnableMtp(false, false, false, false, false));
-    try t.expect(!defaultEnableMtp(false, true, true, false, false));
+    try t.expect(!defaultEnableMtp(false, false, false, false, false, false));
+    try t.expect(!defaultEnableMtp(false, true, true, false, false, false));
     // Dense target with a sidecar → on by default (unchanged behavior).
-    try t.expect(defaultEnableMtp(true, false, false, false, false));
-    try t.expect(defaultEnableMtp(true, false, true, false, false));
+    try t.expect(defaultEnableMtp(true, false, false, false, false, false));
+    try t.expect(defaultEnableMtp(true, false, true, false, false, false));
     // MoE target → OFF by default (the verify-forward routing caution) ...
-    try t.expect(!defaultEnableMtp(true, true, false, false, false));
+    try t.expect(!defaultEnableMtp(true, true, false, false, false, false));
     // ... but ON when the operator passed --mtp. Without this, a MoE MTP
     // checkpoint is unreachable from any client that doesn't send
     // `enable_mtp:true` in the body (llmprobe, Claude Code, curl).
-    try t.expect(defaultEnableMtp(true, true, true, false, false));
+    try t.expect(defaultEnableMtp(true, true, true, false, false, false));
     // DSpark: dsv4's own stages default ON outright — MoE-ness and --mtp
     // never gate the checkpoint's native draft design.
-    try t.expect(defaultEnableMtp(false, true, false, true, false));
-    try t.expect(defaultEnableMtp(false, false, false, true, false));
+    try t.expect(defaultEnableMtp(false, true, false, true, false, false));
+    try t.expect(defaultEnableMtp(false, false, false, true, false, false));
     // A MEASURED native MoE head defaults ON despite is_moe — the
     // caution above is about a bolted-on sidecar paying expert routing it was
     // never designed around, and this arch was measured no-worse-than-serial
     // at every context rung on two prompt shapes.
-    try t.expect(defaultEnableMtp(true, true, false, false, true));
+    try t.expect(defaultEnableMtp(true, true, false, false, true, false));
     // The claim is about the HEAD, so it still needs one loaded.
-    try t.expect(!defaultEnableMtp(false, true, false, false, true));
-    try t.expect(!defaultEnableMtpForStreaming(true, false, false, false, true, true));
-    try t.expect(defaultEnableMtpForStreaming(true, true, true, false, false, true));
+    try t.expect(!defaultEnableMtp(false, true, false, false, true, false));
+    try t.expect(!defaultEnableMtpForStreaming(true, false, false, false, true, false, true));
+    try t.expect(defaultEnableMtpForStreaming(true, true, true, false, false, false, true));
+}
+
+test "defaultEnableMtp: a served MoE pack with its head loaded defaults ON; streaming keeps --mtp" {
+    const t = std.testing;
+    try t.expect(defaultEnableMtp(true, true, false, false, false, true));
+    try t.expect(!defaultEnableMtp(false, true, false, false, false, true)); // still needs a head
+    try t.expect(!defaultEnableMtp(true, true, false, false, false, false)); // an inherited MoE arch keeps the caution
+    try t.expect(!defaultEnableMtpForStreaming(true, true, false, false, false, true, true));
+    try t.expect(defaultEnableMtpForStreaming(true, true, true, false, false, true, true));
+    try t.expect(defaultEnableMtpForStreaming(true, true, false, false, false, true, false));
+    try t.expect(model_mod.isServedArch("qwen4_exp") and model_mod.isServedArch("mimo_v2"));
+}
+
+test "the load-time bill prices the MTP head a served pack runs by default" {
+    const t = std.testing;
+    const saved_force = server_config.default_force_mtp;
+    defer server_config.default_force_mtp = saved_force;
+    server_config.default_force_mtp = false;
+    var cfg = qwen4ExpOomConfig();
+    cfg.mtp_override = null;
+    const head = mtpHeadKvBytesPerToken(&cfg) + mtpHeadStateBytesPerToken(&cfg);
+    try t.expect(head > 0);
+    try t.expect(mtpHeadDefaultOn(&cfg));
+    var off = cfg;
+    off.mtp_override = false;
+    try t.expect(!mtpHeadDefaultOn(&off));
+    try t.expectEqual(sessionBytesPerToken(&off, 8) + head, sessionBytesPerToken(&cfg, 8));
+    var streamed = cfg;
+    streamed.expert_streaming = true;
+    try t.expect(!mtpHeadDefaultOn(&streamed));
 }
 
 test "formatChatUsage: prompt_tokens_details.cached_tokens always present (llmprobe chat caching)" {

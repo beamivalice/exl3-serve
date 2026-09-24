@@ -138,13 +138,15 @@ pub const MTP_UNSUPPORTED: []const u8 = "MTP speculative decode is not supported
 /// PURE: why MTP cannot serve a streamed model, or null. Refused at the door — at load for
 /// `--mtp` and at request parse for an explicit `enable_mtp` — because an armed head reaches
 /// `error.StreamingSpecCaptureUnsupported` inside the forward instead.
-pub const MtpUnderStreaming = enum { off, refuse, drop_settings };
+pub const MtpUnderStreaming = enum { off, refuse, drop_settings, drop_default };
 
-/// Takes the load's RESOLVED MTP choice. On from a launch flag (or the engine default) is
-/// refused; on from a per-model `mtp: true` is dropped with a warning (the setting was
-/// written for the resident load of the same pack, and a dead server is the wrong answer to it).
-pub fn mtpUnderStreaming(mtp_on: bool, from_settings: bool) MtpUnderStreaming {
+/// Takes the load's RESOLVED MTP choice. On from a launch flag is refused; on from a
+/// per-model `mtp: true` is dropped with a warning (the setting was written for the resident
+/// load of the same pack, and a dead server is the wrong answer to it); the engine default
+/// quietly resolves off, since nobody asked for the head.
+pub fn mtpUnderStreaming(mtp_on: bool, from_settings: bool, from_default: bool) MtpUnderStreaming {
     if (!mtp_on) return .off;
+    if (from_default) return .drop_default;
     return if (from_settings) .drop_settings else .refuse;
 }
 
@@ -2909,8 +2911,10 @@ test "expert stream quantized slabs alias the nine pack tensors and remap ids" {
 
 test "expert stream: under streaming an MTP on by flag refuses, a settings mtp is dropped, else off" {
     const t = std.testing;
-    try t.expectEqual(MtpUnderStreaming.refuse, mtpUnderStreaming(true, false));
-    try t.expectEqual(MtpUnderStreaming.drop_settings, mtpUnderStreaming(true, true));
-    try t.expectEqual(MtpUnderStreaming.off, mtpUnderStreaming(false, true));
-    try t.expectEqual(MtpUnderStreaming.off, mtpUnderStreaming(false, false));
+    try t.expectEqual(MtpUnderStreaming.refuse, mtpUnderStreaming(true, false, false));
+    try t.expectEqual(MtpUnderStreaming.drop_settings, mtpUnderStreaming(true, true, false));
+    try t.expectEqual(MtpUnderStreaming.off, mtpUnderStreaming(false, true, false));
+    try t.expectEqual(MtpUnderStreaming.off, mtpUnderStreaming(false, false, false));
+    // The engine default never refuses a streamed load: it resolves off.
+    try t.expectEqual(MtpUnderStreaming.drop_default, mtpUnderStreaming(true, false, true));
 }

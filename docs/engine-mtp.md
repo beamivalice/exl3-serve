@@ -1,4 +1,4 @@
-# Engine: MTP speculative decoding (native heads, opt-in `--mtp`)
+# Engine: MTP speculative decoding (native heads, on by default)
 
 How the native MTP heads draft and verify: Qwen3.8-Flash-Next's one head and MiMo-V2.6's three, their inputs, the
 spec-verify invariant, draft re-scoring, the measured round-cost table, head KV and norms. Read this before touching
@@ -29,8 +29,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
 - Per-request state is a `Qwen4MtpState` swapped onto the module (`qwen4MtpActivate` before EVERY head touch);
   nothing is module-owned, so MTP slots are not exclusive.
 - `--no-mtp` gates the IN-CHECKPOINT head too (`entry.mtp` reads `mtpChoiceFor`, logged `[mtp] on|off (<source>)`);
-  an explicit `--mtp`/`--no-mtp` beats `model-settings.json` `mtp`. MTP is refused while
-  streaming ([engine-expert-streaming](engine-expert-streaming.md)).
+  an explicit `--mtp`/`--no-mtp` beats `model-settings.json` `mtp`. An explicit `--mtp` is refused while
+  streaming; the engine default resolves off ([engine-expert-streaming](engine-expert-streaming.md)).
 
 <a id="mimo"></a>
 ## MiMo's three heads
@@ -89,8 +89,12 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
   serial forwards and prose accepts ~1.0. On the MCG K3 pack this no longer holds cleanly: verify rows cost
   ~4.6 ms each (28.2 / ~33.5 / ~37.5 ms at 2/3/4 rows) because routed experts are a minority of the bytes; measure
   before relying on either reading.
-- Acceptance is a PROMPT-TYPE property (code ≫ prose; `SUSHI_MTP_FORCE_DEPTH=n` + `acc_idx=` on `[mtp-trace]`),
-  so MTP stays opt-in.
+- Acceptance is a PROMPT-TYPE property (code ≫ prose; `SUSHI_MTP_FORCE_DEPTH=n` + `acc_idx=` on `[mtp-trace]`).
+- **MTP is ON by default for both served models** (owner policy, `server.defaultEnableMtp` `served`): a request
+  that omits `enable_mtp` runs the loaded head. `--no-mtp`, `"mtp": false` in `model-settings.json` or
+  `enable_mtp:false` turn it off; an SSD-streamed pack loads with the head off (`[mtp] off (streaming; default)`,
+  `scheduler.mtpDefaultOffUnderStreaming`) and an explicit `--mtp` there still refuses. The load-time bill prices the head's
+  KV whenever it runs by default (`server.mtpHeadDefaultOn`).
 - Rounds stay solo; two interleave, three or more go plain (`mtpRoundsStaySolo`; `SUSHI_MTP_BATCHED_QWEN4` opts
   in; `mergedVerifyDeclineReason` names the decline). Four MTP streams on MCG K3 aggregate ~85 tok/s today; a linear
   model of the measured verify-row cost predicts ~95-125 with merged verify at depth 2-3. Measure before any code.

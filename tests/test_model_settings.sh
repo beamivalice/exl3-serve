@@ -147,5 +147,24 @@ check "[6] --mtp outranks mtp:false, --mtp-tokenv3 outranks typical" \
     "$(grep -q "\[mtp\] on (--mtp); acceptance tokenv3 (--mtp-tokenv3)" "$LOG" && echo 1 || echo 0)"
 check "[6] /props settings.mtp.source --mtp (got $(props_mtp_source "$MODEL_A"))" "$([ "$(props_mtp_source "$MODEL_A")" = "--mtp" ] && echo 1 || echo 0)"
 
+# [7] no flag, no file: a served pack runs MTP by default; the file's mtp:false turns it off
+kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; SRV=""
+echo '{}' >"$SETTINGS"
+boot
+props_mtp_default_on() { # props_mtp_default_on <model path> — /props settings.mtp.default_on
+    local id; id="$(basename "$1")"
+    curl -s "http://127.0.0.1:$PORT/props?model=$id" | python3 -c "import sys, json; print(json.load(sys.stdin)['settings']['mtp']['default_on'])"
+}
+check "[7] load log: MTP on by default" "$(grep -q "\[mtp\] on (default)" "$LOG" && echo 1 || echo 0)"
+check "[7] /props settings.mtp.default_on true, source default (got $(props_mtp_default_on "$MODEL_A") / $(props_mtp_source "$MODEL_A"))" \
+    "$([ "$(props_mtp_default_on "$MODEL_A")" = "True" ] && [ "$(props_mtp_source "$MODEL_A")" = "default" ] && echo 1 || echo 0)"
+cat >"$SETTINGS" <<JSON
+{ "$MODEL_A/": { "mtp": false } }
+JSON
+post unload-model "{\"model\":\"$MODEL_A\"}" >/dev/null
+CODE="$(post load-model "{\"model\":\"$MODEL_A\"}")"
+check "[7] mtp:false in the file turns the default off (load $CODE, default_on $(props_mtp_default_on "$MODEL_A"))" \
+    "$([ "$CODE" = "200" ] && [ "$(props_mtp_default_on "$MODEL_A")" = "False" ] && echo 1 || echo 0)"
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = "0" ]

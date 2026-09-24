@@ -818,7 +818,7 @@ pub fn loadModel(io: std.Io, allocator: std.mem.Allocator, opts: Options) !*Load
         const budget = kld_budget;
         if (opts.expert_cache_bytes == 0 and budget.bytes == 0) return error.ExpertStreamingRequired;
         const mtp = model_settings_mod.MtpChoice.resolve(model_settings_mod.launchFlag(bool, opts.enable_mtp, opts.mtp_explicit), self.config.mtp_override, false);
-        switch (expert_stream_mod.mtpUnderStreaming(mtp.on, mtp.source == .model_settings)) {
+        switch (expert_stream_mod.mtpUnderStreaming(mtp.on, mtp.source == .model_settings, mtp.source == .default)) {
             .refuse => {
                 log.err("[expert-stream] {s}; drop --mtp\n", .{expert_stream_mod.MTP_UNSUPPORTED});
                 return error.ExpertStreamingMtpUnsupported;
@@ -827,7 +827,7 @@ pub fn loadModel(io: std.Io, allocator: std.mem.Allocator, opts: Options) !*Load
                 log.info("[expert-stream] model-settings mtp=true ignored: {s}\n", .{expert_stream_mod.MTP_UNSUPPORTED});
                 self.config.mtp_override = false;
             },
-            .off => {},
+            .drop_default, .off => {},
         }
         const mtp_resident = false;
         const geometry = scheduler_mod.streamingGeometryOf(&self.config);

@@ -6,6 +6,7 @@ earlier history is mlx-serve's, in that project's changelog.
 
 ## Unreleased
 
+- **MTP is on by default for both served models**: a request that does not send `enable_mtp` drafts with the model's own head, without `--mtp`; `--no-mtp`, `"mtp": false` in `model-settings.json` or `enable_mtp:false` turn it off, and an SSD-streamed pack keeps it off unless `--mtp`.
 - **`sushi launch omp` passes omp's thinking level to the server** the same way, with off still turning thinking off.
 - **`sushi launch pi` passes pi's thinking level to the server**: each level (off, minimal, low, medium, high, xhigh) arrives as an effort word the model accepts, where pi used to send only thinking on or off.
 - **`/v1/responses` enforces the reasoning budget** (`reasoning.effort` or `reasoning_budget_tokens`) as chat does: a capped thought is closed at its budget instead of running to `max_output_tokens`.

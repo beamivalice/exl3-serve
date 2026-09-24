@@ -136,14 +136,10 @@ fn printUsage(io: std.Io) void {
         \\  --no-pld            Force-disable Prompt Lookup Decoding.
         \\  --pld-draft-len <n> Max draft tokens per PLD step (default: 5).
         \\  --pld-key-len <n>   N-gram match key length for PLD (default: 3).
-        \\  --no-mtp            Disable the Qwen native MTP head (auto-loaded
-        \\                        when the model dir ships mtp/weights.safetensors;
-        \\                        priority: MTP > PLD).
-        \\  --mtp               Force the MTP head ON for MoE targets too.
-        \\                        Requests default to MTP only on DENSE models;
-        \\                        a MoE checkpoint that ships a sidecar is
-        \\                        otherwise reachable only via `enable_mtp:true`
-        \\                        in the request body.
+        \\  --no-mtp            Disable the native MTP head. Both served models
+        \\                        load it and run it by default.
+        \\  --mtp               Force the MTP head ON, also for an SSD-streamed
+        \\                        pack (off by default there) and other MoE models.
         \\  --mtp-head-kv-quant Quantize the qwen4 MTP head's own KV with
         \\                        --kv-quant (default OFF: the head keeps
         \\                        dense bf16 KV).
@@ -442,10 +438,8 @@ pub fn main(init: std.process.Init) !void {
     var draft_block_size: u32 = drafter_mod.DEFAULT_BLOCK_SIZE;
     var draft_block_size_explicit: bool = false; // user passed --draft-block-size?
     var enable_mtp = true; // Qwen native MTP head (auto when sidecar present; --no-mtp to disable)
-    // --mtp: force the head ON for MoE targets too. Requests default to MTP
-    // only on DENSE targets (server.defaultEnableMtp); a MoE checkpoint that
-    // ships a sidecar is otherwise unreachable from clients that never send
-    // `enable_mtp:true` (llmprobe, Claude Code, curl).
+    // --mtp: force the head ON where requests do not default to it: an SSD-streamed
+    // pack and inherited MoE arches (server.defaultEnableMtp).
     var force_mtp = false;
     // Either flag given: it outranks the per-model `mtp` (the last one wins).
     var mtp_explicit = false;

@@ -1719,10 +1719,10 @@ pub const Scheduler = struct {
                 return error.ExpertStreamingUnsupportedLayout;
             const split = try model_mod.streamingResidentSplit(self.io, self.allocator, entry.path, layout);
             const mtp = mtpChoiceFor(self.mtp_enabled, self.mtp_explicit, owned.config);
-            switch (expert_stream_mod.mtpUnderStreaming(mtp.on, mtp.source == .model_settings)) {
+            switch (expert_stream_mod.mtpUnderStreaming(mtp.on, mtp.source == .model_settings, mtp.source == .default)) {
                 .refuse => return error.ExpertStreamingMtpUnsupported,
                 .drop_settings => owned.config.mtp_override = false,
-                .off => {},
+                .drop_default, .off => {},
             }
             const mtp_resident = false;
             const per_expert = try expert_stream_mod.expertBytesFor(self.allocator, entry.path, geometry, layout);
@@ -2421,6 +2421,19 @@ fn loadMimoHeads(sch: *Scheduler, model_dir: []const u8, config: *const ModelCon
 /// A load's MTP decision: `--mtp`/`--no-mtp` > the per-model `mtp` > on.
 pub fn mtpChoiceFor(mtp_enabled: bool, mtp_explicit: bool, config: *const ModelConfig) model_settings.MtpChoice {
     return model_settings.MtpChoice.resolve(model_settings.launchFlag(bool, mtp_enabled, mtp_explicit), config.mtp_override, true);
+}
+
+/// An engine-default MTP under expert streaming resolves off (`expert_stream.mtpUnderStreaming`):
+/// the head is not loaded and the load log reads `off (streaming; default)`.
+pub fn mtpDefaultOffUnderStreaming(choice: model_settings.MtpChoice, expert_streaming: bool) bool {
+    return expert_streaming and choice.on and choice.source == .default;
+}
+
+test "a streamed load drops only the engine-default MTP, never an asked-for one" {
+    try testing.expect(mtpDefaultOffUnderStreaming(.{ .on = true, .source = .default }, true));
+    try testing.expect(!mtpDefaultOffUnderStreaming(.{ .on = true, .source = .default }, false));
+    try testing.expect(!mtpDefaultOffUnderStreaming(.{ .on = true, .source = .flag }, true));
+    try testing.expect(!mtpDefaultOffUnderStreaming(.{ .on = false, .source = .default }, true));
 }
 
 pub const SsdBudgetChoice = struct {
@@ -3126,7 +3139,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         params.config.expert_layout = layout;
         const split = try model_mod.streamingResidentSplit(sch.io, sch.allocator, params.model_dir, layout);
         const mtp = mtpChoiceFor(params.mtp_enabled, params.mtp_explicit, params.config);
-        switch (expert_stream_mod.mtpUnderStreaming(mtp.on, mtp.source == .model_settings)) {
+        switch (expert_stream_mod.mtpUnderStreaming(mtp.on, mtp.source == .model_settings, mtp.source == .default)) {
             .refuse => {
                 log.err("[expert-stream] {s}; MTP is on ({s}), pass --no-mtp\n", .{ expert_stream_mod.MTP_UNSUPPORTED, mtp.sourceName() });
                 return error.ExpertStreamingMtpUnsupported;
@@ -3135,7 +3148,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
                 log.info("[expert-stream] model-settings mtp=true ignored: {s}\n", .{expert_stream_mod.MTP_UNSUPPORTED});
                 params.config.mtp_override = false;
             },
-            .off => {},
+            .drop_default, .off => {},
         }
         const mtp_resident = false;
         if (budget.from_setting)
@@ -3250,12 +3263,13 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     });
     const kv_quant_config = kv_cache.config;
     const mtp = mtpChoiceFor(params.mtp_enabled, params.mtp_explicit, params.config);
+    const mtp_streaming_off = mtpDefaultOffUnderStreaming(mtp, params.config.expert_streaming);
     const acceptance = generate_mod.mtpAcceptanceFor(params.config.mtp_acceptance_override);
-    log.info("[mtp] {s} ({s}); acceptance {s} ({s})\n", .{
-        mtp.label(),                               mtp.sourceName(),
-        mtp_acceptance_mod.name(acceptance.value), model_settings.sourceLabel(acceptance.source, model_settings.acceptanceFlagName(acceptance.value)),
+    log.info("[mtp] {s} ({s}{s}); acceptance {s} ({s})\n", .{
+        if (mtp_streaming_off) "off" else mtp.label(), if (mtp_streaming_off) "streaming; " else "", mtp.sourceName(),
+        mtp_acceptance_mod.name(acceptance.value),     model_settings.sourceLabel(acceptance.source, model_settings.acceptanceFlagName(acceptance.value)),
     });
-    const mtp_enabled = mtp.on;
+    const mtp_enabled = mtp.on and !mtp_streaming_off;
     if (kv_quant_config.scheme != .off) {
         try xfm_ptr.cache.reinit(params.config.num_hidden_layers, kv_quant_config);
     }
