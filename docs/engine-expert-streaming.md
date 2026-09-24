@@ -21,8 +21,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 
 Any qwen4_exp checkpoint whose routed experts are leading-index banks streams: the HF fused bf16 layout
 (`mlp.experts.gate_up_proj` `[512,1280,2560]` + `down_proj` `[512,2560,640]`, 335 GB total, `streaming_required`),
-the MLX split layout (`switch_mlp.{gate,up,down}_proj.{weight,scales,biases}`), or EXL3. MiMo's original MXFP4
-checkpoint streams too ([arch-mimo-v2](arch-mimo-v2.md)). Trunk + MTP resident; routed experts come from SSD through
+or the MLX split layout (`switch_mlp.{gate,up,down}_proj.{weight,scales,biases}`). An EXL3 pack serves resident
+only: `ModelConfig.streamsExperts` is false for it, so an SSD budget or expert cache asked of one is ignored with the
+non-streaming warning. MiMo's original MXFP4 checkpoint streams too ([arch-mimo-v2](arch-mimo-v2.md)). Trunk + MTP resident; routed experts come from SSD through
 zero-copy slabs. With no budget a pack loads resident as before.
 
 ## Budget

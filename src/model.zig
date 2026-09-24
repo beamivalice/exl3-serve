@@ -1057,6 +1057,12 @@ pub const ModelConfig = struct {
             self.num_experts_per_tok > 0 and self.hidden_size > 0 and self.moe_intermediate_size > 0;
     }
 
+    /// Can a load of THIS checkpoint stream its experts? An EXL3 pack serves resident only, so an
+    /// SSD budget or expert cache asked of it is ignored like any non-streaming model's.
+    pub fn streamsExperts(self: *const ModelConfig) bool {
+        return self.supportsExpertStreaming() and self.expert_layout != .exl3_k4;
+    }
+
     /// Dense banks and raw individual experts require the streaming loader.
     /// An EXL3 bank is a self-describing quantized weight the resident kernels
     /// read as they are, whatever the trunk's own width says.
@@ -8466,6 +8472,7 @@ test "mimo_v2 EXL3 routed banks serve resident and take the source trunk loader"
         .expert_layout = .exl3_k4,
     };
     try testing.expect(c.supportsExpertStreaming());
+    try testing.expect(!c.streamsExperts());
     try testing.expect(!c.expertStreamingRequired());
     try testing.expect(c.usesMimoSourceTrunk());
     c.expert_layout = .mxfp4_individual;

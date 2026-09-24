@@ -30,7 +30,7 @@ earlier history is mlx-serve's, in that project's changelog.
 - **MiMo-V2.6-Flash serves from an MCG EXL3 pack**: routed experts in EXL3, the FP8 attention trunk read as the checkpoint stores it, and `o_proj`, `lm_head` and `embed_tokens` as 8-bit affine stored in the pack.
 - **MiMo-V2.6-Flash drafts with its three trained MTP heads** under `--mtp`; greedy output stays byte-identical to decoding without them.
 - **MiMo-V2.6-Flash verifies MTP drafts faster**: draft rows routed to the same expert share its weight reads, with each row's output unchanged.
-- **Qwen3.8 Flash Next serves EXL3 expert packs** (K2 to K4), resident or streamed.
+- **Qwen3.8 Flash Next serves EXL3 expert packs** (K2 to K4), resident; an SSD budget or expert cache set for an EXL3 pack is ignored with a warning instead of refusing the load.
 - **EXL3 expert decode is faster on both models**, with bit-identical output.
 - **MiMo-V2.6-Flash decodes long contexts from its 8-bit KV cache in place**, on the matrix units on M5-class Macs and through a split-K kernel elsewhere, choosing per step by cache length.
 - **MiMo-V2.6-Flash prefills its sliding-window layers in one fused attention kernel** instead of building a full score sheet, and picks its prefill chunk per request.

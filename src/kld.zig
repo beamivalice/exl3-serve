@@ -808,9 +808,9 @@ pub fn loadModel(io: std.Io, allocator: std.mem.Allocator, opts: Options) !*Load
     scheduler_mod.applyModelSettings(&self.config, model_settings_mod.overrideFor(allocator, io, opts.model_dir));
     self.config.ctx_override = model_settings_mod.contextPick(opts.ctx_size, self.config.ctx_override).value;
 
-    const kld_budget = scheduler_mod.resolveSsdBudget(opts.ssd_budget_bytes, self.config.ssd_budget_gb_override, self.config.supportsExpertStreaming());
+    const kld_budget = scheduler_mod.resolveSsdBudget(opts.ssd_budget_bytes, self.config.ssd_budget_gb_override, self.config.streamsExperts());
     if (expert_stream_mod.expertStreamingEngaged(
-        self.config.supportsExpertStreaming(),
+        self.config.streamsExperts(),
         self.config.expertStreamingRequired(),
         opts.expert_cache_bytes,
         kld_budget.bytes,

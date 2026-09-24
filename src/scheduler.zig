@@ -1706,9 +1706,9 @@ pub const Scheduler = struct {
         var victims_buf: [16]*LoadedModel = undefined;
         var n_victims: usize = 0;
 
-        const settings_budget = resolveSsdBudget(self.ssd_budget_bytes, owned.config.ssd_budget_gb_override, owned.config.supportsExpertStreaming()).bytes;
+        const settings_budget = resolveSsdBudget(self.ssd_budget_bytes, owned.config.ssd_budget_gb_override, owned.config.streamsExperts()).bytes;
         const streaming_gate_bytes: ?u64 = if (expert_stream_mod.expertStreamingEngaged(
-            owned.config.supportsExpertStreaming(),
+            owned.config.streamsExperts(),
             owned.config.expertStreamingRequired(),
             self.expert_cache_bytes,
             settings_budget,
@@ -2392,7 +2392,7 @@ pub fn applyModelSettings(config: *ModelConfig, o: model_settings.Override) void
     config.mtp_override = o.mtp;
     config.mtp_acceptance_override = o.mtp_acceptance;
     config.ssd_budget_gb_override = o.ssd_budget_gb orelse 0;
-    if (resolveSsdBudget(0, config.ssd_budget_gb_override, config.supportsExpertStreaming()).setting_ignored)
+    if (resolveSsdBudget(0, config.ssd_budget_gb_override, config.streamsExperts()).setting_ignored)
         log.warn("[model-settings] ssd_budget_gb ignored: this checkpoint does not stream experts from SSD\n", .{});
 }
 
@@ -2912,6 +2912,26 @@ test "a non-qwen4 checkpoint never engages streaming: the flag is dropped, the p
     ));
 }
 
+test "an EXL3 pack ignores an SSD budget like any non-streaming model" {
+    // The streamed load refuses an EXL3 layout by name; the budget used to engage it anyway, so a
+    // settings-file budget made the pack unloadable with a "re-convert the pack" 503.
+    const t = std.testing;
+    var q4 = ModelConfig{
+        .model_type = "qwen4_exp",
+        .num_hidden_layers = 4,
+        .num_experts = 4,
+        .num_experts_per_tok = 2,
+        .hidden_size = 128,
+        .moe_intermediate_size = 128,
+        .expert_layout = .exl3_k4,
+    };
+    q4.ssd_budget_gb_override = 60;
+    try t.expect(q4.supportsExpertStreaming() and !q4.streamsExperts());
+    const budget = resolveSsdBudget(0, q4.ssd_budget_gb_override, q4.streamsExperts());
+    try t.expect(budget.setting_ignored);
+    try t.expect(!expert_stream_mod.expertStreamingEngaged(q4.streamsExperts(), q4.expertStreamingRequired(), 0, budget.bytes));
+}
+
 test "the cold-load LoadRequest re-applies EVERY retained launch setting" {
     // Three separate rounds of this bug shipped: prefix-cache, then MTP,
     // then the drafter/ssd group — each time a launch flag reached
@@ -3140,9 +3160,9 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         sch.allocator.free(params.config.expert_source_dir.?);
         params.config.expert_source_dir = null;
     };
-    const streaming_budget = resolveSsdBudget(params.ssd_budget_bytes, params.config.ssd_budget_gb_override, params.config.supportsExpertStreaming());
+    const streaming_budget = resolveSsdBudget(params.ssd_budget_bytes, params.config.ssd_budget_gb_override, params.config.streamsExperts());
     if (expert_stream_mod.expertStreamingEngaged(
-        params.config.supportsExpertStreaming(),
+        params.config.streamsExperts(),
         params.config.expertStreamingRequired(),
         params.expert_cache_bytes,
         streaming_budget.bytes,
