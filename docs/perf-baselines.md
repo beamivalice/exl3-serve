@@ -237,16 +237,27 @@ kv8 slices, arms interleaved in one process, `taskpolicy -a`, lock `lever2-attn`
 
 <a id="mimo-long-decode"></a>
 Long-context decode, global-layer attention (2026-09-24, kv8, no MTP, prefix cache off, one boot per cell,
-`taskpolicy -a`, lock `lever3-kv`). Main = 79a4cb4; new = `sushi_qkv_mpp` on 4 simdgroups with packed words
-prefetched in registers, bit-identical output. `SUSHI_DECODE_FWD_UBENCH=128` after a 2048-chunk prefill of that
-many keys, ms per forward:
+`taskpolicy -a`, lock `lever3-kv`).
+- Main = 79a4cb4 (binary 08:09).
+- New = e4dc88e (binary 09:19): 79a4cb4 plus the kernel change that landed as a338ca2; the `src/` diff is the same
+  85 lines. The change runs `sushi_qkv_mpp` on 4 simdgroups with packed words prefetched in registers, and its
+  output is bit-identical.
 
-| keys | main 79a4cb4 | new |
-|---|---|---|
-| 16k | 22.10 | |
-| 64k | 25.10 | 24.65 |
-| 128k | 29.60 | |
-| 256k | 37.65 | 33.27 |
+`SUSHI_DECODE_FWD_UBENCH=128` after a 2048-chunk prefill of that many keys, ms per forward:
+
+| keys | main 79a4cb4 | new | conditions |
+|---|---|---|---|
+| 16k | 22.10 | | morning, no fan pre-cool |
+| 64k | 25.10 | 24.65 | morning, no fan pre-cool, not adjacent |
+| 128k | 27.71 | 25.53 | adjacent pair 20:07 / 20:15, fans max + 10 s, die 77.7 / 69.7 °C, load 1.7-1.8 |
+| 256k | 37.65 | 33.27 | morning, no fan pre-cool, not adjacent |
+
+Live decode, `--no-pld`, one cold request per boot:
+- 244k: new 29.5 tok/s. That run had no fan pre-cool, load 2.15 at start, and a 244,232-token prompt with ctx
+  303104. The inherited no-PLD baseline on 79a4cb4 reads 25.9-26.4 tok/s, but it was taken with a hot prefix cache.
+- 72k: adjacent fan-gated pair, new 38.9 then main 41.9 tok/s (die 67 / 79 °C). Prefill, which never runs this
+  kernel, read 706 vs 817 tok/s in the same boots. The box moved ~15% between the holds, which swamps the
+  ~2% this cell expects.
 
 Attention-only µbench (9 dependent layers, us per layer, arms interleaved in one process, two runs): 16k
 133-135 -> 136-139, 64k 402 -> 321-323, 256k 1697-1782 -> 1185-1252, 512k 3591-3979 -> 2398-2670. Earlier
