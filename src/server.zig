@@ -94,6 +94,53 @@ pub fn shouldWarnOpenBind(host_explicit: bool, host: []const u8) bool {
         std.mem.eql(u8, host, "localhost"));
 }
 
+pub const default_host: []const u8 = "127.0.0.1";
+pub const default_port: u16 = 11234;
+
+pub const BindConfig = struct {
+    host: []const u8,
+    port: u16,
+    host_explicit: bool,
+};
+
+pub fn resolveBind(host_flag: ?[]const u8, port_flag: ?u16) BindConfig {
+    return .{
+        .host = host_flag orelse default_host,
+        .port = port_flag orelse default_port,
+        .host_explicit = host_flag != null,
+    };
+}
+
+pub fn bindAddress(host: []const u8, port: u16) std.Io.net.IpAddress {
+    var ip4_bytes: [4]u8 = .{ 0, 0, 0, 0 };
+    if (!std.mem.eql(u8, host, "0.0.0.0")) {
+        // Parse dotted-decimal IP
+        var parts = std.mem.splitScalar(u8, host, '.');
+        var idx: usize = 0;
+        while (parts.next()) |part| {
+            if (idx >= 4) break;
+            ip4_bytes[idx] = std.fmt.parseInt(u8, part, 10) catch 0;
+            idx += 1;
+        }
+    }
+    return .{ .ip4 = .{ .bytes = ip4_bytes, .port = port } };
+}
+
+pub fn ensurePortFree(io: std.Io, host: []const u8, port: u16) std.Io.net.IpAddress.ListenError!void {
+    const addr = bindAddress(host, port);
+    if (addr.connect(io, .{ .mode = .stream })) |s| {
+        s.close(io);
+        return error.AddressInUse;
+    } else |_| {}
+    var probe = try addr.listen(io, .{ .reuse_address = true });
+    probe.deinit(io);
+}
+
+pub fn startupRefusal(err: anyerror, port: u16, buf: []u8) ?[]const u8 {
+    if (err != error.AddressInUse) return null;
+    return std.fmt.bufPrint(buf, "port {d} is already in use", .{port}) catch unreachable;
+}
+
 test "textGenTargetOf: reads config unless the entry is mid-load" {
     // Bar: a `.loading` entry's retained CPU state can be freed off-mutex, so
     // the encoder-only flag must not come from `config` in that state.
@@ -1639,20 +1686,15 @@ pub fn serve(
     std.posix.sigaction(std.posix.SIG.TERM, &sigact, null);
 
     // Parse host address
-    var ip4_bytes: [4]u8 = .{ 0, 0, 0, 0 };
-    if (!std.mem.eql(u8, host, "0.0.0.0")) {
-        // Parse dotted-decimal IP
-        var parts = std.mem.splitScalar(u8, host, '.');
-        var idx: usize = 0;
-        while (parts.next()) |part| {
-            if (idx >= 4) break;
-            ip4_bytes[idx] = std.fmt.parseInt(u8, part, 10) catch 0;
-            idx += 1;
+    const ip_addr = bindAddress(host, port);
+    var server = ip_addr.listen(io, .{ .reuse_address = true }) catch |err| {
+        var msg_buf: [64]u8 = undefined;
+        if (startupRefusal(err, port, &msg_buf)) |msg| {
+            log.err("{s}\n", .{msg});
+            std.process.exit(1);
         }
-    }
-
-    const ip_addr: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = ip4_bytes, .port = port } };
-    var server = try ip_addr.listen(io, .{ .reuse_address = true });
+        return err;
+    };
     defer server.deinit(io);
 
     // Freeze the auto-context NOW, at startup, while the model is freshly
@@ -23639,4 +23681,31 @@ test "generated think tags require an unambiguous literal template opener" {
     try std.testing.expect(templateThinkOpener("<think> <think:opensource>") == null);
     try std.testing.expect(templateThinkOpener("<think:{{ suffix }}>") == null);
     try std.testing.expect(templateThinkOpener("assistant") == null);
+}
+
+test "resolveBind: no flags bind 127.0.0.1:11234" {
+    const d = resolveBind(null, null);
+    try std.testing.expectEqualStrings("127.0.0.1", d.host);
+    try std.testing.expectEqual(@as(u16, 11234), d.port);
+    try std.testing.expect(!d.host_explicit);
+    const e = resolveBind("0.0.0.0", 23817);
+    try std.testing.expectEqualStrings("0.0.0.0", e.host);
+    try std.testing.expectEqual(@as(u16, 23817), e.port);
+    try std.testing.expect(e.host_explicit);
+    const p = resolveBind(null, 23817);
+    try std.testing.expectEqualStrings("127.0.0.1", p.host);
+    try std.testing.expectEqual(@as(u16, 23817), p.port);
+    try std.testing.expect(!p.host_explicit);
+    const h = resolveBind("192.168.7.9", null);
+    try std.testing.expectEqualStrings("192.168.7.9", h.host);
+    try std.testing.expectEqual(@as(u16, 11234), h.port);
+    try std.testing.expect(h.host_explicit);
+}
+
+test "startupRefusal: AddressInUse refuses naming the port" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("port 11234 is already in use", startupRefusal(error.AddressInUse, 11234, &buf).?);
+    try std.testing.expectEqualStrings("port 23817 is already in use", startupRefusal(error.AddressInUse, 23817, &buf).?);
+    try std.testing.expect(startupRefusal(error.AccessDenied, 23817, &buf) == null);
+    try std.testing.expect(startupRefusal(error.SystemResources, 23817, &buf) == null);
 }

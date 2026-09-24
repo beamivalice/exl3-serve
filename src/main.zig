@@ -81,8 +81,8 @@ fn printUsage(io: std.Io) void {
         \\Options:
         \\  --model <dir>       Path to MLX model directory
         \\  --serve             Start HTTP server mode
-        \\  --host <ip>         Bind address (default: 0.0.0.0 — open to the local
-        \\                      network; a future version will default to 127.0.0.1)
+        \\  --host <ip>         Bind address (default: 127.0.0.1 — this Mac only;
+        \\                      0.0.0.0 opens it to the local network)
         \\  --port <n>          Bind port (default: 11234)
         \\  --ctx-size <n>      Maximum context length (default: model max)
         \\  --config-overrides <json>   JSON object deep-merged into EVERY
@@ -408,9 +408,8 @@ pub fn main(init: std.process.Init) !void {
     // parser enforces beats an allocation the arg loop has to unwind.
     var extra_roots: [7][]const u8 = undefined;
     var extra_roots_n: usize = 0;
-    var port: u16 = 11234;
-    var host: []const u8 = "0.0.0.0";
-    var host_explicit = false;
+    var port_flag: ?u16 = null;
+    var host_flag: ?[]const u8 = null;
     // `--log-file <path|off>`. null = default (`~/.sushi/logs/sushi-<port>.log`).
     var log_file_arg: ?[]const u8 = null;
     var parent_pid: ?std.posix.pid_t = null;
@@ -514,11 +513,10 @@ pub fn main(init: std.process.Init) !void {
             model_dir = args[i];
         } else if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
             i += 1;
-            port = try std.fmt.parseInt(u16, args[i], 10);
+            port_flag = try std.fmt.parseInt(u16, args[i], 10);
         } else if (std.mem.eql(u8, args[i], "--host") and i + 1 < args.len) {
             i += 1;
-            host = args[i];
-            host_explicit = true;
+            host_flag = args[i];
         } else if (std.mem.eql(u8, args[i], "--serve")) {
             serve_mode = true;
         } else if (std.mem.eql(u8, args[i], "--think")) {
@@ -854,6 +852,11 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    const bind = server_mod.resolveBind(host_flag, port_flag);
+    const host = bind.host;
+    const host_explicit = bind.host_explicit;
+    const port = bind.port;
+
     transformer_mod.Transformer.mtp_head_kv_quant_flag = mtp_head_kv_quant;
     generate_mod.mtp_acceptance_default = mtp_acceptance.parse(mtp_typical_raw, mtp_tokenv3_raw) catch |err| {
         log.err("MTP acceptance settings: {s} (--mtp-typical needs d > 0; --mtp-tokenv3 needs 0 <= a <= 1; choose one)\n", .{@errorName(err)});
@@ -964,11 +967,14 @@ pub fn main(init: std.process.Init) !void {
     // In serve mode, check if the port is already in use before loading the model
     // (model loading takes seconds — fail fast instead of wasting time)
     if (serve_mode) {
-        if (portInUse(io, port)) {
-            log.err("Port {d} is already in use — another sushi instance may be running.\n", .{port});
-            log.err("Stop it first (pkill -x sushi) or use a different port (--port {d}).\n", .{port + 1});
-            std.process.exit(1);
-        }
+        server_mod.ensurePortFree(io, host, port) catch |err| {
+            var msg_buf: [64]u8 = undefined;
+            if (server_mod.startupRefusal(err, port, &msg_buf)) |msg| {
+                log.err("{s}\n", .{msg});
+                std.process.exit(1);
+            }
+            return err;
+        };
         // Above every serve dispatch (unsupported-format/headless/media return early below).
         if (server_mod.shouldWarnOpenBind(host_explicit, host)) {
             log.warn("Listening on {s}:{d} — reachable by every device on the network this Mac is on.\n", .{ host, port });
@@ -1457,14 +1463,6 @@ pub fn main(init: std.process.Init) !void {
         const peak_gb = @as(f64, @floatFromInt(peak_mem)) / (1024.0 * 1024.0 * 1024.0);
         try stdout_w.print("Peak memory: {d:.3} GB\n", .{peak_gb});
     }
-}
-
-/// Check if a port is already in use by trying to connect to it.
-fn portInUse(io: std.Io, port: u16) bool {
-    const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(port) };
-    const stream = addr.connect(io, .{ .mode = .stream }) catch return false;
-    stream.close(io);
-    return true;
 }
 
 const isGgufPath = model_discovery.isGgufModelPath;
