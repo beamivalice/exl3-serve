@@ -28,6 +28,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
 - `modelDiskBytes` bills the shards the INDEX names; an index that names NO shard on disk is STALE (every shard
   loads, one warning). Every size sum stats THROUGH symlinks (HF-cache models).
 - Load-time bills run INSIDE `Scheduler.init` ([engine-qsa-long-context](engine-qsa-long-context.md)).
+- **The kernel unwires a freed Metal buffer asynchronously** (~0.5 s for 50 GB): an unload and an eviction-before-load
+  wait until most of the freed bytes left the wired set (`waitForUnwire`, bounded at 3 s), or the next preflight reads
+  them as taken (45 GB free where 95 GB was a moment later).
 - A ready entry's `bytes_resident` (the registry's resident-memory gate, `/v1/models`) is the weights the preflight
   billed (`residentWeightBytes`): a boot `--model` entry has no discovery `bytes_on_disk`, so it measures the shards.
 

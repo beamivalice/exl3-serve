@@ -4637,6 +4637,8 @@ fn runLoadRequest(sch: *Scheduler, req: *LoadRequest) void {
     // Step 1: evict victims (if any) BEFORE the load, so peak GPU residency
     // never holds the old + new model at once. unloadResident() drops
     // mlx_arrays — same thread-stream invariant as cleanup_queue drain.
+    const wired_before = if (req.evict_entries.len > 0) status.getWiredMemBytes() else 0;
+    var evicted_bytes: u64 = 0;
     for (req.evict_entries) |victim| {
         const victim_bytes = victim.bytes_resident; // unloadResident zeroes it
         log.info("[registry] evicting model id={s} ({d:.2} GB resident)\n", .{
@@ -4644,10 +4646,16 @@ fn runLoadRequest(sch: *Scheduler, req: *LoadRequest) void {
             @as(f64, @floatFromInt(victim_bytes)) / 1_073_741_824.0,
         });
         victim.unloadResident();
+        evicted_bytes +|= victim_bytes;
         sch.registry.mutex.lockUncancelable(sch.io);
         sch.registry.accountEvictedLocked(victim_bytes);
         sch.registry.finalizeEvictionLocked(victim);
         sch.registry.mutex.unlock(sch.io);
+    }
+    // The preflight below reads free memory: the victims' must be back first.
+    if (evicted_bytes > 0) {
+        _ = mlx.mlx_clear_cache();
+        waitForUnwire(sch.io, wired_before, evicted_bytes);
     }
 
     // Step 2: the actual load. On error, mark .error_state and signal done
@@ -4704,11 +4712,13 @@ fn runUnloadRequest(sch: *Scheduler, req: *UnloadRequest) void {
         entry.id,
         @as(f64, @floatFromInt(bytes)) / 1_073_741_824.0,
     });
+    const wired_before = status.getWiredMemBytes();
     entry.unloadResident();
     // unloadResident freed the arrays into MLX's allocator cache — clear it
     // so the unload actually returns the memory to the OS (the whole point
     // of the load→generate→unload flow).
     _ = mlx.mlx_clear_cache();
+    waitForUnwire(sch.io, wired_before, bytes);
     // Drop any borrowed views that pointed at this entry so post-unload reads
     // don't dangle (gen entries leave xfm null already, but an LLM unload
     // must clear them).
@@ -4737,6 +4747,33 @@ fn runUnloadRequest(sch: *Scheduler, req: *UnloadRequest) void {
     req.done = true;
     req.done_cond.broadcast(sch.io);
     req.done_mu.unlock(sch.io);
+}
+
+/// The kernel unwires a freed Metal buffer asynchronously (measured ~0.5 s for 50 GB), and a
+/// load right behind the unload read that memory as taken (preflight 45 GB free, 95 GB half a
+/// second later). The unload answers once most of what it freed is back, or after a bound.
+fn waitForUnwire(io: std.Io, wired_before: u64, freed: u64) void {
+    if (wired_before == 0 or freed == 0) return;
+    var waited_ms: u32 = 0;
+    while (!unwireSettled(wired_before, status.getWiredMemBytes(), freed) and waited_ms < UNWIRE_WAIT_MAX_MS) : (waited_ms += 50) {
+        std.Io.sleep(io, .fromMilliseconds(50), .real) catch return;
+    }
+    if (waited_ms > 0) log.info("[registry] waited {d} ms for the unloaded model's memory to unwire\n", .{waited_ms});
+}
+
+const UNWIRE_WAIT_MAX_MS: u32 = 3000;
+
+/// Nine tenths of the freed bytes back from the wired set; other processes wire and unwire too.
+pub fn unwireSettled(wired_before: u64, wired_now: u64, freed: u64) bool {
+    return wired_before -| wired_now >= freed / 10 * 9;
+}
+
+test "unwireSettled: the unload waits until most of the freed bytes left the wired set" {
+    const gib: u64 = 1 << 30;
+    try testing.expect(!unwireSettled(53 * gib, 37 * gib, 50 * gib)); // t+0.1 s in the measured unload
+    try testing.expect(unwireSettled(53 * gib, 7 * gib, 50 * gib)); // t+0.7 s
+    try testing.expect(unwireSettled(53 * gib, 60 * gib, 0)); // nothing freed, nothing to wait for
+    try testing.expect(!unwireSettled(10 * gib, 12 * gib, 5 * gib)); // wired grew: never underflows
 }
 
 fn dflashContextCoversPrefix(context_len: usize, prefix_len: usize) bool {

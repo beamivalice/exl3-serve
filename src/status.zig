@@ -166,6 +166,16 @@ pub fn getTotalMemBytes() u64 {
     return total_mem;
 }
 
+/// Bytes the kernel holds wired right now (Metal's resident buffers among them). 0 on failure.
+pub fn getWiredMemBytes() u64 {
+    var page: usize = 0;
+    if (host_page_size(mach_host_self(), &page) != 0) return 0;
+    var vm = std.mem.zeroes(VmStats64);
+    var count: u32 = @sizeOf(VmStats64) / @sizeOf(i32);
+    if (host_statistics64(mach_host_self(), 4, @ptrCast(&vm), &count) != 0) return 0;
+    return @as(u64, vm.wire_count) * page;
+}
+
 pub fn getAvailableMemBytes() u64 {
     var total_mem: u64 = 0;
     var len: usize = @sizeOf(u64);

@@ -6,6 +6,7 @@ earlier history is mlx-serve's, in that project's changelog.
 
 ## Unreleased
 
+- **Loading a model right after unloading one no longer fails for lack of memory**: the unload now answers once the freed memory is back.
 - **`/v1/models` reports the real `bytes_resident` of the model loaded at launch** (it read about 2 MB for a 64 GB pack), and loading a second model now counts the first one's weights against the resident-memory cap.
 - **MTP is on by default for both served models**: a request that does not send `enable_mtp` drafts with the model's own head, without `--mtp`; `--no-mtp`, `"mtp": false` in `model-settings.json` or `enable_mtp:false` turn it off, and an SSD-streamed pack keeps it off unless `--mtp`.
 - **`sushi launch omp` passes omp's thinking level to the server** the same way, with off still turning thinking off.
