@@ -26,9 +26,8 @@ value-scaling and sigmoid-routing contracts. It is implemented in Zig against
 mlx-c with SSD-streamed expert banks. tests/dump_mimo_v2_fixtures.py loads the
 unmodified reference externally to generate independent numerical fixtures.
 
-The TP-aware FP8 QKV reconstruction in `tests/convert_mimo_v2.py` and
-`src/mimo_source.zig` follows `conversion/mimo.py`, reimplemented with NumPy
-and Zig respectively before affine quantization.
+The TP-aware FP8 QKV reconstruction in `src/mimo_source.zig` follows
+`conversion/mimo.py`, reimplemented in Zig.
 
 --------------------------------------------------------------------------------
 MTPLX
@@ -248,7 +247,7 @@ Copyright (c) 2023-2026 Apple Inc.
 Used in sushi:
 
   * The GatedDeltaNet fused recurrence kernel in `src/transformer.zig`
-    (`GDN_KERNEL_SOURCE`) is a port of `mlx_lm/models/gated_delta.py`'s
+    (`gdnKernelSource`) is a port of `mlx_lm/models/gated_delta.py`'s
     `_make_gated_delta_kernel(has_mask=False, vectorized=False)`.
   * The global-sort MoE gather (`_gather_sort`: argsort the flattened
     (token, expert) pairs, gather rows, run with sorted indices, then inverse
@@ -256,7 +255,7 @@ Used in sushi:
     `src/transformer.zig` and `src/deepseek_v4.zig`.
 
 Modifications by mlx-serve: reimplemented in Zig against mlx-c, and the GDN
-kernel is extended by a sequence variant (`GDN_KERNEL_SEQ_SOURCE`) that records
+kernel is extended by a sequence variant (`capture_seq`) that records
 the recurrence state after every intermediate timestep so speculative decoding
 can roll back without re-running the prefix.
 
@@ -406,10 +405,9 @@ and they are listed because they made that work possible.
   * DeepSeek's `inference/model.py` and `encoding_dsv4.py`, shipped with the
     DeepSeek-V4-Flash release, the reference for the `deepseek_v4` architecture
     and its chat template.
-  * turboderp/exllamav3 (MIT), the EXL3 weight format served for
-    Qwen3.8-Flash-Next experts (`src/expert_exl3.zig`,
-    `src/expert_exl3_kernels.zig`, `tests/convert_qwen38_flash_next_exl3.py`):
-    the 16x16 trellis tile packing, the MUL1 codebook decode, the tensor-core
+  * turboderp/exllamav3 (MIT), the EXL3 weight format served for routed
+    experts (`src/expert_exl3.zig`, `src/expert_exl3_kernels.zig`): the 16x16
+    trellis tile packing, the MCG and MUL1 codebook decodes, the tensor-core
     permutation and the suh/svh Hadamard transforms are re-implemented from its
     reference; no exllamav3 code is shipped.
 

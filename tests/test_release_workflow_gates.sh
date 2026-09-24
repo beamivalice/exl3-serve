@@ -128,5 +128,18 @@ for f in ("LICENSE-APACHE-2.0", "NOTICE"):
 for f in ("LICENSE", "LICENSE-APACHE-2.0", "NOTICE"):
     check(os.path.isfile(f), f"{f} exists at the repo root")
 
+# An attribution must point at a file a reader of this tree can open.
+def expand_braces(p):
+    m = re.search(r"\{([^}]*)\}", p)
+    if not m:
+        return [p]
+    return [q for alt in m.group(1).split(",")
+            for q in expand_braces(p[:m.start()] + alt + p[m.end():])]
+notice_paths = set(re.findall(r"\b(?:src|lib|tests|scripts)/[A-Za-z0-9_./{},-]*[A-Za-z0-9_}/]",
+                              open("NOTICE").read()))
+for p in sorted(notice_paths):
+    for q in expand_braces(p):
+        check(os.path.exists(q), f"NOTICE names an existing path: {q}")
+
 sys.exit(FAIL)
 EOF
