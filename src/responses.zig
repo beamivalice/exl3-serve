@@ -442,6 +442,13 @@ pub fn parseInput(
         else => {},
     }
 
+    // The same unconditional fold /v1/messages applies: Qwen's template raises on a
+    // system turn that is not first, and the raise is the silent generic fallback.
+    if (try chat_mod.foldSystemMessages(allocator, &pi.messages)) |joined| {
+        errdefer allocator.free(joined);
+        try pi.owned_strings.append(allocator, joined);
+    }
+
     return pi;
 }
 
@@ -1049,6 +1056,21 @@ test "parseInput replaces stored system when fresh instructions are provided" {
     for (pi.messages.items[1..]) |m| {
         try testing.expect(!std.mem.eql(u8, m.role, "system"));
     }
+}
+
+test "parseInput folds a non-leading system into the leading one" {
+    // Codex sends a mid-input `developer` turn beside `instructions`.
+    const allocator = testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\[{"role":"developer","content":"mid"},{"role":"user","content":"hi"}]
+    , .{});
+    defer parsed.deinit();
+    var pi = try parseInput(allocator, parsed.value, "You are S.", null, null, .{});
+    defer pi.deinit();
+    try testing.expectEqual(@as(usize, 2), pi.messages.items.len);
+    try testing.expectEqualStrings("system", pi.messages.items[0].role);
+    try testing.expectEqualStrings("You are S.\n\nmid", pi.messages.items[0].content);
+    try testing.expectEqualStrings("user", pi.messages.items[1].role);
 }
 
 test "parseInput function_call + function_call_output round-trip" {

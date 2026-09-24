@@ -20,7 +20,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-tool-calling](serv
   `/v1/messages`.
 - **Anthropic `/v1/messages`** (Claude Code): typed blocks, `input_schema`→`parameters`, stop-reason map incl.
   `stop_sequence` echo, full SSE block lifecycle; a `system`-role message past index 0 FOLDS into the leading system
-  message (`foldSystemMessages`); `developer` reads as `system` (`canonicalRole`).
+  message (`foldSystemMessages`, also run by `responses.parseInput`, since Codex sends a mid-input `developer` turn);
+  `developer` reads as `system` (`canonicalRole`).
 - `/v1/models` rows carry `context_length` + `max_model_len` at TOP level. Context-overflow 400s name BOTH counts.
 - Endpoint EXISTENCE never depends on model state and the 404 is answered BEFORE the model resolves (`ROUTE_PATHS`);
   a status route never reaches `ensureLoaded` (`handlePropsNoModel`). Removed upstream routes answer named 404s.
