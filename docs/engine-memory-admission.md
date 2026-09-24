@@ -44,6 +44,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
 - One `[admission] needed=… available=… reclaimable=… width=… verdict=…` line per decision.
 - A long prefill evicts the hot cache on the INFERENCE thread to be admitted (`evictLruToAdmit`), crediting only
   provably reclaimable bytes; `PrefillDoesNotFit` → 400 by name.
+- **Concurrent arrivals are each billed against the SAME free memory** on their connection threads. The gated arch
+  (qwen4_exp) re-bills live memory before each prefill in `runPrefill`; an ungated one (mimo_v2) is re-billed at the
+  pending drain (`admitsWithinMemory`: live requests plus this tick's earlier admits). One that does not fit beside
+  company waits in `pending` (`[admission] held`); alone it proceeds.
 - The hot-cache budget is clamped at load and follows residency ([engine-prefix-cache](engine-prefix-cache.md#budget)).
 - Context-overflow 400s name BOTH counts.
 - **A vision encode is billed before it runs** (`towerFitFault`): the largest block's tower scratch

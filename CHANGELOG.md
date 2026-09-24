@@ -6,6 +6,7 @@ earlier history is mlx-serve's, in that project's changelog.
 
 ## Unreleased
 
+- **Several long MiMo-V2.6-Flash prompts arriving together no longer overrun GPU memory**: one that does not fit beside the requests already running waits for one of them to finish.
 - **A `system` turn in the middle of a `/v1/chat/completions` conversation reaches Qwen3.8 Flash Next through its own template**, folded into the leading system prompt; MiMo-V2.6-Flash, whose template renders it in place, is unchanged.
 - **A `system` or `developer` turn in the middle of a `/v1/responses` input joins the leading system prompt**, so Qwen3.8 Flash Next renders it with its own template instead of a fallback that repeated the tool schemas and dropped the stop token.
 - **Stopping a request while another stream decodes with MTP no longer crashes the server.**

@@ -1594,6 +1594,8 @@ pub fn serve(
     // The inference thread's evict-or-refuse hook (#353); the scheduler has no server import.
     scheduler_mod.prefill_admission_fits = &prefillFitsNow;
     defer scheduler_mod.prefill_admission_fits = null;
+    scheduler_mod.prefill_admission_numbers = &prefillBillNumbersNow;
+    defer scheduler_mod.prefill_admission_numbers = null;
     scheduler_mod.prefill_request_chunk = &requestPrefillChunkNow;
     defer scheduler_mod.prefill_request_chunk = null;
     // The published budget is per model; retire it whenever the scheduler drops the cache.
@@ -5745,6 +5747,12 @@ pub fn prefillFitsNow(config: *const model_mod.ModelConfig, prompt_len: usize, m
         .will_donate = warm_will_donate,
         .mtp_on = enable_mtp,
     }).fits();
+}
+
+/// {needed, available} of the cold bill, live memory re-read, for the scheduler's sibling hold.
+pub fn prefillBillNumbersNow(config: *const model_mod.ModelConfig, prompt_len: usize, max_tokens: u32, kv_cfg: transformer_mod.KVQuantConfig, unchunked_prefill: bool, enable_mtp: bool) [2]u64 {
+    const bill = prefillAdmissionBill(config, prompt_len, max_tokens, kv_cfg, unchunked_prefill, null, .{ .mtp_on = enable_mtp });
+    return .{ bill.needed, bill.available };
 }
 
 /// The inference thread's refusal, quoting the numbers it compared.

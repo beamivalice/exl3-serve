@@ -275,6 +275,10 @@ pub const SubmitParams = struct {
 /// entry out (the only restore whose rows the request will not allocate).
 pub var prefill_admission_fits: ?*const fn (*const model_mod.ModelConfig, usize, u32, transformer_mod.KVQuantConfig, bool, u64, u64, bool, bool) bool = null;
 
+/// {needed, available} of the same cold bill, live memory re-read (`server.prefillBillNumbersNow`).
+/// Null (unit tests) skips the inference thread's hold for an ungated arch.
+pub var prefill_admission_numbers: ?*const fn (*const model_mod.ModelConfig, usize, u32, transformer_mod.KVQuantConfig, bool, bool) [2]u64 = null;
+
 /// The prefill width this request should run at, chosen against live post-eviction memory
 /// (`server.requestPrefillChunkNow`). Null keeps the model's load-time pin.
 pub var prefill_request_chunk: ?*const fn (*const model_mod.ModelConfig, usize, u32, transformer_mod.KVQuantConfig, bool, u64, u64, bool, bool) u32 = null;
@@ -450,6 +454,7 @@ pub const Slot = struct {
     cached_tokens: u32,
     logprobs_n: u32,
     serial_reason_logged: bool = false,
+    memory_hold_logged: bool = false,
     /// This tick decodes plain (batched) although the slot's MTP head is armed: the
     /// batched forward captures its hidden so the next solo tick can resume speculating.
     mtp_plain_tick: bool = false,
@@ -2277,6 +2282,69 @@ pub fn admitPendingTick(cands: []const AdmitCand, active: []const AdmitCand, out
         n += 1;
     }
     return n;
+}
+
+pub const MemoryBill = struct { needed: u64, available: u64 };
+
+/// How many of one tick's admits (queue order) go on to prefill. Each connection-thread bill
+/// ran before any sibling allocated, so an ungated arch is re-billed here: an admit that does
+/// not fit beside live requests plus this tick's earlier admits stays pending, and so does
+/// every admit after it. Alone it proceeds: nobody would ever free memory for it. A null bill
+/// (the gated arch) is billed against live memory inside `runPrefill` instead.
+pub fn admitsWithinMemory(bills: []const ?MemoryBill, live_company: bool) usize {
+    var promised: u64 = 0;
+    for (bills, 0..) |bill, i| {
+        const b = bill orelse continue;
+        if ((live_company or i > 0) and b.needed +| promised > b.available) return i;
+        promised +|= b.needed;
+    }
+    return bills.len;
+}
+
+/// `admitsWithinMemory` over this tick's admits; called under `queue_mu`.
+fn memoryAdmitCount(sch: *Scheduler, admit_idx: []const usize) usize {
+    const numbers_fn = prefill_admission_numbers orelse return admit_idx.len;
+    var live = false;
+    for (sch.decoding.items) |s| {
+        if (s.cancelled.load(.acquire) or s.finished or s.error_code != null) continue;
+        live = true;
+        break;
+    }
+    var bills: [16]?MemoryBill = undefined;
+    const n = @min(admit_idx.len, bills.len);
+    for (admit_idx[0..n], 0..) |idx, i| {
+        bills[i] = null;
+        const s = sch.pending.items[idx];
+        const cfg = s.model.config orelse continue;
+        if (cfg.longCtxGated() or s.model.transformer == null) continue;
+        const nums = numbers_fn(cfg, s.full_prompt.len, s.max_tokens, s.cache.config, generate_mod.visionPrefillUnchunked(s.vision_embeddings != null), s.enable_mtp);
+        bills[i] = .{ .needed = nums[0], .available = nums[1] };
+    }
+    const admitted = admitsWithinMemory(bills[0..n], live);
+    if (admitted < n) {
+        const held = sch.pending.items[admit_idx[admitted]];
+        if (!held.memory_hold_logged) {
+            held.memory_hold_logged = true;
+            log.info("[admission] held: {d} tokens need ~{d}MB, ~{d}MB available beside live requests; waiting for one to finish\n", .{
+                held.full_prompt.len, bills[admitted].?.needed >> 20, bills[admitted].?.available >> 20,
+            });
+        }
+    }
+    return admitted;
+}
+
+test "admitsWithinMemory: siblings are billed together, a lone request always proceeds" {
+    const gb: u64 = 1 << 30;
+    const b: ?MemoryBill = .{ .needed = 8 * gb, .available = 20 * gb };
+    // Four arrivals each fit alone against the same free memory; only two fit together.
+    try testing.expectEqual(@as(usize, 2), admitsWithinMemory(&.{ b, b, b, b }, false));
+    // Beside a live request the first must fit by itself.
+    const big: ?MemoryBill = .{ .needed = 30 * gb, .available = 20 * gb };
+    try testing.expectEqual(@as(usize, 0), admitsWithinMemory(&.{ big, b }, true));
+    // Alone it proceeds whatever the bill: nothing would ever free memory for it.
+    try testing.expectEqual(@as(usize, 1), admitsWithinMemory(&.{big}, false));
+    // A gated admit carries no bill here and never blocks the queue.
+    try testing.expectEqual(@as(usize, 3), admitsWithinMemory(&.{ null, b, b }, false));
 }
 
 const ThreadCtx = struct {
@@ -4153,7 +4221,7 @@ fn inferenceLoop(ctx: ThreadCtx) void {
                 cand_buf[i] = .{ .model = @intFromPtr(s.model), .exclusive = slotExclusiveDecode(s) };
             }
             var admit_idx: [to_prefill.len]usize = undefined;
-            const n_admit = admitPendingTick(cand_buf[0..n_cands], live_buf[0..n_live], &admit_idx);
+            const n_admit = memoryAdmitCount(sch, admit_idx[0..admitPendingTick(cand_buf[0..n_cands], live_buf[0..n_live], &admit_idx)]);
             for (admit_idx[0..n_admit]) |idx| {
                 to_prefill[n_prefill] = sch.pending.items[idx];
                 _ = to_prefill[n_prefill].in_pass.fetchAdd(1, .acq_rel);
