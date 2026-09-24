@@ -15,7 +15,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-tool-calling](serv
   each served arch accepts a subset (`model.effortArms`), listed as `reasoning_efforts` on its `/v1/models` row; any
   other word 400s on chat, Responses and Anthropic with the accepted list, never rounded. qwen4_exp: off, low (2048),
   medium (8192), xhigh (uncapped); the template reads the word. mimo_v2: off, low (2048), medium (8192), high, xhigh,
-  max (uncapped); the template has only on/off, the budget is the whole effect. Uncapped = `--reasoning-budget`. `/v1/responses`: `sequence_number` on every event, stateful via
+  max (uncapped); the template has only on/off, the budget is the whole effect. Uncapped = `--reasoning-budget`.
+  A thinking request that names NO effort gets no server budget (decided): Qwen3.8 renders it as low
+  (`chat.qwen38EffortFor`), whose preamble shortens the thought without truncating it. `/v1/responses`:
+  `sequence_number` on every event, stateful via
   `ResponseStore`, WS via Upgrade. Continuing a partial reply: `continue_final_message` explicit on chat, INFERRED on
   `/v1/messages`.
 - **Anthropic `/v1/messages`** (Claude Code): typed blocks, `input_schema`→`parameters`, stop-reason map incl.
