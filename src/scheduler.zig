@@ -2369,9 +2369,9 @@ pub const CpuState = struct {
 /// call deinit on uninitialized memory. `ModelConfig.deinit` frees the config's
 /// one owned field; `allocator.destroy` alone would leak it.
 fn preloadCpuState(allocator: std.mem.Allocator, io: std.Io, model_dir: []const u8) !CpuState {
-    // No GGUF engine is part of this build: refuse by name before any
-    // config.json read (a GGUF dir has none).
-    if (model_discovery.isGgufModelPath(io, model_dir)) return error.GgufEngineUnsupported;
+    // An unsupported file format is refused by name before any config.json
+    // read (such a dir has none).
+    if (model_discovery.isGgufModelPath(io, model_dir)) return error.ModelFormatUnsupported;
 
     const config = try allocator.create(ModelConfig);
     errdefer allocator.destroy(config);
@@ -8344,9 +8344,9 @@ test "modelExclusiveDecode asks the transformer, never one hardcoded arch" {
     try testing.expect(std.mem.indexOf(u8, src, hardcoded) == null);
 }
 
-test "preloadCpuState refuses a GGUF checkpoint by name" {
-    // No GGUF engine is part of this build: the verdict is a NAMED load error
-    // the client sees as a 503, never a stub config for a missing engine.
+test "preloadCpuState refuses an unsupported checkpoint format by name" {
+    // The verdict is a NAMED load error the client sees as a 503, never a
+    // stub config.
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -8356,7 +8356,7 @@ test "preloadCpuState refuses a GGUF checkpoint by name" {
     const root_len = try tmp.dir.realPath(io, &buf);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/g", .{buf[0..root_len]});
     defer testing.allocator.free(path);
-    try testing.expectError(error.GgufEngineUnsupported, preloadCpuState(testing.allocator, io, path));
+    try testing.expectError(error.ModelFormatUnsupported, preloadCpuState(testing.allocator, io, path));
 }
 
 test "sumInflightGeneratedTokens sums active slots, excludes finished/cancelled/errored" {

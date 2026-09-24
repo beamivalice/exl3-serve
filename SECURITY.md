@@ -9,25 +9,32 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in sushi, please report it responsibly:
+If you discover a security vulnerability in sushi, please report it privately:
 
 1. **Do not** open a public issue
-2. Email **security@dalcu.com** with:
+2. Open a private security advisory at
+   [github.com/beamivalice/sushi/security/advisories/new](https://github.com/beamivalice/sushi/security/advisories/new) with:
    - Description of the vulnerability
    - Steps to reproduce
    - Potential impact
    - Suggested fix (if any)
 
-You should receive a response within 48 hours. We will work with you to understand and address the issue before any public disclosure.
+For anything that is not a vulnerability, use [GitHub issues](https://github.com/beamivalice/sushi/issues).
 
 ## Security Model
 
-sushi is designed as a **local development tool** running on a single machine. It is not designed for production deployment or untrusted network exposure.
+sushi is designed as a **local inference server** running on a single machine. It is not designed for production
+deployment or untrusted network exposure.
 
-### By Design
-- **No authentication**: The HTTP API has no auth — it's intended for localhost use only
+### Authentication
+- **Off by default.** With no key set, every request is served.
+- **`--api-key <token>`** (or `--api-key-env <VAR>`, which keeps the key out of the process table) requires the key on
+  every request from another machine: `Authorization: Bearer`, `x-api-key`, HTTP Basic (key = password) or
+  `?api_key=`. `GET /health` and CORS preflight stay open.
+- Loopback requests are trusted unless **`--api-key-strict`** is also given.
 
 ### Recommendations
-- Bind to `127.0.0.1` (default) — do not expose to the network
+- The default bind is `0.0.0.0` (every interface, with a warning at startup). Pass `--host 127.0.0.1` unless you mean to
+  serve the network, and set `--api-key` if you do.
 - Only load models from trusted sources
 - Do not run the server as root

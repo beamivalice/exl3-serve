@@ -155,10 +155,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   removing all three families outright saved ~0.4 of ~21.8 ms per forward (79a4cb4, 4096 keys, one boot, arms
   interleaved), so fusing them is worth under 1%. The decode idle time is the dependent chain of heavy kernels.
 - An MLX custom kernel writes fresh outputs, never the cache in place; writing through an input buffer would bypass
-  MLX's hazard tracking and the copy-on-write the prefix-cache snapshots rely on. A fused rope + kv8 quantize is
-  parked on branch `lever4-qkv-prep-parked` (bit-identical, never timed live).
+  MLX's hazard tracking and the copy-on-write the prefix-cache snapshots rely on. A fused rope + kv8 quantize was
+  bit-identical but never timed live, and is not in the tree.
 - A joined `[Q | K]` GEMV output with one rope over both passed its unit tests but moved live logits by ~0.05
-  nats at the first token, cause unfound; parked on branch `joint-rope-parked`.
+  nats at the first token, cause unfound; it is not in the tree.
 
 ## Prompt lookup decoding
 

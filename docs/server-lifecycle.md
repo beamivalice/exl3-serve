@@ -20,8 +20,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
 ## What loads
 
 - The arch gate: the loader refuses any `model_type` outside `model.served_model_types` (`qwen4_exp`, `mimo_v2`) by
-  name (`ArchitectureUnsupported` → 503). A `.gguf` is refused by name (`GgufEngineUnsupported` → 503; `--model`
-  exits).
+  name (`ArchitectureUnsupported` → 503). A checkpoint in an unsupported file format is refused by name
+  (`ModelFormatUnsupported` → 503; `--model` exits).
 - **The weight loader is ONE decision** (`model.loadWeightsForConfig`: streaming index > MiMo source trunk > vision >
   plain). A second site builds a model the server never serves — a MiMo pack read without its source trunk binds the
   raw FP8 fused QKV and its logits stop following the routed experts.

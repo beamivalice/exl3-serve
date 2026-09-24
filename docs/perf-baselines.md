@@ -90,13 +90,13 @@ pairs compare. MCG verify ms 28.2 / ~33.5 / ~37.5 at 2/3/4 rows: ~4.6 ms per ext
 
 ## Upstream comparison (decided: no rebase)
 
-- Rebased onto upstream (branch `upstream-rebase`, 8f64acd) vs main 6755ff2 on the MCG K3 pack, interleaved: MTP
+- Rebased onto upstream vs main 6755ff2 on the MCG K3 pack, interleaved: MTP
   decode 88.2/81.9 vs 82.0/83.1, MTP off 62.1 vs 60.4, prefill 1643 vs 1598: neutral. Four streams with MTP: 85
   aggregate both ways (our merged-verify decline past width one holds).
 - kv8 A/B on the affine 4/8 pack: upstream's `qkvAttnMppKernel` engaged
   zero times (QSA caps keys at 2048); all differences were run-to-run and spec variance.
 - Decision: main stays; upstream's kv8 attention kernel and grouped MTP are cherry-pick candidates later, each with
-  its own certification. The `upstream-rebase` branch is kept as the reference.
+  its own certification.
 
 <a id="qsa"></a>
 ## QSA wide verify (b89991a)

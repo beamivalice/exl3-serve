@@ -5731,7 +5731,7 @@ test "exl3 cooperative indexed GEMV matches the host tile decode at a fractional
     try indexedParity(.{ .n = 44 }, 2560, 640, 4, 10, 47, .mul1);
 }
 
-/// The w12 fixture through the Metal indexed GEMV, scored against the converter's
+/// The w12 fixture through the Metal indexed GEMV, scored against sashimi's
 /// own reference decode (the fixture's `inner`) rather than against our host
 /// decoder — the one bar that certifies the narrowed-window convention on the
 /// GPU end to end.
@@ -5792,7 +5792,7 @@ fn indexedGemvMatchesFixtureInner(fixture: []const u8, rate: exl3.Rate, dec: exl
     try reportGemmParity(try measureInnerGemmParityOn(alloc, s, src[0 .. rows * dim], xh, eids, w, dim, dim));
 }
 
-test "exl3 indexed GEMV decodes the w12 fixture to the converter's own inner weights" {
+test "exl3 indexed GEMV decodes the w12 fixture to sashimi's own inner weights" {
     try indexedGemvMatchesFixtureInner(exl3.fixtures.k2p5_mcg_w12, .{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 });
 }
 

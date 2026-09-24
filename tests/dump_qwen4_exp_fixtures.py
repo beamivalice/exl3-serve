@@ -5,7 +5,7 @@ Two phases, run from the torch venv (transformers main carries the arch):
 
   1. `build`  — a random Qwen4ExpForCausalLM at toy geometry, saved in the
      real checkpoint's naming (model.language_model.*, sharded n-gram table),
-     so the private converter converts it verbatim.
+     so sashimi converts it verbatim.
   2. `dump`   — the reference forward on OUR dequantized pack (mx.dequantize
      of every quantized tensor written back into the torch model), so the
      fixture measures the ENGINE, not the quantizer. Writes input_ids, the
@@ -13,7 +13,7 @@ Two phases, run from the torch venv (transformers main carries the arch):
      budget, plus the per-layer residual stream for bisecting.
 
   venv/bin/python tests/dump_qwen4_exp_fixtures.py build --out ~/.sushi/runs/qwen4-tiny/hf
-  # convert ~/.sushi/runs/qwen4-tiny/hf to ~/.sushi/runs/qwen4-tiny/pack with the private converter
+  # convert ~/.sushi/runs/qwen4-tiny/hf to ~/.sushi/runs/qwen4-tiny/pack with sashimi
   venv/bin/python tests/dump_qwen4_exp_fixtures.py dump --hf ~/.sushi/runs/qwen4-tiny/hf \
       --pack ~/.sushi/runs/qwen4-tiny/pack --out ~/.sushi/runs/qwen4-tiny/fixture.safetensors
   QWEN4_TEST_MODEL=~/.sushi/runs/qwen4-tiny/pack QWEN4_FIXTURE=~/.sushi/runs/qwen4-tiny/fixture.safetensors \

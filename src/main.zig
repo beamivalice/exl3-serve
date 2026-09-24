@@ -562,7 +562,7 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "--skip-mem-preflight")) {
             scheduler_mod.skip_mem_preflight = true;
         } else if (std.mem.eql(u8, args[i], "--no-safety")) {
-            // Retired image content filter; accepted as a no-op.
+            // Accepted as a no-op so launchers that pass it keep booting.
         } else if (std.mem.eql(u8, args[i], "--pld")) {
             enable_pld = true;
             pld_explicit = true;
@@ -934,7 +934,7 @@ pub fn main(init: std.process.Init) !void {
             log.err("Stop it first (pkill -x sushi) or use a different port (--port {d}).\n", .{port + 1});
             std.process.exit(1);
         }
-        // Above every serve dispatch (GGUF/headless/media return early below).
+        // Above every serve dispatch (unsupported-format/headless/media return early below).
         if (server_mod.shouldWarnOpenBind(host_explicit, host)) {
             log.warn("Listening on {s}:{d} — reachable by every device on the network this Mac is on.\n", .{ host, port });
             log.warn("Restrict to this Mac with --host 127.0.0.1 (a future version will make that the default).\n", .{});
@@ -967,10 +967,9 @@ pub fn main(init: std.process.Init) !void {
     if (metrics_instance) |*m| server_mod.g_metrics = m;
     defer server_mod.g_metrics = null;
 
-    // No GGUF engine is part of this build: refuse a `.gguf` (or a directory
-    // holding one) by name before any config.json read.
+    // An unsupported file format is refused by name before any config.json read.
     if (isGgufPath(io, model_dir)) {
-        log.err("[gguf] {s}: GGUF checkpoints are not served by this build. Serve an MLX safetensors checkpoint (qwen4_exp or mimo_v2).\n", .{model_dir});
+        log.err("[load] {s}: unsupported model format. Serve an MLX safetensors checkpoint (qwen4_exp or mimo_v2).\n", .{model_dir});
         std.process.exit(1);
     }
 

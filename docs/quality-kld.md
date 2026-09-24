@@ -88,7 +88,7 @@ that shares no code with ours.
 | turboderp K3, MUL1 w16 | 0.0946 | 90.79% | 2.88% | 0.0866 |
 | MUL1 K3 w12 (in-house experts, turboderp dense) | 0.1031 | 90.44% | 3.15% | 0.0951 |
 | MCG K3 w12 (served; in-house experts, turboderp dense) | 0.1041 | 90.22% | 3.21% | 0.0958 |
-| MCG K3 w15 (in-house experts, turboderp dense; converter eebb3e9, pre-#17 skew rule; binary 7ed9795) | 0.1012 | 90.26% | 3.14% | 0.0931 |
+| MCG K3 w15 (in-house experts, turboderp dense; sashimi eebb3e9, pre-#17 skew rule; binary 7ed9795) | 0.1012 | 90.26% | 3.14% | 0.0931 |
 
 w12 -> w15 bought 2.8% of KLD on MCG; the remaining gap to turboderp's MUL1 w16 (0.0946) is not mostly the window.
 Pack `Qwen3.8-Flash-Next-Sushi3bpw` (MCG K3 w15, plugged).

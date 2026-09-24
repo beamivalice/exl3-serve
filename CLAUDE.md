@@ -15,8 +15,8 @@ streamed MXFP4). OpenAI/Anthropic-compatible HTTP, no Python at serve time. Fork
   repo.
 - Everything else in `src/` (other architectures' forwards and loaders in `transformer.zig`/`model.zig`, the dormant
   ANE driver) is INHERITED upstream code: it builds, it is unreachable, and no doc covers it. The loader refuses any
-  other `model_type` by name (`model.served_model_types`, `ArchitectureUnsupported` → 503); a `.gguf` is refused by
-  name (`GgufEngineUnsupported` → 503; `--model` exits).
+  other `model_type` by name (`model.served_model_types`, `ArchitectureUnsupported` → 503); an unsupported file
+  format is refused by name (`ModelFormatUnsupported` → 503; `--model` exits).
 
 <a id="docs-index"></a>
 ## Docs index
@@ -64,8 +64,8 @@ Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds)
 (`lib/mlx-src` v0.32.2, `lib/mlxc-src` 56b2d39) self-built NAX-enabled by `scripts/build-mlx.sh` into `lib/mlx/`
 (FFI `src/mlx.zig`); jinja.cpp (wangzhaode, Apache-2.0) as `lib/jinja_cpp/libjinja.a`; safetensors; BPE; `stb_image`
 + libwebp decode image INPUT. Min macOS 26.2; NAX kernels need the 26.2 deployment target (asserted by
-`tests/test_mlx_staged_nax.sh`). The served binary's only non-system dylibs are `libmlxc` and Homebrew's `libwebp` —
-no `libllama` (`tests/test_serving_deps.sh`). Box: M5 Max 128 GB, macOS 27.
+`tests/test_mlx_staged_nax.sh`). The served binary's only non-system dylibs are `libmlxc` and Homebrew's `libwebp`
+(`tests/test_serving_deps.sh`). Box: M5 Max 128 GB, macOS 27.
 
 ## Navigating `src/` (served path only)
 

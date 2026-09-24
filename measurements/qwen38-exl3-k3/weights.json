@@ -9305,9 +9305,9 @@
     "codebook": "mul1",
     "cpu_only": true,
     "exl3_k": 3,
-    "converter_root": "<private converter>",
+    "converter_root": "<sashimi>",
     "raw_safetensors_reads": "header parsed and one first-axis expert row seek-read at a time",
-    "reconstructor": "<private converter> reference reconstructor",
+    "reconstructor": "sashimi reference reconstructor",
     "sample": {
       "exhaustive": false,
       "expert_count_per_layer": 4,

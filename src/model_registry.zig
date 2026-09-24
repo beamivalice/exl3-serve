@@ -1181,11 +1181,11 @@ pub const ModelRegistry = struct {
     /// (2026-08-08). Merge note: this arm came from the branch's
     /// `scheduler.loadErrorFor`, which this function replaced — the name-based
     /// half survived the refactor, the second name did not.
-    pub fn loadErrorFromName(name: ?[]const u8) error{ LoadFailed, InsufficientMemory, ArchitectureUnsupported, GgufEngineUnsupported, ExpertCacheDoesNotFit, ExpertStreamingRequired, SsdBudgetBelowResident, SsdBudgetExceedsWiredLimit, ExpertStreamingMtpUnsupported, ExpertStreamingUnsupportedLayout, ExpertSlabImportCopied, ExpertLayoutUnsupported, Exl3TopKExceedsReduceBank, Exl3TrellisGeometry, Exl3WindowUnsupported, Exl3ShardStampMismatch } {
+    pub fn loadErrorFromName(name: ?[]const u8) error{ LoadFailed, InsufficientMemory, ArchitectureUnsupported, ModelFormatUnsupported, ExpertCacheDoesNotFit, ExpertStreamingRequired, SsdBudgetBelowResident, SsdBudgetExceedsWiredLimit, ExpertStreamingMtpUnsupported, ExpertStreamingUnsupportedLayout, ExpertSlabImportCopied, ExpertLayoutUnsupported, Exl3TopKExceedsReduceBank, Exl3TrellisGeometry, Exl3WindowUnsupported, Exl3ShardStampMismatch } {
         if (name) |n| {
             if (std.mem.eql(u8, n, "InsufficientMemory")) return error.InsufficientMemory;
             if (std.mem.eql(u8, n, "ArchitectureUnsupported")) return error.ArchitectureUnsupported;
-            if (std.mem.eql(u8, n, "GgufEngineUnsupported")) return error.GgufEngineUnsupported;
+            if (std.mem.eql(u8, n, "ModelFormatUnsupported")) return error.ModelFormatUnsupported;
             if (std.mem.eql(u8, n, "OutOfMemory")) return error.InsufficientMemory;
             if (std.mem.eql(u8, n, "ExpertCacheDoesNotFit")) return error.ExpertCacheDoesNotFit;
             if (std.mem.eql(u8, n, "ExpertStreamingRequired")) return error.ExpertStreamingRequired;
@@ -1211,7 +1211,7 @@ pub const ModelRegistry = struct {
         try std.testing.expectEqual(error.InsufficientMemory, loadErrorFromName("InsufficientMemory"));
         try std.testing.expectEqual(error.InsufficientMemory, loadErrorFromName("OutOfMemory"));
         try std.testing.expectEqual(error.ArchitectureUnsupported, loadErrorFromName("ArchitectureUnsupported"));
-        try std.testing.expectEqual(error.GgufEngineUnsupported, loadErrorFromName("GgufEngineUnsupported"));
+        try std.testing.expectEqual(error.ModelFormatUnsupported, loadErrorFromName("ModelFormatUnsupported"));
         try std.testing.expectEqual(error.ExpertCacheDoesNotFit, loadErrorFromName("ExpertCacheDoesNotFit"));
         try std.testing.expectEqual(error.ExpertStreamingRequired, loadErrorFromName("ExpertStreamingRequired"));
         try std.testing.expectEqual(error.SsdBudgetBelowResident, loadErrorFromName("SsdBudgetBelowResident"));

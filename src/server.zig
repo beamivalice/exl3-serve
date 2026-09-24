@@ -8136,15 +8136,10 @@ fn handleChatCompletions(
                 enable_drafter = false;
             }
         }
-        // NOTE (2026-07-13): the old heavy-echo MTP->PLD routing (score >=
-        // 0.13 disabled MTP) was RETIRED with the verify-qmm kernels + EV
-        // depth. The prompt-time n-gram score cannot separate "output will
-        // echo verbatim" (PLD excels: 83 vs 75 tok/s live) from
-        // "repetitive-looking agent context" (PLD flaps at ~45% per-draft,
-        // runtime-disables, and lands on plain AR at 28 tok/s with the MTP
-        // head idle) — live captures scored 0.334 vs 0.365, inseparable.
-        // MTP now wins whenever loaded (generator priority); force PLD with
-        // enable_pld:true + enable_mtp:false.
+        // The n-gram score never routes MTP to PLD: it cannot separate output
+        // that will echo verbatim (PLD's win) from repetitive-looking agent
+        // context (where PLD flaps and runtime-disables). MTP wins whenever
+        // loaded; force PLD with enable_pld:true + enable_mtp:false.
     }
 
     // Prompt caching: reuse KV cache for shared prefix.
@@ -8408,8 +8403,8 @@ fn handleCompletions(
                 enable_drafter = false;
             }
         }
-        // Heavy-echo MTP->PLD routing retired 2026-07-13 (see the NOTE at the
-        // chat-completions site): MTP wins whenever loaded.
+        // MTP wins whenever loaded; the n-gram score never routes it to PLD
+        // (see the chat-completions site).
     }
 
     const eos_slice = config.eosTokenSlice();
@@ -11642,7 +11637,7 @@ test "every load refusal the registry preserves answers under its own name" {
         "InsufficientMemory",
         "OutOfMemory",
         "ArchitectureUnsupported",
-        "GgufEngineUnsupported",
+        "ModelFormatUnsupported",
         "ExpertCacheDoesNotFit",
         "ExpertStreamingRequired",
         "SsdBudgetBelowResident",
@@ -11665,6 +11660,7 @@ test "every load refusal the registry preserves answers under its own name" {
         try t.expect(refusal.message.len > 0);
     }
     try t.expectEqualStrings("architecture_unsupported", loadRefusalFor(error.ArchitectureUnsupported).?.type);
+    try t.expectEqualStrings("model_format_unsupported", loadRefusalFor(error.ModelFormatUnsupported).?.type);
     try t.expectEqualStrings("expert_streaming_unsupported_layout", loadRefusalFor(error.ExpertStreamingUnsupportedLayout).?.type);
     try t.expectEqualStrings("expert_slab_import_copied", loadRefusalFor(error.ExpertSlabImportCopied).?.type);
     try t.expectEqualStrings("expert_layout_unsupported", loadRefusalFor(error.ExpertLayoutUnsupported).?.type);
@@ -11691,7 +11687,7 @@ pub fn loadRefusalFor(err: anyerror) ?LoadRefusal {
         error.NotEnoughMemory => .{ .type = "out_of_memory", .message = not_enough_memory_message },
         error.InsufficientMemory => .{ .type = "out_of_memory", .message = insufficient_free_memory_message },
         error.ArchitectureUnsupported => .{ .type = "architecture_unsupported", .message = "This checkpoint's model_type is not served by this build, which loads only qwen4_exp (Qwen3.8-Flash-Next) and mimo_v2 (MiMo-V2.6-Flash)." },
-        error.GgufEngineUnsupported => .{ .type = "gguf_engine_unsupported", .message = "GGUF checkpoints are not served by this build, which has no GGUF engine. Serve an MLX safetensors checkpoint (qwen4_exp or mimo_v2)." },
+        error.ModelFormatUnsupported => .{ .type = "model_format_unsupported", .message = "This checkpoint's file format is not supported. Serve an MLX safetensors checkpoint (qwen4_exp or mimo_v2)." },
         error.ExpertCacheDoesNotFit => .{ .type = "expert_cache_does_not_fit", .message = "The requested expert cache, full-union workspace, bounce buffers, resident trunk, and serving state do not fit under the GPU memory ceiling. Lower --expert-cache-gb or free memory." },
         error.ExpertStreamingMtpUnsupported => .{ .type = "expert_streaming_mtp_unsupported", .message = expert_stream_mod.MTP_UNSUPPORTED },
         error.ExpertStreamingRequired => .{ .type = "expert_streaming_required", .message = "This checkpoint streams its experts from SSD and needs a resident budget: set this model's \"ssd_budget_gb\" in model-settings.json, or launch with --ssd-budget-gb <n> (or --expert-cache-gb <n>)." },
@@ -14645,8 +14641,8 @@ fn handleAnthropicMessages(
                 enable_drafter = false;
             }
         }
-        // Heavy-echo MTP->PLD routing retired 2026-07-13 (see the NOTE at the
-        // chat-completions site): MTP wins whenever loaded.
+        // MTP wins whenever loaded; the n-gram score never routes it to PLD
+        // (see the chat-completions site).
     }
 
     // Context size enforcement
@@ -16576,8 +16572,8 @@ fn handleResponsesInner(
                 enable_drafter_resp = false;
             }
         }
-        // Heavy-echo MTP->PLD routing retired 2026-07-13 (see the NOTE at the
-        // chat-completions site): MTP wins whenever loaded.
+        // MTP wins whenever loaded; the n-gram score never routes it to PLD
+        // (see the chat-completions site).
     }
 
     var result: generate_mod.GenerationResult = undefined;
@@ -20825,8 +20821,8 @@ test "prefillMemoryNeeded: working set is chunk-bounded — the 255K MoE prompt 
     const needed = prefillMemoryNeeded(262_144, 16, 2, 81920, 256, 256, 2048, 15360, 4, 512, 262_144, 0, 0, .{});
     try t.expectEqual(@as(u64, 14_061_404_160 + 671_088_640), needed);
     try t.expect(needed < 16 << 30);
-    // The retired seq-scaled envelope billed 8 x seq x ffn x 2 working bytes
-    // (~64 GB) on top of fp16 KV (~21.5 GB) -> ~107 GB and a spurious 400.
+    // A seq-scaled envelope (8 x seq x ffn x 2 working bytes, ~64 GB, on top
+    // of fp16 KV, ~21.5 GB) would refuse this prompt with a spurious 400.
     const old_estimate: u64 = (40 * 2 * 262_144 * 2 * 256 * 2 + 8 * 262_144 * 15360 * 2) * 5 / 4;
     try t.expect(needed < old_estimate / 7);
 }

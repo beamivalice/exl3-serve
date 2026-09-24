@@ -46,8 +46,8 @@ const SourceIndex = struct {
     stamps: std.StringHashMap(ShardStamp),
 };
 
-/// The decoder a shard was written for, as the private converter
-/// stamps it (docs/pack-format.md). Every value is a string there. A shard
+/// The decoder a shard was written for, as sashimi stamps it
+/// (docs/pack-format.md). Every value is a string there. A shard
 /// naming none predates the stamp and is admitted; one that names a decoder
 /// the config does not is refused, because the same bytes decode to different
 /// weights under each.

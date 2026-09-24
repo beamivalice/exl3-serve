@@ -404,7 +404,7 @@ pub const fixtures = struct {
     pub const k2 = aligned(@embedFile("fixtures/exl3_k2_linear.safetensors"));
     pub const k2p5_mcg = aligned(@embedFile("fixtures/exl3_k2p5_mcg_linear.safetensors"));
     pub const k3_mcg = aligned(@embedFile("fixtures/exl3_k3_mcg_linear.safetensors"));
-    /// Searched AND decoded at window 12 by the converter: the only fixture that
+    /// Searched AND decoded at window 12 by sashimi: the only fixture that
     /// certifies a narrowed window against the library rather than against our
     /// own masking of a w16 bitstream.
     pub const k2p5_mcg_w12 = aligned(@embedFile("fixtures/exl3_k2p5_mcg_w12_linear.safetensors"));

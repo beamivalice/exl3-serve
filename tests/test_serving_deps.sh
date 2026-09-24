@@ -1,21 +1,18 @@
 #!/bin/bash
-# test_serving_deps.sh — the served binary's runtime dependency contract.
+# test_serving_deps.sh — the served binary's runtime dependency and refusal contract.
 #
-# This fork serves mimo_v2 / qwen4_exp / EXL3 on our self-built MLX. The
-# embedded generic-GGUF engine (llama.cpp's libllama, staged by the old
-# scripts/fetch-llama.sh into lib/llama/) was cut: nothing loads it, and its
-# @rpath reference made the binary unlaunchable without a staged dylib that
-# no served path ever calls. Guard that it cannot come back by accident —
-# a stray `linkSystemLibrary("llama")` re-links silently.
+# This engine serves mimo_v2 / qwen4_exp / EXL3 on our self-built MLX, and
+# nothing else. A stray `linkSystemLibrary(...)` re-links silently and can make
+# the binary unlaunchable without a staged dylib no served path ever calls.
 #
 # Checks:
 #   1. zig-out/bin/sushi exists (build it first)
-#   2. otool -L lists no libllama
-#   3. lib/llama_shim (the tracked C bridge) is gone
-#   4. the staged MLX is still linked (the contract is "no llama", not "no deps")
-#   5. the llama-only flags are REJECTED BY NAME, never silently eaten — a
-#      script that still passes one must fail loudly, not serve under
-#      different settings (the flag-eater rule, docs/server-lifecycle.md)
+#   2. otool -L lists no non-system dylib beyond the staged MLX and libwebp
+#   3. the staged MLX is still linked (the contract is "no stray deps", not "no deps")
+#   4. an unknown flag is REJECTED BY NAME, never silently eaten — a script that
+#      passes one must fail loudly, not serve under different settings (the
+#      flag-eater rule, docs/server-lifecycle.md)
+#   5. a checkpoint in an unsupported file format is refused by name before load
 #
 # No model, no server, seconds.
 #
@@ -43,10 +40,11 @@ echo "== linked libraries =="
 LINKED=$(otool -L "$BIN" | tail -n +2)
 echo "$LINKED" | sed 's/^/    /'
 
-if echo "$LINKED" | grep -qi "libllama"; then
-  fail "binary still links libllama (the embedded GGUF engine is cut from this fork)"
+STRAY=$(echo "$LINKED" | awk '{print $1}' | grep -v -E '^(/System/|/usr/lib/)' | grep -v -E '/libmlxc\.dylib$|/libwebp[.0-9]*\.dylib$')
+if [ -n "$STRAY" ]; then
+  fail "unexpected non-system dylib(s): $(echo "$STRAY" | tr '\n' ' ')"
 else
-  ok "no libllama"
+  ok "no non-system dylib beyond libmlxc and libwebp"
 fi
 
 if echo "$LINKED" | grep -q "libmlxc"; then
@@ -55,18 +53,7 @@ else
   fail "libmlxc missing — the served path needs the staged MLX"
 fi
 
-echo "== staging tree =="
-# lib/llama_shim was TRACKED; its return means the C bridge came back.
-if [ -e "lib/llama_shim" ]; then
-  fail "lib/llama_shim is back — the C bridge over llama.h was removed"
-else
-  ok "lib/llama_shim absent"
-fi
-# lib/llama is build OUTPUT (gitignored). A leftover from before the cut is
-# harmless — nothing links it — so it is a note, not a failure.
-[ -e "lib/llama" ] && echo "  note: stale lib/llama/ staging tree from an older build; safe to rm -rf"
-
-echo "== llama-only flags rejected by name =="
+echo "== unknown flags rejected by name =="
 check_flag() {
   # "$@" is the flag as a launch script would pass it.
   OUT=$("$BIN" "$@" 2>&1)
@@ -79,9 +66,20 @@ check_flag() {
     fail "$1 exited $RC but never named itself: $(echo "$OUT" | head -1)"
   fi
 }
-check_flag --llama-kv-quant q8
-check_flag --llama-cache-entries 8
-check_flag --engine llama
+check_flag --no-such-flag 8
+check_flag --engine mlx
+
+echo "== unsupported checkpoint format refused by name =="
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+printf 'GGUF' > "$TMP/model.gguf"
+OUT=$("$BIN" --model "$TMP/model.gguf" 2>&1)
+RC=$?
+if [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "unsupported model format"; then
+  ok "unsupported format refused by name (exit $RC)"
+else
+  fail "unsupported format not refused by name (exit $RC): $(echo "$OUT" | tail -1)"
+fi
 
 echo
 echo "PASS: $PASS  FAIL: $FAIL"
