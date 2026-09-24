@@ -179,6 +179,21 @@ reads 0.07772 / 0.07754 / 0.07771 / 0.07836. Per call on real prefills (4 chunks
 sinks) the two arms' error against an f32 reference agrees to 1e-4 relative RMS; a NAX-vs-SIMD KLD delta under ~1% is
 noise.
 
+f16 P in `sushi_attn_pd_nax` (2026-09-24). Harness: a python replica of the dispatch chain, qL 4096, H 64 / Hk 4, kv8
+slices, arms interleaved in one process, `taskpolicy -a`, lock `lever2-attn`.
+- One global layer, main -> f16 P, ms: kL 16384 71.3 -> 53.3, 65536 309 -> 234, 262144 1311 -> 1075 (-25% / -24% /
+  -18%). One dense dispatch at 4096 x 4096: 8.58 -> 6.82 (-20%). The f16 arm also carried lockstep simdgroups and
+  clamped loads, which alone read 67.2 / 302 / 1331.
+- Ruled out in the same harness:
+  - a strict float P (1.4x slower);
+  - an int8 correction term (costs what a bf16 one does);
+  - 16x32x32 tiles (<= 2%);
+  - `max_total_threads_per_threadgroup` (0);
+  - fast exp2 (0);
+  - 8 simdgroups (slower);
+  - lockstep simdgroups with a 1e9 dispatch budget: -7.6% / -4.1% / -2.0% at 16k / 64k / 256k, under the 5% bar;
+  - a larger budget alone: slower at long kL (1e9: +2% at 64k, +13% at 256k), because K/V fall out of cache.
+
 <a id="mimo-verify-rows"></a>
 Verify-row cost (binary 37d5f0d = main 7ed9795 + the MTP branch, pre-00:55 layout of the MCG K2.5 w12 pack with
 o_proj/lm_head/embed affine-8, kv8, 4096 KV, `SUSHI_DECODE_FWD_UBENCH=40` with

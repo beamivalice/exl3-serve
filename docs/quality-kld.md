@@ -109,11 +109,15 @@ EXL3 K4 (turboderp), 60x64 screen: the f32 SwiGLU widening moved mean KLD 0.0187
 | MCG K2.5 w12, fused sliding prefill (branch) | 2.5 | 0.0775 | | | | |
 | MCG K2.5 w12, stored imatrix affine-8 o_proj + lm_head + embed | 2.5 | 0.07793 | 92.14% | 1.97% | 0.07944 | 28d8a4b |
 | MCG K2.5 w12, stored round-to-nearest affine-8 o_proj + lm_head + embed (served) | 2.5 | 0.07783 | 91.92% | 1.97% | 0.07937 | 8341222 |
+| the served pack, prefill attention with f16 P (`sushi_attn_pd_nax`) | 2.5 | 0.07768 | 92.12% | 1.96% | 0.07935 | 79a4cb4 + f16 P |
 
 An imatrix-weighted search of the three affine-8 tensors lowers their weighted weight error ~45% against MLX's
 round-to-nearest packer (most of it from the error-minimizing search with scale/bias rounded to bf16 before the codes,
 which the same search unweighted also gets; the imatrix weighting adds 4-7%), yet scores 0.07793 against
 round-to-nearest's 0.07783, inside the rounding-flip floor: at 8 bits these tensors sit below the pack's noise floor,
 which the K2.5 experts set. The served pack stores them round-to-nearest (exactly `mx.quantize`'s bytes).
+
+f16 P in the NAX prefill attention: 0.07768 / top-1 92.12% / NLL 0.3471 against the served row's 0.07783 / 91.92% /
+0.3492 on the same binary (-0.19%, inside the rounding-flip floor).
 
 The FP8-native teacher against the bf16-rounded teacher: 0.0034 nats.

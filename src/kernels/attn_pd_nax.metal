@@ -134,14 +134,11 @@ for (; kb < kb_lim; kb++) {
   sm_s = sm_s * fac + rs;
   SUSHI_UNROLL for (short d = 0; d < TDV; ++d) SUSHI_UNROLL for (short j = 0; j < 8; ++j) O[d][j] *= fac[j / 4];
 
-  // O += P @ V with P as two bf16 terms (hi + lo): one bf16 P loses the fp32 state's precision,
-  // and a float P operand is truncated by the relaxed matmul.
+  // O += P @ V with P in f16: P is in [0, 1], where f16 keeps 11 bits to bf16's 8 (a float P operand
+  // is truncated by the relaxed matmul).
   SUSHI_UNROLL for (short ik = 0; ik < TK; ++ik) {
-    tfrag ph, pl;
-    SUSHI_UNROLL for (short j = 0; j < 8; ++j) {
-      ph[j] = T(S[ik][j]);
-      pl[j] = T(S[ik][j] - float(ph[j]));
-    }
+    metal::vec<half, 8> ph;
+    SUSHI_UNROLL for (short j = 0; j < 8; ++j) ph[j] = half(S[ik][j]);
     const device T* V0 = Vp + (long)(c0 + ik * 16) * ldv;
     const int vrows = rows_k - ik * 16;
     SUSHI_UNROLL for (short d = 0; d < TDV; d += 2) {
@@ -153,8 +150,7 @@ for (; kb < kb_lim; kb++) {
         SushiNax::load_rows(v0f, V0 + d * 16, ldv, vrows);
         SushiNax::load_rows(v1f, V0 + d * 16 + 16, ldv, vrows);
       }
-      SushiNax::mma<float, T, T, false, false>(O[d], O[d + 1], ph, v0f, v1f);
-      SushiNax::mma<float, T, T, false, false>(O[d], O[d + 1], pl, v0f, v1f);
+      SushiNax::mma<float, half, T, false, false>(O[d], O[d + 1], ph, v0f, v1f);
     }
   }
 }

@@ -54676,6 +54676,12 @@ fn swaBandMask(ql: c_int, kl: c_int) !mlx.mlx_array {
     return mlx.mlx_array_new_data(buf.ptr, &shape, 4, .bool_);
 }
 
+fn absMax(xs: []const f32) f64 {
+    var m: f64 = 0;
+    for (xs) |x| m = @max(m, @abs(@as(f64, x)));
+    return m;
+}
+
 fn swaMaxErr(got: []const f32, truth: []const f64) f64 {
     var e: f64 = 0;
     for (got, truth) |a, b| e = @max(e, @abs(@as(f64, a) - b));
@@ -54699,8 +54705,10 @@ fn attnPdTestArms() []const AttnPdArm {
 }
 
 /// The NAX arm against fp64 truth, element by element, may exceed the SIMD kernel's error only by
-/// the bf16 store's own rounding flip, and its RMS error by rounding noise.
-fn expectAttnPdNoWorse(nax: []const f32, simd: []const f32, truth: []const f64) !void {
+/// the bf16 store's own rounding flip plus its f16 P's rounding (2^-11 of the largest |V|, the
+/// weights summing to one), and its RMS error by rounding noise.
+fn expectAttnPdNoWorse(nax: []const f32, simd: []const f32, truth: []const f64, v_absmax: f64) !void {
+    const p16 = v_absmax * 0.00048828125;
     var scale_of: f64 = 0;
     for (truth) |t| scale_of = @max(scale_of, @abs(t));
     var sq_nax: f64 = 0;
@@ -54711,11 +54719,12 @@ fn expectAttnPdNoWorse(nax: []const f32, simd: []const f32, truth: []const f64) 
         try std.testing.expect(std.math.isFinite(ea) and std.math.isFinite(eb));
         // One bf16 ulp of the element, floored at one ulp of a value 2^-8 below the tensor's scale
         // (near zero the fp32 accumulation, not the store, sets the error).
-        try std.testing.expect(ea <= eb + (@abs(t) + scale_of * 0.00390625) * 0.00390625);
+        try std.testing.expect(ea <= eb + (@abs(t) + scale_of * 0.00390625) * 0.00390625 + p16);
         sq_nax += ea * ea;
         sq_simd += eb * eb;
     }
-    try std.testing.expect(sq_nax <= sq_simd * ATTN_PD_NAX_RMS_SLACK);
+    const n: f64 = @floatFromInt(truth.len);
+    try std.testing.expect(sq_nax <= sq_simd * ATTN_PD_NAX_RMS_SLACK + n * (p16 * 0.5) * (p16 * 0.5));
 }
 
 /// Walk a ringed sliding cache through `schedule` and hold every chunk's fused
@@ -54825,7 +54834,7 @@ fn swaSinkParityWalk(kv_cfg: KVQuantConfig, seed: u64, schedule: []const c_int) 
             try std.testing.expect(std.math.isFinite(fused_err));
             // One bf16 ulp of slack at the truth's own scale: the arms round in different places.
             try std.testing.expect(fused_err <= composed_err + scale_of * 0.00390625);
-            if (simd_h) |simd| try expectAttnPdNoWorse(fused_h, simd, truth) else {
+            if (simd_h) |simd| try expectAttnPdNoWorse(fused_h, simd, truth, absMax(v_h)) else {
                 simd_h = fused_h;
                 kept = true;
             }
@@ -54945,7 +54954,7 @@ fn attnPdGlobalCase(seed: u64, hq: c_int, hkv: c_int, q_len: c_int, kv_len: c_in
         const err = swaMaxErr(out_h, truth);
         try std.testing.expect(std.math.isFinite(err));
         try std.testing.expect(err <= composed_err + scale_of * 0.00390625);
-        if (simd_h) |simd| try expectAttnPdNoWorse(out_h, simd, truth) else {
+        if (simd_h) |simd| try expectAttnPdNoWorse(out_h, simd, truth, absMax(v_h)) else {
             simd_h = out_h;
             kept = true;
         }

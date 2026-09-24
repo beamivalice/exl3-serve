@@ -40,8 +40,12 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   diagonal. Same inputs, fp32 carries, dispatch budget and slices as the SIMD kernel; a chunked chain is bit-identical
   to one dispatch on either arm. Gate `attnPdNaxServes`: NAX + macOS 26.3 + a one-tile probe of both instantiations
   (causal, band + sinks) against an f32 reference; a failed probe declines by name. `SUSHI_ATTN_PD_NAX=0` = SIMD.
-- Its PV feeds P as TWO bf16 terms (hi + lo). A float P operand into the relaxed matmul is truncated (~1e-3 before
-  the store) and fails the bar: per element vs fp64 no worse than the SIMD kernel beyond a store rounding flip.
+- Its PV feeds P as ONE f16 term (P is in [0, 1]; f16 keeps 11 bits). Served-pack 16x512 KLD 0.07768, inside the
+  rounding floor ([quality-kld](quality-kld.md#mimo)). Parity bar: per element vs fp64 no
+  worse than the SIMD kernel beyond a store rounding flip plus 2^-11 of max|V|. A float P operand into the relaxed
+  matmul is truncated (~1e-3).
+- Its ceiling is the matrix units' issue rate for 16x32x16 ops (~55 TFLOPS issued on the M5 Max, the rate MLX's hd-128
+  NAX sdpa also reaches), so a P that costs a second PV pass costs ~20% of the kernel.
 - The SIMD kernel stages K^T with consecutive lanes on consecutive KEY rows: lanes spread over head-dim chunks
   stride 8*LDK halves, one bank. Bit-identical output.
 - hd 256 stays off the NAX attn_pd arm: the same kernel at 256/256 (O in 128 registers per lane) ran 3.2x slower
@@ -66,7 +70,12 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 - Metal JIT-compiles at first EVAL, not at apply, so an optional NAX arm is PROBED on a one-tile problem before it
   is trusted (`buildNaxGemmKernel`); a failed probe declines by name and the sorted arm serves.
 - Every matmul2d tile in the engine is f16/bf16 (EXL3 expert GEMM, QSA gather, attention); int8 NAX would need int8
-  activations (W8A8) and is not planned.
+  activations (W8A8) and is not planned. An int8 x bf16 op costs the same as bf16 x bf16.
+- A cooperative tensor's layout depends on the element types and the precision flag. Read it with
+  `get_multidimensional_index`, never assume it. A STRICT (unrelaxed) float operand changes all three operands'
+  layouts. It also runs ~1.4x slower than two bf16 ops, because it is emulated.
+- Cooperative-only matmul2d takes M, N, K in {16, 32}, with at least one of them 32. Larger tiles are the 16x16
+  fragments concatenated. A K=32 op runs no faster than two K=16 ops.
 
 ## Proving a kernel
 
