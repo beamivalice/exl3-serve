@@ -84,7 +84,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
   failure is a NAMED 400, never a silent drop; media on a tower-less/streamed load is refused by NAME
   (`mediaRejectReason`).
 - Media INPUT code: `src/vision.zig` / `src/qwen_vision.zig` / `src/mrope.zig` (Qwen3-VL image/video tower, M-RoPE
-  positions, audio embedder forward); `stb_image` + libwebp decode image input.
+  positions); `stb_image` + libwebp decode image input.
 
 ## Config reading
 

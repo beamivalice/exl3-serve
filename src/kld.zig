@@ -1897,8 +1897,8 @@ const TinyMimo = struct {
     const experts: usize = 4;
     const layers: usize = 2;
     const qkv_rows: usize = 384; // (8 heads + 8 kv + 8 v) * 16
-    const packed_cols: usize = hidden / 8; // 4-bit affine over `hidden` inputs
-    const groups: usize = hidden / 64;
+    const tiles: usize = hidden / 16;
+    const trellis_n: usize = 40; // halfwords per 16x16 tile at k 2.5
 };
 
 const TinyTensor = struct {
@@ -1927,6 +1927,18 @@ fn tinyFp8(a: std.mem.Allocator, count: usize, seed: u64) ![]u8 {
     const r = prng.random();
     const out = try a.alloc(u8, count);
     for (out) |*b| b.* = (if (r.boolean()) @as(u8, 0xB0) else @as(u8, 0x30)) | r.uintLessThan(u8, 8);
+    return out;
+}
+
+/// f16 axis scales of magnitude [0.5, 1) with random signs.
+fn tinyF16Axis(a: std.mem.Allocator, count: usize, seed: u64) ![]u8 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const out = try a.alloc(u8, count * 2);
+    for (0..count) |i| {
+        const bits: u16 = (if (r.boolean()) @as(u16, 0x8000) else 0) | 0x3800 | r.uintLessThan(u16, 0x400);
+        std.mem.writeInt(u16, out[i * 2 ..][0..2], bits, .little);
+    }
     return out;
 }
 
@@ -1984,7 +1996,7 @@ fn writeTinyShard(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, tensors: []
 }
 
 /// A two-layer mimo_v2 pack shaped like a converted MiMo: the FP8 source trunk
-/// (layer 0 dense) beside RESIDENT affine routed banks (layer 1). `expert_seed`
+/// (layer 0 dense) beside resident EXL3 routed banks (layer 1). `expert_seed`
 /// is the only thing that differs between two arms.
 fn writeTinyMimoResidentPack(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expert_seed: u64) !void {
     return writeTinyMimoPackWith(io, a, dir, expert_seed, &.{});
@@ -2005,7 +2017,8 @@ fn writeTinyMimoPackWith(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expe
         \\ "hybrid_layer_pattern":[0,0],"moe_layer_freq":[0,1],
         \\ "attention_projection_layout":"fused_qkv",
         \\ "add_swa_attention_sink_bias":false,
-        \\ "add_full_attention_sink_bias":false
+        \\ "add_full_attention_sink_bias":false,
+        \\ "expert_quant":{"format":"exl3","k":2.5,"codebook":"mcg"}
         ,
         "}",
     }) });
@@ -2041,10 +2054,11 @@ fn writeTinyMimoPackWith(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, expe
         try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.gate.weight", .{p}), .dtype = "BF16", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.experts, H }), .bytes = try tinyBf16(a, TinyMimo.experts * H, seed + 20) });
         try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.gate.e_score_correction_bias", .{p}), .dtype = "F32", .shape = try a.dupe(u64, &[_]u64{TinyMimo.experts}), .bytes = try tinyF32(a, &[_]f32{ 0.0, 0.1, -0.1, 0.05 }) });
         for ([_][]const u8{ "gate", "up", "down" }, 0..) |proj, j| {
-            const rows = TinyMimo.experts * H;
-            try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.switch_mlp.{s}_proj.weight", .{ p, proj }), .dtype = "U32", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.experts, H, TinyMimo.packed_cols }), .bytes = try tinyU32(a, rows * TinyMimo.packed_cols, expert_seed * 1000 + j) });
-            try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.switch_mlp.{s}_proj.scales", .{ p, proj }), .dtype = "BF16", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.experts, H, TinyMimo.groups }), .bytes = try tinyBf16(a, rows * TinyMimo.groups, expert_seed * 1000 + 10 + j) });
-            try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.switch_mlp.{s}_proj.biases", .{ p, proj }), .dtype = "BF16", .shape = try a.dupe(u64, &[_]u64{ TinyMimo.experts, H, TinyMimo.groups }), .bytes = try tinyBf16(a, rows * TinyMimo.groups, expert_seed * 1000 + 20 + j) });
+            const E = TinyMimo.experts;
+            const halfwords = E * TinyMimo.tiles * TinyMimo.tiles * TinyMimo.trellis_n;
+            try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.switch_mlp.{s}_proj.trellis", .{ p, proj }), .dtype = "U16", .shape = try a.dupe(u64, &[_]u64{ E, TinyMimo.tiles, TinyMimo.tiles, TinyMimo.trellis_n }), .bytes = try tinyU32(a, halfwords / 2, expert_seed * 1000 + j) });
+            try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.switch_mlp.{s}_proj.suh", .{ p, proj }), .dtype = "F16", .shape = try a.dupe(u64, &[_]u64{ E, H }), .bytes = try tinyF16Axis(a, E * H, expert_seed * 1000 + 10 + j) });
+            try tensors.append(a, .{ .key = try std.fmt.allocPrint(a, "{s}.mlp.switch_mlp.{s}_proj.svh", .{ p, proj }), .dtype = "F16", .shape = try a.dupe(u64, &[_]u64{ E, H }), .bytes = try tinyF16Axis(a, E * H, expert_seed * 1000 + 20 + j) });
         }
     }
     var stored: std.ArrayList(TinyTensor) = .empty;

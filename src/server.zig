@@ -2658,9 +2658,9 @@ pub fn streamingStubMarker(architecture: []const u8, geometry_ok: bool, index_co
 }
 
 /// A dense qwen4_exp checkpoint has no resident arm at all; a quantized pack
-/// streams only when a budget asks it to. A pack that quantizes its routed
-/// experts PER LAYER names no config-wide width, so the width alone would read
-/// it as dense — `quantized_experts` is the pack's own `expert_quant` block.
+/// streams only when a budget asks it to. A MiMo EXL3 pack names no config-wide
+/// width, so the width alone would read it as dense — `quantized_experts` is
+/// the pack's own `expert_quant` block.
 pub fn streamingRequiredMarker(architecture: []const u8, quant_bits: u32, quantized_experts: bool, geometry_ok: bool, index_complete: bool) bool {
     return streamingStubMarker(architecture, geometry_ok, index_complete) and quant_bits == 0 and !quantized_experts;
 }
@@ -3408,8 +3408,8 @@ test "a quantized pack is streaming capable and only the dense one is streaming 
     try std.testing.expect(!streamingRequiredMarker("qwen4_exp", 4, false, true, true));
     try std.testing.expect(!streamingRequiredMarker("qwen4_exp", 8, false, true, true));
     try std.testing.expect(!streamingRequiredMarker("qwen3_5_moe", 0, false, true, true));
-    // A pack whose routed experts are quantized PER LAYER names no config-wide
-    // width, so the width alone cannot tell it from a dense checkpoint.
+    // A pack with no `quantization` block names no config-wide width, so the
+    // width alone cannot tell it from a dense checkpoint.
     try std.testing.expect(!streamingRequiredMarker("mimo_v2", 0, true, true, true));
     try std.testing.expect(streamingStubMarker("mimo_v2", true, true));
 }
@@ -11655,7 +11655,6 @@ test "every load refusal the registry preserves answers under its own name" {
         "Exl3TrellisGeometry",
         "Exl3WindowUnsupported",
         "Exl3ShardStampMismatch",
-        "Exl3CodebookUnsupported",
     };
     for (names) |name| {
         const refusal = loadRefusalFor(model_registry_mod.ModelRegistry.loadErrorFromName(name)) orelse {
@@ -11673,7 +11672,6 @@ test "every load refusal the registry preserves answers under its own name" {
     try t.expectEqualStrings("exl3_trellis_geometry", loadRefusalFor(error.Exl3TrellisGeometry).?.type);
     try t.expectEqualStrings("exl3_window_unsupported", loadRefusalFor(error.Exl3WindowUnsupported).?.type);
     try t.expectEqualStrings("exl3_shard_stamp_mismatch", loadRefusalFor(error.Exl3ShardStampMismatch).?.type);
-    try t.expectEqualStrings("exl3_codebook_unsupported", loadRefusalFor(error.Exl3CodebookUnsupported).?.type);
     try t.expect(loadRefusalFor(error.LoadFailed) == null);
     try t.expect(loadRefusalFor(error.UnknownModelId) == null);
 }
@@ -11682,7 +11680,7 @@ pub const LoadRefusal = struct { type: []const u8, message: []const u8 };
 
 test "streaming layout refusal explains MiMo repacking without assuming Qwen" {
     const layout = loadRefusalFor(error.ExpertStreamingUnsupportedLayout).?;
-    try std.testing.expect(std.mem.indexOf(u8, layout.message, "pack-mimo-v2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, layout.message, "For MiMo, repack") != null);
     const budget = loadRefusalFor(error.ExpertStreamingRequired).?;
     try std.testing.expect(std.mem.indexOf(u8, budget.message, "qwen4_exp") == null);
     try std.testing.expect(std.mem.indexOf(u8, budget.message, "--ssd-budget-gb") != null);
@@ -11697,14 +11695,13 @@ pub fn loadRefusalFor(err: anyerror) ?LoadRefusal {
         error.ExpertCacheDoesNotFit => .{ .type = "expert_cache_does_not_fit", .message = "The requested expert cache, full-union workspace, bounce buffers, resident trunk, and serving state do not fit under the GPU memory ceiling. Lower --expert-cache-gb or free memory." },
         error.ExpertStreamingMtpUnsupported => .{ .type = "expert_streaming_mtp_unsupported", .message = expert_stream_mod.MTP_UNSUPPORTED },
         error.ExpertStreamingRequired => .{ .type = "expert_streaming_required", .message = "This checkpoint streams its experts from SSD and needs a resident budget: set this model's \"ssd_budget_gb\" in model-settings.json, or launch with --ssd-budget-gb <n> (or --expert-cache-gb <n>)." },
-        error.ExpertStreamingUnsupportedLayout => .{ .type = "expert_streaming_unsupported_layout", .message = "This checkpoint has no complete expert-bank layout this build can stream. Check the pack and all indexed shards. For MiMo, first repack with the sashimi pack converter (serve_convert pack-mimo-v2); raw per-expert HF shards cannot be streamed directly." },
+        error.ExpertStreamingUnsupportedLayout => .{ .type = "expert_streaming_unsupported_layout", .message = "This checkpoint has no complete expert-bank layout this build can stream. Check the pack and all indexed shards. For MiMo, repack the checkpoint first; raw per-expert HF shards cannot be streamed directly." },
         error.ExpertSlabImportCopied => .{ .type = "expert_slab_import_copied", .message = "MLX copied the expert slab instead of aliasing it, so this machine cannot stream experts zero-copy. Report the Mac model and macOS version." },
-        error.ExpertLayoutUnsupported => .{ .type = "expert_layout_unsupported", .message = "This qwen4_exp checkpoint's routed experts are not a uniform EXL3 K4 MUL1 pack this build can load. Re-convert with k=4 and codebook mul1, or serve an affine pack." },
+        error.ExpertLayoutUnsupported => .{ .type = "expert_layout_unsupported", .message = "This checkpoint's routed experts are not a pack layout this build can load. An EXL3 pack's expert_quant names format exl3, a k, and codebook mcg or mul1; re-convert the pack." },
         error.Exl3TopKExceedsReduceBank => .{ .type = "exl3_topk_exceeds_reduce_bank", .message = "This EXL3 pack's num_experts_per_tok exceeds the decode reduce-bank (32). Re-convert with top-k <= 32." },
         error.Exl3TrellisGeometry => .{ .type = "exl3_trellis_geometry", .message = "This EXL3 pack has a routed-expert trellis this build cannot decode, or one that disagrees with the expert count, shape or k its config.json names. Re-convert the pack." },
         error.Exl3WindowUnsupported => .{ .type = "exl3_window_unsupported", .message = "This EXL3 pack names a codeword window this build cannot decode: expert_quant.window must be an integer from 8 to 16, or absent for 16." },
         error.Exl3ShardStampMismatch => .{ .type = "exl3_shard_stamp_mismatch", .message = "An EXL3 shard in this pack was written for a different decoder than config.json's expert_quant names (k, codebook or window). Re-convert the pack, or fix expert_quant to match the shards." },
-        error.Exl3CodebookUnsupported => .{ .type = "exl3_codebook_unsupported", .message = "This EXL3 pack was written for the retired TINY codebook, which this build no longer decodes. Re-convert it with codebook mcg." },
         error.SsdBudgetBelowResident => .{ .type = "ssd_budget_below_resident", .message = "--ssd-budget-gb leaves no room for an expert cache after the resident trunk, the prefill union and the fill buffers. Raise the budget." },
         error.SsdBudgetExceedsWiredLimit => .{ .type = "ssd_budget_exceeds_wired_limit", .message = "--ssd-budget-gb plus the planned KV cache exceeds the machine's residency limit. Raise iogpu.wired_limit_mb (the server log names the value) or lower the budget." },
         else => null,

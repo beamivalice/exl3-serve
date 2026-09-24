@@ -1069,7 +1069,7 @@ pub const ModelConfig = struct {
     /// An EXL3 bank is a self-describing quantized weight the resident kernels
     /// read as they are, whatever the trunk's own width says.
     pub fn expertStreamingRequired(self: *const ModelConfig) bool {
-        if (self.expert_layout == .exl3_k4 or self.isMimoResidentAffine()) return false;
+        if (self.expert_layout == .exl3_k4) return false;
         return self.supportsExpertStreaming() and
             (self.quant_bits == 0 or self.expert_layout == .mxfp4_individual);
     }
@@ -1078,19 +1078,11 @@ pub const ModelConfig = struct {
         return std.mem.eql(u8, self.model_type, "mimo_v2");
     }
 
-    /// A MiMo affine pack carries its widths PER LAYER, so the config-wide
-    /// `quant_bits` stays 0 — which is the dense-checkpoint tell everywhere
-    /// else. The layout, not the width, says these experts are already packed.
-    pub fn isMimoResidentAffine(self: *const ModelConfig) bool {
-        return self.expert_layout == .quantized_split and std.mem.eql(u8, self.model_type, "mimo_v2");
-    }
-
-    /// A MiMo checkpoint keeps its trunk in the source FP8 layout whichever way
-    /// its routed experts are packed, so every layout takes the source loader.
+    /// A MiMo checkpoint keeps its trunk in the source FP8 layout beside source
+    /// MXFP4 or EXL3 experts, so both take the source loader.
     pub fn usesMimoSourceTrunk(self: *const ModelConfig) bool {
         return std.mem.eql(u8, self.model_type, "mimo_v2") and
-            (self.expert_layout == .mxfp4_individual or self.expert_layout == .exl3_k4 or
-                self.expert_layout == .quantized_split);
+            (self.expert_layout == .mxfp4_individual or self.expert_layout == .exl3_k4);
     }
 
     /// The long-context blast-radius predicate: every long-context mechanism (KV
@@ -3306,7 +3298,7 @@ pub fn parseConfigFromJson(allocator: std.mem.Allocator, content: []const u8) !M
         // DeepSeek V4 Flash (284B-A13B, 1M ctx). See the dsv4_* field block
         // for the architecture summary; reference is the release's own
         // inference/{model,kernel}.py (torch). Loaded from OUR converted
-        // mixed-quant mirror (sashimi `serve_convert pack-dsv4`) — bare
+        // mixed-quant mirror (made by the private converter) — bare
         // inference-style tensor names, stacked expert banks.
         config.model_type = "deepseek_v4";
         config.weight_prefix = ""; // release ships bare names (embed.weight, layers.N....)
@@ -3862,9 +3854,9 @@ fn parseMimoConfig(c: *ModelConfig, obj: std.json.ObjectMap) !void {
         return error.UnsupportedMimoV2Config;
     const freq = obj.get("moe_layer_freq") orelse return error.UnsupportedMimoV2Config;
     c.first_k_dense_replace = try model_discovery.denseMoePrefix(freq, c.num_hidden_layers);
-    // A pack now STORES o_proj/lm_head/embed_tokens packed (docs/pack-format.md);
-    // a config still asking to pack them at load predates that.
-    if (obj.get("trunk_quant") != null) return error.TrunkQuantRetired;
+    // A pack stores its packed trunk linears (docs/pack-format.md); the engine
+    // quantizes nothing at load, so a config asking it to is refused.
+    if (obj.get("trunk_quant") != null) return error.UnsupportedMimoV2Config;
 }
 
 fn jsonFloat(v: std.json.Value) f32 {
@@ -8389,7 +8381,7 @@ test "mimo_v2 config rejects unsupported routing and malformed layer geometry" {
     try testing.expect(fused.layerHasAttnSinks(0) and !fused.layerHasAttnSinks(1));
 }
 
-test "mimo_v2 refuses the retired load-time trunk_quant by name" {
+test "mimo_v2 refuses a config asking to quantize trunk linears at load" {
     const base =
         \\{"model_type":"mimo_v2", "num_hidden_layers":2, "hidden_size":384,
         \\ "num_attention_heads":4, "num_key_value_heads":2, "head_dim":192,
@@ -8402,7 +8394,7 @@ test "mimo_v2 refuses the retired load-time trunk_quant by name" {
         \\{"trunk_quant":{"o_proj":{"mode":"affine","bits":8,"group_size":64}}}
     );
     defer testing.allocator.free(json);
-    try testing.expectError(error.TrunkQuantRetired, parseConfigFromJson(testing.allocator, json));
+    try testing.expectError(error.UnsupportedMimoV2Config, parseConfigFromJson(testing.allocator, json));
 }
 
 test "layer value width and sink placement preserve existing defaults" {
@@ -8559,37 +8551,6 @@ test "mimo_v2 original config selects split QKV and native expert quantization" 
     try testing.expectEqual(@as(u32, 4), c.quant_bits);
     try testing.expectEqual(@as(u32, 32), c.quant_group_size);
     try testing.expect(c.expertStreamingRequired());
-}
-
-test "mimo_v2 affine routed banks serve resident and take the source trunk loader" {
-    var c = ModelConfig{
-        .model_type = "mimo_v2",
-        .num_hidden_layers = 2,
-        .first_k_dense_replace = 1,
-        .num_experts = 4,
-        .num_experts_per_tok = 2,
-        .hidden_size = 128,
-        .moe_intermediate_size = 128,
-        // No `quantization` block: the pack's widths are per layer, so the
-        // config-wide width stays 0 and must not read as "dense bf16".
-        .quant_bits = 0,
-        .expert_layout = .quantized_split,
-    };
-    try testing.expect(c.supportsExpertStreaming());
-    try testing.expect(!c.expertStreamingRequired());
-    try testing.expect(c.usesMimoSourceTrunk());
-    var q = ModelConfig{
-        .model_type = "qwen4_exp",
-        .num_hidden_layers = 2,
-        .num_experts = 4,
-        .num_experts_per_tok = 2,
-        .hidden_size = 128,
-        .moe_intermediate_size = 128,
-        .quant_bits = 0,
-        .expert_layout = .quantized_split,
-    };
-    try testing.expect(!q.usesMimoSourceTrunk());
-    try testing.expect(q.expertStreamingRequired());
 }
 
 test "mimo_v2 EXL3 routed banks serve resident and take the source trunk loader" {

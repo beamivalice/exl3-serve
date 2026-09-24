@@ -109,7 +109,7 @@ weights. This is **plain, uncalibrated MLX affine quantization**. All 48 trunk
 layers and the MTP layer use 3-bit/group128; the K3 donor supplies unchanged
 8-bit non-expert weights, configuration and raw BF16 n-grams.
 
-The conversion recipe is kept with the private converter (sashimi).
+The conversion recipe is kept with the private converter.
 
 The destination must not exist. Conversion used CPU-only bounded batches.
 Unchanged donor files are hard-linked, never modified; the mixed MTP shard

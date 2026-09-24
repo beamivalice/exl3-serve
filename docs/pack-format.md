@@ -25,7 +25,7 @@ gather kernel indexes it directly. Per MoE layer `L` and projection `P` in
 | `<prefix>.layers.{L}.mlp.switch_mlp.{P}.svh` | `F16` | `[E, out]` |
 
 `<prefix>` is the arch's own nesting: `language_model.model` for `qwen4_exp`,
-`model` for `mimo_v2`. Every other module keeps the affine pack's names and
+`model` for `mimo_v2`. Every other module keeps the trunk's own names and
 layout; only the routed banks are EXL3.
 
 `n` is the packed halfwords per 256-weight tile and it, not an integer K, is
@@ -67,8 +67,8 @@ and one without it differ in their trellis codewords as well as in `suh`.
 - `k` — the rate, a JSON number and possibly fractional. It names the WIDEST
   rate a layer packs and is what the engine bills.
 - `codebook` — `mul1` or `mcg`. MCG is the codebook for new packs; MUL1 serves
-  turboderp's packs; the retired `tiny` is refused by name
-  (`Exl3CodebookUnsupported`, in `expert_quant` or a shard stamp alike). The codebook and window follow the MODEL: `moeExl3` sets them
+  turboderp's packs; any other name is `ExpertLayoutUnsupported` (in a shard
+  stamp, `Exl3ShardStampMismatch`). The codebook and window follow the MODEL: `moeExl3` sets them
   (`expert_exl3_kernels.setDecodeParams`) before every dispatch, so packs with
   different codebooks can be resident together, and every weight kernel
   inlines its `exl3_pairh`.
@@ -100,10 +100,9 @@ every affine weight (bits 2, 3, 4, 5, 6, 8; group 32, 64, 128); a triple that is
 incomplete, or grids beside a bf16 weight, is `AffineTrunkIncomplete`, shapes
 that solve to no admitted width are `MimoTensorShapeMismatch`. Any subset of
 the three linears may be stored; the rest stay bf16. The original checkpoint
-`kld capture` reads stores all three bf16, so the teacher is unchanged.
-
-The retired load-time policy, a `config.json` `trunk_quant` block, is refused
-by name (`TrunkQuantRetired`) rather than ignored.
+`kld capture` reads stores all three bf16, so the teacher is unchanged. The
+engine quantizes nothing at load: a `config.json` `trunk_quant` block is
+`UnsupportedMimoV2Config`.
 
 ## The shard stamp
 
@@ -114,7 +113,7 @@ string, because that is all safetensors stores:
 |---|---|
 | `format` | `exl3` |
 | `k` | the rate as written, e.g. `2.5` or `4` |
-| `codebook` | `mul1` \| `mcg` (`tiny` refused) |
+| `codebook` | `mul1` \| `mcg` |
 | `window` | the codeword width, e.g. `12` |
 | `quantizer` | which search wrote it (`ldlq-rotated` / `direct`) |
 | `g_scale` | the global-scale mode, e.g. `gss` |

@@ -33,7 +33,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [pack-format](pack-format.
   bitstream decodes to different weights at every other window, so a window can never come from a flag.
 - **The codebook follows the MODEL at every dispatch**: `moeExl3` calls `expert_exl3_kernels.setDecodeParams`
   (codebook + window) before each dispatch because several EXL3 packs can be resident at once; every weight kernel
-  inlines `exl3_pairh` from `codebookHelpers`, built per (codebook, window). A pack declaring the retired `tiny` codebook (config or shard stamp) is refused as `Exl3CodebookUnsupported`. A/B lever:
+  inlines `exl3_pairh` from `codebookHelpers`, built per (codebook, window). A codebook name this build does not decode is refused at load
+  ([pack-format](pack-format.md#configjson)). A/B lever:
   `SUSHI_EXL3_CODEBOOK_AB=1` on the `codebook A/B` test.
 - **A shard's `__metadata__` stamp is CHECKED against `expert_quant` before upload**
   (`mimo_source.validateShardStamps`): see [pack-format](pack-format.md#the-shard-stamp).

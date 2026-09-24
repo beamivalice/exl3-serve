@@ -71,10 +71,6 @@ llmprobe `--bench-only --full`, ctx 65536, KV unquantized, MTP verified off (1.0
 
 MCG decodes 15-18% faster than MUL1 and prefills 25-32% faster (same bytes, cheaper decode ALU).
 
-Same boot, ctx 8192, kv8, no MTP, 3x200-token samples (a05d15f): MUL1 → TINY (retired; the same instruction
-stream as MCG) on the same K3 w12 experts: decode 37.27 → 38.17 tok/s, prefill 1k 1493 → 1766, 2k 1573 → 1825. Decode moves little because a
-Flash-Next step is mostly trunk kernels and dispatch gaps; prefill moves because trellis GEMMs are a large share.
-
 <a id="mtp"></a>
 ## Flash-Next K3 with MTP (MCG vs MUL1)
 
@@ -144,18 +140,17 @@ llmprobe `--bench-only` on 7c9a5af (ctx 32768, kv8, no MTP): decode 40.8 tok/s (
 40.8 → 44.8), predictable 44.7, novel 44.6 (recorded 43.5, predictable 42.3, on f72f989 without lm_head/embed
 affine-8). 16x512 KLD to EOS 0.07700, top-1 92.06%, resident 101.48 GB (+0.2 GB: the f32 router copy).
 
-The bf16 trunk (b2670b6, the lossless-teacher ruling, which the served pack shares) cost the MCG/TINY pack ~15% of
-decode against the affine-8 trunk it replaced (31.1 → ~26 tok/s; +2.7 GiB read per token). Hence the FP8 work:
+A bf16 trunk (b2670b6, the lossless-teacher ruling) decodes ~15% slower than an affine-8 trunk (31.1 → ~26 tok/s;
++2.7 GiB read per token). Hence the FP8 work:
 
-Landed 4cb68cc..a1fb67f (measured on f72f989/3b27c11, kv8, no MTP, ctx 32768, llmprobe `--bench-only`, A B B A):
+Measured on f72f989/3b27c11 (kv8, no MTP, ctx 32768, llmprobe `--bench-only`, A B B A):
 decode 32.4/32.5 (bf16 trunk) → 39.0/39.0 (FP8 native) → 43.5/43.6 (+ o_proj
-affine-8); affine-8 for the FP8 linears 43.3/43.2 (no faster, lossy, not shipped). + lm_head and embed affine-8: load
-bill 95.42 → 94.32 GB, decode not yet measured on a quiet box (microbench predicts ~45.5).
+affine-8); affine-8 for the FP8 linears 43.3/43.2 (no faster, lossy, not shipped). + lm_head and embed affine-8:
+bill 95.42 → 94.32 GB.
 Stored imatrix affine-8 o_proj + lm_head + embed (28d8a4b, overlay pack, kv8, no MTP, ctx 32768, llmprobe
 `--bench-only`, `taskpolicy -a`, lock `mimo-trunk-affine`): decode 44.2 tok/s (a
-first run read 40.5 with 4.6 GB less free memory and a -12% sustained slide: box interference, discarded); the same
-format packed at load by main (4c8367f, taken once because that product had no quiet number) 44.0. Bill 94.32 GB both;
-boot to `/health` 24.0-25.5 s stored vs 25.1 s load-time: the load-time packing was not a measurable cost. FP8 GEMV runs 465-488 GB/s
+first run read 40.5 with 4.6 GB less free memory and a -12% sustained slide: box interference, discarded). Bill
+94.32 GB; boot to `/health` 24.0-25.5 s. FP8 GEMV runs 465-488 GB/s
 at one row; o_proj via MLX affine-8 qmv only 363 GB/s (a dedicated kernel could save ~1 ms/token). Sliding-layer fused prefill with sinks, 39-layer ubench: 39.5 → 20.3 ms at chunk 512, 603 → 95.5 at 2048,
 2439 → 181 at 4096.
 
@@ -186,7 +181,7 @@ noise.
 
 <a id="mimo-verify-rows"></a>
 Verify-row cost (binary 37d5f0d = main 7ed9795 + the MTP branch, pre-00:55 layout of the MCG K2.5 w12 pack with
-`trunk_quant` o_proj/lm_head/embed affine-8, kv8, 4096 KV, `SUSHI_DECODE_FWD_UBENCH=40` with
+o_proj/lm_head/embed affine-8, kv8, 4096 KV, `SUSHI_DECODE_FWD_UBENCH=40` with
 `_S=1,2,3,4 _ROW_ARMS=1 _PROFILE=1`, one boot, `taskpolicy -a`, lock `mimo-mtp`, 2026-09-24). ms/forward, lm_head in
 brackets:
 
@@ -336,8 +331,7 @@ Live, llmprobe `--bench-only`, no MTP, one boot per arm, `taskpolicy -a`, lock `
 | pack, flags | base | new | decode | prefill 2k |
 |---|---|---|---|---|
 | MiMo MCG K2.5 w12, stored-affine trunk (post-03:47 layout), kv8, ctx 32768 | 2161e18 | this change on 2161e18 (bc27a4e) | 44.9 → 52.0 | 916 → 1068 |
-| MiMo MCG K2.5 w12, load-time affine trunk (pre-03:47 layout), same flags | c4f3f7a | this change on c4f3f7a (aff4f85) | 44.0 → 50.4 | 964 → 1069 |
 | Flash-Next MCG K3 w12 plugged, kv off, ctx 65536 | 61.8 recorded (28d7fab, `--full`) | this change on c4f3f7a (aff4f85) | 61.8 → 66.2 | 1763 → 1845 |
 
-The MiMo prefill gain (+11-17%, both pairs) is not attributed: prefill rows take `moePrefill`, which this change
+The MiMo prefill gain (+17%) is not attributed: prefill rows take `moePrefill`, which this change
 does not touch; re-measure before quoting it.

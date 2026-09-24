@@ -67,9 +67,9 @@ Both are heavy GPU jobs: take the lock per run (CLAUDE.md, Team process).
   off. Before any capture, read the loader path the original checkpoint takes and list every dtype change; each must
   be exact.
 - Say "original checkpoint through path X", never "bf16 teacher", unless the checkpoint is bf16.
-- History: a MiMo teacher captured through an affine-8 trunk and a kv8 cache differed from the lossless one by 0.0076
-  nats (the whole engine-to-engine gap mlx-lm had measured); no pack number moved, but a biased reference is refused
-  regardless of size. A pack's stored-affine trunk (served packs only) leaves the teacher untouched.
+- A biased reference is refused regardless of size: a MiMo teacher captured through an affine-8 trunk and a kv8 cache
+  differed from the lossless one by 0.0076 nats (the whole engine-to-engine gap mlx-lm had measured). A pack's
+  stored-affine trunk (served packs only) leaves the teacher untouched.
 - `SUSHI_NGRAM_BF16_DIR=<hf checkpoint>` serves a Flash-Next pack with the original bf16 n-gram table to isolate
   the PLE table's cost.
 
@@ -77,8 +77,8 @@ Both are heavy GPU jobs: take the lock per run (CLAUDE.md, Team process).
 
 mlx-lm's MiMo support (upstream PR 1219, router patched to f32), streamed one layer at a time, against our MiMo
 teacher: the original checkpoint scores 0.0077 nats / 95.8% top-1 (the engine-to-engine floor; every flip sits at a
-teacher top-2 gap ≤ 0.5 nats, flat across the context); the affine iq2.7 pack scores 0.249 / 80.9% against our 0.247 /
-81.5%. The teacher and the tool are validated by an implementation that shares no code with ours.
+teacher top-2 gap ≤ 0.5 nats, flat across the context). The teacher and the tool are validated by an implementation
+that shares no code with ours.
 
 ## Flash-Next (16x512, first EOS, 7186 positions, kv8)
 
@@ -88,7 +88,7 @@ teacher top-2 gap ≤ 0.5 nats, flat across the context); the affine iq2.7 pack 
 | turboderp K3, MUL1 w16 | 0.0946 | 90.79% | 2.88% | 0.0866 |
 | MUL1 K3 w12 (in-house experts, turboderp dense) | 0.1031 | 90.44% | 3.15% | 0.0951 |
 | MCG K3 w12 (served; in-house experts, turboderp dense) | 0.1041 | 90.22% | 3.21% | 0.0958 |
-| MCG K3 w15 (in-house experts, turboderp dense; sashimi eebb3e9, pre-#17 skew rule; binary 7ed9795) | 0.1012 | 90.26% | 3.14% | 0.0931 |
+| MCG K3 w15 (in-house experts, turboderp dense; converter eebb3e9, pre-#17 skew rule; binary 7ed9795) | 0.1012 | 90.26% | 3.14% | 0.0931 |
 
 w12 -> w15 bought 2.8% of KLD on MCG; the remaining gap to turboderp's MUL1 w16 (0.0946) is not mostly the window.
 Pack `Qwen3.8-Flash-Next-Sushi3bpw` (MCG K3 w15, plugged).
@@ -105,21 +105,15 @@ EXL3 K4 (turboderp), 60x64 screen: the f32 SwiGLU widening moved mean KLD 0.0187
 | pack | expert bpw | KLD | top-1 | cosine loss | all positions | binary |
 |---|---|---|---|---|---|---|
 | MCG K2.5 w12 (served) | 2.5 | 0.0776 | 92.0% | 1.95% | 0.0792 | a916af3 |
-| affine iq2.7 (benchmark reference) | 2.70 | 0.1641 | 88.3% | 3.37% | 0.1682 | a916af3 |
 | MCG K2.5 w12, FP8-native trunk (branch) | 2.5 | 0.0776 | | | | f72f989 |
-| MCG K2.5 w12, FP8 + o_proj affine-8 (branch) | 2.5 | 0.0774 | | | | f72f989 |
 | MCG K2.5 w12, fused sliding prefill (branch) | 2.5 | 0.0775 | | | | |
-| MCG K2.5 w12, load-time affine-8 o_proj + lm_head + embed | 2.5 | 0.07761 | 92.09% | 1.96% | 0.07884 | 3b27c11 |
 | MCG K2.5 w12, stored imatrix affine-8 o_proj + lm_head + embed | 2.5 | 0.07793 | 92.14% | 1.97% | 0.07944 | 28d8a4b |
 | MCG K2.5 w12, stored round-to-nearest affine-8 o_proj + lm_head + embed (served) | 2.5 | 0.07783 | 91.92% | 1.97% | 0.07937 | 8341222 |
 
-Stored imatrix-weighted affine-8 trunk vs the load-time MLX packer: the weighted weight error of the three tensors is
-~45% lower (most of it from the error-minimizing search with scale/bias rounded to bf16 before the codes, which the
-same search unweighted also gets; the imatrix weighting adds 4-7%), yet 16x512
-KLD moves +0.0003 (NLL 0.3480 -> 0.3462, top-1 +0.05 pt): at 8 bits these tensors sit below the pack's noise floor,
-which the K2.5 experts set.
-The served pack stores the three tensors round-to-nearest (exactly `mx.quantize`'s bytes, owner choice): 0.07783
-against the searched shards' 0.07793, inside the rounding-flip floor, so the search buys nothing measurable at 8 bits.
+An imatrix-weighted search of the three affine-8 tensors lowers their weighted weight error ~45% against MLX's
+round-to-nearest packer (most of it from the error-minimizing search with scale/bias rounded to bf16 before the codes,
+which the same search unweighted also gets; the imatrix weighting adds 4-7%), yet scores 0.07793 against
+round-to-nearest's 0.07783, inside the rounding-flip floor: at 8 bits these tensors sit below the pack's noise floor,
+which the K2.5 experts set. The served pack stores them round-to-nearest (exactly `mx.quantize`'s bytes).
 
-The FP8-native teacher against the bf16-rounded teacher: 0.0034 nats. The affine 2.70 bpw MiMo pack is coherent but
-degenerates after a few chat turns in use; its KLD had foreshadowed it.
+The FP8-native teacher against the bf16-rounded teacher: 0.0034 nats.

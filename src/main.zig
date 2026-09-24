@@ -61,8 +61,7 @@ fn printUsage(io: std.Io) void {
         \\
         \\Commands:
         \\  run <model>         Download if needed, serve it, and chat right here
-        \\                      (short name like "gemma4", "qwen3.6:27b", or any
-        \\                      HuggingFace "org/repo")
+        \\                      (a local model name or a HuggingFace "org/repo")
         \\                      --think [off|low|medium|high|xhigh|max] sets thinking;
         \\                      /think <effort> changes it in the chat
         \\  pull <model>        Download a model into ~/.sushi/models
@@ -132,28 +131,9 @@ fn printUsage(io: std.Io) void {
         \\  --no-pld            Force-disable Prompt Lookup Decoding.
         \\  --pld-draft-len <n> Max draft tokens per PLD step (default: 5).
         \\  --pld-key-len <n>   N-gram match key length for PLD (default: 3).
-        \\  --drafter <dir>     Path to an assistant drafter checkpoint —
-        \\                        either a Gemma 4 cross-attention drafter or
-        \\                        a DFlash block-drafter (auto-detected from
-        \\                        its config: block_size + mask_token_id +
-        \\                        target_layer_ids). Loaded at startup, bound
-        \\                        to the target model, default draft source
-        \\                        for new requests (priority: MTP > dflash >
-        \\                        drafter > PLD > regular).
-        \\  --draft-block-size <n>  Tokens per drafter round. Gemma default is
-        \\                        auto-detected per target (E2B=2, E4B=4,
-        \\                        26B-A4B=4, 31B=8); DFlash uses its config's
-        \\                        block_size (an explicit value only clamps
-        \\                        it DOWN). Pass to override.
-        \\  --no-drafter        Never load a speculative-decoding drafter, including
-        \\                      one shipped inside the checkpoint (drafter/ subdir)
         \\  --no-mtp            Disable the Qwen native MTP head (auto-loaded
         \\                        when the model dir ships mtp/weights.safetensors;
-        \\                        priority: MTP > drafter > PLD).
-        \\  --ane-prefill       Offload a share of each prefill chunk's dense
-        \\                        MLP rows to the Neural Engine (qwen3_5-family
-        \\                        only; int8/fp16, lossy; needs >= 96 GB RAM).
-        \\                        SUSHI_ANE_SPLIT tunes the share (0.40).
+        \\                        priority: MTP > PLD).
         \\  --mtp               Force the MTP head ON for MoE targets too.
         \\                        Requests default to MTP only on DENSE models;
         \\                        a MoE checkpoint that ships a sidecar is
@@ -162,9 +142,6 @@ fn printUsage(io: std.Io) void {
         \\  --mtp-head-kv-quant Quantize the qwen4 MTP head's own KV with
         \\                        --kv-quant (default OFF: the head keeps
         \\                        dense bf16 KV).
-        \\  --dspark            Enable DeepSeek-V4 DSpark draft stages (OFF by
-        \\                        default: the stages cost ~11 GB resident; the
-        \\                        memory fit-gate still applies at load).
         \\  --decode-attn-quant / --no-decode-attn-quant
         \\                      Serve decode from quantized side copies of
         \\                      DENSE (bf16/f16) attention projection weights:
@@ -172,7 +149,7 @@ fn printUsage(io: std.Io) void {
         \\                      last 20% (late layers amplify quantization
         \\                      error far less). Cuts their per-token weight
         \\                      read by half or more on models that ship dense
-        \\                      attention (e.g. Laguna, ~-25% decode overall).
+        \\                      attention.
         \\                      LOSSY: a real requantization, applied to
         \\                      decode/verify steps only; prefill keeps the
         \\                      dense weights. Default ON; --no-… restores
@@ -201,8 +178,7 @@ fn printUsage(io: std.Io) void {
         \\                        GENERATES past it switches mid-flight. The
         \\                        bound is inclusive (<n> itself still drafts)
         \\                        and it outranks `enable_mtp:true` in the
-        \\                        request body. MTP only — PLD, the drafter
-        \\                        and DFlash/DSpark are unaffected.
+        \\                        request body. MTP only — PLD is unaffected.
         \\  --mtp-history-window <n>
         \\                      MTP prefill-history window: prompts forwarding
         \\                        more than 16384 tokens only build head history
@@ -246,8 +222,8 @@ fn printUsage(io: std.Io) void {
         \\                        GB of disk, so it's opt-in; e.g. 10GB. 0/off
         \\                        disables.
         \\  --ssm-checkpoint-stride <n>
-        \\                      Hybrid SSM architectures only (e.g. Qwen3.5/3.6
-        \\                        GDN): capture an SSM/conv state checkpoint every
+        \\                      Hybrid SSM architectures only (Qwen3.8-Flash-Next's
+        \\                        GDN layers): capture an SSM/conv state checkpoint every
         \\                        <n> tokens during chunked prefill, so a later
         \\                        request sharing a prefix can restore mid-prompt
         \\                        instead of re-prefilling (default: 256). 0

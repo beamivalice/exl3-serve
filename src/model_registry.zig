@@ -1181,7 +1181,7 @@ pub const ModelRegistry = struct {
     /// (2026-08-08). Merge note: this arm came from the branch's
     /// `scheduler.loadErrorFor`, which this function replaced — the name-based
     /// half survived the refactor, the second name did not.
-    pub fn loadErrorFromName(name: ?[]const u8) error{ LoadFailed, InsufficientMemory, ArchitectureUnsupported, GgufEngineUnsupported, ExpertCacheDoesNotFit, ExpertStreamingRequired, SsdBudgetBelowResident, SsdBudgetExceedsWiredLimit, ExpertStreamingMtpUnsupported, ExpertStreamingUnsupportedLayout, ExpertSlabImportCopied, ExpertLayoutUnsupported, Exl3TopKExceedsReduceBank, Exl3TrellisGeometry, Exl3WindowUnsupported, Exl3ShardStampMismatch, Exl3CodebookUnsupported } {
+    pub fn loadErrorFromName(name: ?[]const u8) error{ LoadFailed, InsufficientMemory, ArchitectureUnsupported, GgufEngineUnsupported, ExpertCacheDoesNotFit, ExpertStreamingRequired, SsdBudgetBelowResident, SsdBudgetExceedsWiredLimit, ExpertStreamingMtpUnsupported, ExpertStreamingUnsupportedLayout, ExpertSlabImportCopied, ExpertLayoutUnsupported, Exl3TopKExceedsReduceBank, Exl3TrellisGeometry, Exl3WindowUnsupported, Exl3ShardStampMismatch } {
         if (name) |n| {
             if (std.mem.eql(u8, n, "InsufficientMemory")) return error.InsufficientMemory;
             if (std.mem.eql(u8, n, "ArchitectureUnsupported")) return error.ArchitectureUnsupported;
@@ -1199,7 +1199,6 @@ pub const ModelRegistry = struct {
             if (std.mem.eql(u8, n, "Exl3TrellisGeometry")) return error.Exl3TrellisGeometry;
             if (std.mem.eql(u8, n, "Exl3WindowUnsupported")) return error.Exl3WindowUnsupported;
             if (std.mem.eql(u8, n, "Exl3ShardStampMismatch")) return error.Exl3ShardStampMismatch;
-            if (std.mem.eql(u8, n, "Exl3CodebookUnsupported")) return error.Exl3CodebookUnsupported;
         }
         return error.LoadFailed;
     }
@@ -1225,7 +1224,6 @@ pub const ModelRegistry = struct {
         try std.testing.expectEqual(error.Exl3TrellisGeometry, loadErrorFromName("Exl3TrellisGeometry"));
         try std.testing.expectEqual(error.Exl3WindowUnsupported, loadErrorFromName("Exl3WindowUnsupported"));
         try std.testing.expectEqual(error.Exl3ShardStampMismatch, loadErrorFromName("Exl3ShardStampMismatch"));
-        try std.testing.expectEqual(error.Exl3CodebookUnsupported, loadErrorFromName("Exl3CodebookUnsupported"));
         // Everything else stays a load failure — guessing a diagnosis is worse
         // than reporting the honest generic one.
         try std.testing.expectEqual(error.LoadFailed, loadErrorFromName("FileNotFound"));

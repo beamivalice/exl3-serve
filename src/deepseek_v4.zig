@@ -2,7 +2,7 @@
 //! loading. Forward pass lands next (see the plan at the bottom of this
 //! header).
 //!
-//! Loaded from OUR converted mirror (sashimi `serve_convert pack-dsv4`): bare
+//! Loaded from OUR converted mirror (made by the private converter): bare
 //! inference-style tensor names (`embed.weight`, `layers.N.attn.wkv.weight`),
 //! stacked `[E, out, in]` expert banks
 //! (`layers.N.ffn.experts.{w1,w2,w3}.{weight,scales,biases}`), mixed affine

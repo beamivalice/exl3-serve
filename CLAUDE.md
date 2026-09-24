@@ -16,8 +16,7 @@ streamed MXFP4). OpenAI/Anthropic-compatible HTTP, no Python at serve time. Fork
 - Everything else in `src/` (other architectures' forwards and loaders in `transformer.zig`/`model.zig`, the dormant
   ANE driver) is INHERITED upstream code: it builds, it is unreachable, and no doc covers it. The loader refuses any
   other `model_type` by name (`model.served_model_types`, `ArchitectureUnsupported` → 503); a `.gguf` is refused by
-  name (`GgufEngineUnsupported` → 503; `--model` exits). Upstream's docs are archived:
-  `git show ff1380d:docs/reference.md`.
+  name (`GgufEngineUnsupported` → 503; `--model` exits).
 
 <a id="docs-index"></a>
 ## Docs index
@@ -54,7 +53,7 @@ quote them from a committed file.
 | doc | what it holds |
 |---|---|
 | `docs/private/sashimi-workflow.md` | how to convert with sashimi: venv, subcommands, served-pack recipes, imatrix files and hashes, stamps, window speeds, wall times, speed work, lessons |
-| `docs/private/sashimi-codebooks.md` | MCG decision, TINY dropped, decoder dead ends, fractional-rate trellis |
+| `docs/private/sashimi-codebooks.md` | MCG decision, decoder dead ends, fractional-rate trellis |
 | `docs/private/measurement-raw.md` | the raw-file path behind every committed measurement, keyed by doc and section |
 
 Skills: `/release` (CalVer, CHANGELOG), `/bench` (llmprobe methodology, comparison traps).
@@ -96,7 +95,7 @@ no `libllama` (`tests/test_serving_deps.sh`). Box: M5 Max 128 GB, macOS 27.
 Flags that matter: `--model --serve --host --port --ctx-size --kv-quant --kv-attn-mode --mtp --no-mtp --mtp-depth
 --mtp-head-kv-quant --max-mtp-ctx --ssd-budget-gb --expert-cache-gb --prefix-cache-entries --prefix-cache-mem
 --prefix-cache-disk --prefill-chunk --max-concurrent --max-tokens --timeout --reasoning-budget --wired-margin-gib
---skip-mem-preflight --metrics --api-key --model-dir --log-level --log-file`. `--help` lists the inherited rest.
+--skip-mem-preflight --metrics --api-key --model-dir --log-level --log-file`. `--help` lists the rest.
 
 ## Building
 

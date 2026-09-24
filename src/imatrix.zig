@@ -1,7 +1,6 @@
 //! Per-input-channel activation statistics ("imatrix") captured while the engine
 //! serves a checkpoint with expert streaming, in the exact contract
-//! sashimi's `sashimi.serve_convert` writes (`imatrix-qwen4`) and reads
-//! (`exl3-qwen4`).
+//! the private converter writes and reads.
 //!
 //! Per layer the file carries three entries, whatever the architecture:
 //!   <experts>.gate_up_proj        [E * hidden], expert e at [e*hidden, (e+1)*hidden)

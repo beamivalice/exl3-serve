@@ -3079,8 +3079,8 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         streaming_resident_bytes = split.trunk +| split.mtp;
         if (params.expert_cache_fit_resolver) |fit| try fit(params.config, streaming_resident_bytes.?);
     } else if (params.config.usesMimoSourceTrunk()) {
-        // A resident MiMo load is billed by what the source loader PREPARES:
-        // the disk shards are FP8 plus scale grids, not the affine-8 trunk.
+        // A resident MiMo load is billed by what the source loader serves: the
+        // FP8 trunk as stored plus its scale grids.
         streaming_resident_bytes = try model_mod.mimoSourceResidentBytes(sch.io, sch.allocator, params.model_dir);
         if (mtpChoiceFor(params.mtp_enabled, params.mtp_explicit, params.config).on) {
             streaming_resident_bytes.? += try model_mod.mimoMtpResidentBytes(sch.io, sch.allocator, params.model_dir);

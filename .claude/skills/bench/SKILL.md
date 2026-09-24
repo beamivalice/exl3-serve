@@ -14,7 +14,7 @@ description: sushi benchmarking methodology — bench.sh/llmprobe usage, compari
 ./tests/bench.sh --full                         # median of 3 per rung, to 64k
 ```
 
-**Each cell is sushi at its FASTEST.** `--mtp` is forced wherever the checkpoint ships an MTP head, because it is default-OFF on MoE targets and that is where it pays most (35B-A3B reads 157 without and 191 with). Everything else is already on by default. The mode that actually engaged is read off the server's own `[spec-stats] mode=` lines and named beside the number — a mode that silently stops engaging shows up as a bare cell, which is the regression signal.
+**Each cell is sushi at its FASTEST.** `--mtp` is forced wherever the checkpoint ships an MTP head, because it is default-OFF on MoE targets and that is where it pays most. Everything else is already on by default. The mode that actually engaged is read off the server's own `[spec-stats] mode=` lines and named beside the number — a mode that silently stops engaging shows up as a bare cell, which is the regression signal.
 
 **Another engine = another URL.** Start LM Studio / oMLX / MTPLX / llama-server yourself, then `--url host:port -m <id>`. Same script, same probe, nothing about their binaries, ports or version strings lives in the bench.
 
@@ -32,6 +32,6 @@ Follow CLAUDE.md's Team process and `docs/process-measurement.md`: take `scripts
 - **Never quote a win without naming the engine it is over** — vs LM-GGUF a row reads +33%; vs oMLX the same row is +1.6%.
 - **Thermal soak lies harder than drift** — same-session ratios only. llmprobe's own sustained-load check catches drift WITHIN a cell; run the comparison engine right after ours, not hours later, or say so beside the number.
 - **An A/B arm is proven by ENGAGEMENT lines in its own log, never by its launch env.** zsh does not word-split `env $VAR`, so a multi-switch arm's first switch swallowed the rest as its value and the "composed" arm silently ran the fast path — reading a 2x win as "neutral" for half a session (live 2026-07-30, story in docs/qwentts-cache.md).
-- **A spec-decode collapse that survives SERVER restarts is machine state, not the build** (M3 Ultra, PR #223: 5.45→2.0 tok/step persisted across restarts and an ANE-OFF control; a macOS reboot fully restored it) — reboot and re-baseline before attributing.
+- **A spec-decode collapse that survives SERVER restarts is machine state, not the build** (M3 Ultra, PR #223: 5.45→2.0 tok/step persisted across restarts; a macOS reboot fully restored it) — reboot and re-baseline before attributing.
 - **Power source is a variable on laptops**: measure on AC at high charge — battery→AC roughly doubled one tester's decode MID-RUN (PR #223, M5 Max); Latin-square or A-B-A the arms on laptops so a power/thermal shift reads as drift, not an effect.
 - **A bench's port wait-list must equal its kill-list.** LM Studio's server is a persistent daemon you never kill (its MODEL is freed by `lms unload --all`), so waiting on its port burns the full timeout on every stop — measured 11 of 20 min on one run. This is why bench.sh no longer manages other engines at all.

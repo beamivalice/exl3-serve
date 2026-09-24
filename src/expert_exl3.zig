@@ -20,12 +20,6 @@ pub const Codebook = enum(u8) {
         if (std.mem.eql(u8, name, "mul1")) return .mul1;
         return null;
     }
-
-    /// TINY is retired: a pack written for it is refused by name, never read
-    /// as an unknown layout.
-    pub fn isRetired(name: []const u8) bool {
-        return std.mem.eql(u8, name, "tiny");
-    }
 };
 
 /// The codeword width a pack's Viterbi search hashed: a decoder takes the low
@@ -410,7 +404,7 @@ pub const fixtures = struct {
     pub const k2 = aligned(@embedFile("fixtures/exl3_k2_linear.safetensors"));
     pub const k2p5_mcg = aligned(@embedFile("fixtures/exl3_k2p5_mcg_linear.safetensors"));
     pub const k3_mcg = aligned(@embedFile("fixtures/exl3_k3_mcg_linear.safetensors"));
-    /// Searched AND decoded at window 12 by sashimi: the only fixture that
+    /// Searched AND decoded at window 12 by the converter: the only fixture that
     /// certifies a narrowed window against the library rather than against our
     /// own masking of a w16 bitstream.
     pub const k2p5_mcg_w12 = aligned(@embedFile("fixtures/exl3_k2p5_mcg_w12_linear.safetensors"));
@@ -536,14 +530,11 @@ test "exl3 MUL1 codebook pins known codewords" {
     try t.expectEqual(@as(u16, 47511), decodeMul1(7));
 }
 
-test "exl3 codebook names resolve and an unknown or retired name is null" {
+test "exl3 codebook names resolve and an unknown name is null" {
     const t = std.testing;
     try t.expectEqual(Codebook.mul1, Codebook.fromName("mul1").?);
     try t.expectEqual(Codebook.mcg, Codebook.fromName("mcg").?);
     try t.expectEqual(@as(?Codebook, null), Codebook.fromName("mul2"));
-    try t.expectEqual(@as(?Codebook, null), Codebook.fromName("tiny"));
-    try t.expect(Codebook.isRetired("tiny"));
-    try t.expect(!Codebook.isRetired("mcg"));
 }
 
 test "exl3 MUL1 codebook maps a zero codeword to the finite half" {

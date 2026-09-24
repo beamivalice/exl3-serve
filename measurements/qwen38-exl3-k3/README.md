@@ -157,7 +157,7 @@ including H128 transforms, input/output scales and final FP16 rounding.
 Dot products and norm sums use float64. Raw tensor reads avoid loading full
 expert banks or invoking GPU computation.
 
-The command is kept with the private converter (sashimi).
+The command is kept with the private converter.
 
 The six hermetic Python tests passed, and the real-header audit validated all
 48 layers × 3 matrix layouts. The JSON contains exact sample IDs, moments,
