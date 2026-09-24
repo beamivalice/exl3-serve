@@ -210,8 +210,8 @@ bit-identical lands whatever its size. A change that alters output lands only th
 **Measurement hygiene.**
 - Rebuild ReleaseFast from the head under test right before any live number; stamp commit + binary mtime beside it.
 - Restore QoS for agent-launched timed jobs (`taskpolicy -a`); state the QoS, lock and baseline beside every number.
-- Bench thermal protocol: after heavy GPU work or with a die sensor over 90 °C, fans to max and 3 min idle before the
-  bench starts; otherwise fans to max and a 10 s wait. Fans back to auto when the bench ends. Nothing else runs meanwhile.
+- Bench thermal protocol: under heavy GPU workload AND with a die sensor over 90 °C, fans to max and 3 min idle before
+  the bench starts; otherwise fans to max and a 10 s wait. Fans back to auto when the bench ends. Nothing else runs meanwhile.
   Under it one A then one B suffices; A B B A only when the expected difference is within a few percent.
 - Never wait on `pgrep -f <string>` (the waiting shell matches itself): wait on END markers, PIDs, or `pgrep -x`.
 - Launch flags outrank `model-settings.json`; confirm the load lines (`[kv-cache]`, `[mtp]`) show the intended arm.

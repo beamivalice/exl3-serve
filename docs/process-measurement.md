@@ -63,8 +63,7 @@ timed jobs with `taskpolicy -a <cmd>` (or restore the running PID), and state th
 The M5 Max throttles hard: a 1M ladder read 1358 tok/s prefill at 2k right after hours of GPU work, and 1678 after a cooled
 start (fans at max, 4 min idle). Even with fans at max the die reached 97 °C inside one minute of 4k load. So before any
 bench:
-- a heavy GPU job ran in the last minutes, or any die sensor reads over 90 °C: fans to max, then 3 min with nothing
-  running, then start;
+- heavy GPU workload AND a die sensor over 90 °C: fans to max, then 3 min with nothing running, then start;
 - otherwise: fans to max, wait 10 s, start.
 
 Under this protocol one A arm then one B arm is enough. Run A B B A only when the expected difference is within a few
