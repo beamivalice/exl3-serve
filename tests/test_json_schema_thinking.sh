@@ -8,7 +8,7 @@
 
 set -u
 
-MODEL=${1:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}
+MODEL=${1:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi-3bpw}
 PORT=${2:-8137}
 BASE="http://127.0.0.1:$PORT"
 PASS=0

@@ -13,7 +13,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 ## Product policy
 
 - **MCG EXL3 only.** The served MiMo target is the K2.5 MCG EXL3 pack
-  (`MiMo-V2.6-Flash-Sushi2.5bpw`).
+  (`MiMo-V2.6-Flash-Sushi-2.5bpw`).
 - **Thinking defaults ON** (the vendor template's default; `generation_config.json` declares none); effort words
   only set the thinking budget (see [server-http-apis](server-http-apis.md)).
 

@@ -23,7 +23,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${TOOL_STREAM_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}"
+MODEL="${TOOL_STREAM_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi-3bpw}"
 DRAFTER="${TOOL_STREAM_TEST_DRAFTER:-}"
 
 if [ ! -d "$MODEL" ]; then

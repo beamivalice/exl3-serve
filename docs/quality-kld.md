@@ -92,7 +92,7 @@ that shares no code with ours.
 | MCG K4 w15 (in-house experts, turboderp K4 dense; sashimi 5561ccc; binary 30a27ba) | 0.0632 | 92.99% | 2.25% | 0.0588 |
 
 w12 -> w15 bought 2.8% of KLD on MCG; the remaining gap to turboderp's MUL1 w16 (0.0946) is not mostly the window.
-Pack `Qwen3.8-Flash-Next-Sushi3bpw` (MCG K3 w15, plugged). Pack `Qwen3.8-Flash-Next-Sushi4bpw` (MCG K4 w15, plugged) reads below the
+Pack `Qwen3.8-Flash-Next-Sushi-3bpw` (MCG K3 w15, plugged). Pack `Qwen3.8-Flash-Next-Sushi-4bpw` (MCG K4 w15, plugged) reads below the
 affine 4/8 control.
 
 Binaries a05d15f / 28d7fab (the KLD tool is unchanged

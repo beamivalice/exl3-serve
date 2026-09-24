@@ -22,7 +22,7 @@ set -uo pipefail
 
 PORT="${PORT:-19101}"
 BIN="${BINARY:-./zig-out/bin/sushi}"
-MODEL="${MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}"
+MODEL="${MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi-3bpw}"
 BASE="http://127.0.0.1:$PORT"
 
 [ -d "$MODEL" ] || { echo "SKIP: model dir missing: $MODEL"; exit 0; }

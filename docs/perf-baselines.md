@@ -88,9 +88,9 @@ Verify is 89-92% of a round's wall; forced-depth round ms MCG/MUL1 on code: dept
 42.4/48.6. The absolute off-MTP figures sit below the serial table's: a different session, so only the within-session
 pairs compare. MCG verify ms 28.2 / ~33.5 / ~37.5 at 2/3/4 rows: ~4.6 ms per extra row.
 
-## Flash-Next Sushi3bpw, 1M context ladder (725b76ca)
+## Flash-Next Sushi-3bpw, 1M context ladder (725b76ca)
 
-Pack `Qwen3.8-Flash-Next-Sushi3bpw`, `--ctx-size 1048576 --kv-quant 8 --mtp`, llmprobe `--bench-only --rungs
+Pack `Qwen3.8-Flash-Next-Sushi-3bpw`, `--ctx-size 1048576 --kv-quant 8 --mtp`, llmprobe `--bench-only --rungs
 4k,8k,16k,32k,64k,128k,256k,512k,980k`, `taskpolicy -a`, lock `bench-qwen-1m-clean`, quiet box (load average < 1), fans at
 max with 4 min idle before boot (the thermal protocol in [process-measurement](process-measurement.md)). Headline cells:
 decode 93.8 tok/s, prefill 1906 tok/s at 2k, MTP 3.62 tokens per step (predictable 119.9, novel 82.9), and llmprobe
@@ -362,7 +362,7 @@ The earlier expert-grouped reads ran a leader's slots back to back: every weight
 work serialized in one threadgroup, and the bytes saved were never the bound.
 
 <a id="mimo-mtp-prefill"></a>
-MTP does not slow MiMo's prefill (7ce480f, binary 05:55, the served pack renamed `MiMo-V2.6-Flash-Sushi2.5bpw`, kv8,
+MTP does not slow MiMo's prefill (7ce480f, binary 05:55, the served pack renamed `MiMo-V2.6-Flash-Sushi-2.5bpw`, kv8,
 `--mtp --no-pld --prefix-cache-entries 0`, ctx 81920, `taskpolicy -a`, lock `mimo-mtp-prefill`). One boot per row,
 MTP on vs `enable_mtp: false` alternated ABBA, 8 tokens, median streamed TTFT:
 

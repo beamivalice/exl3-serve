@@ -25,7 +25,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${PLD_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}"
+MODEL="${PLD_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi-3bpw}"
 DRAFTER="${DRAFTER_TEST_DRAFTER:-}"
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_completions_spec: model directory not found."

@@ -21,7 +21,7 @@ set -u
 
 PORT="${1:-11487}"
 BINARY="${BINARY:-./zig-out/bin/sushi}"
-MODEL="${INTERLEAVE_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}"
+MODEL="${INTERLEAVE_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi-3bpw}"
 WORK="$(mktemp -d)"
 SERVER_PID=""
 

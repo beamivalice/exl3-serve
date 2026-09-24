@@ -17,7 +17,7 @@
 
 set -u
 
-MODEL="${1:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi3bpw}"
+MODEL="${1:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi-3bpw}"
 PORT="${2:-11293}"
 BINARY="${BINARY:-./zig-out/bin/sushi}"
 FAKE="/tmp/test_oom_preflight_model"

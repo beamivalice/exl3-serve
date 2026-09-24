@@ -1772,7 +1772,7 @@ test "qwen encodeScratchBytes covers each measured peak by >= 25% without the N^
     config.qv_heads = 16;
     config.qv_hidden = 1152;
     config.qv_intermediate = 4304;
-    // Per-block-eval scratch peaks, bytes (`qwen vision ubench`, Sushi3bpw tower).
+    // Per-block-eval scratch peaks, bytes (`qwen vision ubench`, Sushi-3bpw tower).
     const measured = [_][2]u64{
         .{ 196, 20_800_000 },
         .{ 3772, 1_225_400_000 },

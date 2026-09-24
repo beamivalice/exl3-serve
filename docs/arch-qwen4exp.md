@@ -47,7 +47,7 @@ hidden 2560, expert intermediate 640.
   also held every block's transposed weights (~1 GB at any size) and more than one block's score sheets. The encode
   bill (`encodeScratchBytes`: 32 MB + 1.3 x one f32 score sheet + 107 KB per patch) covers the per-block peak by
   1.26x or more at every measured size; `qwen vision ubench` asserts bill >= peak.
-- Measured on main `68001a57` plus this change, with `qwen vision ubench`: Sushi3bpw tower only, random pixels, 5 reps with the lazy and
+- Measured on main `68001a57` plus this change, with `qwen vision ubench`: Sushi-3bpw tower only, random pixels, 5 reps with the lazy and
   per-block arms interleaved, `taskpolicy -a`, GPU lock held. Times are best-of-5 and CONTENDED: a live Qwen server
   was decoding on the same GPU. Peaks were identical across two runs.
 
@@ -85,7 +85,7 @@ hidden 2560, expert intermediate 640.
 
 | pack | directory under the models root | notes |
 |---|---|---|
-| MCG K3 w15 (served target) | `Qwen3.8-Flash-Next-Sushi3bpw` | our MCG experts (window 15) plugged into turboderp's K3 dense |
+| MCG K3 w15 (served target) | `Qwen3.8-Flash-Next-Sushi-3bpw` | our MCG experts (window 15) plugged into turboderp's K3 dense |
 | MCG K3 w15, our dense | `Qwen3.8-Flash-Next-EXL3-K3-w15-mcg-ours` | the same experts with our own dense |
 | turboderp K3 / K4 | `Qwen3.8-Flash-Next-EXL3-K3`, `...-K4` | restacked from exllamav3, MUL1 w16 |
 | affine 4/8 control | `Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` | the control column in every table |
