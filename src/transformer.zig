@@ -15258,12 +15258,13 @@ pub fn qkvAttnVerifyKernel(
 
 // ── matmul2d packed attention (t_q 1..8) ──
 //
-// One threadgroup (256 threads, 8 simdgroups) per (kv head, kv split). Per 32-token page:
+// One threadgroup (128 threads, 4 simdgroups) per (kv head, kv split). Per 32-token page:
 // dequantize K into a threadgroup tile, QK through the matmul2d tensor op, an online softmax
 // per q row, dequantize V into the same tile, PV accumulated into a cooperative running
-// output rescaled when a row's max grows. Each split emits the (m, l, unnormalized O)
-// partials `qkvMergePartials` reads. Ported from upstream mlx-serve, structure after
-// Inco Splash's q8 attention tile (Apache-2.0, see NOTICE).
+// output rescaled when a row's max grows. Packed words are read into registers one phase
+// before their tile needs them. Each split emits the (m, l, unnormalized O) partials
+// `qkvMergePartials` reads. Ported from upstream mlx-serve, structure after Inco Splash's q8
+// attention tile (Apache-2.0, see NOTICE).
 const QKV_MPP_PAGE: c_int = 32;
 const QKV_MPP_MAX_SPLITS: c_int = 128;
 const QKV_MPP_PAGES_PER_SPLIT: c_int = 2;
@@ -15274,9 +15275,12 @@ const QKV_MPP_KERNEL_SOURCE =
     \\constexpr int MR = GQA * TQ;
     \\constexpr int M = MPAD; // matmul2d wants rows in multiples of 8; pad rows carry zero queries
     \\constexpr int N = 32;
-    \\constexpr int NT = 256;
-    \\constexpr int KW = DK / VPW;
-    \\constexpr int VW = DV / VPW;
+    \\constexpr int NT = 128; // the page loop is barrier- and matmul-latency bound: 8 simdgroups wait on each other
+    \\constexpr int KC = DK / VPW / 2; // uint2 words per K row
+    \\constexpr int VC = DV / VPW / 2;
+    \\constexpr int CPG = GS / VPW / 2; // uint2 words per quant group
+    \\constexpr int KIT = (N * KC + NT - 1) / NT;
+    \\constexpr int VIT = (N * VC + NT - 1) / NT;
     \\const uint tid = thread_position_in_threadgroup.x;
     \\const uint hkv = threadgroup_position_in_grid.y;
     \\const uint split = threadgroup_position_in_grid.z;
@@ -15300,8 +15304,8 @@ const QKV_MPP_KERNEL_SOURCE =
     \\
     \\constexpr auto qk_desc = matmul2d_descriptor(M, N, DK, false, true, false, matmul2d_descriptor::mode::multiply);
     \\constexpr auto pv_desc = matmul2d_descriptor(M, DV, N, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
-    \\matmul2d<qk_desc, execution_simdgroups<8>> qk;
-    \\matmul2d<pv_desc, execution_simdgroups<8>> pv;
+    \\matmul2d<qk_desc, execution_simdgroups<NT / 32>> qk;
+    \\matmul2d<pv_desc, execution_simdgroups<NT / 32>> pv;
     \\auto qt = tensor((device T*)q + (long)hkv * M * DK, dextents<int, 2>{DK, M}, array<int, 2>{1, DK});
     \\auto kt = tensor(tile, dextents<int, 2>{DK, N}, array<int, 2>{1, DK});
     \\auto vt = tensor(tile, dextents<int, 2>{DV, N}, array<int, 2>{1, DV});
@@ -15317,25 +15321,44 @@ const QKV_MPP_KERNEL_SOURCE =
     \\
     \\const long kq0 = (long)hkv * kq_strides[1], ks0 = (long)hkv * ksc_strides[1], kb0 = (long)hkv * kbi_strides[1];
     \\const long vq0 = (long)hkv * vq_strides[1], vs0 = (long)hkv * vsc_strides[1], vb0 = (long)hkv * vbi_strides[1];
+    \\uint2 kr[KIT]; float ksr[KIT], kbr[KIT];
+    \\uint2 vr[VIT]; float vsr[VIT], vbr[VIT];
+    \\// Rows past Tk re-read row Tk-1 and are masked in the softmax.
+    \\#define QKV_LOAD(C, IT, REG, SREG, BREG, QP, Q0, QSTR, SP, S0, SSTR, BP, B0, BSTR, TOK0) \
+    \\  for (int i = 0; i < IT; ++i) { \
+    \\    const int c = int(tid) + i * NT; \
+    \\    if (c < N * C) { \
+    \\      const int n = c / C, ci = c % C, g = ci / CPG; \
+    \\      const long r = (long)min((TOK0) + n, Tk - 1); \
+    \\      REG[i] = ((const device uint2*)(QP + Q0 + r * QSTR[2]))[ci]; \
+    \\      SREG[i] = float(SP[S0 + r * SSTR[2] + g]); \
+    \\      BREG[i] = float(BP[B0 + r * BSTR[2] + g]); \
+    \\    } \
+    \\  }
+    \\#define QKV_STORE(C, D, IT, REG, SREG, BREG) \
+    \\  for (int i = 0; i < IT; ++i) { \
+    \\    const int c = int(tid) + i * NT; \
+    \\    if (c < N * C) { \
+    \\      threadgroup T* dst = tile + (c / C) * D + (c % C) * 2 * VPW; \
+    \\      for (int h = 0; h < 2; ++h) \
+    \\        for (int u = 0; u < VPW; ++u) \
+    \\          dst[h * VPW + u] = T(float((REG[i][h] >> (u * BITS)) & mask_bits) * SREG[i] + BREG[i]); \
+    \\    } \
+    \\  }
+    \\if (pb < pe) { QKV_LOAD(KC, KIT, kr, ksr, kbr, kq, kq0, kq_strides, ksc, ks0, ksc_strides, kbi, kb0, kbi_strides, pb * N) }
     \\for (int page = pb; page < pe; ++page) {
     \\  const int tok0 = page * N;
-    \\  // Every thread dequantizes whole packed words; rows past Tk re-read row Tk-1 and are masked below.
-    \\  for (int w = int(tid); w < N * KW; w += NT) {
-    \\    const int n = w / KW, wi = w % KW, g = (wi * VPW) / GS;
-    \\    const long r = (long)min(tok0 + n, Tk - 1);
-    \\    const float sj = float(ksc[ks0 + r * ksc_strides[2] + g]);
-    \\    const float bj = float(kbi[kb0 + r * kbi_strides[2] + g]);
-    \\    const uint wv = uint(kq[kq0 + r * kq_strides[2] + wi]);
-    \\    for (int u = 0; u < VPW; ++u)
-    \\      tile[n * DK + wi * VPW + u] = T(float((wv >> (u * BITS)) & mask_bits) * sj + bj);
-    \\  }
+    \\  QKV_STORE(KC, DK, KIT, kr, ksr, kbr)
+    \\  // In flight while QK and the softmax run: this page's V and the next page's K.
+    \\  QKV_LOAD(VC, VIT, vr, vsr, vbr, vq, vq0, vq_strides, vsc, vs0, vsc_strides, vbi, vb0, vbi_strides, tok0)
+    \\  if (page + 1 < pe) { QKV_LOAD(KC, KIT, kr, ksr, kbr, kq, kq0, kq_strides, ksc, ks0, ksc_strides, kbi, kb0, kbi_strides, tok0 + N) }
     \\  threadgroup_barrier(mem_flags::mem_threadgroup);
     \\  auto page_scores = qk.template get_destination_cooperative_tensor<
     \\      metal::remove_addrspace_t<decltype(q0)>, metal::remove_addrspace_t<decltype(k0)>, float>();
     \\  qk.run(q0, k0, page_scores);
     \\  page_scores.store(p0);
     \\  threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\  // Online softmax: simdgroup sg owns rows sg, sg+8, ...; lane n owns page column n (N = 32).
+    \\  // Online softmax: simdgroup sg owns rows sg, sg+4, ...; lane n owns page column n (N = 32).
     \\  for (int m = int(tid / 32u); m < M; m += NT / 32) {
     \\    const int n = int(tid % 32u);
     \\    const int lim = m < MR ? Tk - TQ + 1 + (m % TQ) : Tk;
@@ -15353,15 +15376,7 @@ const QKV_MPP_KERNEL_SOURCE =
     \\      rmax[m] = next;
     \\    }
     \\  }
-    \\  for (int w = int(tid); w < N * VW; w += NT) {
-    \\    const int n = w / VW, wi = w % VW, g = (wi * VPW) / GS;
-    \\    const long r = (long)min(tok0 + n, Tk - 1);
-    \\    const float sj = float(vsc[vs0 + r * vsc_strides[2] + g]);
-    \\    const float bj = float(vbi[vb0 + r * vbi_strides[2] + g]);
-    \\    const uint wv = uint(vq[vq0 + r * vq_strides[2] + wi]);
-    \\    for (int u = 0; u < VPW; ++u)
-    \\      tile[n * DV + wi * VPW + u] = T(float((wv >> (u * BITS)) & mask_bits) * sj + bj);
-    \\  }
+    \\  QKV_STORE(VC, DV, VIT, vr, vsr, vbr)
     \\  threadgroup_barrier(mem_flags::mem_threadgroup);
     \\  for (ushort i = 0; i < running.get_capacity(); ++i) {
     \\    if (!running.is_valid_element(i)) continue;
@@ -15371,6 +15386,8 @@ const QKV_MPP_KERNEL_SOURCE =
     \\  pv.run(p0, v0, running);
     \\  threadgroup_barrier(mem_flags::mem_threadgroup);
     \\}
+    \\#undef QKV_LOAD
+    \\#undef QKV_STORE
     \\// Partials land in the merge layout [Hkv * MR, NSPLIT(, DV)]; pad rows are never stored.
     \\for (ushort i = 0; i < running.get_capacity(); ++i) {
     \\  if (!running.is_valid_element(i)) continue;
@@ -15415,8 +15432,8 @@ fn qkvMppConfig(key: QkvMppKey, h_kv: c_int, nsplit: c_int) !mlx.mlx_fast_metal_
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(config, &ml_shape, 2, .float32));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(config, &ml_shape, 2, .float32));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(config, &o_shape, 3, .float32));
-    try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(config, 256, h_kv, nsplit));
-    try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(config, 128, h_kv, nsplit));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(config, 128, 1, 1));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_dtype(config, "T", key.dtype));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "BITS", @intCast(key.bits)));
     try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(config, "GS", @intCast(key.gs)));
@@ -15506,6 +15523,12 @@ pub fn qkvAttnMppKernel(s: mlx.mlx_stream, q_in: mlx.mlx_array, view: *const Den
     if (qs[3] != dk or !((dk == 256 and dv == 256) or (dk == 192 and dv == 128))) return null;
     const gs: c_int = @intCast(view.group_size);
     if (@rem(dk, gs) != 0 or @rem(dv, gs) != 0) return null;
+    // The kernel reads packed words in aligned pairs that never straddle a quant group.
+    if (@rem(@divTrunc(gs, vpw), 2) != 0) return null;
+    for ([_]mlx.mlx_array{ view.k_triple_q, view.v_triple_q }) |a| {
+        const st = mlx.mlx_array_strides(a);
+        if (@rem(st[1], 2) != 0 or @rem(st[2], 2) != 0) return null;
+    }
     const h_q: c_int = qs[1];
     const h_kv: c_int = ks[1];
     if (h_kv <= 0 or @rem(h_q, h_kv) != 0 or vs[1] != h_kv or vs[2] != ks[2] or ks[0] != 1) return null;

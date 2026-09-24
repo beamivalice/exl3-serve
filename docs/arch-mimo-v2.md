@@ -137,6 +137,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   Attention-only microbench (9 layers, kv8) vs the per-call dequant+SDPA rebuild: split-K 0.62x at 4k, 0.50x at 16k,
   0.42x at 64k, 0.35-0.36x at 512k (M5 proxy for M4; split-K is compute-bound, the rebuild bandwidth-bound);
   matmul2d is ~1.2-1.4x faster than split-K at 16k-512k (cross-run). Live 64k split-K decode not yet measured.
+- **`sushi_qkv_mpp` is latency-bound, not bandwidth-bound**: 4 simdgroups with register-prefetched words
+  (bit-identical to the 8-simdgroup kernel) cut global-layer attention ~30% at 256k keys. Split-K never beats it on M5
+  at 8k keys or more ([perf-baselines](perf-baselines.md#mimo-long-decode)).
 - Before the sliding fusion landed, the composed band+sink sheet was the biggest chunk-dependent bill term (0.17 GB
   at chunk 512, 2.28 GB at 2048), so 500k at chunk 2048 billed ~14.3 GB against ~12.4 GB of headroom. That term is
   now zero wherever the fused arm serves. Global-layer decode no longer rebuilds on M4-class GPUs (split-K, above).

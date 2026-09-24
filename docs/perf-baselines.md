@@ -194,6 +194,33 @@ slices, arms interleaved in one process, `taskpolicy -a`, lock `lever2-attn`.
   - lockstep simdgroups with a 1e9 dispatch budget: -7.6% / -4.1% / -2.0% at 16k / 64k / 256k, under the 5% bar;
   - a larger budget alone: slower at long kL (1e9: +2% at 64k, +13% at 256k), because K/V fall out of cache.
 
+<a id="mimo-long-decode"></a>
+Long-context decode, global-layer attention (2026-09-24, kv8, no MTP, prefix cache off, one boot per cell,
+`taskpolicy -a`, lock `lever3-kv`). Main = 79a4cb4; new = `sushi_qkv_mpp` on 4 simdgroups with packed words
+prefetched in registers, bit-identical output. `SUSHI_DECODE_FWD_UBENCH=128` after a 2048-chunk prefill of that
+many keys, ms per forward:
+
+| keys | main 79a4cb4 | new |
+|---|---|---|
+| 16k | 22.10 | |
+| 64k | 25.10 | 24.65 |
+| 128k | 29.60 | |
+| 256k | 37.65 | 33.27 |
+
+Attention-only µbench (9 dependent layers, us per layer, arms interleaved in one process, two runs): 16k
+133-135 -> 136-139, 64k 402 -> 321-323, 256k 1697-1782 -> 1185-1252, 512k 3591-3979 -> 2398-2670. Earlier
+same-session runs had main's kernel at 1468-1481 us at 256k (~243 GB/s of a ~540 GB/s read peak).
+Split-K on M5 at the same shape: 155 / 528 / 1923 / 3767 us at 16k / 64k / 256k / 512k, so it never beats matmul2d
+at 8k keys or more.
+Ablations at 256k show where the old kernel's time went:
+- dropping both matmuls left the barrier and softmax loop at 545 us with 8 simdgroups, 217 us with 4;
+- the rest was the two 16-row matmul2d calls plus loads that the per-page barriers exposed.
+What did not help: 64-key pages, separate K/V tiles with two barriers, vector tile stores, transposed QK, V one page
+ahead, 256 splits (-3% at 256k, worse at 16k), and one merge kernel (-10 us/layer at 2-4k only, not bit-identical).
+From 4k to 16k keys the new kernel costs 3-10 us more per layer, under 0.1 ms per token.
+Byte identity, no PLD: greedy serial new == main on 3 prompts (4.9k / 9.8k / 18.6k tokens, 256 generated each).
+Forced-depth-3 MTP == serial on the same 3 prompts, on the new kernel rebased onto 36ae6d0.
+
 <a id="mimo-verify-rows"></a>
 Verify-row cost (binary 37d5f0d = main 7ed9795 + the MTP branch, pre-00:55 layout of the MCG K2.5 w12 pack with
 o_proj/lm_head/embed affine-8, kv8, 4096 KV, `SUSHI_DECODE_FWD_UBENCH=40` with

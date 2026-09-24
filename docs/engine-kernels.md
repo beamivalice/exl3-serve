@@ -17,6 +17,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 - GDN decode = three fused dispatches (`SUSHI_GDN_DECODE_FUSED=0`; S 1..9 bit-identity is SAMPLING).
 - A dependent-kernel cut that REDISTRIBUTES a reduction into every threadgroup loses; a routing-independent chain
   the GPU already OVERLAPS is not a dispatch to fuse. Meter: `SUSHI_DECODE_FWD_UBENCH`.
+- A matmul2d decode tile of 16 query rows is latency-bound: its barriers and small matmuls cost more than its
+  reads. `sushi_qkv_mpp` runs 4 simdgroups, not 8, and holds packed words in registers one phase ahead.
+  Tried with no gain: more splits, 64-key pages, split K/V tiles, vector tile stores, transposed QK, a fused merge.
+  Numbers: [perf-baselines](perf-baselines.md#mimo-long-decode).
 - Decode on this box is dispatch-gap bound: ~860 kernels per Flash-Next token, kernel time ~9.8 of ~18 ms, ~7 us
   per boundary. `MLX_MAX_OPS_PER_BUFFER` and `MLX_METAL_FAST_SYNCH` gave nothing; decode wins come from fewer,
   denser kernels ([perf-baselines](perf-baselines.md#exl3)).
@@ -102,6 +106,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 
 - Interleave A/B kernels in ONE process (separate runs drift 15%); one-shot per-kernel ubench timings are not
   evidence (codebook-free kernels swung 20-40% between arms from clock ramp).
+- Size every probe and config cache for all the arms of an A/B. A full cache re-probes on every call, which added
+  ~170 us per call to the dev arms. An ablation that skips a tile's only reader lets the compiler drop the tile's
+  stores and their loads.
 - A Metal System Trace: `xcrun xctrace record --template 'Metal System Trace' --instrument 'Metal GPU Counters'
   --attach <pid>`, then export `metal-shader-profiler-intervals` (the profiler under-samples short kernels).
 - Every timing run takes the GPU lock and restores QoS ([CLAUDE.md, Team process](../CLAUDE.md#team-process)).
