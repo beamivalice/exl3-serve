@@ -122,6 +122,7 @@ string, because that is all safetensors stores:
 | `source_sha256` | digest of the source checkpoint's index (new shards; older ones lack it) |
 | `seed_scheme` | which per-expert seed formula produced suh/svh signs (new shards) |
 | `out_scales_mode` | the output-scale rule, `auto` \| `always` \| `never` (new shards) |
+| `pin_pass` | the search's pass-0 pin length when it is not the full 128 (e.g. `64`); absent means 128. Search provenance only: the engine decodes the shard the same either way |
 
 A stored-affine trunk shard stamps `format: affine` with `bits`, `group_size`,
 `quantizer`, `imatrix_sha256` and `converter`, and carries no `k`, `codebook`

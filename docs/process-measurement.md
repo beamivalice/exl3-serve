@@ -58,6 +58,22 @@ Processes spawned from an agent harness inherit background QoS (priority 4 vs 31
 timed jobs with `taskpolicy -a <cmd>` (or restore the running PID), and state the QoS used beside the number. A number
 2-4x worse than a terminal run points at QoS before anything else.
 
+## 4b. Cool the box before a bench
+
+The M5 Max throttles hard: a 1M ladder read 1358 tok/s prefill at 2k right after hours of GPU work, and 1678 after a cooled
+start (fans at max, 4 min idle). Even with fans at max the die reached 97 °C inside one minute of 4k load. So before any
+bench:
+- a heavy GPU job ran in the last minutes, or any die sensor reads over 90 °C: fans to max, then 3 min with nothing
+  running, then start;
+- otherwise: fans to max, wait 10 s, start.
+
+Under this protocol one A arm then one B arm is enough. Run A B B A only when the expected difference is within a few
+percent, where a thermal or drift step between two single arms would read as the effect.
+
+Set the fans back to auto when the bench ends. The fan control and temperature readout are the box's own tooling (on this
+box, the fan-control MCP: `max_fans`, `set_fan_auto`, `get_thermal_status`). A bench script waits on a marker file that
+the driver touches once the fans are at max. Nothing else may compute during the idle and the bench (quiet box).
+
 ## 5. Wait without hanging
 
 Never wait on `pgrep -f "<string>"`: every agent shell's own `zsh -c "<command>"` contains the string and matches

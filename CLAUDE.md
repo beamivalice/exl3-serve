@@ -55,7 +55,8 @@ quote them from a committed file.
 | `docs/private/sashimi-workflow.md` | how to convert with sashimi: venv, subcommands, served-pack recipes, imatrix files and hashes, stamps, window speeds, wall times, speed work, lessons |
 | `docs/private/sashimi-codebooks.md` | MCG decision, decoder dead ends, fractional-rate trellis |
 | `docs/private/measurement-raw.md` | the raw-file path behind every committed measurement, keyed by doc and section |
-| `docs/private/future.md` | work we decided is worth doing but haven't started; an entry leaves when it starts or lands |
+| `docs/private/future.md` | strictly work still to continue or explore; an entry leaves when it starts or lands |
+| `docs/private/fail/` | one file per failed experiment (TINY, beam Viterbi, ...): the numbers that killed it, where its code lives |
 
 Skills: `/release` (SemVer, CHANGELOG), `/bench` (llmprobe methodology, comparison traps).
 
@@ -209,6 +210,9 @@ bit-identical lands whatever its size. A change that alters output lands only th
 **Measurement hygiene.**
 - Rebuild ReleaseFast from the head under test right before any live number; stamp commit + binary mtime beside it.
 - Restore QoS for agent-launched timed jobs (`taskpolicy -a`); state the QoS, lock and baseline beside every number.
+- Bench thermal protocol: after heavy GPU work or with a die sensor over 90 °C, fans to max and 3 min idle before the
+  bench starts; otherwise fans to max and a 10 s wait. Fans back to auto when the bench ends. Nothing else runs meanwhile.
+  Under it one A then one B suffices; A B B A only when the expected difference is within a few percent.
 - Never wait on `pgrep -f <string>` (the waiting shell matches itself): wait on END markers, PIDs, or `pgrep -x`.
 - Launch flags outrank `model-settings.json`; confirm the load lines (`[kv-cache]`, `[mtp]`) show the intended arm.
 - KLD is 16 prompts x 512 tokens scored to the first EOS, for every model; the teacher carries no lossy step of its own.
