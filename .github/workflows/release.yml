@@ -240,6 +240,11 @@ jobs:
           # errors surface here rather than after notarization.
           "./$STAGING/sushi" --version
 
+          # What a host that runs this release as its engine checks first.
+          "./$STAGING/sushi" --guest-manifest > "$STAGING/guest.json"
+          python3 -c 'import json, sys; m = json.load(open(sys.argv[1])); assert m["version"] == sys.argv[2] and m["guest_api"] == 1, m' \
+            "$STAGING/guest.json" "${{ steps.version.outputs.version }}"
+
           ditto -c -k --keepParent "$STAGING" "sushi-cli.zip"
 
       - name: Notarize CLI
@@ -257,7 +262,9 @@ jobs:
 
       # ── Package final artifacts ──
       - name: Package CLI tarball
-        run: tar -czf "sushi-bin-macos-arm64.tar.gz" "sushi-macos-arm64"
+        run: |
+          tar -czf "sushi-bin-macos-arm64.tar.gz" "sushi-macos-arm64"
+          shasum -a 256 "sushi-bin-macos-arm64.tar.gz" > "sushi-bin-macos-arm64.tar.gz.sha256"
 
       - name: Cleanup keychain
         if: always()
@@ -294,6 +301,7 @@ jobs:
           draft: true
           files: |
             sushi-bin-macos-arm64.tar.gz
+            sushi-bin-macos-arm64.tar.gz.sha256
 
       - name: Upload PR / dry-run artifacts
         if: ${{ inputs.dry_run || github.event_name == 'pull_request' }}
@@ -304,4 +312,5 @@ jobs:
           name: package-${{ steps.version.outputs.version }}
           path: |
             sushi-bin-macos-arm64.tar.gz
+            sushi-bin-macos-arm64.tar.gz.sha256
           retention-days: 7

@@ -301,6 +301,8 @@ fn printUsage(io: std.Io) void {
         \\  --parent-pid <pid>  Shut down when process <pid> exits (for a host
         \\                        that runs sushi as its engine).
         \\  --version           Print version and exit
+        \\  --guest-manifest    Print the JSON a host checks before running this
+        \\                        build as its engine (guest.json), and exit
         \\  --help              Show this help
         \\
     ) catch {};
@@ -487,6 +489,22 @@ pub fn main(init: std.process.Init) !void {
             var ver_w = std.Io.File.stdout().writer(io, &ver_buf);
             version_mod.writeReport(&ver_w.interface, info) catch {};
             ver_w.interface.flush() catch {};
+            return;
+        } else if (std.mem.eql(u8, args[i], "--guest-manifest")) {
+            var mlx_ver = mlx.mlx_string_new();
+            defer _ = mlx.mlx_string_free(mlx_ver);
+            try mlx.check(mlx.mlx_version(&mlx_ver));
+            var out_buf: [1024]u8 = undefined;
+            var out_w = std.Io.File.stdout().writer(io, &out_buf);
+            try version_mod.writeGuestManifest(&out_w.interface, allocator, .{
+                .version = VERSION,
+                .commit = build_options.git_sha,
+                .mlx = std.mem.span(mlx.mlx_string_data(mlx_ver)),
+                .mlx_sha = build_options.mlx_sha,
+                .mlx_c_sha = build_options.mlx_c_version,
+                .min_macos = @import("builtin").os.version_range.semver.min,
+            });
+            try out_w.interface.flush();
             return;
         } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             printUsage(io);

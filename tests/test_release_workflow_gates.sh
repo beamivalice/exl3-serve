@@ -157,6 +157,21 @@ for tag, ok in (("1.0.0", True), ("1.0.0-pre-release.2", True), ("26.9.1", False
 # and for months they did not: the packaging path shipped the binary alone.
 for f in ("LICENSE-APACHE-2.0", "NOTICE"):
     check(f in wf_text, f"release.yml packages {f} into the CLI tarball")
+# ── A host that pins a release as its guest engine checks the tarball's sha256
+# and reads guest.json from inside it; both must ship with every release.
+package_run = str(steps.get("Package CLI binary", {}).get("run", ""))
+check("--guest-manifest" in package_run and '"$STAGING/guest.json"' in package_run,
+      "the packaged binary writes guest.json into the tarball")
+check("steps.version.outputs.version" in package_run and "guest.json" in package_run.split("--guest-manifest", 1)[-1],
+      "guest.json's version is checked against the release version")
+tarball = "sushi-bin-macos-arm64.tar.gz"
+sha_steps = [s for s in job["steps"]
+             if "shasum -a 256" in str(s.get("run", "")) and f"{tarball}.sha256" in str(s.get("run", ""))]
+check(len(sha_steps) == 1 and "if" not in sha_steps[0], "every build writes the tarball's .sha256")
+check(f"{tarball}.sha256" in str(rel_with.get("files", "")), "the release publishes the .sha256")
+check(any(f"{tarball}.sha256" in str(s.get("with", {}).get("path", "")) for s in upload),
+      "PR / dry-run artifacts carry the .sha256")
+
 # The packaging step copies them, so a tree without them cannot cut a release.
 for f in ("LICENSE", "LICENSE-APACHE-2.0", "NOTICE"):
     check(os.path.isfile(f), f"{f} exists at the repo root")

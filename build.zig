@@ -63,11 +63,14 @@ pub fn build(b: *std.Build) void {
     // that have NO runtime query API (MLX reports itself at runtime):
     //   --mlx-c-version  pinned mlx-c submodule version; defaults from the
     //                    lib/mlx/.version stamp (written by scripts/build-mlx.sh)
-    const mlx_c_version = b.option([]const u8, "mlx-c-version", "Pinned mlx-c version") orelse readMlxcPin(b) orelse "unknown";
+    // The mlx submodule commit rides along for `sushi --guest-manifest`.
+    const mlx_c_version = b.option([]const u8, "mlx-c-version", "Pinned mlx-c version") orelse readMlxPin(b, "mlxc=") orelse "unknown";
+    const mlx_sha = readMlxPin(b, "mlx=") orelse "";
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version);
     build_options.addOption([]const u8, "mlx_c_version", mlx_c_version);
+    build_options.addOption([]const u8, "mlx_sha", mlx_sha);
     const git_sha = b.option([]const u8, "git-sha", "Engine build id for the round-cost table: a release sha stands for the executable bytes, which are then not hashed; the MLX dylib and metallib fingerprints are always mixed in") orelse "";
     build_options.addOption([]const u8, "git_sha", git_sha);
 
@@ -278,10 +281,10 @@ fn verifyMlxStage(b: *std.Build) void {
     }
 }
 
-/// The pinned mlx-c revision from lib/mlx/.version (written by
-/// scripts/build-mlx.sh as "mlx=<sha> mlxc=<sha> target=<ver>"), surfaced in
-/// `sushi --version`. Returns null (→ "unknown") when not staged yet.
-fn readMlxcPin(b: *std.Build) ?[]const u8 {
+/// A pinned revision (`key` "mlx=" or "mlxc=") from lib/mlx/.version, written
+/// by scripts/build-mlx.sh as "mlx=<sha> mlxc=<sha> target=<ver>". Returns
+/// null when not staged yet.
+fn readMlxPin(b: *std.Build, key: []const u8) ?[]const u8 {
     const bytes = buildRootHandle(b).readFileAlloc(
         b.graph.io,
         "lib/mlx/.version",
@@ -290,7 +293,7 @@ fn readMlxcPin(b: *std.Build) ?[]const u8 {
     ) catch return null;
     var it = std.mem.tokenizeScalar(u8, std.mem.trim(u8, bytes, " \t\r\n"), ' ');
     while (it.next()) |tok| {
-        if (std.mem.startsWith(u8, tok, "mlxc=")) return b.dupe(tok["mlxc=".len..]);
+        if (std.mem.startsWith(u8, tok, key)) return b.dupe(tok[key.len..]);
     }
     return null;
 }

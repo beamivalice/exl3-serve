@@ -19,6 +19,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
 - **`--parent-pid <pid>`** is for a host that runs sushi as its engine (`src/parent_watch.zig`): a thread polls the pid
   once a second and, once it is gone (or has reparented sushi), sends this process SIGTERM. Mid-load that ends the
   process; in the serve loop it is the ordinary graceful shutdown. Test: `tests/test_parent_pid.sh`.
+- **`sushi --guest-manifest`** prints the JSON such a host checks before routing (`version.writeGuestManifest`):
+  version, commit, `guest_api`, the mlx/mlx-c pins, `min_macos` from the binary's own target, `model_types`
+  (`version.guest_model_types`, a subset of the served types) and the EXL3 codebooks and window range the decoder
+  accepts. The release tarball ships it as `guest.json`, next to a `.sha256` of the tarball.
 
 ## What loads
 
