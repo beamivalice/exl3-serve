@@ -15989,20 +15989,25 @@ fn handleResponsesInner(
     };
 
     // ── reasoning ──
-    // reasoning.budget is parsed but not enforced post-generation in this MVP
-    // pass; thinking truncation happens via finish_reason="length" if the model
-    // overruns max_output_tokens.
+    // Budget precedence as on chat: reasoning_budget_tokens > the effort word's budget >
+    // --reasoning-budget.
     const reasoning_cfg = responses_mod.parseReasoning(root.get("reasoning"), server_config.default_reasoning_budget);
     var enable_thinking = reasoning_cfg.enable;
-    _ = reasoning_cfg.budget;
+    var effort_budget: i32 = server_config.default_reasoning_budget;
     if (reasoning_cfg.effort) |word| {
-        enable_thinking = (reasoningEffortFromWord(word, server_config.default_reasoning_budget, false, model_mod.effortArms(config.model_type)) catch {
+        const cfg = reasoningEffortFromWord(word, server_config.default_reasoning_budget, effortWordOnly(allocator, lm, tok), model_mod.effortArms(config.model_type)) catch {
             const msg = try effortRefusalFor(allocator, lm, word);
             defer allocator.free(msg);
             try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", msg, 400);
             return;
-        }).enable;
+        };
+        enable_thinking = cfg.enable;
+        effort_budget = cfg.budget;
     }
+    const reasoning_budget: i32 = if (root.get("reasoning_budget_tokens")) |v| switch (v) {
+        .integer => |i| clampJsonI32(i),
+        else => effort_budget,
+    } else effort_budget;
 
     // ── tools ──
     var tools_json: ?[]const u8 = null;
@@ -16108,7 +16113,7 @@ fn handleResponsesInner(
         grammar_schema_val != null,
         active_has_tools,
         enable_thinking,
-        false, // Responses parses reasoning.budget but does not enforce it.
+        reasoning_budget >= 0,
         schema_proto_active,
     )) {
         .deferred => {},
@@ -16211,6 +16216,11 @@ fn handleResponsesInner(
             }
         }
     }
+
+    // Enforced at decode: the bound closes the thought, so this surface parses a closed block.
+    var think_bound = armThinkBound(allocator, lm, tok, prompt_ids, enable_thinking, reasoning_budget);
+    defer if (think_bound) |tb| allocator.free(tb.forced);
+    if (think_bound) |*tb| sampling.think_bound = tb;
 
     // ── pre-allocate response id (used in streaming envelopes too) ──
     const resp_id = try responses_mod.makeId(stream.io, allocator, "resp");
