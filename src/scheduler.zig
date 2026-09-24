@@ -2953,15 +2953,24 @@ test "coldLoadVision honors the process-wide vision opt-out" {
 /// iOS) is the figure that decides whether the load survives. Live bug: an
 /// 8 GB iPhone reported ~4 GB host-free and the preflight refused a 3.6 GB
 /// model that fit comfortably inside the ~6.4 GB process limit.
-fn effectiveAvailableBytes(host_avail: u64, proc_avail: u64) u64 {
-    return if (proc_avail > 0) proc_avail else host_avail;
+/// `gpu_limit` = Metal's working-set limit (0 = unknown): a lowered `iogpu.wired_limit_mb` binds
+/// below free RAM, and weights past it OOM in warmup instead of refusing by name.
+fn effectiveAvailableBytes(host_avail: u64, proc_avail: u64, gpu_limit: u64) u64 {
+    const avail = if (proc_avail > 0) proc_avail else host_avail;
+    return if (gpu_limit > 0) @min(avail, gpu_limit) else avail;
+}
+
+test "effectiveAvailableBytes is capped by the GPU working-set limit" {
+    const GB: u64 = 1024 * 1024 * 1024;
+    try std.testing.expectEqual(36 * GB, effectiveAvailableBytes(98 * GB, 0, 36 * GB));
+    try std.testing.expect(memInsufficientForLoad(70 * GB, effectiveAvailableBytes(98 * GB, 0, 36 * GB)));
 }
 
 test "effectiveAvailableBytes prefers the per-process jetsam headroom when present" {
     const GB: u64 = 1024 * 1024 * 1024;
-    try std.testing.expectEqual(6 * GB, effectiveAvailableBytes(4 * GB, 6 * GB)); // iOS: proc wins
-    try std.testing.expectEqual(4 * GB, effectiveAvailableBytes(4 * GB, 0)); // macOS: proc query = 0 → host
-    try std.testing.expectEqual(@as(u64, 0), effectiveAvailableBytes(0, 0)); // both unknown → 0 (never blocks)
+    try std.testing.expectEqual(6 * GB, effectiveAvailableBytes(4 * GB, 6 * GB, 0)); // iOS: proc wins
+    try std.testing.expectEqual(4 * GB, effectiveAvailableBytes(4 * GB, 0, 0)); // macOS: proc query = 0 → host
+    try std.testing.expectEqual(@as(u64, 0), effectiveAvailableBytes(0, 0, 0)); // both unknown → 0 (never blocks)
 }
 
 fn memInsufficientForLoad(weights_bytes: u64, avail_bytes: u64) bool {
@@ -3184,14 +3193,14 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // its memory" case. Bypass with --skip-mem-preflight.
     if (!skip_mem_preflight) {
         const weights_bytes = streaming_resident_bytes orelse modelDiskBytes(sch.io, params.model_dir);
-        const avail_bytes = effectiveAvailableBytes(status.getAvailableMemBytes(), status.getProcAvailableMemBytes());
+        const avail_bytes = effectiveAvailableBytes(status.getAvailableMemBytes(), status.getProcAvailableMemBytes(), mlx.maxRecommendedWorkingSet());
         log.info("[preflight] weights ~{d:.2} GB, available {d:.2} GB\n", .{
             @as(f64, @floatFromInt(weights_bytes)) / (1024.0 * 1024.0 * 1024.0),
             @as(f64, @floatFromInt(avail_bytes)) / (1024.0 * 1024.0 * 1024.0),
         });
         if (memInsufficientForLoad(weights_bytes, avail_bytes)) {
             const gb = 1024.0 * 1024.0 * 1024.0;
-            log.err("Insufficient memory to load model: needs ~{d:.1} GB free ({d:.1} GB of weights plus headroom for warmup buffers and a baseline KV cache) but only {d:.1} GB is available. Close other models/apps (or wait for a prior sushi to fully exit) and retry; pass --skip-mem-preflight to override.\n", .{
+            log.err("Insufficient memory to load model: needs ~{d:.1} GB free ({d:.1} GB of weights plus headroom for warmup buffers and a baseline KV cache) but only {d:.1} GB is available (free RAM, capped at the GPU working-set limit that iogpu.wired_limit_mb sets). Close other models/apps (or wait for a prior sushi to fully exit) and retry; pass --skip-mem-preflight to override.\n", .{
                 @as(f64, @floatFromInt(loadRequirementBytes(weights_bytes))) / gb,
                 @as(f64, @floatFromInt(weights_bytes)) / gb,
                 @as(f64, @floatFromInt(avail_bytes)) / gb,

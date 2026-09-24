@@ -20,6 +20,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
 
 ## Load-time preflight
 
+- The preflight's available figure is free RAM CAPPED at Metal's working-set limit (`effectiveAvailableBytes`): a
+  lowered `iogpu.wired_limit_mb` binds below free RAM, and a load past it failed warmup, then every request.
 - Preflight refusals → `InsufficientMemory` → 503 + entry reset to `.unloaded`. A refusal quotes the number it
   COMPARED (`loadRequirementBytes`) and the flag that would admit (`--wired-margin-gib`, `--skip-mem-preflight`,
   `iogpu.wired_limit_mb`).
