@@ -55,6 +55,7 @@ quote them from a committed file.
 | `docs/private/sashimi-workflow.md` | how to convert with sashimi: venv, subcommands, served-pack recipes, imatrix files and hashes, stamps, window speeds, wall times, speed work, lessons |
 | `docs/private/sashimi-codebooks.md` | MCG decision, decoder dead ends, fractional-rate trellis |
 | `docs/private/measurement-raw.md` | the raw-file path behind every committed measurement, keyed by doc and section |
+| `docs/private/future.md` | work we decided is worth doing but haven't started; an entry leaves when it starts or lands |
 
 Skills: `/release` (SemVer, CHANGELOG), `/bench` (llmprobe methodology, comparison traps).
 
