@@ -99,9 +99,10 @@ Flags that matter: `--model --serve --host --port --ctx-size --kv-quant --kv-att
 
 ## Building
 
-- First-time: `./scripts/fetch-zig.sh` stages the pinned Zig at `.zig-toolchain/` (it 404s now: copy an existing
-  one). A git worktree lacks `.zig-toolchain/` and `lib/mlx/`: symlink both from the main checkout. After a
-  toolchain/SDK change `rm -rf .zig-cache` (configure-time output is cached).
+- First-time: `./scripts/fetch-zig.sh` stages the pinned Zig (`0.17.0-dev.2248`) at `.zig-toolchain/`; ziglang.org
+  drops old nightlies, so a 404 means bump the pin. A git worktree lacks `.zig-toolchain/` and `lib/mlx/`: symlink
+  both from the main checkout (fetch-zig replaces a stale link with its own copy). After a toolchain/SDK change
+  `rm -rf .zig-cache` (configure-time output is cached).
 - **ALWAYS `zig build -Doptimize=ReleaseFast`, never bare `zig build`** (Debug is 2–4× slower ⇒ fake regressions).
   `zig build test` does NOT refresh `zig-out/bin/sushi` — rebuild before any live A/B.
 - mlx + mlx-c: `scripts/build-mlx.sh`. Bump = checkout tag → rerun → re-diff `src/mlx.zig` externs against

@@ -12,9 +12,11 @@
 #
 # This is the single source of truth for the pinned Zig version. Bump
 # ZIG_VERSION to upgrade; CI and local builds re-fetch automatically.
+# ziglang.org/builds keeps only recent nightlies: when the download 404s, pin
+# a newer one that the build and the full test suite accept.
 set -euo pipefail
 
-ZIG_VERSION="${ZIG_VERSION:-0.17.0-dev.1818+7051f8e73}"
+ZIG_VERSION="${ZIG_VERSION:-0.17.0-dev.2248+3f6a02acd}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -28,6 +30,8 @@ if [ -f "$STAMP" ] && [ -x "$DEST/zig" ]; then
     exit 0
   fi
   echo "[fetch-zig] staged version '$(cat "$STAMP")' != '$ZIG_VERSION' — refetching"
+  # The build cache holds configure-time paths from the old toolchain.
+  rm -rf "$REPO_ROOT/.zig-cache"
 fi
 
 case "$(uname -m)" in
@@ -59,7 +63,9 @@ if [ ! -x "$EXTRACTED/zig" ]; then
   exit 1
 fi
 
-rm -rf "$DEST"
+# A worktree may symlink .zig-toolchain to the main checkout's copy: replace
+# the link with its own copy, never write through it.
+if [ -L "$DEST" ]; then rm "$DEST"; else rm -rf "$DEST"; fi
 mkdir -p "$DEST"
 cp -R "$EXTRACTED"/. "$DEST"/
 

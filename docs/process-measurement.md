@@ -81,6 +81,7 @@ local path.
 
 ## Build environment notes
 
-- The pinned Zig nightly is no longer downloadable (`scripts/fetch-zig.sh` 404s); copy an existing `.zig-toolchain/`.
+- ziglang.org keeps only recent Zig nightlies: when `scripts/fetch-zig.sh` 404s, pin a newer one that builds and
+  passes the full suite.
 - A git worktree has neither `.zig-toolchain/` nor the built `lib/mlx/`: symlink both from the main checkout.
 - `lib/mlx-src` and `lib/mlxc-src` are the only submodules; they are needed only to rebuild MLX.
