@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 python3 - <<'EOF'
-import re, sys, yaml
+import os, re, sys, yaml
 
 FAIL = 0
 def check(cond, msg):
@@ -124,6 +124,9 @@ check(re.search(r"TZ[=:]\s*[\"']?([A-Za-z_]+/[A-Za-z_]+)", wf_text) is not None,
 # and for months they did not: the packaging path shipped the binary alone.
 for f in ("LICENSE-APACHE-2.0", "NOTICE"):
     check(f in wf_text, f"release.yml packages {f} into the CLI tarball")
+# The packaging step copies them, so a tree without them cannot cut a release.
+for f in ("LICENSE", "LICENSE-APACHE-2.0", "NOTICE"):
+    check(os.path.isfile(f), f"{f} exists at the repo root")
 
 sys.exit(FAIL)
 EOF
