@@ -90,7 +90,7 @@ Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds)
 | `kv_quant.zig` | quantized KV contract (`--kv-quant 4|8`) | engine-kv-cache |
 | `prefix_cache.zig` / `kv_disk_cache.zig` / `kv_disk_writer.zig` / `restore_dump.zig` | prefix cache, SSD tier | engine-prefix-cache |
 | `tokenizer.zig` / `tokenize_cache.zig` | BPE, special tokens, per-model `digit_group`; prompt LRU | engine-mlx-gotchas |
-| `vision.zig` / `qwen_vision.zig` / `mrope.zig` | media INPUT (Qwen3-VL tower, M-RoPE) | server-lifecycle |
+| `vision.zig` / `qwen_vision.zig` / `mimo_vision.zig` / `mrope.zig` | media INPUT (Qwen3-VL tower + M-RoPE, MiMo-ViT) | server-lifecycle, arch-mimo-v2 |
 | `kld.zig` | `sushi kld capture|compare` | quality-kld |
 | `metrics.zig` / `status.zig` / `log.zig` | metrics, status bar, logging | server-http-apis |
 | `format_corpus_test.zig` / `tool_traffic_replay_test.zig` | hermetic format corpus, real-traffic replay | server-tool-calling |

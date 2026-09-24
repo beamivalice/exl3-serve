@@ -17,6 +17,7 @@ const dsv4_mod = @import("deepseek_v4.zig");
 const qwen_vision = @import("qwen_vision.zig");
 const muse_vision = @import("muse_vision.zig");
 const lfm2_vision = @import("lfm2_vision.zig");
+const mimo_vision = @import("mimo_vision.zig");
 const mrope_mod = @import("mrope.zig");
 const vision_mod = @import("vision.zig");
 const log = @import("log.zig");
@@ -12570,8 +12571,9 @@ fn mediaKindRefusal(messages: []const chat_mod.Message, flat: FlatMedia, has_tow
     return null;
 }
 
-/// Peak GPU scratch of one ViT call over `patches` rows (`qwen vision ubench`).
+/// Peak GPU scratch of one ViT call over `patches` rows, from each tower's measured bill.
 fn visionScratchBytes(config: *const model_mod.ModelConfig, patches: u64) u64 {
+    if (config.mimo_vision) return mimo_vision.encodeScratchBytes(config, patches);
     return qwen_vision.encodeScratchBytes(config, patches);
 }
 
@@ -12910,6 +12912,14 @@ fn visionPreprocFromConfig(config: *const model_mod.ModelConfig) chat_mod.Vision
             .pixels_tolerance = config.lv_pixels_tolerance,
         };
     }
+    if (config.mimo_vision) return .{
+        .mode = .mimo,
+        .patch = config.qv_patch,
+        .tps = config.qv_temporal_patch,
+        .merge = config.qv_merge,
+        .min_pixels = config.qv_min_pixels,
+        .max_pixels = config.qv_max_pixels,
+    };
     if (!config.qwen_vision and !config.muse_vision) return .{};
     return .{
         .mode = if (config.muse_vision) .muse else .qwen,
@@ -12958,6 +12968,39 @@ test "visionPreprocFromConfig threads each tower's processor bounds" {
     try std.testing.expectEqual(.muse, muse.mode);
     try std.testing.expectEqual(@as(u32, 4096), muse.max_tokens);
     try std.testing.expectEqual(.gemma, visionPreprocFromConfig(&.{}).mode);
+
+    const mimo = visionPreprocFromConfig(&.{
+        .mimo_vision = true,
+        .qv_patch = 16,
+        .qv_temporal_patch = 2,
+        .qv_merge = 2,
+        .qv_min_pixels = 8192,
+        .qv_max_pixels = 8388608,
+    });
+    try std.testing.expectEqual(.mimo, mimo.mode);
+    try std.testing.expectEqual(@as(u32, 8192), mimo.min_pixels);
+    try std.testing.expectEqual(@as(u32, 8388608), mimo.max_pixels);
+}
+
+test "a MiMo image is resized and normalized the vendor way, in Qwen2-VL patch order" {
+    // 36x20 PNG, four flat quadrants: red, green / blue, yellow.
+    const url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACQAAAAUCAIAAABqGAhiAAAALUlEQVR42mM4ISdHBpIjSxvDqGWjlo1aNswsI0/fhw8iZKBRy0YtG7VsmFkGAGi0hC5b6HVfAAAAAElFTkSuQmCC";
+    const vp = chat_mod.VisionPreproc{ .mode = .mimo, .patch = 16, .tps = 2, .merge = 2, .min_pixels = 8192, .max_pixels = 8388608 };
+    const img = parseImageUrlContent(std.testing.allocator, url, vp) orelse return error.DecodeFailed;
+    defer std.testing.allocator.free(img.pixels);
+    // Vendor smart_resize: 20x36 -> 96x128 -> a 6x8 patch grid.
+    try std.testing.expectEqual(@as(u32, 6), img.grid_h);
+    try std.testing.expectEqual(@as(u32, 8), img.grid_w);
+    const pv = @as([*]const f32, @ptrCast(@alignCast(img.pixels.ptr)))[0 .. img.pixels.len / 4];
+    const feat: usize = 3 * 2 * 16 * 16;
+    try std.testing.expectEqual(@as(usize, 6 * 8) * feat, pv.len);
+    // Token 0's first feature is the red corner through ImageNet mean/std x255.
+    try std.testing.expectApproxEqAbs(@as(f32, (200.0 - 123.675) / 58.395), pv[0], 1e-5);
+    // Its second temporal slot duplicates the frame: [C, T, P, P] features.
+    try std.testing.expectApproxEqAbs(pv[0], pv[16 * 16], 0);
+    // The last token (merge-block order) sits in the yellow corner; its blue channel.
+    const last = pv[(6 * 8 - 1) * feat ..][0..feat];
+    try std.testing.expectApproxEqAbs(@as(f32, (20.0 - 103.53) / 57.375), last[2 * 2 * 16 * 16 + 255], 1e-5);
 }
 
 test "an x-mlx-pixels payload is refused by a patch-grid tower (it is a Gemma format)" {
@@ -13443,6 +13486,7 @@ fn decodeImageToPixels(allocator: std.mem.Allocator, encoded: []const u8, vp: ch
         const rs = switch (vp.mode) {
             .muse => muse_vision.smartResize(src_h, src_w, factor, if (vp.max_tokens > 0) vp.max_tokens else model_mod.MUSE_MAX_IMAGE_TOKENS),
             .lfm2 => lfm2_vision.smartResize(src_h, src_w, vp.patch, vp.merge, vp.min_tokens, vp.max_tokens),
+            .mimo => mimo_vision.smartResize(src_h, src_w, factor, min_pixels, max_pixels),
             else => qwen_vision.smartResizeImage(src_h, src_w, factor, min_pixels, max_pixels),
         };
         const rh = rs.h;
@@ -13457,7 +13501,9 @@ fn decodeImageToPixels(allocator: std.mem.Allocator, encoded: []const u8, vp: ch
         const chw = allocator.alloc(f32, @as(usize, C) * plane) catch return null;
         defer allocator.free(chw);
         const source_len: usize = @as(usize, src_h) * src_w * C;
-        qwen_vision.resizeRgbNormalizedChw(
+        if (vp.mode == .mimo) {
+            mimo_vision.resizeNormalizedChw(chw, px[0..source_len], src_h, src_w, rh, rw) catch return null;
+        } else qwen_vision.resizeRgbNormalizedChw(
             allocator,
             chw,
             px[0..source_len],
@@ -13829,6 +13875,23 @@ test "towerFitFault admits an image at the 1536^2 cap when 9 GB is free" {
     // Measured per-block peak at 96x96 patches: 6.1 GB (`qwen vision ubench`).
     const cap = [_]chat_mod.ImageData{testGridImage(96, 96, "")};
     try std.testing.expect(towerFitFault(&config, &cap, &.{}, 2304, 9_000_000_000) == null);
+}
+
+test "towerFitFault bills a MiMo image by the MiMo-ViT's measured scratch, not score sheets" {
+    var config = model_mod.ModelConfig{};
+    config.mimo_vision = true;
+    config.qv_heads = 32;
+    config.mvit_kv_heads = 8;
+    config.qv_head_dim = 64;
+    config.qv_hidden = 1280;
+    config.qv_intermediate = 4608;
+    config.qv_out_hidden = 4096;
+    // The engine's 1536^2 cap: 96x96 patches. N^2 score sheets would bill ~33 GB.
+    const cap = [_]chat_mod.ImageData{testGridImage(96, 96, "")};
+    const need = mimo_vision.encodeScratchBytes(&config, 9216);
+    try std.testing.expect(need < 3 * (1 << 30));
+    try std.testing.expect(towerFitFault(&config, &cap, &.{}, 2304, 3 * (1 << 30)) == null);
+    try std.testing.expect(towerFitFault(&config, &cap, &.{}, 2304, need / 2) != null);
 }
 
 test "towerFitFault refuses an encode whose scratch does not fit, naming both sizes" {

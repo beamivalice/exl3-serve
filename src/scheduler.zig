@@ -3234,8 +3234,8 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         if (params.expert_cache_fit_resolver) |fit| try fit(params.config, streaming_resident_bytes.?);
     } else if (params.config.usesMimoSourceTrunk()) {
         // A resident MiMo load is billed by what the source loader serves: the
-        // FP8 trunk as stored plus its scale grids.
-        streaming_resident_bytes = try model_mod.mimoSourceResidentBytes(sch.io, sch.allocator, params.model_dir);
+        // FP8 trunk as stored plus its scale grids, and the vision tower it loads.
+        streaming_resident_bytes = try model_mod.mimoSourceResidentBytes(sch.io, sch.allocator, params.model_dir, params.load_vision and params.config.mimo_vision);
         if (mtpChoiceFor(params.mtp_enabled, params.mtp_explicit, params.config).on) {
             streaming_resident_bytes.? += try model_mod.mimoMtpResidentBytes(sch.io, sch.allocator, params.model_dir);
             if (mtp_mod.MtpModel.draftRerankMode() != .off)

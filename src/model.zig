@@ -19,6 +19,10 @@ pub const HiddenAct = enum { gelu_approx, gelu, silu, relu_sq };
 /// Upper bound on a vision tower's per-layer type table (muse ships 50).
 pub const MAX_VISION_LAYERS = 64;
 
+/// A MiMo-ViT block's attention: all patches, or a band over the image's
+/// patches in row-major or column-major merge-unit order.
+pub const MimoVitAttn = enum { full, row, col };
+
 /// `MuseGlimmerImageProcessor.max_image_tokens` — MERGED tokens, not pixels.
 pub const MUSE_MAX_IMAGE_TOKENS = 4096;
 
@@ -585,6 +589,14 @@ pub const ModelConfig = struct {
     lv_pixels_tolerance: f32 = 2.0,
     lv_thumbnail_token_id: u32 = 0,
     lv_row_col_base_id: u32 = 0, // id of `<|img_row_1_col_1|>`; the block is row-major
+    // MiMo-ViT (src/mimo_vision.zig). Shares the qv_* geometry; attention is
+    // GQA, and every block is full, or a ±window band over row-major or
+    // column-major merge-unit order, with a per-head sink on the band blocks.
+    mimo_vision: bool = false,
+    mvit_kv_heads: u32 = 0,
+    mvit_window: u32 = 0,
+    mvit_sinks: bool = false,
+    mvit_attn: [MAX_VISION_LAYERS]MimoVitAttn = @splat(.full),
     // Interleaved M-RoPE sections [t, h, w]; sum = rotary_dim/2 (e.g. [11,11,10]).
     mrope_section: [3]u32 = .{ 0, 0, 0 },
     mrope_interleaved: bool = false,
@@ -3710,6 +3722,63 @@ fn mimoBool(obj: std.json.ObjectMap, key: []const u8, fallback: bool) !bool {
     return v.bool;
 }
 
+/// MiMo-ViT geometry, the image token ids, and the pixel bounds the vendor
+/// processors read from config.json's own `processor_config` (they ignore
+/// preprocessor_config.json).
+fn parseMimoVision(c: *ModelConfig, obj: std.json.ObjectMap) !void {
+    const vc_val = obj.get("vision_config") orelse return;
+    if (vc_val != .object) return error.UnsupportedMimoV2Config;
+    const vc = vc_val.object;
+    c.qv_depth = try mimoUint(vc, "depth", 0);
+    c.qv_hidden = try mimoUint(vc, "hidden_size", 0);
+    c.qv_heads = try mimoUint(vc, "num_heads", 0);
+    c.qv_head_dim = try mimoUint(vc, "qk_channels", 64);
+    c.mvit_kv_heads = try mimoUint(vc, "num_key_value_heads", c.qv_heads);
+    c.qv_intermediate = try mimoUint(vc, "intermediate_size", 0);
+    c.qv_out_hidden = try mimoUint(vc, "out_hidden_size", c.hidden_size);
+    c.qv_patch = try mimoUint(vc, "patch_size", 16);
+    c.qv_merge = try mimoUint(vc, "spatial_merge_size", 2);
+    c.qv_temporal_patch = try mimoUint(vc, "temporal_patch_size", 2);
+    c.mvit_window = try mimoUint(vc, "visual_token_window_size", 0);
+    c.mvit_sinks = try mimoBool(vc, "use_sink", false);
+    if (c.qv_depth == 0 or c.qv_depth > MAX_VISION_LAYERS or c.qv_hidden == 0 or c.qv_heads == 0 or
+        c.qv_head_dim == 0 or c.mvit_kv_heads == 0 or c.qv_heads % c.mvit_kv_heads != 0 or
+        c.qv_intermediate == 0 or c.qv_out_hidden != c.hidden_size or c.qv_patch == 0 or c.qv_merge == 0 or
+        c.qv_temporal_patch == 0 or c.mvit_window == 0)
+        return error.UnsupportedMimoV2Config;
+
+    var full: [MAX_VISION_LAYERS]bool = @splat(false);
+    if (vc.get("fullatt_block_indexes")) |v| {
+        if (v != .array) return error.UnsupportedMimoV2Config;
+        for (v.array.items) |item| {
+            if (item != .integer or item.integer < 0 or item.integer >= c.qv_depth) return error.UnsupportedMimoV2Config;
+            full[@intCast(item.integer)] = true;
+        }
+    }
+    const types = vc.get("vit_window_attn_types") orelse return error.UnsupportedMimoV2Config;
+    if (types != .array or types.array.items.len != c.qv_depth) return error.UnsupportedMimoV2Config;
+    for (types.array.items, 0..) |item, i| {
+        if (item != .integer) return error.UnsupportedMimoV2Config;
+        c.mvit_attn[i] = if (full[i]) .full else switch (item.integer) {
+            -1, 0 => .row,
+            1 => .col,
+            else => return error.UnsupportedMimoV2Config,
+        };
+    }
+
+    c.image_token_id = try mimoUint(obj, "image_token_id", 0);
+    c.vision_start_token_id = try mimoUint(obj, "vision_start_token_id", 0);
+    c.vision_end_token_id = try mimoUint(obj, "vision_end_token_id", 0);
+    if (c.image_token_id == 0 or c.vision_start_token_id == 0 or c.vision_end_token_id == 0)
+        return error.UnsupportedMimoV2Config;
+    if (obj.get("processor_config")) |pc| {
+        if (pc != .object) return error.UnsupportedMimoV2Config;
+        c.qv_min_pixels = try mimoUint(pc.object, "image_min_pixels", 0);
+        c.qv_max_pixels = try mimoUint(pc.object, "image_max_pixels", 0);
+    }
+    c.mimo_vision = true;
+}
+
 fn parseMimoConfig(c: *ModelConfig, obj: std.json.ObjectMap) !void {
     c.model_type = "mimo_v2";
     c.weight_prefix = "model";
@@ -3718,7 +3787,11 @@ fn parseMimoConfig(c: *ModelConfig, obj: std.json.ObjectMap) !void {
     c.has_pre_ff_norm = false;
     c.has_qk_norm = false;
     c.hidden_act = .silu;
-    c.has_vision = false; // The text engine does not implement MiMo's towers.
+    try parseMimoVision(c, obj);
+    c.has_vision = c.mimo_vision;
+    // Audio and video are not served yet; their pads must never join the splice.
+    c.audio_token_id = 0;
+    c.video_token_id = 0;
     c.has_sliding_window = true;
     c.has_explicit_layer_types = true;
     c.rope_scaling_factor = 1;
@@ -3978,19 +4051,27 @@ pub fn loadWeights(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
 
 /// MiMo's trunk is FP8 on disk under either routed-expert layout, so both take
 /// the source loader; an EXL3 pack's routed banks come resident beside it.
-pub fn loadWeightsMimoSource(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !Weights {
+pub fn loadWeightsMimoSource(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, vision: bool) !Weights {
+    const mimo_source = @import("mimo_source.zig");
     var config = try parseConfig(io, allocator, model_dir);
     defer config.deinit(allocator);
-    log.info("[mimo-source] loading original shards: {s} experts, FP8 trunk in source bytes\n", .{
+    log.info("[mimo-source] loading original shards: {s} experts, FP8 trunk in source bytes{s}\n", .{
         if (config.expert_layout == .exl3_k4) "resident EXL3" else "native MXFP4",
+        if (vision) ", bf16 vision tower" else "",
     });
-    return @import("mimo_source.zig").loadWeights(io, allocator, model_dir, &config);
+    var weights = try mimo_source.loadWeights(io, allocator, model_dir, &config);
+    errdefer weights.deinit();
+    if (vision) try mimo_source.loadVisionWeightsInto(&weights, io, allocator, model_dir);
+    return weights;
 }
 
 /// Resident bytes of a MiMo pack the source loader prepares: the trunk as
-/// served (FP8 codes + scale grids, bf16 rest) plus any resident routed banks.
-pub fn mimoSourceResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !u64 {
-    return @import("mimo_source.zig").residentBytes(io, allocator, model_dir);
+/// served (FP8 codes + scale grids, bf16 rest) plus any resident routed banks,
+/// plus the vision tower as stored when it is loaded.
+pub fn mimoSourceResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, vision: bool) !u64 {
+    const mimo_source = @import("mimo_source.zig");
+    const trunk = try mimo_source.residentBytes(io, allocator, model_dir);
+    return if (vision) trunk + try mimo_source.visionResidentBytes(io, allocator, model_dir) else trunk;
 }
 
 /// Resident bytes of a MiMo checkpoint's MTP heads as `mimo_source` uploads them.
@@ -4069,13 +4150,13 @@ pub fn loadWeightsForConfig(
         return error.ArchitectureUnsupported;
     }
     if (config.expert_streaming) return loadWeightsStreaming(io, allocator, model_dir, config.expert_layout);
-    if (config.usesMimoSourceTrunk()) return loadWeightsMimoSource(io, allocator, model_dir);
+    if (config.usesMimoSourceTrunk()) return loadWeightsMimoSource(io, allocator, model_dir, load_vision and config.mimo_vision);
     if (load_vision) return loadWeightsWithVision(io, allocator, model_dir);
     return loadWeights(io, allocator, model_dir);
 }
 
 pub fn loadWeightsStreaming(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, layout: expert_quant.Layout) !Weights {
-    if (layout == .mxfp4_individual) return loadWeightsMimoSource(io, allocator, model_dir);
+    if (layout == .mxfp4_individual) return loadWeightsMimoSource(io, allocator, model_dir, false);
     var dir = try std.Io.Dir.openDirAbsolute(io, model_dir, .{ .iterate = true });
     defer dir.close(io);
     return loadWeightsFromOpenDirMode(io, allocator, dir, model_dir, false, layout);
@@ -8229,6 +8310,69 @@ test "ModelConfig parses mimo_v2 hybrid geometry and sigmoid routing" {
     try testing.expect(c.isEosToken(17));
 }
 
+const MIMO_V2_VISION_JSON =
+    \\{
+    \\  "model_type": "mimo_v2", "hidden_size": 384, "vocab_size": 128,
+    \\  "num_hidden_layers": 2, "intermediate_size": 1536,
+    \\  "num_attention_heads": 4, "num_key_value_heads": 2,
+    \\  "head_dim": 192, "v_head_dim": 128,
+    \\  "hybrid_layer_pattern": [0,1], "sliding_window": 128,
+    \\  "partial_rotary_factor": 0.334, "moe_layer_freq": [0,1],
+    \\  "n_routed_experts": 16, "num_experts_per_tok": 4, "moe_intermediate_size": 192,
+    \\  "image_token_id": 101, "video_token_id": 102, "audio_token_id": 103,
+    \\  "vision_start_token_id": 104, "vision_end_token_id": 105,
+    \\  "vision_config": {
+    \\    "depth": 4, "hidden_size": 64, "num_heads": 4, "num_key_value_heads": 2,
+    \\    "intermediate_size": 96, "out_hidden_size": 384, "patch_size": 16,
+    \\    "spatial_merge_size": 2, "temporal_patch_size": 2, "use_sink": true,
+    \\    "fullatt_block_indexes": [0, 3], "vit_window_attn_types": [-1, 0, 1, -1],
+    \\    "visual_token_window_size": 64, "window_size": 128
+    \\  },
+    \\  "processor_config": {"image_min_pixels": 8192, "image_max_pixels": 8388608}
+    \\}
+;
+
+test "mimo_v2 config reads the MiMo-ViT geometry and the processor's own pixel bounds" {
+    const c = try parseConfigFromJson(testing.allocator, MIMO_V2_VISION_JSON);
+    try testing.expect(c.has_vision and c.mimo_vision and !c.qwen_vision and !c.muse_vision);
+    try testing.expectEqual(@as(u32, 4), c.qv_depth);
+    try testing.expectEqual(@as(u32, 64), c.qv_hidden);
+    try testing.expectEqual(@as(u32, 4), c.qv_heads);
+    // The reference's `qk_channels` default, not hidden / heads.
+    try testing.expectEqual(@as(u32, 64), c.qv_head_dim);
+    try testing.expectEqual(@as(u32, 2), c.mvit_kv_heads);
+    try testing.expectEqual(@as(u32, 96), c.qv_intermediate);
+    try testing.expectEqual(@as(u32, 384), c.qv_out_hidden);
+    try testing.expectEqual(@as(u32, 16), c.qv_patch);
+    try testing.expectEqual(@as(u32, 2), c.qv_merge);
+    try testing.expectEqual(@as(u32, 2), c.qv_temporal_patch);
+    try testing.expectEqual(@as(u32, 64), c.mvit_window);
+    try testing.expect(c.mvit_sinks);
+    try testing.expectEqualSlices(MimoVitAttn, &.{ .full, .row, .col, .full }, c.mvit_attn[0..4]);
+    try testing.expectEqual(@as(u32, 8192), c.qv_min_pixels);
+    try testing.expectEqual(@as(u32, 8388608), c.qv_max_pixels);
+    try testing.expectEqual(@as(u32, 101), c.image_token_id);
+    try testing.expectEqual(@as(u32, 104), c.vision_start_token_id);
+    try testing.expectEqual(@as(u32, 105), c.vision_end_token_id);
+    // Video and audio are not served yet: their placeholders must never join the splice.
+    try testing.expectEqual(@as(u32, 0), c.video_token_id);
+    try testing.expectEqual(@as(u32, 0), c.audio_token_id);
+}
+
+test "mimo_v2 config refuses a MiMo-ViT whose block tables disagree with its depth" {
+    const cases = [_][]const u8{
+        "\"fullatt_block_indexes\": [0, 4], \"vit_window_attn_types\": [-1, 0, 1, -1]",
+        "\"fullatt_block_indexes\": [0, 3], \"vit_window_attn_types\": [-1, 0, 1]",
+        "\"fullatt_block_indexes\": [0, 3], \"vit_window_attn_types\": [-1, 0, 2, -1]",
+    };
+    for (cases) |tables| {
+        const json = try std.mem.replaceOwned(u8, testing.allocator, MIMO_V2_VISION_JSON,
+            "\"fullatt_block_indexes\": [0, 3], \"vit_window_attn_types\": [-1, 0, 1, -1]", tables);
+        defer testing.allocator.free(json);
+        try testing.expectError(error.UnsupportedMimoV2Config, parseConfigFromJson(testing.allocator, json));
+    }
+}
+
 test "mimo_v2 config rejects unsupported routing and malformed layer geometry" {
     const base =
         \\{"model_type":"mimo_v2", "num_hidden_layers":2, "hidden_size":384,
@@ -8355,6 +8499,22 @@ test "real mimo_v2 Flash config agrees with source geometry" {
     try testing.expectEqual(@as(u32, 4), c.quant_bits);
     try testing.expectEqual(@as(u32, 32), c.quant_group_size);
     try testing.expect(c.expertStreamingRequired());
+
+    try testing.expect(c.mimo_vision);
+    try testing.expectEqual(@as(u32, 28), c.qv_depth);
+    try testing.expectEqual(@as(u32, 1280), c.qv_hidden);
+    try testing.expectEqual(@as(u32, 32), c.qv_heads);
+    try testing.expectEqual(@as(u32, 8), c.mvit_kv_heads);
+    try testing.expectEqual(@as(u32, 64), c.qv_head_dim);
+    try testing.expectEqual(@as(u32, 4608), c.qv_intermediate);
+    try testing.expectEqual(@as(u32, 64), c.mvit_window);
+    var full: u32 = 0;
+    for (c.mvit_attn[0..c.qv_depth]) |kind| full += @intFromBool(kind == .full);
+    try testing.expectEqual(@as(u32, 4), full);
+    try testing.expect(c.mvit_attn[0] == .full and c.mvit_attn[27] == .full and c.mvit_attn[1] == .row and c.mvit_attn[5] == .col);
+    try testing.expectEqual(@as(u32, 8192), c.qv_min_pixels);
+    try testing.expectEqual(@as(u32, 8388608), c.qv_max_pixels);
+    try testing.expectEqual(@as(u32, 151655), c.image_token_id);
 }
 
 /// The mimo_v2 geometry of "ModelConfig parses mimo_v2 hybrid geometry", kept
@@ -8434,6 +8594,15 @@ test "real mimo_v2 original and converted packs bill the same resident trunk" {
     const converted = try streamingResidentSplit(testing.io, testing.allocator, std.mem.span(reference), .mxfp4_split);
     try testing.expect(original.trunk > 0);
     try testing.expectEqual(converted, original);
+}
+
+test "real mimo_v2 bill carries the bf16 vision tower exactly when it is loaded" {
+    const source = std.c.getenv("MIMO_V2_SOURCE") orelse return error.SkipZigTest;
+    const dir = std.mem.span(source);
+    const text = try mimoSourceResidentBytes(testing.io, testing.allocator, dir, false);
+    const with_tower = try mimoSourceResidentBytes(testing.io, testing.allocator, dir, true);
+    // 364 `visual.*` tensors, all bf16, as stored.
+    try testing.expectEqual(@as(u64, 1_457_188_864), with_tower - text);
 }
 
 test "mimo_v2 original config selects split QKV and native expert quantization" {

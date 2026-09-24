@@ -1,9 +1,9 @@
 # Architecture: MiMo-V2.6-Flash (`mimo_v2`)
 
 How the engine serves MiMo-V2.6-Flash-RL: the source checkpoint's layout, the resident trunk, the MXFP4 and EXL3
-expert paths, the hybrid global/sliding attention with its ring, and the bills that follow the storage. MiMo is an
-experimental TEXT-ONLY bring-up; the supported product is the MCG EXL3 pack. Read this before touching
-`src/mimo_source.zig`, the MiMo arms of `src/transformer.zig`, or anything that bills MiMo's KV.
+expert paths, the hybrid global/sliding attention with its ring, the vision tower, and the bills that follow the
+storage. MiMo serves text and image input; the supported product is the MCG EXL3 pack. Read this before touching
+`src/mimo_source.zig`, `src/mimo_vision.zig`, the MiMo arms of `src/transformer.zig`, or anything that bills MiMo's KV.
 
 Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engine-exl3-experts.md),
 [engine-expert-streaming](engine-expert-streaming.md), [engine-kv-cache](engine-kv-cache.md),
@@ -25,11 +25,13 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   39 sliding layers at a 128-token window (8 KV heads).
 - The FP8 part is `qkv_proj` + the layer-0 MLP (3.07 GB e4m3); the bf16 3.32 GB is mostly `o_proj` (in
   `ignored_layers`). lm_head and embed_tokens are bf16, 1.25 GB each, untied.
-- **Loaded by the engine: text only.** The checkpoint also ships a vision tower (mimovl, 360 tensors, video via
-  `temporal_patch_size` 2), an audio encoder + 20 speech-embedding tables + a separate 24 kHz audio tokenizer, 3 MTP
-  layers (`model.mtp.*`, 48 tensors; ~396 MB each, 1.19 GB) and a 5-layer DFlash drafter (block 8, target layers
-  0/11/23/35/47). The trunk loader skips `visual.`, `audio_encoder.`, `speech_embeddings.` and `model.mtp.`;
-  `model.zig` sets `has_vision=false` for mimo_v2. The three MTP heads load separately under `--mtp`
+- **Loaded by the engine: text + the vision tower.** The checkpoint also ships the vision tower (MiMo-ViT, 364
+  tensors, 1.457 GB bf16; see [Vision](#vision)), an audio encoder + 20 speech-embedding tables + a separate 24 kHz
+  audio tokenizer (input only: the LLM has no speech-output head), 3 MTP layers (`model.mtp.*`, 48 tensors; ~396 MB
+  each, 1.19 GB) and a 5-layer DFlash drafter (block 8, target layers 0/11/23/35/47). The trunk loader skips
+  `visual.`, `audio_encoder.`, `speech_embeddings.` and `model.mtp.`; the tower loads beside it
+  (`mimo_source.loadVisionWeightsInto`) unless `--no-vision`; audio and video are not wired (their pad ids are
+  zeroed so they never join the splice). The three MTP heads load separately under `--mtp`
   (`mimo_source.loadMtpWeights`, `mimo_mtp.zig`; [engine-mtp](engine-mtp.md#mimo)); the DFlash drafter is not loaded.
 
 ## Source checkpoint and packs
@@ -182,6 +184,47 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 - MTP outranks PLD (`server.requestSpecModes`), so PLD runs only on requests without MTP.
 - PLD stays on by default: it pays on echo workloads. The prompt n-gram gate passes all of these prompts (score
   0.16-0.32 against 0.01), so the runtime yield and per-draft gates are what cap the losers at 1-2%.
+
+<a id="vision"></a>
+## Vision (MiMo-ViT)
+
+- **Tower** (`src/mimo_vision.zig`, port of the checkpoint's `MiMoVisionTransformer`): Conv3d patch embed (2x16x16,
+  served as its [1280, 1536] Linear), 28 blocks of RMSNorm + GQA attention (32 q / 8 kv heads, head 64, qkv and proj
+  biases) + SwiGLU (4608, biases), 2-D rotary positions as Qwen2-VL, then LayerNorm + 5120 -> 5120 -> GELU -> 4096
+  over each 2x2 merge unit. The checkpoint ships the merger WITHOUT biases (the modeling code declares them): zero.
+- **Attention per block**: 0/9/18/27 full; the rest a band |i - j| <= 64 over the image's patches, in row-major
+  (types 0) or column-major (type 1) order of whole merge units, with a per-head sink. The sink is a bias on KEY 0's
+  logit (the checkpoint's code and vLLM); SGLang reads it as an extra softmax column. The two readings differ (tiny
+  fixture cos 0.98) and `mimo vision tiny` pins ours. A band block runs as query blocks of 64 rows against 192 keys
+  through fused SDPA; only the first two blocks can see key 0, so only they carry the per-head sink mask.
+- **Positions are 1-D**: an image is `<|vision_start|>` + N `<|image_pad|>` + `<|vision_end|>` at plain text positions
+  (both vendor processors assert rope_type "rope"); no M-RoPE.
+- **Preprocessing is the vendor processors'** (SGLang and vLLM agree; `preprocessor_config.json` is NOT what they
+  read): pixel bounds from config.json `processor_config` (8192 .. 8,388,608, capped at the engine's 1536²),
+  `smart_resize` with tiny sides scaled up first, torch bilinear (align_corners=False, no antialias) on 0..255 floats,
+  ImageNet mean/std x255 (123.675 / 58.395 ...), Qwen2-VL merge-block patch order. A 1920x1080 screenshot is
+  1088x1920: 2040 tokens.
+- **Precision: f32 stream, bf16 matmuls.** The residual stream, norms, rope and attention run in f32 around bf16
+  Linear matmuls. An all-bf16 tower drifts to cos 0.997 against the f32 reference by the last block, and the
+  checkpoint's own tower run in torch bf16 does the same (0.99697; per block ~1.000 through 13, 0.995 at 27).
+  Real weights, 448x640 image (280 tokens), vs the reference on the CPU in f32: preprocessing max |diff| 3.6e-7;
+  features cos 0.99718 all-bf16 -> 0.99945 f32 stream (RMS ratio 1.0032).
+- **Encode time**, one image, best of 5 (`mimo vision ubench`; `taskpolicy -a`, fans max, die <= 65 C at start;
+  all-bf16 = eee7d24, f32 stream = the served code, which also evaluates per block):
+
+  | patches (tokens) | all-bf16 | f32 stream | cost |
+  |---|---|---|---|
+  | 14x14 (49) | 14.1 ms | 21.9 ms | +55% |
+  | 68x120, a 1920x1080 screenshot (2040) | 383 ms | 498 ms | +30% |
+  | 96x96, the 1536² cap (2304) | 502 ms | 570 ms | +14% |
+
+- **Bills**: `mimoSourceResidentBytes(dir, vision)` adds the tower as stored (1,457,188,864 bytes) when it loads.
+  The encode's scratch is the media path's fit check (`server.towerFitFault` -> `visionScratchBytes`, which takes
+  `mimo_vision.encodeScratchBytes` for this tower instead of the N² score-sheet formula): a request whose largest
+  image does not fit is a named 400. The stream is evaluated per block so one block's buffers are the peak:
+  measured 57 / 1645 / 1686 MB at 196 / 8160 / 9216 patches against bills of 111 / 1905 / 2143 MB. Without the
+  per-block eval the lazy graph held 508 MB even at 196 patches.
+- Video (MM:SS timestamp text between 2-frame groups) and audio are not wired.
 
 ## Bills (the bill follows the storage in the SAME commit)
 

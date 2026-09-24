@@ -159,6 +159,48 @@ pub fn mtpResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []c
     return total;
 }
 
+/// Uploads the checkpoint's vision tower (`visual.*`) as stored into `weights`.
+/// The rank-5 Conv3d patch weight lands as the [out, C*T*P*P] Linear it is over
+/// a flattened patch.
+pub fn loadVisionWeightsInto(weights: *model.Weights, io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var source = try loadSourceIndex(io, arena.allocator(), model_dir);
+    var it = source.tensors.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (!isVisionKey(key)) continue;
+        var meta = entry.value_ptr.*;
+        var flat: [2]u64 = undefined;
+        if (meta.shape.len > 4) {
+            flat = .{ meta.shape[0], try shapeProduct(meta.shape[1..]) };
+            meta.shape = &flat;
+        }
+        const raw = try readTensor(allocator, model_dir, meta);
+        defer allocator.free(raw);
+        const arr = try uploadDense(raw, meta, .{ .ctx = null });
+        errdefer _ = mlx.mlx_array_free(arr);
+        try putWeight(weights, allocator, key, arr);
+    }
+}
+
+/// Resident bytes `loadVisionWeightsInto` uploads.
+pub fn visionResidentBytes(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8) !u64 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const source = try loadSourceIndex(io, arena.allocator(), model_dir);
+    var total: u64 = 0;
+    var it = source.tensors.iterator();
+    while (it.next()) |entry| {
+        if (isVisionKey(entry.key_ptr.*)) total += try payloadBytes(entry.value_ptr.*, null);
+    }
+    return total;
+}
+
+fn isVisionKey(key: []const u8) bool {
+    return std.mem.startsWith(u8, key, "visual.");
+}
+
 fn isMtpKey(key: []const u8) bool {
     return std.mem.startsWith(u8, key, "model.mtp.layers.");
 }
@@ -1731,6 +1773,43 @@ test "mimo source keeps the FP8 trunk in its source bytes and bills them" {
         const grid = mlx.mlx_array_data_float32(sc) orelse return error.TestUnexpectedNullData;
         try std.testing.expectEqualSlices(u8, case.scales, std.mem.sliceAsBytes(grid[0 .. case.scales.len / 4]));
     }
+}
+
+test "mimo source uploads the vision tower on request, the Conv3d patch weight as a Linear, and bills what it uploads" {
+    const t = std.testing;
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try makeTinySourceFixture(io, t.allocator, &tmp);
+    defer fixture.deinit();
+    const trunk_bytes = try residentBytesWithConfig(io, t.allocator, fixture.path, &fixture.config);
+
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const patch = try testBf16Bytes(a, 4 * 3 * 2 * 2 * 2, 0x3f80);
+    const norm = try testBf16Bytes(a, 4, 0x4000);
+    const audio = try testBf16Bytes(a, 2, 0x3f80);
+    const tensors = [_]TestTensor{
+        .{ .key = "visual.patch_embed.proj.weight", .dtype = "BF16", .shape = &[_]u64{ 4, 3, 2, 2, 2 }, .bytes = patch },
+        .{ .key = "visual.blocks.0.norm1.weight", .dtype = "BF16", .shape = &[_]u64{4}, .bytes = norm },
+        .{ .key = "audio_encoder.fake", .dtype = "BF16", .shape = &[_]u64{2}, .bytes = audio },
+        .{ .key = "speech_embeddings.0.weight", .dtype = "BF16", .shape = &[_]u64{2}, .bytes = audio },
+    };
+    try redirectToNewShard(io, a, &tmp, &tensors);
+
+    var weights = model.Weights.init(t.allocator);
+    defer weights.deinit();
+    try loadVisionWeightsInto(&weights, io, t.allocator, fixture.path);
+    // `visual.fake` (F32 [1]) plus the two tower tensors; audio stays on disk.
+    try t.expectEqual(@as(u32, 3), weights.count());
+    try t.expect(weights.get("audio_encoder.fake") == null and weights.get("speech_embeddings.0.weight") == null);
+    const pw = weights.get("visual.patch_embed.proj.weight") orelse return error.TestMissingWeight;
+    try t.expectEqualSlices(c_int, &.{ 4, 24 }, mlx.getShape(pw));
+    try t.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(pw));
+    try t.expectEqual(@as(u64, 4 + patch.len + norm.len), try visionResidentBytes(io, t.allocator, fixture.path));
+    // The trunk bill is unchanged: the tower is billed apart, like the MTP heads.
+    try t.expectEqual(trunk_bytes, try residentBytesWithConfig(io, t.allocator, fixture.path, &fixture.config));
 }
 
 test "mimo source loads the MTP heads apart from the trunk and bills what it uploads" {

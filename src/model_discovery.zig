@@ -1015,9 +1015,10 @@ pub fn parseStubMeta(allocator: std.mem.Allocator, config_json: []const u8, has_
     }
     // Vision: a `vision_config` block on a non-`_text` arch (the `_text` guard
     // skips text-only quantized checkpoints with a vestigial block).
-    meta.has_vision = root.get("vision_config") != null and !std.mem.endsWith(u8, mt, "_text") and
+    meta.has_vision = root.get("vision_config") != null and !std.mem.endsWith(u8, mt, "_text");
+    // MiMo serves images only; its video pads are not wired.
+    meta.has_video = meta.has_vision and cfgU32(root, text_cfg, "video_token_id") > 0 and
         !std.mem.eql(u8, mt, "mimo_v2");
-    meta.has_video = meta.has_vision and cfgU32(root, text_cfg, "video_token_id") > 0;
     const bidirectional = blk: {
         const cfgBool = struct {
             fn get(r: std.json.ObjectMap, tc: ?std.json.ObjectMap, key: []const u8) bool {
@@ -1736,7 +1737,7 @@ test "isSupportedQuantMode accepts nvfp4 (issue #24), rejects unknown" {
     try testing.expect(!isSupportedQuantMode("fp99"));
 }
 
-test "parseStubMeta mimo_v2 reports routed count and text-only capabilities" {
+test "parseStubMeta mimo_v2 reports routed count and image input without video" {
     const m = parseStubMeta(testing.allocator,
         \\{"model_type":"mimo_v2", "num_hidden_layers":4, "hidden_size":384,
         \\ "n_routed_experts":16, "num_experts_per_tok":4, "moe_intermediate_size":192,
@@ -1747,7 +1748,7 @@ test "parseStubMeta mimo_v2 reports routed count and text-only capabilities" {
     try testing.expectEqual(@as(u32, 16), m.num_experts);
     try testing.expectEqual(@as(u32, 1), m.first_moe_layer);
     try testing.expectEqual(@as(u32, 4), m.quant_bits);
-    try testing.expect(!m.has_vision and !m.has_video and !m.has_mtp);
+    try testing.expect(m.has_vision and !m.has_video and !m.has_mtp);
 }
 
 test "mimo_v2 streaming discovery validates MXFP4 headers without a PLE table" {

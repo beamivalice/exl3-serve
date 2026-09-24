@@ -34781,7 +34781,7 @@ test "moe dump waits for a real forward before writing tensors" {
     try t.expectEqual(@as(usize, 2), count);
 }
 
-fn diagEnvOn(name: [*:0]const u8) bool {
+pub fn diagEnvOn(name: [*:0]const u8) bool {
     return diagEnvValueOn(std.c.getenv(name));
 }
 /// `diagEnvOn` for a hot path: same semantics (absent or `0` = off), asked once.

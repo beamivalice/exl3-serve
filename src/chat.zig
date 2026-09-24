@@ -38,7 +38,7 @@ pub const ImageData = struct {
 pub const VisionPreproc = struct {
     /// Which processor produced `ImageData.pixels`: Gemma's fixed CHW square,
     /// or one of the patch-grid towers (each with its own resize + patch order).
-    mode: enum { gemma, qwen, muse, lfm2 } = .gemma,
+    mode: enum { gemma, qwen, muse, lfm2, mimo } = .gemma,
     patch: u32 = 16,
     tps: u32 = 2,
     merge: u32 = 2,

@@ -26,6 +26,7 @@ test {
     _ = @import("vision.zig");
     _ = @import("qwen_vision.zig");
     _ = @import("muse_vision.zig");
+    _ = @import("mimo_vision.zig");
     _ = @import("lfm2_vision.zig");
     _ = @import("mrope.zig");
     _ = @import("regex.zig");

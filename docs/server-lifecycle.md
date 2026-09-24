@@ -109,8 +109,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
   more than `chat.MAX_REQUEST_IMAGES` (64) a 400 with both counts, a prompt the media pushes past the context a 400
   naming the media's tokens, an encode that does not fit a 400 (`towerFitFault`), a failed encode a 500
   (`MediaFault`); never a text-only answer.
-- Media INPUT code: `src/vision.zig` / `src/qwen_vision.zig` / `src/mrope.zig` (Qwen3-VL image/video tower, M-RoPE
-  positions over every block); `stb_image` + libwebp decode image input.
+- Media INPUT code: `src/vision.zig` / `src/qwen_vision.zig` / `src/mimo_vision.zig` / `src/mrope.zig` (Qwen3-VL
+  image/video tower, M-RoPE positions over every block; MiMo-ViT images, [arch-mimo-v2](arch-mimo-v2.md#vision));
+  `stb_image` + libwebp decode image input.
 
 ## Config reading
 
