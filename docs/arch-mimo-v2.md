@@ -150,8 +150,13 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
   final norm. The router is widened to f32 once at load (source-trunk packs), not per forward.
 - All bit-identical to the ops they replaced: greedy text and top-3 logprobs match over 2x160 tokens.
 - Count one decode forward's primitives with `SUSHI_DECODE_FWD_GRAPH=<path>` beside `SUSHI_DECODE_FWD_UBENCH`.
-  What is left, per token: the kv8 append (2 quantize + 6 slice updates per layer, 384) and the sliding ring's
-  dequant (78) are ~40%; a partial rotary copies its input before rotating (96 hidden copies).
+  What is left, per token: the kv8 append (2 quantize + 6 slice updates per layer, 384), the sliding ring's
+  dequant (78) and the partial rotary's input copy (96) are ~650 dispatches, but they overlap the heavy kernels:
+  removing all three families outright saved ~0.4 of ~21.8 ms per forward (79a4cb4, 4096 keys, one boot, arms
+  interleaved), so fusing them is worth under 1%. The decode idle time is the dependent chain of heavy kernels.
+- An MLX custom kernel writes fresh outputs, never the cache in place; writing through an input buffer would bypass
+  MLX's hazard tracking and the copy-on-write the prefix-cache snapshots rely on. A fused rope + kv8 quantize is
+  parked on branch `lever4-qkv-prep-parked` (bit-identical, never timed live).
 - A joined `[Q | K]` GEMV output with one rope over both passed its unit tests but moved live logits by ~0.05
   nats at the first token, cause unfound; parked on branch `joint-rope-parked`.
 
