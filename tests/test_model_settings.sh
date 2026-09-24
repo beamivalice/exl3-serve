@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Per-model settings (`~/.sushi/model-settings.json`, issue #269): a model's
 # `ctx_size` / `kv_quant` / `mtp` / `mtp_acceptance` follow the MODEL, apply on its
-# load (boot AND cold load), and a second model in the same process keeps the
-# globals. An explicit launch flag outranks the file.
+# load (boot AND cold load), and a second model cold-loaded in the same process
+# keeps the globals and the launch flags. An explicit launch flag outranks the file.
+# The served packs cannot sit side by side under the resident cap, so the second
+# model is loaded after the first is unloaded: precedence, not coexistence.
 #
 # Runs under a private HOME so the real settings file is never touched.
-# NEEDS REAL MODELS: skips when the two small defaults are absent.
+# NEEDS REAL MODELS: skips when the two defaults are absent.
 #
 # Usage: ./tests/test_model_settings.sh [port]
 set -uo pipefail
@@ -16,7 +18,7 @@ BIN="$ROOT/zig-out/bin/sushi"
 
 MODELS_ROOT="${MODELS_ROOT:-$HOME/.sushi/models}"
 MODEL_A="${MODEL_A:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi-3bpw}"
-MODEL_B="${MODEL_B:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/MiMo-V2.6-Flash-Sushi-2.5bpw}"
+MODEL_B="${MODEL_B:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-Sushi-4bpw}"
 if [ ! -f "$MODEL_A/config.json" ] || [ ! -f "$MODEL_B/config.json" ]; then
     echo "SKIP: needs two local chat models (MODEL_A=$MODEL_A, MODEL_B=$MODEL_B)"
     exit 0
@@ -74,13 +76,30 @@ for m in json.load(sys.stdin)['data']:
         break
 " "$1" "$2"
 }
+model_id() { # model_id <model path> — the /v1/models id of that path; an unknown id falls back to the default model
+    curl -s "http://127.0.0.1:$PORT/v1/models" | python3 -c "
+import sys, json
+want = sys.argv[1].rstrip('/')
+print(next((m['id'] for m in json.load(sys.stdin)['data'] if want.endswith('/' + m['id'])), ''))
+" "$1"
+}
 props_mtp_source() { # props_mtp_source <model path> — /props settings.mtp.source
-    local id; id="$(basename "$(dirname "$1")")/$(basename "$1")"
+    local id; id="$(model_id "$1")"
     curl -s "http://127.0.0.1:$PORT/props?model=$id" | python3 -c "import sys, json; print(json.load(sys.stdin)['settings']['mtp']['source'])"
 }
 post() { # post <route> <json>
     curl -s -o /dev/null -w '%{http_code}' --max-time 300 -X POST "http://127.0.0.1:$PORT/v1/$1" \
         -H 'Content-Type: application/json' -d "$2"
+}
+load() { # load <model path> — an unloaded model's pages come back to the OS lazily, so the load
+    # preflight can refuse (503) for a few seconds after an unload; retry as its message says.
+    local code
+    for _ in $(seq 1 12); do
+        code="$(post load-model "{\"model\":\"$1\"}")"
+        [ "$code" = "503" ] || break
+        sleep 5
+    done
+    echo "$code"
 }
 
 # [1] boot load honours the file where no flag was given; --no-mtp outranks its mtp: true
@@ -95,20 +114,21 @@ check "[1] log names the override" "$(grep -q "\[model-settings\] .*ctx=4096 kv=
 check "[1] log names the MTP acceptance mode" "$(grep -q "\[model-settings\] .*accept=typical" "$LOG" && echo 1 || echo 0)"
 
 # [2] a second model keeps the globals, and its cold load carries the explicit --no-mtp
-CODE="$(post load-model "{\"model\":\"$MODEL_B\"}")"
+CODE="$(post unload-model "{\"model\":\"$MODEL_A\"}")"
+check "[2] unload model A first -> 200 (got $CODE)" "$([ "$CODE" = "200" ] && echo 1 || echo 0)"
+CODE="$(load "$MODEL_B")"
 check "[2] cold load of model B -> 200 (got $CODE)" "$([ "$CODE" = "200" ] && echo 1 || echo 0)"
 check "[2] model B keeps the kv8 default (got $(row "$MODEL_B" kv))" "$([ "$(row "$MODEL_B" kv)" = "8" ] && echo 1 || echo 0)"
 check "[2] model B kv_cache source default (got $(row "$MODEL_B" src))" "$([ "$(row "$MODEL_B" src)" = "default" ] && echo 1 || echo 0)"
 check "[2] cold-load log names the KV and ctx choices" "$(grep -q "\[kv-cache\] kv8 (default); ctx auto (default)" "$LOG" && echo 1 || echo 0)"
 check "[2] cold-load log: --no-mtp, exact acceptance" "$(grep -q "\[mtp\] off (--no-mtp); acceptance exact (default)" "$LOG" && echo 1 || echo 0)"
 check "[2] /props settings.mtp.source --no-mtp for B (got $(props_mtp_source "$MODEL_B"))" "$([ "$(props_mtp_source "$MODEL_B")" = "--no-mtp" ] && echo 1 || echo 0)"
-check "[2] model A still 4096 (got $(row "$MODEL_A" ctx))" "$([ "$(row "$MODEL_A" ctx)" = "4096" ] && echo 1 || echo 0)"
 
 # [3] edit + unload + load applies the new values, no restart
 write_settings 8192 4
-CODE="$(post unload-model "{\"model\":\"$MODEL_A\"}")"
-check "[3] unload model A -> 200 (got $CODE)" "$([ "$CODE" = "200" ] && echo 1 || echo 0)"
-CODE="$(post load-model "{\"model\":\"$MODEL_A\"}")"
+CODE="$(post unload-model "{\"model\":\"$MODEL_B\"}")"
+check "[3] unload model B -> 200 (got $CODE)" "$([ "$CODE" = "200" ] && echo 1 || echo 0)"
+CODE="$(load "$MODEL_A")"
 check "[3] reload model A -> 200 (got $CODE)" "$([ "$CODE" = "200" ] && echo 1 || echo 0)"
 check "[3] model A now 8192 (got $(row "$MODEL_A" ctx))" "$([ "$(row "$MODEL_A" ctx)" = "8192" ] && echo 1 || echo 0)"
 check "[3] model A now kv 4 (got $(row "$MODEL_A" kv))" "$([ "$(row "$MODEL_A" kv)" = "4" ] && echo 1 || echo 0)"
@@ -117,7 +137,7 @@ kill -0 "$SRV" 2>/dev/null; check "[3] server never restarted" "$([ $? = 0 ] && 
 # [4] a malformed file never stops a load
 echo '{nope' >"$SETTINGS"
 post unload-model "{\"model\":\"$MODEL_A\"}" >/dev/null
-CODE="$(post load-model "{\"model\":\"$MODEL_A\"}")"
+CODE="$(load "$MODEL_A")"
 check "[4] malformed file: load -> 200 (got $CODE), defaults apply (kv source $(row "$MODEL_A" src))" \
     "$([ "$CODE" = "200" ] && [ "$(row "$MODEL_A" src)" = "default" ] && echo 1 || echo 0)"
 check "[4] malformed file logged" "$(grep -q "\[model-settings\] .*malformed" "$LOG" && echo 1 || echo 0)"
@@ -127,7 +147,7 @@ cat >"$SETTINGS" <<JSON
 { "$MODEL_A/": { "ssd_budget_gb": 60 } }
 JSON
 post unload-model "{\"model\":\"$MODEL_A\"}" >/dev/null
-CODE="$(post load-model "{\"model\":\"$MODEL_A\"}")"
+CODE="$(load "$MODEL_A")"
 check "[5] ssd_budget_gb on a non-streaming model: load -> 200 (got $CODE)" "$([ "$CODE" = "200" ] && echo 1 || echo 0)"
 check "[5] the setting is logged" "$(grep -q "\[model-settings\] .*ssd_budget_gb=60" "$LOG" && echo 1 || echo 0)"
 check "[5] one line says it is ignored" \
@@ -152,7 +172,7 @@ kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; SRV=""
 echo '{}' >"$SETTINGS"
 boot
 props_mtp_default_on() { # props_mtp_default_on <model path> — /props settings.mtp.default_on
-    local id; id="$(basename "$1")"
+    local id; id="$(model_id "$1")"
     curl -s "http://127.0.0.1:$PORT/props?model=$id" | python3 -c "import sys, json; print(json.load(sys.stdin)['settings']['mtp']['default_on'])"
 }
 check "[7] load log: MTP on by default" "$(grep -q "\[mtp\] on (default)" "$LOG" && echo 1 || echo 0)"
@@ -162,9 +182,13 @@ cat >"$SETTINGS" <<JSON
 { "$MODEL_A/": { "mtp": false } }
 JSON
 post unload-model "{\"model\":\"$MODEL_A\"}" >/dev/null
-CODE="$(post load-model "{\"model\":\"$MODEL_A\"}")"
+CODE="$(load "$MODEL_A")"
 check "[7] mtp:false in the file turns the default off (load $CODE, default_on $(props_mtp_default_on "$MODEL_A"))" \
     "$([ "$CODE" = "200" ] && [ "$(props_mtp_default_on "$MODEL_A")" = "False" ] && echo 1 || echo 0)"
 
+if [ "$FAIL" -gt 0 ]; then
+    echo "server log (loads and refusals):"
+    grep -E "preflight|Insufficient|\[admission\]|\[registry\]|load failed|error" "$LOG" | tail -20
+fi
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = "0" ]
