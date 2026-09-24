@@ -40,6 +40,27 @@ hidden 2560, expert intermediate 640.
   [engine-kernels](engine-kernels.md).
 - **A GDN trunk's `KVCache.step` is 0 forever**: see [engine-kv-cache](engine-kv-cache.md#gdn).
 
+<a id="vision-tower"></a>
+## Vision tower
+
+- **The tower evaluates after every block and at its output** (`QwenVision.eval_per_block`): a lazy 27-block graph
+  also held every block's transposed weights (~1 GB at any size) and more than one block's score sheets. The encode
+  bill (`encodeScratchBytes`: 32 MB + 1.3 x one f32 score sheet + 107 KB per patch) covers the per-block peak by
+  1.26x or more at every measured size; `qwen vision ubench` asserts bill >= peak.
+- Measured on main `68001a57` plus this change, with `qwen vision ubench`: Sushi3bpw tower only, random pixels, 5 reps with the lazy and
+  per-block arms interleaved, `taskpolicy -a`, GPU lock held. Times are best-of-5 and CONTENDED: a live Qwen server
+  was decoding on the same GPU. Peaks were identical across two runs.
+
+  | grid (patches) | image | lazy time / peak | per-block time / peak | old N² bill | bill |
+  |---|---|---|---|---|---|
+  | 14x14 (196) | small | 18.3 ms / 1013 MB | 23.8 ms / 21 MB | 14 MB | 58 MB |
+  | 46x82 (3772) | 1920x1080 at the packs' 1 Mpx bound | 569 ms / 3280 MB | 557 ms / 1225 MB | 2.8 GB | 1621 MB |
+  | 68x120 (8160) | 1920x1080 at the 1536² cap | 2169 ms / 9155 MB | 2122 ms / 4923 MB | 13.1 GB | 6446 MB |
+  | 96x96 (9216) | the 1536² cap | 2630 ms / 6112 MB | 2640 ms / 6112 MB | 16.6 GB | 8086 MB |
+
+- The served packs ship no processor config, so their bound is the 1,003,520-pixel default: a 1920x1080 screenshot is
+  46x82 patches (943 tokens). Only a checkpoint that declares a larger bound reaches the 1536² cap.
+
 ## The n-gram table (PLE)
 
 - `mx.quantize` packs DENSELY (element i at bit offset `i*bits`, straddling words at 3/5/6 bits; `dequantRow` tested

@@ -12527,12 +12527,9 @@ fn mediaKindRefusal(messages: []const chat_mod.Message, flat: FlatMedia, has_tow
     return null;
 }
 
-/// Peak GPU scratch of one ViT call over `patches` rows: the f32 scores, their
-/// scaled copy and the softmax (heads x N^2 each), plus the row activations.
+/// Peak GPU scratch of one ViT call over `patches` rows (`qwen vision ubench`).
 fn visionScratchBytes(config: *const model_mod.ModelConfig, patches: u64) u64 {
-    const heads: u64 = @max(config.qv_heads, 1);
-    const row_floats: u64 = 4 * @as(u64, @max(config.qv_hidden, 1)) + @max(config.qv_intermediate, 1);
-    return 3 * heads * patches * patches * 4 + patches * row_floats * 4;
+    return qwen_vision.encodeScratchBytes(config, patches);
 }
 
 /// The encode's fit check, before it runs: the largest block's tower scratch
@@ -13760,16 +13757,27 @@ test "an input_audio part sent to a vision-only model is refused by name" {
     try std.testing.expect(std.mem.indexOf(u8, mediaKindRefusal(&msgs, flat, false).?.text(), "audio") != null);
 }
 
+test "towerFitFault admits an image at the 1536^2 cap when 9 GB is free" {
+    var config = model_mod.ModelConfig{};
+    config.qv_heads = 16;
+    config.qv_hidden = 1152;
+    config.qv_intermediate = 4304;
+    config.qv_out_hidden = 2560;
+    // Measured per-block peak at 96x96 patches: 6.1 GB (`qwen vision ubench`).
+    const cap = [_]chat_mod.ImageData{testGridImage(96, 96, "")};
+    try std.testing.expect(towerFitFault(&config, &cap, &.{}, 2304, 9_000_000_000) == null);
+}
+
 test "towerFitFault refuses an encode whose scratch does not fit, naming both sizes" {
     var config = model_mod.ModelConfig{};
     config.qv_heads = 16;
     config.qv_hidden = 1152;
     config.qv_intermediate = 4304;
     config.qv_out_hidden = 2560;
-    // A 1920x1080 screenshot is ~8100 patches: 3 f32 score sheets of 16 x 8100^2.
+    // ~8100 patches is a 1920x1080 screenshot at the 1536^2 cap: one block's f32 score sheet is 4.2 GB.
     const shot = [_]chat_mod.ImageData{ testGridImage(90, 90, ""), testGridImage(8, 8, "") };
     const need = visionScratchBytes(&config, 8100);
-    try std.testing.expect(need > 12 * (1 << 30));
+    try std.testing.expect(need > 4 * (1 << 30));
     const fault = towerFitFault(&config, &shot, &.{}, 2041, need / 2) orelse return error.TestExpectedRefusal;
     try std.testing.expect(std.mem.indexOf(u8, fault.text(), "8100 patches") != null);
     try std.testing.expect(!fault.server_error);

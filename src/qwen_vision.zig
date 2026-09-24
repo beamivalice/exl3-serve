@@ -447,6 +447,17 @@ pub fn buildPixelValues(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+/// Transient GPU bytes one image's encode needs on top of the resident tower, at
+/// `n_patches` patches. The stream is evaluated per block, so the peak is one
+/// block: its f32 score sheet (heads x N^2) and its row activations. Covers the
+/// measured peak (`qwen vision ubench`) by >= 25% from 196 to 9216 patches.
+pub fn encodeScratchBytes(config: *const ModelConfig, n_patches: u64) u64 {
+    const heads: u64 = @max(config.qv_heads, 1);
+    const scores = 4 * heads * n_patches * n_patches;
+    const per_patch: u64 = 4 * (12 * @as(u64, config.qv_hidden) + 3 * @as(u64, config.qv_intermediate));
+    return (32 << 20) + scores * 13 / 10 + n_patches * per_patch;
+}
+
 // Qwen3-VL ViT encoder. Mirrors mlx-vlm qwen3_vl/vision.py for a SINGLE still
 // image (grid_thw = [[1, grid_h, grid_w]]): full bidirectional attention over all
 // patches (cu_seqlens trivial), no windowing, no DeepStack. Dense bf16 — even on
@@ -476,6 +487,9 @@ const QBlock = struct {
 pub const QwenVision = struct {
     s: mlx.mlx_stream,
     allocator: std.mem.Allocator,
+    /// Evaluate the stream after every block and the output at the end, so one
+    /// block's buffers are the encode's peak (`encodeScratchBytes`).
+    eval_per_block: bool = true,
 
     depth: u32,
     hidden: u32,
@@ -1060,6 +1074,7 @@ pub const QwenVision = struct {
                 x = h;
             }
             dt.layer(x, block_idx);
+            if (self.eval_per_block) try mlx.check(mlx.mlx_array_eval(x));
         }
         dt.end(x);
 
@@ -1081,8 +1096,11 @@ pub const QwenVision = struct {
         defer _ = mlx.mlx_array_free(m2);
         // [N_merged, out_hidden] → [1, N_merged, out_hidden].
         var out = mlx.mlx_array_new();
+        errdefer _ = mlx.mlx_array_free(out);
         const oshape = [_]c_int{ 1, n_merged, @intCast(self.out_hidden) };
         try mlx.check(mlx.mlx_reshape(&out, m2, &oshape, 3, self.s));
+        // Images queued lazily would hold their scratch together.
+        if (self.eval_per_block) try mlx.check(mlx.mlx_array_eval(out));
         return out;
     }
 
@@ -1746,4 +1764,104 @@ test "qwen forwardVideo == per-group forward()+concat (self-consistency)" {
     const m_data = mlx.mlx_array_data_float32(m_f32) orelse return error.TestUnexpectedNullData;
     const total: usize = 12 * 4; // tokens × out_hidden
     try std.testing.expectEqualSlices(f32, m_data[0..total], v_data[0..total]);
+}
+
+test "qwen encodeScratchBytes covers each measured peak by >= 25% without the N^2 formula's over-bill" {
+    // Qwen3.8-Flash-Next tower (heads 16, hidden 1152, intermediate 4304).
+    var config = ModelConfig{};
+    config.qv_heads = 16;
+    config.qv_hidden = 1152;
+    config.qv_intermediate = 4304;
+    // Per-block-eval scratch peaks, bytes (`qwen vision ubench`, Sushi3bpw tower).
+    const measured = [_][2]u64{
+        .{ 196, 20_800_000 },
+        .{ 3772, 1_225_400_000 },
+        .{ 8160, 4_923_400_000 },
+        .{ 9216, 6_112_100_000 },
+    };
+    for (measured) |m| {
+        const bill = encodeScratchBytes(&config, m[0]);
+        try std.testing.expect(bill * 4 >= m[1] * 5);
+        // Where the bill decides admission, it stays within 1.5x of the peak.
+        if (m[0] >= 1000) try std.testing.expect(bill * 2 <= m[1] * 3);
+    }
+}
+
+// Encode time and scratch peak on the real tower, per image, at a small image, a
+// 1920x1080 screenshot and the engine's 1536^2 cap (random pixels; numerics are
+// the parity test's job), with and without the per-block eval, arms interleaved:
+//   QWEN_VISION_TEST_MODEL=<pack> SUSHI_QWEN_VISION_UBENCH=<reps> \
+//   zig build test -Doptimize=ReleaseFast -Dtest-filter="qwen vision ubench"
+test "qwen vision ubench: encode time and scratch peak per image" {
+    const reps_raw = std.c.getenv("SUSHI_QWEN_VISION_UBENCH") orelse return error.SkipZigTest;
+    const model_raw = std.c.getenv("QWEN_VISION_TEST_MODEL") orelse return error.SkipZigTest;
+    const reps = std.fmt.parseInt(u32, std.mem.span(reps_raw), 10) catch return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const dir = std.mem.span(model_raw);
+    var config = try model_mod.parseConfig(io, a, dir);
+    defer config.deinit(a);
+    try std.testing.expect(config.qwen_vision);
+    var weights = Weights.init(a);
+    defer weights.deinit();
+    {
+        const path = try std.fmt.allocPrintSentinel(a, "{s}/model-vision.safetensors", .{dir}, 0);
+        defer a.free(path);
+        const cpu = mlx.mlx_default_cpu_stream_new();
+        defer _ = mlx.mlx_stream_free(cpu);
+        try model_mod.loadSafetensorsFile(a, &weights, path, cpu, true);
+    }
+    var tower = try QwenVision.init(a, config, &weights);
+    defer tower.deinit();
+
+    const feat: c_int = @intCast(3 * config.qv_temporal_patch * config.qv_patch * config.qv_patch);
+    const cap_side: u32 = std.math.sqrt(ENGINE_MAX_PIXELS) / config.qv_patch;
+    // A 1920x1080 screenshot under this pack's own processor bounds.
+    const bounds = effectivePixelBounds(config.qv_min_pixels, config.qv_max_pixels);
+    const shot = smartResizeImage(1080, 1920, config.qv_patch * config.qv_merge, bounds.min, bounds.max);
+    var under_billed = false;
+    for ([_][2]u32{ .{ 14, 14 }, .{ shot.h / config.qv_patch, shot.w / config.qv_patch }, .{ 68, 120 }, .{ cap_side, cap_side } }) |g| {
+        const n: c_int = @intCast(g[0] * g[1]);
+        var pv = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(pv);
+        const shape = [_]c_int{ n, feat };
+        try mlx.check(mlx.mlx_random_normal(&pv, &shape, 2, .float32, 0, 1, .{ .ctx = null }, tower.s));
+        try mlx.check(mlx.mlx_array_eval(pv));
+        var best = [2]u64{ std.math.maxInt(u64), std.math.maxInt(u64) };
+        var peak = [2]usize{ 0, 0 };
+        for (0..reps + 1) |r| {
+            // Arm 0 = today's lazy graph, arm 1 = eval per block; the order alternates per rep.
+            for (0..2) |k| {
+                const arm = (k + r) % 2;
+                tower.eval_per_block = arm == 1;
+                try mlx.check(mlx.mlx_synchronize(tower.s));
+                _ = mlx.mlx_clear_cache();
+                var before: usize = 0;
+                _ = mlx.mlx_get_active_memory(&before);
+                _ = mlx.mlx_reset_peak_memory();
+                const t0 = std.Io.Timestamp.now(io, .boot);
+                const out = try tower.forward(pv, g[0], g[1]);
+                try mlx.check(mlx.mlx_array_eval(out));
+                try mlx.check(mlx.mlx_synchronize(tower.s));
+                const ns: u64 = @intCast(t0.untilNow(io, .boot).nanoseconds);
+                var p: usize = 0;
+                _ = mlx.mlx_get_peak_memory(&p);
+                _ = mlx.mlx_array_free(out);
+                peak[arm] = @max(peak[arm], p -| before);
+                if (r > 0) best[arm] = @min(best[arm], ns);
+            }
+        }
+        tower.eval_per_block = true;
+        const bill = encodeScratchBytes(&config, @intCast(n));
+        const mb = 1e6;
+        std.debug.print("[qwen-vit ubench] grid {d}x{d} ({d} patches, {d} tokens): lazy best {d:.1} ms peak {d:.1} MB | per-block eval best {d:.1} ms peak {d:.1} MB | bill {d:.1} MB (reps {d})\n", .{
+            g[0],                                  g[1],                                     n,
+            @divExact(n, @as(c_int, @intCast(config.qv_merge * config.qv_merge))),
+            @as(f64, @floatFromInt(best[0])) / 1e6, @as(f64, @floatFromInt(peak[0])) / mb,
+            @as(f64, @floatFromInt(best[1])) / 1e6, @as(f64, @floatFromInt(peak[1])) / mb,
+            @as(f64, @floatFromInt(bill)) / mb,     reps,
+        });
+        if (bill < peak[1]) under_billed = true;
+    }
+    try std.testing.expect(!under_billed);
 }
