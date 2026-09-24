@@ -62,6 +62,13 @@ source FP8→bf16 loader (`usesMimoSourceTrunk`), billed dense by `mimoSourceRes
   tiles per threadgroup, load both k-tiles of an iteration before decoding, and bump pointers; the per-tile
   accumulation order is unchanged, so the bytes equal the one-tile generic reader's (`FUNNEL=0`, the test's
   reference). A layout that changes which simdgroup sums which k-tile (8 simdgroups) is NOT bit-identical.
+- **MiMo verify rows share an expert's weight reads** (`PAIR_GEMV_GROUPED_SOURCE`, `DOWN_PREPARED_GROUPED_SOURCE`;
+  prepared-mid geometry, 2+ rows): among an expert's slots, each even-ranked slot leads itself and the next one,
+  decodes each weight once and feeds both members in the single-slot order, so every row's bytes are its one-row
+  decode tick's. Two members only: four spill their accumulators. Not on Flash-Next, whose rows share too few experts.
+- **A decode GEMV slot is bound by its own FMA and input path**, not the weight decode or DRAM, so deduplicating
+  shared experts recovers only 4-7% of the expert kernels at 3-4 rows
+  ([perf-baselines](perf-baselines.md#mimo-verify-attribution)).
 - Dead for the decode GEMVs (microbenched): 4 or 8 tiles per threadgroup, software prefetch, 2 simdgroups, a
   threadgroup LUT decode, a 24-bit multiply split, half2 input reads, bitfield extracts.
 - **The SwiGLU chain is f32**: gate, up, sigmoid, SiLU and their product stay in f32 registers through the multiply

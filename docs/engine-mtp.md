@@ -62,6 +62,12 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
   predictable text: forced depth 3 is +27-52% on code/lists/JSON and -10 to -18% on prose; per-index acceptance on
   code 1.00/0.91/0.81 confirms the non-chained semantics. Greedy MTP is byte-identical to serial (18/18 pairs at 256
   tokens, forced and auto). Numbers: [perf-baselines](perf-baselines.md#mimo-verify-rows).
+- **A MiMo verify row costs ~8-12 ms of a ~20.6 ms forward, ~75% of it its own experts** streaming at 96% of the
+  read peak; attention per row, the o_proj row kernel and ~550 extra dispatches make most of the rest. Real-text rows
+  share ~30% of their expert slots; grouping them (the grouped decode GEMVs) saves ~1.9 ms at 4 rows and ~1 ms at 3.
+  What is left is small: one sdpa for all rows of a sliding layer (~0.7 ms at 4 rows; the global layers' split-K
+  follows each row's own key count, so batching them is not bit-identical), the o_proj row kernel and the per-row
+  router GEMV ([perf-baselines](perf-baselines.md#mimo-verify-attribution)).
 - **MTP costs MiMo's prefill nothing measurable**: each chunk's head catch-up (three heads x the 128-row window) is
   ~6 ms per 4096-row chunk, and same-boot TTFT on vs off stays within noise from 2k to 71k
   ([perf-baselines](perf-baselines.md#mimo-mtp-prefill)). Compare prefill arms interleaved in one boot, never one

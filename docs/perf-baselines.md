@@ -229,6 +229,43 @@ On main 9942e8e (head 83b564a, binary built 04:41, the served pack as stored, sa
 / 16k 55.3 / 60.3 / 60.3 / 58.9 vs 49.7 / 49.4 / 48.9 / 47.6, prefill 2k 925 vs 1007 (one reading per arm: noise, see
 below); auto A/B 3/3 byte-identical. That boot's serial ran 49.6, below the first boot's 52.4.
 
+<a id="mimo-verify-attribution"></a>
+Where a verify row goes on main 94f0e4b (binary built 06:52, served pack, kv8, 4096 KV prefilled,
+`SUSHI_DECODE_FWD_UBENCH=40`, `taskpolicy -a`, lock `mimo-verify`, 2026-09-24). Ladder, one boot, ms/forward:
+verify rows 1 / 2 / 3 / 4 = 20.62 / 28.56 / 37.16 / 49.65 (prefill-shaped 28.68 / 38.22 / 49.07); a second boot of the
+same binary read 43.41 at 4 rows, so compare forward arms inside one boot only. Per kernel family from a Metal System
+Trace of 1-row and 4-row forwards (per-call time x calls per forward):
+
+| family | 1 row ms | 4 rows ms | delta | achieved |
+|---|---|---|---|---|
+| EXL3 pair GEMV (gate+up) | 4.52 | 16.42 | +11.90 | 437 -> 481 GB/s of slot bytes |
+| EXL3 prepared down | 2.22 | 7.45 | +5.23 | 444 -> 529 GB/s |
+| EXL3 mid + reduce | 0.21 | 0.28 | +0.07 | |
+| router (fused kernel + per-row f32 GEMV) | 0.61 | 0.80 | +0.19 | |
+| FP8 QKV GEMV (39 sliding + 9 global) | 5.03 | 5.13 | +0.10 | ~570 GB/s, flat in rows |
+| affine-8 o_proj (MLX qmv -> row kernel) | ~2.7 | 3.90 | ~+1.2 | |
+| attention (sdpa per row, qkv_mpp per row, merges, rope) | ~0.72 | ~2.5 | ~+1.8 | |
+| KV append, norms, copies | ~0.65 | ~0.84 | ~+0.2 | |
+| lm_head | 1.16 | ~1.1 | 0 | |
+| GPU idle between dispatches | ~2.4 | ~4.0 | ~+1.6 | 1279 -> 1835 non-view primitives |
+
+The extra rows are ~75% EXL3: each row's own 2.96 GB of experts at ~516 GB/s, 96% of the 538 GB/s streaming
+peak, so no multi-row EXL3 efficiency lever remains. On real text 4 verify rows share experts (live forced depth 3,
+per layer): 22.6 / 21.4 / 24.2 / 22.0 unique of 32 slots on code / story / count / explain, an expert in all four
+rows in 36-65% of layer calls. Deduplicating them pays little because a decode GEMV slot is bound by its own FMA and
+input path: a second slot in the same threadgroup costs 0.52 of a slot, dropping the MCG decode saves only 6-9%.
+Grouped decode GEMVs (two slots per threadgroup, bit-identical per row), interleaved kernel bench at the served
+geometry with ~22 unique of 32 slots, net us per call base -> grouped: 4 rows pair 352.5 -> 333.1, down 160.8 ->
+149.0; 3 rows 267.1 -> 255.9, 122.4 -> 116.4; 2 rows 183.6 -> 183.8, 84.7 -> 84.3; rows sharing nothing 358.3 ->
+370.6. Four slots per threadgroup ran 2x slower (spilled accumulators); Flash-Next's pair lost 18% at 2 rows.
+Same boot, whole forward, grouping off/on alternated (6 pairs at 4 rows, 4 at 3; 20 forwards per arm; same flags,
+lock, QoS): 4 rows 47.5-51.7 -> 46.8-49.3 ms, every pair faster, median -1.9 ms; 3 rows 40.7-41.0 -> 39.8-40.1,
+median -0.95. Live forced depth 3 (main vs grouped, boots A B B A, two sets) moved verify by -1.4 ms on the mean with
+~7 ms of boot-to-boot drift, and MTP tok/s by +2-5% on code / count / JSON / story; 16/16 greedy pairs byte-identical
+to serial.
+The earlier expert-grouped reads ran a leader's slots back to back: every weight re-decoded per slot, the slots'
+work serialized in one threadgroup, and the bytes saved were never the bound.
+
 <a id="mimo-mtp-prefill"></a>
 MTP does not slow MiMo's prefill (7ce480f, binary 05:55, the served pack renamed `MiMo-V2.6-Flash-Sushi2.5bpw`, kv8,
 `--mtp --no-pld --prefix-cache-entries 0`, ctx 81920, `taskpolicy -a`, lock `mimo-mtp-prefill`). One boot per row,
