@@ -164,6 +164,12 @@ is chosen from the cache's CURRENT key count each step (switch logged at `Tk=409
 tokens); 16k decode 41.2 tok/s with auto = dense, 64k 36.8 with auto = dense (bf16-trunk ladder: dense 15.4-17.3 vs
 packed 26.0); prefill 660 tok/s at 16k, 465 at 64k (chunk auto).
 
+Live decode with PLD off (9c9eb92, kv8, no MTP, `/v1/completions` on code, 192 greedy tokens, `taskpolicy -a`, lock
+`longctx-regress`, 2026-09-24): 44.4 tok/s at 17k, 38.7 at 72k, 34.1 at 126k, 25.9-26.4 at 244k. That is 0.1-0.4
+ms/token over the forward microbench at 16k-128k keys (22.1 / 25.1 / 29.6 ms, 79a4cb4) and 1.3-2.1 ms at 244k
+(37.65 ms at 262k). PLD on the same 244k prompt: 10.3 tok/s before the verify-rows fix, 25.0 after
+([arch-mimo-v2](arch-mimo-v2.md#prompt-lookup-decoding)).
+
 Prefill attention on the matrix units (`sushi_attn_pd_nax`, 2026-09-24, binary b33ec32 built 01:30, taskpolicy -a,
 lock attnpd-nax; baselines on 7ed9795).
 One global layer, H 64 / Hk 4, qL 2048, kv8, ms: kL 2048 8.04 -> 2.90, 4096 22.1 -> 7.18, 16384 113.0 -> 33.0,

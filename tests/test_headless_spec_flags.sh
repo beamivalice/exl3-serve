@@ -15,7 +15,7 @@
 # Fully hermetic: an EMPTY --model-dir discovers zero models and never loads
 # one, so the boot banner is reachable with no checkpoint on disk. The banner
 # is the observable — server.zig's
-# `PLD speculative decoding: ENABLED (draft_len=N, key_len=M...)` line reads
+# `[pld] <on|off> (<source>); draft_len=N, key_len=M...` line reads
 # the exact ServerConfig fields a request would.
 #
 # Usage: ./tests/test_headless_spec_flags.sh [port]
@@ -78,7 +78,7 @@ echo "Headless spec-decode flag plumbing (port $PORT)"
 
 echo "[1/5] --pld with non-default draft/key lengths"
 if boot --pld --pld-draft-len 8 --pld-key-len 4; then
-    grep -q "PLD speculative decoding: ENABLED" "$LOG"
+    grep -q "\[pld\] on (--pld)" "$LOG"
     check "--pld enables PLD in headless mode" "$([ $? -eq 0 ] && echo 1 || echo 0)"
     grep -q "draft_len=8" "$LOG"
     check "--pld-draft-len 8 reaches the request defaults" "$([ $? -eq 0 ] && echo 1 || echo 0)"
@@ -90,15 +90,15 @@ fi
 
 echo "[2/5] --no-pld still disables"
 if boot --no-pld --pld-draft-len 8 --pld-key-len 4; then
-    grep -q "PLD speculative decoding: ENABLED" "$LOG"
-    check "--no-pld keeps PLD off even with lengths passed" "$([ $? -ne 0 ] && echo 1 || echo 0)"
+    grep -q "\[pld\] off (--no-pld)" "$LOG"
+    check "--no-pld keeps PLD off even with lengths passed" "$([ $? -eq 0 ] && echo 1 || echo 0)"
 else
     check "boot with --no-pld" 0
 fi
 
 echo "[3/5] bare default matches the documented 5/3"
 if boot; then
-    grep -q "draft_len=5, key_len=3" "$LOG"
+    grep -q "\[pld\] on (default); draft_len=5, key_len=3" "$LOG"
     check "default headless boot is PLD on at 5/3" "$([ $? -eq 0 ] && echo 1 || echo 0)"
 else
     check "bare default boot" 0

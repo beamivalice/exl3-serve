@@ -168,6 +168,26 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 - A joined `[Q | K]` GEMV output with one rope over both passed its unit tests but moved live logits by ~0.05
   nats at the first token, cause unfound; parked on branch `joint-rope-parked`.
 
+## Prompt lookup decoding
+
+- **A PLD verify is MTP's verify** (`ctx.verify_rows`, drafts capped at `MIMO_VERIFY_ROWS_MAX` - 1 = 3): every
+  row reads the packed cache as its own decode tick would, a partial accept truncates, and no `KVCache.snapshot` is
+  taken, so greedy PLD is serial byte for byte. The prefill-shaped verify it replaced declined the fused kernel below
+  16 rows, rebuilt every global layer's whole cache dense, copied the cache on every write under the snapshot and
+  re-forwarded partial accepts: 375-410 ms per verify at 244k keys, and live decode of 10.3 tok/s against a 37.7 ms
+  forward.
+- On vs off (9c9eb92, kv8, `--no-mtp`, hot-cache arms off/on/on/off in one boot, 192 greedy tokens, tok/s):
+
+  | prompt | 4k | 64k | 244k |
+  |---|---|---|---|
+  | code edit (echoes the context) | 45.0-45.5 → 59.3-60.9 | 38.0-38.2 → 51.5-52.4 | 25.9-26.0 → 27.1-27.2 |
+  | novel prose after the code | 44.6-45.6 → 44.1-44.7 | 37.9-38.8 → 37.8-38.0 | 26.0-26.9 → 26.4-26.5 |
+
+  Plain code continuation at 17k / 72k / 126k: 43.6-44.4 → 43.3, 38.0-38.7 → 37.4, 33.3-34.1 → 32.8.
+- MTP outranks PLD (`server.requestSpecModes`), so PLD runs only on requests without MTP.
+- PLD stays on by default: it pays on echo workloads. The prompt n-gram gate passes all of these prompts (score
+  0.16-0.32 against 0.01), so the runtime yield and per-draft gates are what cap the losers at 1-2%.
+
 ## Bills (the bill follows the storage in the SAME commit)
 
 - `kvBytesPerToken` counts the 9 global layers per token (spread over `kvPerTokenLayerCount`, never every caching

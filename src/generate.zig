@@ -4163,7 +4163,9 @@ pub const Generator = struct {
         const t1: u32 = self.next_token_id;
 
         // Cap draft_len so the verify forward stays a small fixed cost.
-        const max_draft: u32 = @min(draft_len, 15);
+        const is_mimo = xfm.config.isMimo();
+        // MiMo verifies with each row's decode arithmetic, which serves at most MIMO_VERIFY_ROWS_MAX rows.
+        const max_draft: u32 = @min(draft_len, if (is_mimo) @as(u32, transformer_mod.MIMO_VERIFY_ROWS_MAX - 1) else 15);
         const klen: u32 = @max(@as(u32, 1), key_len);
 
         // ── Phase 1: Lookup ──
@@ -4258,8 +4260,10 @@ pub const Generator = struct {
         // `if (layer == 0)` — so it stays stale (~0) for this family. The
         // full-attention KV entries instead track `moe_seq_offset` (both advance
         // by seq_len per forward), so that is the real KV length to roll back to.
-        var kv_snap = try self.ctx.cache.snapshot();
-        defer kv_snap.deinit();
+        // MiMo is attention-only: a truncate IS its rollback, rings included. A snapshot
+        // shares the KV buffers, so every verify write would copy each global layer's whole cache.
+        var kv_snap: ?transformer_mod.KVCacheSnapshot = if (is_mimo) null else try self.ctx.cache.snapshot();
+        defer if (kv_snap) |*snap| snap.deinit();
         var ssm_snaps: ?[]SSMCacheEntrySnapshot = null;
         defer if (ssm_snaps) |snaps| {
             for (snaps) |*sn| ssmSnapshotDeinit(sn);
@@ -4293,6 +4297,10 @@ pub const Generator = struct {
         // only GatedDeltaNet layers actually populate `spec_state_seq`, so
         // pure-attention / Mamba2 / LFM2 fall through to the snapshot fallback.
         self.ctx.capture_ssm_seq = self.ctx.ssm_entries != null;
+        // Each MiMo row attends the packed cache as its own decode tick would, never through a
+        // dense rebuild of every global layer's whole cache.
+        self.ctx.verify_rows = is_mimo;
+        defer self.ctx.verify_rows = false;
         var verify_logits = try xfm.forwardWith(&self.ctx, verify_input);
         errdefer _ = mlx.mlx_array_free(verify_logits);
         self.ctx.capture_ssm_seq = false;
@@ -4425,20 +4433,24 @@ pub const Generator = struct {
             else
                 false;
 
-            if (gdn_captured) {
+            if (is_mimo) {
+                const accepted_len: usize = 1 + @as(usize, accepted);
+                try self.ctx.cache.truncate(moe_seq_offset_snap + accepted_len, s);
+                self.ctx.moe_seq_offset.* = moe_seq_offset_snap + accepted_len;
+            } else if (gdn_captured) {
                 const accepted_len: usize = 1 + @as(usize, accepted);
                 // `truncate` overwrites cache.step with its length arg; on this
                 // family cache.step is a stale counter the model never reads
                 // (positioning is moe_seq_offset), so preserve the snapshot's
                 // value to keep the prefix cache's kv_step bookkeeping identical
                 // to the restore-based fallback.
-                const step_keep = kv_snap.step;
+                const step_keep = kv_snap.?.step;
                 try self.ctx.cache.truncate(moe_seq_offset_snap + accepted_len, s);
                 self.ctx.cache.step = step_keep;
                 try self.rollbackSsmFromCapture(self.ctx.ssm_entries.?, accepted, 1 + m, s);
                 self.ctx.moe_seq_offset.* = moe_seq_offset_snap + accepted_len;
             } else {
-                try self.ctx.cache.restore(&kv_snap);
+                try self.ctx.cache.restore(&kv_snap.?);
                 if (ssm_snaps) |snaps| {
                     for (self.ctx.ssm_entries.?, snaps) |*entry, *sn| try ssmRestore(entry, sn);
                 }
@@ -17044,6 +17056,143 @@ test "no decode path advances `step` outside advanceStep" {
         if (std.mem.indexOf(u8, line, clock) != null) writers += 1;
     }
     try testing.expectEqual(@as(usize, 2), writers);
+}
+
+/// The last global layer's key buffer: its data address and its row capacity.
+fn globalKeysBuffer(xfm: *Transformer) !struct { ptr: usize, cap: c_int } {
+    const e = &xfm.cache.entries[try lastGlobalKvLayer(xfm)];
+    try mlx.check(mlx.mlx_array_eval(e.keys));
+    const ptr: usize = if (mlx.mlx_array_dtype(e.keys) == .uint32)
+        @intFromPtr(mlx.mlx_array_data_uint32(e.keys).?)
+    else
+        @intFromPtr(mlx.mlx_array_data_bfloat16(e.keys).?);
+    return .{ .ptr = ptr, .cap = mlx.getShape(e.keys)[2] };
+}
+
+fn lastGlobalKvLayer(xfm: *Transformer) !usize {
+    var layer = xfm.cache.entries.len;
+    while (layer > 0) {
+        layer -= 1;
+        if (xfm.config.isGlobalLayer(@intCast(layer)) and xfm.cache.entries[layer].initialized) return layer;
+    }
+    return error.NoGlobalLayer;
+}
+
+/// Do two caches hold the same first `rows` rows in every stored buffer of `layer`?
+fn kvRowsEqual(x: *Transformer, y: *Transformer, layer: usize, rows: usize) !bool {
+    const ex = &x.cache.entries[layer];
+    const ey = &y.cache.entries[layer];
+    const pairs = [_][2]mlx.mlx_array{
+        .{ ex.keys, ey.keys },                   .{ ex.values, ey.values },
+        .{ ex.keys_scales, ey.keys_scales },     .{ ex.keys_biases, ey.keys_biases },
+        .{ ex.values_scales, ey.values_scales }, .{ ex.values_biases, ey.values_biases },
+    };
+    const s = x.s;
+    for (pairs) |p| {
+        if (p[0].ctx == null or mlx.mlx_array_ndim(p[0]) != 4) continue;
+        var parts: [2]mlx.mlx_array = .{ .{}, .{} };
+        defer for (parts) |a| {
+            if (a.ctx != null) _ = mlx.mlx_array_free(a);
+        };
+        for (p, &parts) |buf, *part| {
+            const sh = mlx.getShape(buf);
+            part.* = mlx.mlx_array_new();
+            try mlx.check(mlx.mlx_slice(part, buf, &[_]c_int{ 0, 0, 0, 0 }, 4, &[_]c_int{ sh[0], sh[1], @intCast(rows), sh[3] }, 4, &[_]c_int{ 1, 1, 1, 1 }, 4, s));
+        }
+        var eq = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(eq);
+        try mlx.check(mlx.mlx_array_equal(&eq, parts[0], parts[1], false, s));
+        try mlx.check(mlx.mlx_array_eval(eq));
+        var same = false;
+        try mlx.check(mlx.mlx_array_item_bool(&same, eq));
+        if (!same) return false;
+    }
+    return true;
+}
+
+/// Greedy PLD against serial decode, each on its own transformer over `weights`: the tokens and
+/// every committed K/V row must match, and a verify round that did not grow the cache must leave
+/// the last global layer's buffer in place.
+fn expectPldMatchesSerial(io: std.Io, config: model_mod.ModelConfig, weights: anytype, prompt: []const u32, kv: transformer_mod.KVQuantConfig) !void {
+    const a = testing.allocator;
+    var tok_dummy: Tokenizer = undefined;
+    const greedy = SamplingParams{ .temperature = 0.0 };
+    const want: usize = 32;
+
+    var serial_xfm = try pldTestTransformer(io, config, weights, kv);
+    defer serial_xfm.deinit();
+    var serial_gen = try Generator.initWithOptions(io, a, &serial_xfm, &tok_dummy, prompt, want + 16, greedy, &.{}, .{ .skip_lazy_preforward = true });
+    defer serial_gen.deinit(a);
+    var serial: [want + 8]u32 = undefined;
+    for (&serial) |*t| t.* = (try serial_gen.next(a)) orelse return error.ShortSerial;
+
+    // The lookup text holds the serial continuation with every eighth token wrong, so
+    // rounds accept whole drafts, parts of drafts and nothing.
+    const lookup = try a.alloc(u32, prompt.len + serial.len);
+    defer a.free(lookup);
+    @memcpy(lookup[0..prompt.len], prompt);
+    for (serial, 0..) |t, i| lookup[prompt.len + i] = if (i % 8 == 7) (t + 1) % @as(u32, @intCast(config.vocab_size)) else t;
+
+    var xfm = try pldTestTransformer(io, config, weights, kv);
+    defer xfm.deinit();
+    var gen = try Generator.initWithOptions(io, a, &xfm, &tok_dummy, prompt, want + 16, greedy, &.{}, .{
+        .pld_enabled = true,
+        .skip_lazy_preforward = true,
+        .lookup_prompt = lookup,
+    });
+    defer gen.deinit(a);
+    var pld_toks: [want]u32 = undefined;
+    var n: usize = 0;
+    var rounds_in_place: usize = 0;
+    while (n < want) {
+        const before = try globalKeysBuffer(&xfm);
+        const attempted = gen.pld_attempted;
+        const r = (try gen.nextPld(a, 5, 3)) orelse break;
+        defer a.free(r.tokens);
+        const after = try globalKeysBuffer(&xfm);
+        if (gen.pld_attempted > attempted and after.cap == before.cap) {
+            try testing.expectEqual(before.ptr, after.ptr);
+            rounds_in_place += 1;
+        }
+        for (r.tokens) |t| {
+            if (n == want) break;
+            pld_toks[n] = t;
+            n += 1;
+        }
+    }
+    try testing.expectEqual(want, n);
+    try testing.expect(rounds_in_place > 0);
+    try testing.expectEqualSlices(u32, serial[0..want], pld_toks[0..]);
+    const layer = try lastGlobalKvLayer(&xfm);
+    const rows = @min(xfm.cache.entries[layer].offset, serial_xfm.cache.entries[layer].offset);
+    try testing.expect(try kvRowsEqual(&serial_xfm, &xfm, layer, rows));
+}
+
+fn pldTestTransformer(io: std.Io, config: model_mod.ModelConfig, weights: anytype, kv: transformer_mod.KVQuantConfig) !Transformer {
+    var xfm = try Transformer.init(io, testing.allocator, config, weights);
+    errdefer xfm.deinit();
+    try xfm.cache.reinit(config.num_hidden_layers, kv);
+    xfm.cache.setSwaRing(config.sliding_window);
+    return xfm;
+}
+
+test "mimo PLD rounds decode like serial ticks and write the cache in place (MIMO_V2_MODEL)" {
+    const model_dir = std.c.getenv("MIMO_V2_MODEL") orelse return error.SkipZigTest;
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const a = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var config = try model_mod.parseConfig(io, a, std.mem.span(model_dir));
+    defer if (config.ngram_table_path) |p| a.free(p);
+    var weights = try model_mod.loadWeightsForConfig(io, a, std.mem.span(model_dir), &config, false);
+    defer weights.deinit();
+    try transformer_mod.stackMimoFixtureExperts(&weights, config, mlx.gpuStream());
+    model_mod.resolveWeightPrefix(&config, &weights);
+    // A prompt past the sliding window.
+    var prompt: [168]u32 = undefined;
+    for (&prompt, 0..) |*v, i| v.* = @intCast((i * 7) % config.vocab_size);
+    for ([_]transformer_mod.KVQuantConfig{ transformer_mod.KVQuantConfig.dense, transformer_mod.KVQuantConfig.affine(8) }) |kv| {
+        try expectPldMatchesSerial(io, config, &weights, &prompt, kv);
+    }
 }
 
 test "dsv4: nextPld on a chokepoint-disabled generator stays serial (DSV4_MINI)" {

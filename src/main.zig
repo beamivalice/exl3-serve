@@ -449,6 +449,7 @@ pub fn main(init: std.process.Init) !void {
     var reasoning_budget: i32 = -1; // -1 = unlimited
     var no_vision = false;
     var enable_pld = true; // Prompt Lookup Decoding (on by default; --no-pld to disable)
+    var pld_explicit = false;
     var pld_draft_len: u32 = 5;
     var pld_key_len: u32 = 3;
     var drafter_dir: ?[]const u8 = null; // Path to Gemma 4 assistant drafter checkpoint
@@ -588,10 +589,12 @@ pub fn main(init: std.process.Init) !void {
             // Retired image content filter; accepted as a no-op.
         } else if (std.mem.eql(u8, args[i], "--pld")) {
             enable_pld = true;
+            pld_explicit = true;
         } else if (std.mem.eql(u8, args[i], "--no-tool-autocorrect")) {
             server_mod.g_tool_autocorrect = false;
         } else if (std.mem.eql(u8, args[i], "--no-pld")) {
             enable_pld = false;
+            pld_explicit = true;
         } else if (std.mem.eql(u8, args[i], "--pld-draft-len") and i + 1 < args.len) {
             i += 1;
             pld_draft_len = try std.fmt.parseInt(u32, args[i], 10);
@@ -1006,7 +1009,8 @@ pub fn main(init: std.process.Init) !void {
     // pre-flag default, and passed whole so a path can't honor `--pld` while
     // dropping the two lengths next to it (which is precisely what headless
     // mode did).
-    const cli_pld = server_mod.PldDefaults.fromCli(enable_pld, pld_draft_len, pld_key_len);
+    var cli_pld = server_mod.PldDefaults.fromCli(enable_pld, pld_draft_len, pld_key_len);
+    cli_pld.explicit = pld_explicit;
 
     // Echo the resolved arguments — makes drafter/target mismatches obvious
     // from the log without having to scroll through the whole launch line in
@@ -1292,6 +1296,7 @@ pub fn main(init: std.process.Init) !void {
             .default_top_p = top_p_flag,
             .default_top_k = top_k_flag,
             .default_enable_pld = cli_pld.enable,
+            .pld_explicit = cli_pld.explicit,
             .default_pld_draft_len = cli_pld.draft_len,
             .default_pld_key_len = cli_pld.key_len,
             .kv_attn_mode = kv_attn_mode,
@@ -1609,6 +1614,7 @@ fn runHeadlessServe(
         // always passes all three flags. Taking them as one `PldDefaults`
         // is what keeps the next edit from honoring one and dropping two.
         .default_enable_pld = pld.enable,
+        .pld_explicit = pld.explicit,
         .default_pld_draft_len = pld.draft_len,
         .default_pld_key_len = pld.key_len,
         .kv_attn_mode = .auto,

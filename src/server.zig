@@ -457,6 +457,8 @@ pub const ServerConfig = struct {
     default_reasoning_budget: i32 = -1,
     /// Default PLD enabled state. Per-request `enable_pld` JSON overrides.
     default_enable_pld: bool = false,
+    /// Whether `default_enable_pld` came from `--pld`/`--no-pld` (`pldReport`).
+    pld_explicit: bool = true,
     /// Maximum draft tokens proposed per PLD step.
     default_pld_draft_len: u32 = 5,
     /// N-gram match key length for PLD.
@@ -521,6 +523,22 @@ fn resolveSamplingDefault(comptime T: type, request: ?T, cli: ?T, gen_config: ?T
 /// `--mtp` process-wide, or the model's own `"mtp": true` in `model-settings.json` when unflagged.
 fn forceMtpFor(config: *const model_mod.ModelConfig) bool {
     return mtpChoiceFor(config).forced();
+}
+
+const PldReport = struct { on: bool, source: []const u8 };
+
+/// `lm` null = no model known yet: the flag or the engine default alone.
+fn pldReportFor(lm: ?*LoadedModel) PldReport {
+    const t = if (lm) |m| m.transformer else null;
+    return pldReport(server_config.default_enable_pld, server_config.pld_explicit, if (t) |x| x.moduleSpecWiring() else false);
+}
+
+/// What a slot runs when a request leaves out `enable_pld`, and why, as the load line and `/props` name it.
+fn pldReport(enable: bool, explicit: bool, module_spec: bool) PldReport {
+    // `scheduler.specInitWiring` never runs PLD on a module-wired arch (qwen4_exp), flag or not.
+    if (module_spec) return .{ .on = false, .source = "module spec wiring" };
+    const choice = model_settings.pick(bool, model_settings.launchFlag(bool, enable, explicit), null, true);
+    return .{ .on = choice.value, .source = model_settings.sourceLabel(choice.source, if (choice.value) "--pld" else "--no-pld") };
 }
 
 /// THIS model's MTP decision and its source, the answer the load log and `/props` read.
@@ -867,6 +885,8 @@ pub const PldDefaults = struct {
     enable: bool,
     draft_len: u32,
     key_len: u32,
+    /// Whether `enable` came from `--pld`/`--no-pld` rather than the engine default.
+    explicit: bool = true,
 
     /// Embedded-engine and media-gen serve paths — PLD is unreachable.
     pub const off: PldDefaults = .{ .enable = false, .draft_len = 5, .key_len = 3 };
@@ -896,6 +916,20 @@ test "PldDefaults: CLI lengths survive alongside the enable bit" {
     try std.testing.expect(!PldDefaults.off.enable);
     try std.testing.expectEqual(@as(u32, 5), PldDefaults.off.draft_len);
     try std.testing.expectEqual(@as(u32, 3), PldDefaults.off.key_len);
+}
+
+test "PLD reports what a slot runs: the engine default, --pld, --no-pld, or off on a module-wired arch" {
+    const t = std.testing;
+    const dflt = pldReport(true, false, false);
+    try t.expect(dflt.on);
+    try t.expectEqualStrings("default", dflt.source);
+    try t.expectEqualStrings("--pld", pldReport(true, true, false).source);
+    const off = pldReport(false, true, false);
+    try t.expect(!off.on);
+    try t.expectEqualStrings("--no-pld", off.source);
+    const module = pldReport(true, true, true);
+    try t.expect(!module.on);
+    try t.expectEqualStrings("module spec wiring", module.source);
 }
 
 test "PldDefaults: ServerConfig built from it reports the CLI values" {
@@ -1656,9 +1690,8 @@ pub fn serve(
     if (launchMaxTokensDefault() > 0) {
         log.info("default max_tokens for omitted requests: {d}\n", .{launchMaxTokensDefault()});
     }
-    if (server_config.default_enable_pld) {
-        log.info("PLD speculative decoding: ENABLED (draft_len={d}, key_len={d}; default for new requests)\n", .{ server_config.default_pld_draft_len, server_config.default_pld_key_len });
-    }
+    const pld = pldReportFor(scheduler.registry.resolveEntry("") catch null);
+    log.info("[pld] {s} ({s}); draft_len={d}, key_len={d}; default for new requests\n", .{ if (pld.on) "on" else "off", pld.source, server_config.default_pld_draft_len, server_config.default_pld_key_len });
     if (scheduler.dflash != null) {
         log.info("DFlash speculative decoding: ENABLED (block_size={d}; default for new requests)\n", .{scheduler.drafter_block_size});
     } else if (scheduler.drafter != null and scheduler.dflash == null) {
@@ -6579,6 +6612,7 @@ const PropsSettings = struct {
     max_mtp_ctx: u32,
     drafter: []const u8,
     pld: PldDefaults,
+    pld_source: []const u8 = "default",
     max_concurrent: u32,
     prefix_cache_mem_bytes: u64,
     prefix_cache_disk_bytes: u64,
@@ -6593,6 +6627,7 @@ fn mlxPropsSettings(lm: *LoadedModel) PropsSettings {
     const kv_cache = kvCacheFor(config);
     const kv = kv_cache.config;
     const acceptance = generate_mod.mtpAcceptanceFor(config.mtp_acceptance_override);
+    const pld = pldReportFor(lm);
     return .{
         .engine = "mlx",
         .kv_quant = if (kv.isQuant()) (if (kv.bits == 4) "4" else "8") else "off",
@@ -6609,7 +6644,8 @@ fn mlxPropsSettings(lm: *LoadedModel) PropsSettings {
         .mtp_adaptive = generate_mod.Generator.mtpAdaptiveEnabled(),
         .max_mtp_ctx = generate_mod.max_mtp_ctx,
         .drafter = if (lm.dflash != null) "dflash" else if (lm.drafter != null) "assistant" else "none",
-        .pld = .{ .enable = server_config.default_enable_pld, .draft_len = server_config.default_pld_draft_len, .key_len = server_config.default_pld_key_len },
+        .pld = .{ .enable = pld.on, .draft_len = server_config.default_pld_draft_len, .key_len = server_config.default_pld_key_len },
+        .pld_source = pld.source,
         .max_concurrent = max_concurrent,
         .prefix_cache_mem_bytes = prefix_cache_mem_bytes,
         .prefix_cache_disk_bytes = prefix_cache_disk_bytes,
@@ -6624,7 +6660,7 @@ fn settingsPropsJson(allocator: std.mem.Allocator, st: PropsSettings) ![]u8 {
         .typical => |t| try std.fmt.bufPrint(&param_buf, "{d}", .{t.delta}),
         .tokenv3 => |a| try std.fmt.bufPrint(&param_buf, "{d}", .{a}),
     };
-    return std.fmt.allocPrint(allocator, ",\"settings\":{{\"version\":\"{s}\",\"engine\":\"{s}\",\"kv_quant\":\"{s}\",\"kv_cache\":{{\"scheme\":\"{s}\",\"source\":\"{s}\"}},\"kv_attn_mode\":\"{s}\",\"decode_attn_quant\":{},\"prefill_chunk\":{d},\"mtp\":{{\"loaded\":{},\"default_on\":{},\"source\":\"{s}\",\"acceptance_source\":\"{s}\",\"acceptance\":\"{s}\",\"acceptance_param\":{s},\"depth\":{d},\"adaptive\":{},\"max_ctx\":{d}}},\"drafter\":\"{s}\",\"pld\":{{\"default_on\":{},\"draft_len\":{d},\"key_len\":{d}}},\"max_concurrent\":{d},\"prefix_cache\":{{\"mem_bytes\":{d},\"disk_bytes\":{d}}}}}", .{
+    return std.fmt.allocPrint(allocator, ",\"settings\":{{\"version\":\"{s}\",\"engine\":\"{s}\",\"kv_quant\":\"{s}\",\"kv_cache\":{{\"scheme\":\"{s}\",\"source\":\"{s}\"}},\"kv_attn_mode\":\"{s}\",\"decode_attn_quant\":{},\"prefill_chunk\":{d},\"mtp\":{{\"loaded\":{},\"default_on\":{},\"source\":\"{s}\",\"acceptance_source\":\"{s}\",\"acceptance\":\"{s}\",\"acceptance_param\":{s},\"depth\":{d},\"adaptive\":{},\"max_ctx\":{d}}},\"drafter\":\"{s}\",\"pld\":{{\"default_on\":{},\"source\":\"{s}\",\"draft_len\":{d},\"key_len\":{d}}},\"max_concurrent\":{d},\"prefix_cache\":{{\"mem_bytes\":{d},\"disk_bytes\":{d}}}}}", .{
         build_options.version,                      st.engine,
         st.kv_quant,                                st.kv_cache.label(),
         st.kv_cache.sourceName(),                   @tagName(st.kv_attn_mode),
@@ -6634,8 +6670,9 @@ fn settingsPropsJson(allocator: std.mem.Allocator, st: PropsSettings) ![]u8 {
         mtp_acceptance_mod.name(st.mtp_acceptance), param,
         st.mtp_depth,                               st.mtp_adaptive,
         st.max_mtp_ctx,                             st.drafter,
-        st.pld.enable,                              st.pld.draft_len,
-        st.pld.key_len,                             st.max_concurrent,
+        st.pld.enable,                              st.pld_source,
+        st.pld.draft_len,                           st.pld.key_len,
+        st.max_concurrent,
         st.prefix_cache_mem_bytes,                  st.prefix_cache_disk_bytes,
     });
 }
@@ -19720,6 +19757,7 @@ test "settingsPropsJson: /props names the effective serving settings a benchmark
         .max_mtp_ctx = 32768,
         .drafter = "none",
         .pld = .{ .enable = false, .draft_len = 5, .key_len = 3 },
+        .pld_source = "--no-pld",
         .max_concurrent = 4,
         .prefix_cache_mem_bytes = 2048,
         .prefix_cache_disk_bytes = 0,
@@ -19746,6 +19784,9 @@ test "settingsPropsJson: /props names the effective serving settings a benchmark
     try testing.expectEqualStrings("tokenv3", mtp.get("acceptance").?.string);
     try testing.expectApproxEqAbs(@as(f64, 0.95), mtp.get("acceptance_param").?.float, 1e-6);
     try testing.expectEqual(@as(i64, 32768), mtp.get("max_ctx").?.integer);
+    const pld = st.get("pld").?.object;
+    try testing.expect(!pld.get("default_on").?.bool);
+    try testing.expectEqualStrings("--no-pld", pld.get("source").?.string);
     try testing.expectEqual(@as(i64, 4), st.get("max_concurrent").?.integer);
 
     const exact = try settingsPropsJson(testing.allocator, .{ .engine = "llama", .kv_quant = "q4", .kv_attn_mode = .dense, .decode_attn_quant = false, .prefill_chunk = 4096, .mtp_loaded = false, .mtp_default_on = false, .mtp_acceptance = .exact, .mtp_depth = 3, .mtp_adaptive = false, .max_mtp_ctx = 0, .drafter = "dflash", .pld = PldDefaults.off, .max_concurrent = 1, .prefix_cache_mem_bytes = 0, .prefix_cache_disk_bytes = 0 });
