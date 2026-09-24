@@ -6,6 +6,7 @@ earlier history is mlx-serve's, in that project's changelog.
 
 ## Unreleased
 
+- **MiMo-V2.6-Flash prefills faster at every context length**: its prefill attention walks the causal band in lockstep with branch-free loads and larger dispatches, with output unchanged byte for byte.
 - **`sushi run` can research**: `--tool on` (or `/tool on` in the chat) lets the model search the web, read public pages and read files in the current folder, read-only and without prompts, and `/image <path>` shows a vision model an image.
 - **Every image in a conversation reaches the model where it was sent**: earlier user turns, OpenAI `tool` messages, Anthropic `tool_result` blocks and Responses `input_image` parts (tool outputs included) each render at their own placeholder, so an agent's screenshots are seen; an undecodable image, an `input_audio` part, more than 64 images or an encode that does not fit in memory is a 400 naming the message and the reason, and a failed encode a 500, never a text-only answer.
 - **sushi binds `127.0.0.1:11234` by default and refuses a port that is already in use**: `sushi run` and `sushi serve` need no `--host`/`--port`, `--host localhost` means loopback, and a second server on a busy port exits with `port N is already in use` before loading a model.
