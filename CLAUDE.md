@@ -199,6 +199,10 @@ timing, traces (`zig build test` is not heavy).
 - Existing pack shards are a converter's byte-identity baseline.
 - Committed docs cite commit + settings beside every new number; raw-file paths go to `docs/private/measurement-raw.md`.
 
+**Landing perf.** A speedup that is real (outside run-to-run noise, arms interleaved in one session) and leaves output
+bit-identical lands whatever its size. A change that alters output lands only through the KLD gate
+([quality-kld](docs/quality-kld.md)). Judge a tweak on top of the change it builds on, not alone against the old code.
+
 **Measurement hygiene.**
 - Rebuild ReleaseFast from the head under test right before any live number; stamp commit + binary mtime beside it.
 - Restore QoS for agent-launched timed jobs (`taskpolicy -a`); state the QoS, lock and baseline beside every number.
