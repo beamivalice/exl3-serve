@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/sushi-logo.png" alt="sushi" width="256"></p>
+
 # sushi
 
 A fork from ddalcu's MLX-serve, focus only to support selected EXL3 models in Apple Silicon.
