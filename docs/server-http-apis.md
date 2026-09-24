@@ -99,6 +99,9 @@ effort word's budget > `--reasoning-budget`. `/v1/responses` parsed the word and
 - pi sends its thinking level as `reasoning_effort` through a per-model `thinkingLevelMap` built from the row's
   `reasoning_efforts` (`launch.piEffortFor`: exact, else the next accepted word up, else down; Qwen3.8 high → xhigh).
   pi's `thinkingFormat: qwen` sent only `enable_thinking`, so low/medium never reached the server.
+- omp (a pi fork) has no off entry in its maps: off rides the qwen dialect (`enable_thinking: false`), `whenThinking`
+  switches thinking requests to `reasoning_effort`, and a per-model `thinking` block remaps each level with the same
+  rule; `requiresEffort: false` stops omp clamping off to the lowest effort.
 
 ## `sushi run` research tools (client-side)
 

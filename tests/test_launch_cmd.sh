@@ -85,6 +85,7 @@ echo "$OUT" | grep -q 'export PI_CODING_AGENT_DIR="$HOME/.sushi/omp"' || OK=0
 echo "$OUT" | grep -q "omp --model sushi/$MODEL_ID" || OK=0
 grep -q "contextWindow: $ADV_CTX" ~/.sushi/omp/models.yml || OK=0
 grep -q "baseUrl: $BASE/v1" ~/.sushi/omp/models.yml || OK=0
+grep -q "requiresEffort: false" ~/.sushi/omp/models.yml || OK=0
 if [ "$OK" = 1 ]; then
     run_test "omp script + models.yml carry the advertised context" PASS
 else

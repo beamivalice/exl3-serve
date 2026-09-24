@@ -173,6 +173,9 @@ pub fn ompModelsYml(allocator: std.mem.Allocator, base_url: []const u8, entries:
         \\      supportsReasoningEffort: true
         \\      maxTokensField: max_tokens
         \\      thinkingFormat: qwen
+        \\      qwenTemplateReasoningEffort: false
+        \\      whenThinking:
+        \\        thinkingFormat: openai
         \\    models:
         \\
     , .{base_url});
@@ -181,6 +184,10 @@ pub fn ompModelsYml(allocator: std.mem.Allocator, base_url: []const u8, entries:
             \\      - id: "{s}"
             \\        name: "{s} (sushi)"
             \\        reasoning: true
+            \\
+        , .{ e.id, e.id });
+        if (e.efforts) |accepted| try writeOmpThinking(allocator, &out, accepted);
+        try out.print(allocator,
             \\        input: [{s}]
             \\        cost:
             \\          input: 0
@@ -190,9 +197,33 @@ pub fn ompModelsYml(allocator: std.mem.Allocator, base_url: []const u8, entries:
             \\        contextWindow: {d}
             \\        maxTokens: {d}
             \\
-        , .{ e.id, e.id, if (e.vision) "text, image" else "text", e.budget.context, e.budget.output });
+        , .{ if (e.vision) "text, image" else "text", e.budget.context, e.budget.output });
     }
     return out.toOwnedSlice(allocator);
+}
+
+/// omp's thinking levels past off; off rides the provider's qwen dialect (`enable_thinking:
+/// false`), every other level `whenThinking`'s openai `reasoning_effort`.
+const omp_levels = [_][]const u8{ "minimal", "low", "medium", "high", "xhigh", "max" };
+
+/// One model's `thinking` block: the levels that land on an accepted word, remapped where they
+/// differ. `requiresEffort: false` keeps omp from clamping off to the lowest effort.
+fn writeOmpThinking(allocator: std.mem.Allocator, out: *std.ArrayList(u8), accepted: []const []const u8) !void {
+    // omp refuses an empty `efforts`; a model that accepts no thinking word keeps omp's defaults.
+    if (piEffortFor("max", accepted) == null) return;
+    try out.appendSlice(allocator, "        thinking:\n          mode: effort\n          requiresEffort: false\n          efforts: [");
+    var n: usize = 0;
+    for (omp_levels) |lvl| if (piEffortFor(lvl, accepted) != null) {
+        try out.print(allocator, "{s}{s}", .{ if (n > 0) ", " else "", lvl });
+        n += 1;
+    };
+    try out.appendSlice(allocator, "]\n          effortMap: {");
+    n = 0;
+    for (omp_levels) |lvl| if (piEffortFor(lvl, accepted)) |w| if (!std.mem.eql(u8, w, lvl)) {
+        try out.print(allocator, "{s}{s}: {s}", .{ if (n > 0) ", " else "", lvl, w });
+        n += 1;
+    };
+    try out.appendSlice(allocator, "}\n");
 }
 
 /// opencode config — carried inline via OPENCODE_CONFIG_CONTENT (merges over
@@ -887,6 +918,26 @@ test "pi models.json sends each thinking level as reasoning_effort the model acc
     const old = models[2].object.get("thinkingLevelMap").?.object;
     try t.expectEqual(@as(usize, 1), old.count());
     try t.expectEqualStrings("none", old.get("off").?.string);
+}
+
+test "omp models.yml: off rides enable_thinking, every other level an accepted reasoning_effort" {
+    // The shape verified against omp 18.3.0: the qwen dialect sends off as enable_thinking false,
+    // `whenThinking` switches a thinking request to reasoning_effort, remapped per model.
+    const entries = [_]Entry{
+        .{ .id = "qwen", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true, .efforts = &qwen4_efforts },
+        .{ .id = "mimo", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true, .efforts = &mimo_efforts },
+        .{ .id = "old", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true },
+    };
+    const yml = try ompModelsYml(t.allocator, "http://127.0.0.1:11234", &entries);
+    defer t.allocator.free(yml);
+    try t.expect(std.mem.indexOf(u8, yml, "      qwenTemplateReasoningEffort: false\n      whenThinking:\n        thinkingFormat: openai\n") != null);
+    const qwen_block = "      - id: \"qwen\"\n        name: \"qwen (sushi)\"\n        reasoning: true\n        thinking:\n" ++
+        "          mode: effort\n          requiresEffort: false\n          efforts: [minimal, low, medium, high, xhigh, max]\n" ++
+        "          effortMap: {minimal: low, high: xhigh, max: xhigh}\n        input: [text]\n";
+    try t.expect(std.mem.indexOf(u8, yml, qwen_block) != null);
+    try t.expect(std.mem.indexOf(u8, yml, "          effortMap: {minimal: low}\n") != null);
+    try t.expectEqual(@as(usize, 2), std.mem.count(u8, yml, "thinking:\n"));
+    try t.expect(std.mem.indexOf(u8, yml, "      - id: \"old\"\n        name: \"old (sushi)\"\n        reasoning: true\n        input: [text]\n") != null);
 }
 
 test "parseChatEntries reads each row's reasoning_efforts" {
