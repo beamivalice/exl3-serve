@@ -88,6 +88,31 @@ Verify is 89-92% of a round's wall; forced-depth round ms MCG/MUL1 on code: dept
 42.4/48.6. The absolute off-MTP figures sit below the serial table's: a different session, so only the within-session
 pairs compare. MCG verify ms 28.2 / ~33.5 / ~37.5 at 2/3/4 rows: ~4.6 ms per extra row.
 
+## Flash-Next Sushi3bpw, 1M context ladder (725b76ca)
+
+Pack `Qwen3.8-Flash-Next-Sushi3bpw`, `--ctx-size 1048576 --kv-quant 8 --mtp`, llmprobe `--bench-only --rungs
+4k,8k,16k,32k,64k,128k,256k,512k,980k`, `taskpolicy -a`, lock `bench-qwen-1m-clean`, quiet box (load average < 1), fans at
+max with 4 min idle before boot (the thermal protocol in [process-measurement](process-measurement.md)). Headline cells:
+decode 93.8 tok/s, prefill 1906 tok/s at 2k, MTP 3.62 tokens per step (predictable 119.9, novel 82.9), and llmprobe
+saw an 11.9% sustained-load slide over the 38 min run.
+
+| context | decode tok/s | prefill tok/s | first token | tokens per step |
+|---|---|---|---|---|
+| 4k | 96.1 | 1702 | 2.5 s | 3.37 |
+| 8k | 92.5 | 1940 | 4.2 s | 3.31 |
+| 16k | 93.2 | 1949 | 8.4 s | 3.20 |
+| 33k | 96.2 | 1961 | 16.8 s | 3.00 |
+| 66k | 80.7 | 1945 | 33.7 s | 2.56 |
+| 131k | 80.9 | 1900 | 69.0 s | 2.63 |
+| 262k | 73.4 | 1826 | 143.7 s | 3.20 |
+| 524k | 55.1 | 1686 | 311.1 s | 3.37 |
+| 1004k | 56.6 | 1465 | 685.2 s | 3.31 |
+
+The same ladder on a338ca2, run hot after 2 h of other GPU work with workers computing alongside, read 20-33% lower
+prefill at every rung (1358 at 2k, 1127 at 1004k) and 71.8 decode at 4k. Prefill code did not change between the two
+binaries, so that gap is the box. Decode also gained from d72178a (the MTP regime gate). Never compare a ladder cell
+across a thermal state.
+
 ## Upstream comparison (decided: no rebase)
 
 - Rebased onto upstream vs main 6755ff2 on the MCG K3 pack, interleaved: MTP
