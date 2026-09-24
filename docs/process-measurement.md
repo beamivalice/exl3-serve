@@ -11,7 +11,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [perf-baselines](perf-base
 
 - Look up the matching cell in [perf-baselines](perf-baselines.md) or [quality-kld](quality-kld.md) (and
   `benchmarks.md` for release columns). Same pack, same flags, same methodology.
-- Found → do NOT rerun it. Run only the new arm and cite the recorded file, commit and date beside the new number.
+- Found → do NOT rerun it. Run only the new arm and cite the recorded commit, settings and date beside the new number.
 - Within one session, inherit the previous number. An old-binary baseline is rerun only in a clean new session (fresh
   box state) or when none exists for that exact setting; say which beside the number.
 - Existing pack shards are the byte-identity baseline for a converter change at the same settings.
@@ -75,11 +75,12 @@ captured at launch (`kill -0 $pid`), or on `pgrep -x <binary>` / `ps -axo pid,co
 ## 7. Record
 
 Write the number into the matching doc (and `benchmarks.md` for a release column) in the same landing, with:
-commit, binary stamp, pack path, flags, QoS, lock owner, date, raw-file path, and the baseline it is compared with.
+commit, binary stamp, pack name, flags, QoS, lock owner, date, and the baseline it is compared with. The raw-file
+path goes to the gitignored `docs/private/measurement-raw.md`, keyed by doc and section; a committed doc names no
+local path.
 
 ## Build environment notes
 
 - The pinned Zig nightly is no longer downloadable (`scripts/fetch-zig.sh` 404s); copy an existing `.zig-toolchain/`.
-- A git worktree has neither `.zig-toolchain/` nor the built `lib/mlx/`: symlink both from the main checkout
-  (`/Users/beam/llm/sushi`).
+- A git worktree has neither `.zig-toolchain/` nor the built `lib/mlx/`: symlink both from the main checkout.
 - `lib/mlx-src` and `lib/mlxc-src` are the only submodules; they are needed only to rebuild MLX.

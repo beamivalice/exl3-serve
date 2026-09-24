@@ -1388,7 +1388,14 @@ pub fn cmdKld(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8
     }
 }
 
-const TEACHER_FIXTURE = "/Users/beam/llm/models/kld-teacher/Qwen3.8-Flash-Next-wikitext2-60x64";
+/// The 60x64 teacher fixture under the models root, or null when it is absent.
+fn teacherFixture(buf: []u8, io: std.Io) ?[]const u8 {
+    const path = @import("test_models.zig").packPath(buf, "kld-teacher/Qwen3.8-Flash-Next-wikitext2-60x64") catch return null;
+    var dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return null;
+    defer dir.close(io);
+    _ = dir.statFile(io, "baseline.json", .{}) catch return null;
+    return path;
+}
 
 test "kld: compare memory report serializes aggregate MLX byte counters" {
     const report = MemoryReport{
@@ -1642,26 +1649,31 @@ test "kld: a captured fixture round-trips through the reader byte for byte" {
 test "kld: the real teacher fixture reads back at full width" {
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    _ = std.Io.Dir.cwd().statFile(io, TEACHER_FIXTURE ++ "/baseline.json", .{}) catch return error.SkipZigTest;
+    var fixture_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fixture = teacherFixture(&fixture_buf, io) orelse return error.SkipZigTest;
 
-    var base = try readBaseline(allocator, io, TEACHER_FIXTURE);
+    var base = try readBaseline(allocator, io, fixture);
     defer base.deinit();
     try testing.expectEqual(@as(usize, 60), base.prompts.len);
     try testing.expectEqual(@as(u32, 64), base.tokens_per_prompt);
     try testing.expectEqualStrings("wikitext2-test-00-robert-boulter", base.prompts[0].id);
     try testing.expectEqualStrings("prompts/00_wikitext2-test-00-robert-boulter", base.prompts[0].dir);
 
-    const gen_path = TEACHER_FIXTURE ++ "/prompts/00_wikitext2-test-00-robert-boulter/generated_tokens.txt";
+    const gen_path = try std.fmt.allocPrint(allocator, "{s}/prompts/00_wikitext2-test-00-robert-boulter/generated_tokens.txt", .{fixture});
+    defer allocator.free(gen_path);
     const gen = try readIdList(allocator, io, gen_path);
     defer allocator.free(gen);
     try testing.expectEqual(@as(usize, 64), gen.len);
 
-    const tok_path = TEACHER_FIXTURE ++ "/prompts/00_wikitext2-test-00-robert-boulter/prompt_tokens.txt";
+    const tok_path = try std.fmt.allocPrint(allocator, "{s}/prompts/00_wikitext2-test-00-robert-boulter/prompt_tokens.txt", .{fixture});
+    defer allocator.free(tok_path);
     const ptok = try readIdList(allocator, io, tok_path);
     defer allocator.free(ptok);
     try testing.expectEqual(@as(usize, 343), ptok.len);
 
-    const st = try std.Io.Dir.cwd().statFile(io, TEACHER_FIXTURE ++ "/prompts/00_wikitext2-test-00-robert-boulter/logits.f32", .{});
+    const logits_path = try std.fmt.allocPrint(allocator, "{s}/prompts/00_wikitext2-test-00-robert-boulter/logits.f32", .{fixture});
+    defer allocator.free(logits_path);
+    const st = try std.Io.Dir.cwd().statFile(io, logits_path, .{});
     const vocab = st.size / (64 * @sizeOf(f32));
     try testing.expectEqual(@as(u64, 248320), vocab);
     try testing.expectEqual(@as(u64, 0), st.size % (64 * @sizeOf(f32)));
@@ -1727,14 +1739,15 @@ test "kld: prompt sources parse from a fixture dir, a text dir and a jsonl file"
     defer limited.deinit();
     try testing.expectEqual(@as(usize, 1), limited.items.len);
 
-    if (std.Io.Dir.cwd().statFile(io, TEACHER_FIXTURE ++ "/baseline.json", .{})) |_| {
-        try testing.expectEqual(SourceKind.fixture, try classifySource(io, TEACHER_FIXTURE));
-        var from_fixture = try loadPrompts(allocator, io, TEACHER_FIXTURE, 2);
+    var fixture_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (teacherFixture(&fixture_buf, io)) |fixture| {
+        try testing.expectEqual(SourceKind.fixture, try classifySource(io, fixture));
+        var from_fixture = try loadPrompts(allocator, io, fixture, 2);
         defer from_fixture.deinit();
         try testing.expectEqual(@as(usize, 2), from_fixture.items.len);
         try testing.expectEqualStrings("wikitext2-test-00-robert-boulter", from_fixture.items[0].id);
         try testing.expect(std.mem.startsWith(u8, from_fixture.items[0].text, "= Robert Boulter ="));
-    } else |_| {}
+    }
 }
 
 test "kld: the argument parser reads every flag and refuses an unknown one" {
@@ -1801,9 +1814,10 @@ test "kld: an unflagged capture keeps a full-width teacher KV, never the serving
 test "kld: the recorded strict NLL is the teacher's own log-softmax, as the capture wrote it" {
     const allocator = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    _ = std.Io.Dir.cwd().statFile(io, TEACHER_FIXTURE ++ "/baseline.json", .{}) catch return error.SkipZigTest;
+    var fixture_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fixture = teacherFixture(&fixture_buf, io) orelse return error.SkipZigTest;
 
-    var base = try readBaseline(allocator, io, TEACHER_FIXTURE);
+    var base = try readBaseline(allocator, io, fixture);
     defer base.deinit();
     try testing.expectEqual(@as(usize, 343), base.prompts[0].prompt_tokens);
 
@@ -1812,12 +1826,12 @@ test "kld: the recorded strict NLL is the teacher's own log-softmax, as the capt
     defer allocator.free(row);
     for (base.prompts[0..3]) |fp| {
         try testing.expectEqual(@as(usize, 64), fp.generated_tokens);
-        const gen_path = try std.fmt.allocPrint(allocator, "{s}/{s}/generated_tokens.txt", .{ TEACHER_FIXTURE, fp.dir });
+        const gen_path = try std.fmt.allocPrint(allocator, "{s}/{s}/generated_tokens.txt", .{ fixture, fp.dir });
         defer allocator.free(gen_path);
         const generated = try readIdList(allocator, io, gen_path);
         defer allocator.free(generated);
 
-        const logits_path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}/logits.f32", .{ TEACHER_FIXTURE, fp.dir }, 0);
+        const logits_path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}/logits.f32", .{ fixture, fp.dir }, 0);
         defer allocator.free(logits_path);
         const fd = std.c.open(logits_path.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
         try testing.expect(fd >= 0);

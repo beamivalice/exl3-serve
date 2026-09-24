@@ -30,7 +30,7 @@
 #   AGENT_SPEC_TEST_MODEL=/path/to/model ./tests/test_agent_loop_spec.sh [port]
 #
 # Defaults:
-#   model   = /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
+#   model   = ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
 #   drafter = ~/.sushi/models/mlx-community/gemma-4-E4B-it-assistant-bf16 (only used if
 #             AGENT_SPEC_TEST_MODEL points at a Gemma 4 target)
 #
@@ -45,7 +45,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${AGENT_SPEC_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+MODEL="${AGENT_SPEC_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 DRAFTER="${AGENT_SPEC_TEST_DRAFTER:-}"
 
 if [ ! -d "$MODEL" ]; then

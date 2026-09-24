@@ -795,7 +795,7 @@ const NameCtx = struct {
 // quantization error).
 //
 //   MUSE_VISION_MODEL=~/.sushi/models/ddalcu/Muse-Glimmer-30B-MLX-Serve-8bit \
-//   MUSE_VISION_FIXTURE=~/claude-tmp/muse-vision/muse_vision_fixture.safetensors \
+//   MUSE_VISION_FIXTURE=<dir>/muse_vision_fixture.safetensors \
 //   zig build test -Doptimize=ReleaseFast -Dtest-filter="muse vision parity"
 test "muse vision live: tower parity vs the executed reference" {
     const raw_model = std.c.getenv("MUSE_VISION_MODEL") orelse return error.SkipZigTest;

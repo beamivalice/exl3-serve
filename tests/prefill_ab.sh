@@ -14,6 +14,7 @@ MODEL="${1:?usage: prefill_ab.sh <model-dir> <ENV_VAR> <on-value> <off-value> [r
 VAR="${2:?}"; ONV="${3:?}"; OFFV="${4:?}"; REPS="${5:-3}"
 PORT="${PORT:-8093}"
 BIN="${BIN:-./zig-out/bin/sushi}"
+mkdir -p "$HOME/.sushi/runs/prefill-ab"
 
 PROMPT_BODY=$(python3 -c "
 para='A B-tree is a self-balancing search tree whose nodes hold many keys and many children, which keeps its height small and suits block-oriented storage well. '
@@ -22,7 +23,7 @@ print(para*int('${PREFILL_AB_PARAS:-260}'))")
 arm() {
   local val="$1" label="$2"
   pkill -f "sushi.*--port $PORT" 2>/dev/null; sleep 2
-  env "$VAR=$val" "$BIN" --model "$MODEL" --serve --port "$PORT" >"$HOME/claude-tmp/prefill-ab/$PORT-${label// /}.log" 2>&1 &
+  env "$VAR=$val" "$BIN" --model "$MODEL" --serve --port "$PORT" >"$HOME/.sushi/runs/prefill-ab/$PORT-${label// /}.log" 2>&1 &
   local pid=$!
   for _ in $(seq 1 900); do
     curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break

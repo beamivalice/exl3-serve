@@ -6,7 +6,7 @@
 # Usage: ./tests/test_thinking_tools.sh [model_dir] [port]
 # Starts its own server, runs tests, kills it.
 
-MODEL_DIR=${1:-${SUSHI_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}
+MODEL_DIR=${1:-${SUSHI_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}
 PORT=${2:-8099}
 BASE="http://127.0.0.1:$PORT"
 BINARY="./zig-out/bin/sushi"

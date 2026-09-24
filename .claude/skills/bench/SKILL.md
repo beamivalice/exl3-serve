@@ -18,11 +18,11 @@ description: sushi benchmarking methodology — bench.sh/llmprobe usage, compari
 
 **Another engine = another URL.** Start LM Studio / oMLX / MTPLX / llama-server yourself, then `--url host:port -m <id>`. Same script, same probe, nothing about their binaries, ports or version strings lives in the bench.
 
-The only artifacts: the paste-ready rows bench.sh prints at the end, which go into `benchmarks.md` (one column per release in the history table, plus the cross-engine table rewritten when a comparison is run), and the saved llmprobe reports + server logs under `~/claude-tmp/bench-<tag>/`.
+The only artifacts: the paste-ready rows bench.sh prints at the end, which go into `benchmarks.md` (one column per release in the history table, plus the cross-engine table rewritten when a comparison is run), and the saved llmprobe reports + server logs under `~/.sushi/runs/bench-<tag>/`.
 
 ### Before you run anything
 
-Follow CLAUDE.md's Team process and `docs/process-measurement.md`: take `scripts/gpu-lock.sh` per run, rebuild and stamp the binary, restore QoS (`taskpolicy -a`), and look up the recorded baseline in `docs/perf-baselines.md` first. A recorded old-binary baseline is inherited, not rerun (rerun only in a clean new session); cite its file and commit beside the new number, and record the new number there in the same landing.
+Follow CLAUDE.md's Team process and `docs/process-measurement.md`: take `scripts/gpu-lock.sh` per run, rebuild and stamp the binary, restore QoS (`taskpolicy -a`), and look up the recorded baseline in `docs/perf-baselines.md` first. A recorded old-binary baseline is inherited, not rerun (rerun only in a clean new session); cite its commit and settings beside the new number, and record the new number there in the same landing.
 
 ### Comparison traps (these cost real days)
 

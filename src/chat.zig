@@ -7760,7 +7760,7 @@ test "inferBareJsonToolCalls maps bare-args fenced JSON to the unique matching t
     const allocator = testing.allocator;
     // Shape captured live from gemma-4-12b via Claude Code /v1/messages: thought
     // block, then a ```json fence holding ONLY the Write tool's arguments.
-    const text = "<|channel>thought\nI will create this file using Write.<channel|>```json\n{\n  \"file_path\": \"/Users/david/mlx_info.html\",\n  \"content\": \"<h1>MLX</h1>\"\n}\n```\nI've created the file.";
+    const text = "<|channel>thought\nI will create this file using Write.<channel|>```json\n{\n  \"file_path\": \"/Users/user/mlx_info.html\",\n  \"content\": \"<h1>MLX</h1>\"\n}\n```\nI've created the file.";
     const calls = (try inferBareJsonToolCalls(allocator, text, test_tools_write_bash)) orelse return error.NoCalls;
     defer {
         for (calls) |tc| {
@@ -7773,7 +7773,7 @@ test "inferBareJsonToolCalls maps bare-args fenced JSON to the unique matching t
     try testing.expectEqualStrings("Write", calls[0].name);
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, calls[0].arguments, .{});
     defer parsed.deinit();
-    try testing.expectEqualStrings("/Users/david/mlx_info.html", parsed.value.object.get("file_path").?.string);
+    try testing.expectEqualStrings("/Users/user/mlx_info.html", parsed.value.object.get("file_path").?.string);
 }
 
 test "inferBareJsonToolCalls unfenced bare object at content start" {
@@ -10852,7 +10852,7 @@ test "parseToolCalls: empty body + attribute-args + explicit </tool_call> close"
     const allocator = testing.allocator;
     const text =
         \\<tool_calls>
-        \\<tool_call name="cwd" arguments="{"path": "/Users/david/.sushi/workspace"}"></tool_call>
+        \\<tool_call name="cwd" arguments="{"path": "/Users/user/.sushi/workspace"}"></tool_call>
         \\</tool_calls>
     ;
     const calls = (try parseToolCalls(allocator, text)) orelse return error.NoCalls;
@@ -11080,7 +11080,7 @@ test "coerceToolArgsToSchema: Python-style False on a boolean param becomes JSON
     const allocator = testing.allocator;
     const raw =
         "\n<tool_call>\n<function=Edit>\n<parameter=replace_all>\nFalse\n</parameter>\n" ++
-        "<parameter=file_path>\n/Users/david/doom/index.html\n</parameter>\n" ++
+        "<parameter=file_path>\n/Users/user/doom/index.html\n</parameter>\n" ++
         "<parameter=old_string>\n  <script src=\"game.js\"></script>\n</parameter>\n" ++
         "<parameter=new_string>\n  <script src=\"game.js\" type=\"module\"></script>\n</parameter>\n" ++
         "</function>\n</tool_call>";

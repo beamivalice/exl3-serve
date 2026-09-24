@@ -19,9 +19,8 @@
 //! I/O planes legal (A9). Separate UNITS eval concurrently, so each owns
 //! its own planes.
 //!
-//! Stage-A measured facts this file encodes (harness at
-//! ~/claude-tmp/perf-aug17/p5-ane-mlp): full-MLP-in-one-program parity
-//! cos 0.9999 vs fp32; 11.8 TFLOPS eval with the down conv K-chunked
+//! Stage-A measured facts this file encodes (out-of-tree harness):
+//! full-MLP-in-one-program parity cos 0.9999 vs fp32; 11.8 TFLOPS eval with the down conv K-chunked
 //! (a single K=17408 conv is a 2.6x cliff — chunking lives in
 //! lib/ane/ane_mlp.m); fp16 range safe to 16x with the always-on
 //! (1/16 .. x16) down-conv wrap.

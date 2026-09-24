@@ -11,10 +11,10 @@
 # human's image message; that media still belongs to the active turn, while an
 # image before the latest assistant boundary must remain historical.
 set -u
-MODEL="${VISION_CACHE_MODEL:-${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
+MODEL="${VISION_CACHE_MODEL:-${1:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
 PORT="${2:-11419}"
 BIN="${SUSHI_BIN:-./zig-out/bin/sushi}"
-LOG="$HOME/claude-tmp/vision-cache/server-$PORT.log"
+LOG="$HOME/.sushi/runs/vision-cache/server-$PORT.log"
 mkdir -p "$(dirname "$LOG")"
 [ -f "$MODEL/config.json" ] || { echo "SKIP: no model at $MODEL"; exit 0; }
 F1="tests/fixtures/street-name-signs.jpg"

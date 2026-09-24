@@ -98,7 +98,7 @@ class FakeFS:
     """
 
     def __init__(self):
-        self.cwd = "/Users/david/.sushi/workspace"
+        self.cwd = "/Users/user/.sushi/workspace"
         self.files = {}   # path → content
         self.dirs = set([self.cwd])
 

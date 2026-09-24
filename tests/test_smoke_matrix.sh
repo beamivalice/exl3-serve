@@ -25,7 +25,7 @@ BINARY="${BINARY:-./zig-out/bin/sushi}"
 PORT="${PORT:-11431}"
 BASE="http://127.0.0.1:$PORT"
 MAX_GB="${SMOKE_MAX_GB:-0}"
-OUT="${SMOKE_OUT:-$HOME/claude-tmp/smoke-matrix-$(date +%Y%m%d-%H%M%S)}"
+OUT="${SMOKE_OUT:-$HOME/.sushi/runs/smoke-matrix-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT/home"
 
 [[ -x "$BINARY" ]] || { echo "[fatal] $BINARY missing — zig build -Doptimize=ReleaseFast"; exit 1; }
@@ -33,8 +33,8 @@ mkdir -p "$OUT/home"
 MD="$HOME/.sushi/models"
 # arch|thinking(yes/no)|candidate paths (first that exists wins)
 ARCHES=(
-    "qwen4_exp|yes|${QWEN4_EXP_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}|$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw"
-    "mimo_v2|yes|${MIMO_STREAM_MODEL:-/Users/beam/llm/models/MiMo-V2.6-Flash-Sushi2.5bpw}"
+    "qwen4_exp|yes|${QWEN4_EXP_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}|$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw"
+    "mimo_v2|yes|${MIMO_STREAM_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/MiMo-V2.6-Flash-Sushi2.5bpw}"
 )
 CONFIGS="${SMOKE_CONFIGS:-default,off,kv4,mtp,nospec}"
 

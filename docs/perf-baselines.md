@@ -1,6 +1,6 @@
 # Performance baselines
 
-The recorded speed numbers for the served packs on this box, where each one's raw files live, the roofline they are
+The recorded speed numbers for the served packs on this box, the roofline they are
 judged against, and the levers already ruled out. Before any A/B, find the matching baseline here and INHERIT it
 (Team process in CLAUDE.md); every new number lands here, with its commit, binary stamp, QoS and lock, in the same
 landing.
@@ -19,7 +19,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [quality-kld](quality-kld.
 
 ## Roofline
 
-Measured peaks (`/Users/beam/claude-tmp/mimo-roofline/peak.json`, mlx 0.32.2, binary a73713d):
+Measured peaks (mlx 0.32.2, binary a73713d):
 
 | probe | median | best |
 |---|---|---|
@@ -39,8 +39,8 @@ so real ceilings are ~10% lower.
 | MiMo, FP8-native trunk (branch) | ~10.6 GB | ~56 tok/s | 39.0 | |
 | MiMo, FP8 + o_proj affine-8 (branch) | ~9.0 GB | ~67 tok/s | 43.5 | |
 
-MiMo byte breakdown: `/Users/beam/claude-tmp/mimo-roofline/bytes.json` (qkv 5.74 GB bf16, o_proj 3.22, layer-0 MLP
-0.40, router 0.10, routed K2.5 2.97, lm_head 1.25, sliding ring 0.014).
+MiMo byte breakdown: qkv 5.74 GB bf16, o_proj 3.22, layer-0 MLP 0.40, router 0.10, routed K2.5 2.97, lm_head 1.25,
+sliding ring 0.014.
 
 <a id="exl3"></a>
 ## EXL3 decode and prefill attribution (Flash-Next)
@@ -60,7 +60,6 @@ MiMo byte breakdown: `/Users/beam/claude-tmp/mimo-roofline/bytes.json` (qkv 5.74
 ## Flash-Next K3, serial (no MTP)
 
 llmprobe `--bench-only --full`, ctx 65536, KV unquantized, MTP verified off (1.01 tok/step), one server at a time.
-Raw files: `/Users/beam/claude-tmp/bench-tiny-vs/` (`fw-*`, `flash-*`, each with a `.binary.txt` stamp).
 
 | pack | binary | decode 192 tok | prefill 2k | 4k | 8k | 16k | 32k | 64k | first token at 64k |
 |---|---|---|---|---|---|---|---|---|---|
@@ -98,7 +97,7 @@ pairs compare. MCG verify ms 28.2 / ~33.5 / ~37.5 at 2/3/4 rows: ~4.6 ms per ext
 - Rebased onto upstream (branch `upstream-rebase`, 8f64acd) vs main 6755ff2 on the MCG K3 pack, interleaved: MTP
   decode 88.2/81.9 vs 82.0/83.1, MTP off 62.1 vs 60.4, prefill 1643 vs 1598: neutral. Four streams with MTP: 85
   aggregate both ways (our merged-verify decline past width one holds).
-- kv8 A/B on the affine 4/8 pack (`/Users/beam/claude-tmp/bench-rebase-ab/`): upstream's `qkvAttnMppKernel` engaged
+- kv8 A/B on the affine 4/8 pack: upstream's `qkvAttnMppKernel` engaged
   zero times (QSA caps keys at 2048); all differences were run-to-run and spec variance.
 - Decision: main stays; upstream's kv8 attention kernel and grouped MTP are cherry-pick candidates later, each with
   its own certification. The `upstream-rebase` branch is kept as the reference.
@@ -116,7 +115,7 @@ and 4-8% of a depth-3 verify; a matmul2d QSA prototype (branch `qsa-mpp-proto`) 
 <a id="mimo-decode"></a>
 ## MiMo MCG K2.5 w12
 
-Ladder on binary a73713d, bf16 trunk, kv8 (`/Users/beam/claude-tmp/mimo-roofline/ladderB/ladder.out`; `mode=fused` =
+Ladder on binary a73713d, bf16 trunk, kv8 (`mode=fused` =
 the matmul2d packed decode, `mode=dense` = the rebuild):
 
 | context | prefill tok/s | decode fused | decode dense |
@@ -129,16 +128,16 @@ the matmul2d packed decode, `mode=dense` = the rebuild):
 
 The 128k rung reads below the 256k rung in this run; recorded as measured, unexplained (re-measure before quoting it).
 
-Prefill chunk sweep (`/Users/beam/claude-tmp/mimo-roofline/sweep/sweep.out`): width 2048 is best (852 tok/s at 4k,
+Prefill chunk sweep: width 2048 is best (852 tok/s at 4k,
 477 at 64k) against 512 (737-817, 418) and 4096/8192 (~725, ~437). That was before the fused sliding prefill, whose
 composed band sheet grew with the chunk. After it (binary 7c9a5af, ctx 131072, kv8, `SUSHI_PREFILL_CHUNK`, one
 boot per cell, 2048 4096 4096 2048, QoS restored, lock `dispatch-chunk`, 2026-09-24): 2048 → 4096 is 926-1173 vs
 1006-1175 tok/s at 4k, 879/889 vs 814/950 at 16k, 501/543 vs 539/562 at 64k; 4096 is never slower on the mean, so
 the per-request chooser keeps the 4096 cap. Head ffdfc38 choosing per request (4096 admitted every time): 4k
-1106-1122, 16k 888-922, 64k 500 (ctx 528384) / 559 (ctx 131072). Raw: `scratchpad/dispatch/runs/cw*`, `pfG_*`.
+1106-1122, 16k 888-922, 64k 500 (ctx 528384) / 559 (ctx 131072).
 
 Decode dispatch diet (ffdfc38 family; fwd-ubench, 4096 KV, one boot per arm, A D D A twice, lock `dispatch-chunk`,
-QoS restored; raw `scratchpad/dispatch/runs/ub*`): one decode forward's primitives 1399 → 1113 non-view
+QoS restored): one decode forward's primitives 1399 → 1113 non-view
 (`SUSHI_DECODE_FWD_GRAPH`); 24.37/24.32/24.23/24.22 → 23.73/23.94/23.83/24.00 ms per forward (-0.41 ms, -1.7%; GPU
 eval 23.56 → 23.04 ms, CPU build +0.11 ms). Greedy text and top-3 logprobs identical to the base over 2x160 tokens.
 llmprobe `--bench-only` on 7c9a5af (ctx 32768, kv8, no MTP): decode 40.8 tok/s (39.7-45, contended; sustained
@@ -148,12 +147,12 @@ affine-8). 16x512 KLD to EOS 0.07700, top-1 92.06%, resident 101.48 GB (+0.2 GB:
 The bf16 trunk (b2670b6, the lossless-teacher ruling, which the served pack shares) cost the MCG/TINY pack ~15% of
 decode against the affine-8 trunk it replaced (31.1 → ~26 tok/s; +2.7 GiB read per token). Hence the FP8 work:
 
-Landed 4cb68cc..a1fb67f (measured on f72f989/3b27c11, kv8, no MTP, ctx 32768, llmprobe `--bench-only`, A B B A;
-raw files `scratchpad/fp8/live/`): decode 32.4/32.5 (bf16 trunk) → 39.0/39.0 (FP8 native) → 43.5/43.6 (+ o_proj
+Landed 4cb68cc..a1fb67f (measured on f72f989/3b27c11, kv8, no MTP, ctx 32768, llmprobe `--bench-only`, A B B A):
+decode 32.4/32.5 (bf16 trunk) → 39.0/39.0 (FP8 native) → 43.5/43.6 (+ o_proj
 affine-8); affine-8 for the FP8 linears 43.3/43.2 (no faster, lossy, not shipped). + lm_head and embed affine-8: load
 bill 95.42 → 94.32 GB, decode not yet measured on a quiet box (microbench predicts ~45.5).
 Stored imatrix affine-8 o_proj + lm_head + embed (28d8a4b, overlay pack, kv8, no MTP, ctx 32768, llmprobe
-`--bench-only`, `taskpolicy -a`, lock `mimo-trunk-affine`; raw `scratchpad/trunkq/live/`): decode 44.2 tok/s (a
+`--bench-only`, `taskpolicy -a`, lock `mimo-trunk-affine`): decode 44.2 tok/s (a
 first run read 40.5 with 4.6 GB less free memory and a -12% sustained slide: box interference, discarded); the same
 format packed at load by main (4c8367f, taken once because that product had no quiet number) 44.0. Bill 94.32 GB both;
 boot to `/health` 24.0-25.5 s stored vs 25.1 s load-time: the load-time packing was not a measurable cost. FP8 GEMV runs 465-488 GB/s
@@ -163,10 +162,10 @@ at one row; o_proj via MLX affine-8 qmv only 363 GB/s (a dedicated kernel could 
 Per-step packed decode (11a0912; MCG K2.5 w12, FP8 trunk, kv8, no MTP, ctx 81920, 2026-09-24): the global-layer arm
 is chosen from the cache's CURRENT key count each step (switch logged at `Tk=4096` inside a request admitted at 3.6k
 tokens); 16k decode 41.2 tok/s with auto = dense, 64k 36.8 with auto = dense (bf16-trunk ladder: dense 15.4-17.3 vs
-packed 26.0); prefill 660 tok/s at 16k, 465 at 64k (chunk auto). Raw: session scratchpad `live/out.jsonl`, `server.log`.
+packed 26.0); prefill 660 tok/s at 16k, 465 at 64k (chunk auto).
 
 Prefill attention on the matrix units (`sushi_attn_pd_nax`, 2026-09-24, binary b33ec32 built 01:30, taskpolicy -a,
-lock attnpd-nax; raw files `scratchpad/naxpd/`, baselines `scratchpad/attnpd/results/` + `attnpd/live/` on 7ed9795).
+lock attnpd-nax; baselines on 7ed9795).
 One global layer, H 64 / Hk 4, qL 2048, kv8, ms: kL 2048 8.04 -> 2.90, 4096 22.1 -> 7.18, 16384 113.0 -> 33.0,
 65536 448 -> 159, 262144 2012 -> 601 (34-39 TFLOPS; the SIMD kernel 11-12). 39 sliding layers' band call, per call:
 qL 512 1.96 -> 0.78, 2048 1.66 -> 0.95-0.97, 4096 2.98 -> 0.89. Live MiMo MCG K2.5 w12, kv8, no MTP, chunk 2048, one
@@ -182,8 +181,8 @@ noise.
 <a id="mimo-verify-rows"></a>
 Verify-row cost (binary 37d5f0d = main 7ed9795 + the MTP branch, pre-00:55 layout of the MCG K2.5 w12 pack with
 `trunk_quant` o_proj/lm_head/embed affine-8, kv8, 4096 KV, `SUSHI_DECODE_FWD_UBENCH=40` with
-`_S=1,2,3,4 _ROW_ARMS=1 _PROFILE=1`, one boot, `taskpolicy -a`, lock `mimo-mtp`, 2026-09-24; raw
-`/Users/beam/claude-tmp/mimo-mtp/runs/boot1_forced3.log`). ms/forward, lm_head in brackets:
+`_S=1,2,3,4 _ROW_ARMS=1 _PROFILE=1`, one boot, `taskpolicy -a`, lock `mimo-mtp`, 2026-09-24). ms/forward, lm_head in
+brackets:
 
 | rows | prefill-shaped (main) | verify rows (decode arithmetic) | expert-grouped reads |
 |---|---|---|---|
@@ -200,7 +199,7 @@ prefill-shaped forward did. Expert-grouped reads (the first slot of an expert ru
 one threadgroup) lost 1.5-5 ms and were dropped.
 
 MTP (same binary and pack, kv8, ctx 32768, `--prefix-cache-entries 0`, one boot per arm, same session;
-llmprobe `--bench-only`; raw `/Users/beam/claude-tmp/mimo-mtp/runs/boot{1,2,3}*`):
+llmprobe `--bench-only`):
 
 | cell | serial (`--no-mtp`) | MTP auto (`--mtp`) |
 |---|---|---|
@@ -217,14 +216,14 @@ count 65.6, JSON 64.2, story 38.0, explain 44.5, recipe 49.5 — one rep, not se
 acceptance code 1.00/0.91/0.81, count/JSON 1.00/1.00/1.00, story 0.56-0.59/0.31-0.41/0.13-0.16, explain
 0.59-0.84/0.28-0.44/0.16-0.31.
 
-With the MiMo EV surface (binary add003d, same pack and flags, `--mtp` auto, raw `runs/boot5*`): llmprobe decode 51.0,
+With the MiMo EV surface (binary add003d, same pack and flags, `--mtp` auto): llmprobe decode 51.0,
 predictable / novel 63.8 / 43.3, context 47.7 / 49.2 / 41.3 / 46.5; 256-token A/B serial 42.8-43.2 vs MTP code 57.9,
 count 62.4, JSON 62.7, story 41.2, explain 42.4, recipe 46.3, 6/6 byte-identical. That boot's box ran ~3% slower
 serial and read prefill 880 with an unchanged prefill path and cold TTFT (1670 vs 1618 ms). Rebased on 9dbe85e
-(forced depth 3, `runs/boot6*`): 6/6 byte-identical, seeded sampled requests stream == non-stream on both arms.
+(forced depth 3): 6/6 byte-identical, seeded sampled requests stream == non-stream on both arms.
 
 On main 9942e8e (head 83b564a, binary built 04:41, the served pack as stored, same flags, `taskpolicy -a`, lock
-`mimo-mtp`, raw `runs/boot7*`): forced depth 3 code / count / story byte-identical, serial 52.4 -> MTP 66.6 / 84.3 /
+`mimo-mtp`): forced depth 3 code / count / story byte-identical, serial 52.4 -> MTP 66.6 / 84.3 /
 46.2, verify 44.6 ms at 4 rows. One auto boot, llmprobe `--bench-only` MTP direct vs serial through an
 `enable_mtp: false` proxy: decode 59.1 vs 49.6, predictable / novel 71.1 / 50.5 vs 49.6 / 49.9, context 0.5k / 4k / 8k
 / 16k 55.3 / 60.3 / 60.3 / 58.9 vs 49.7 / 49.4 / 48.9 / 47.6, prefill 2k 925 vs 1007 (one reading per arm: noise, see
@@ -232,9 +231,8 @@ below); auto A/B 3/3 byte-identical. That boot's serial ran 49.6, below the firs
 
 <a id="mimo-mtp-prefill"></a>
 MTP does not slow MiMo's prefill (7ce480f, binary 05:55, the served pack renamed `MiMo-V2.6-Flash-Sushi2.5bpw`, kv8,
-`--mtp --no-pld --prefix-cache-entries 0`, ctx 81920, `taskpolicy -a`, lock `mimo-mtp-prefill`, raw
-`/Users/beam/claude-tmp/mimo-mtp-prefill/runs/base_{a,b64k,c}*`). One boot per row, MTP on vs `enable_mtp: false`
-alternated ABBA, 8 tokens, median streamed TTFT:
+`--mtp --no-pld --prefix-cache-entries 0`, ctx 81920, `taskpolicy -a`, lock `mimo-mtp-prefill`). One boot per row,
+MTP on vs `enable_mtp: false` alternated ABBA, 8 tokens, median streamed TTFT:
 
 | prompt | pairs | TTFT on / off (ms) | paired diff on - off | MTP-only prefill work (eval, on - off) |
 |---|---|---|---|---|
@@ -258,8 +256,7 @@ The lane-funnel decode GEMVs (n40 MiMo, n48 Flash-Next) take two output tiles pe
 iteration with both loads issued first, and pointer bumps; outputs bit-identical (see
 [engine-exl3-experts](engine-exl3-experts.md#kernels)). Kernel microbench: 47 chained dispatches per round, arms
 interleaved, median net of a null chain, `taskpolicy -a`, lock `exl3-decode-layout`; base = the served kernels,
-recorded in the research run (session scratchpad `rx/q4.jsonl`, `rx/q5.jsonl`, `rx/q7.jsonl`), new arm in
-`dl/tq1.jsonl`, `dl/tq2.jsonl` (sources read verbatim from the commit).
+recorded in the research run, new arm with sources read verbatim from the commit.
 
 | geometry, kernel | rows 1 | rows 2 | rows 4 | rows 8 |
 |---|---|---|---|---|
@@ -273,7 +270,7 @@ One tile per threadgroup with the unroll and pointer bumps reads the same as two
 share: one policy, two tiles.
 
 Live, llmprobe `--bench-only`, no MTP, one boot per arm, `taskpolicy -a`, lock `exl3-decode-layout`, greedy
-200-token chat completion byte-identical between the arms of each pair (raw: session scratchpad `dl/`):
+200-token chat completion byte-identical between the arms of each pair:
 
 | pack, flags | base | new | decode | prefill 2k |
 |---|---|---|---|---|

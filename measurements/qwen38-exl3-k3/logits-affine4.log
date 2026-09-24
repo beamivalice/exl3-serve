@@ -1,5 +1,5 @@
 [mem] MLX buffer-pool cap 8192 MB (was 124518 MB)
-[model-settings] /Users/beam/llm/models/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit: ctx=524288 kv=off mtp=on accept=exact ssd_budget_gb=0
+[model-settings] <models>/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit: ctx=524288 kv=off mtp=on accept=exact ssd_budget_gb=0
   parsed tokenizer (12 MB) in 42ms
   loaded 248044 vocab entries in 4ms
   loaded 247587 merges in 7ms
@@ -110,7 +110,7 @@ Loaded 2834 weights from 101 file(s)
 Precomputing MoE layer weights...
 [rope] YaRN: factor 4.0000 (window 262144 -> 1048576), rotary 64 dims, ramp [14, 22], mscale 1.138629
 Batch eval all weights: 5658ms
-[qwen4] ngram table from the bf16 shards in /Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next (MLX_SERVE_NGRAM_BF16_DIR)
+[qwen4] ngram table from the bf16 shards in <models>/Qwen/Qwen3.8-Flash-Next (MLX_SERVE_NGRAM_BF16_DIR)
 Precomputing MoE layer weights...
 [qwen4] MTP head loaded (1 hyper-connected QSA+MoE layer; drafts armed by --mtp)
 [qwen4] n-gram table 320001536 rows x 160 (16-bit, mmapped), PLE at layer 1, QSA budget 2048/4

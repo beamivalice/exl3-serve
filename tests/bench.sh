@@ -52,8 +52,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Reports live outside the repo: ~/claude-tmp survives reboots, /tmp does not.
-OUT="$HOME/claude-tmp/bench-$TAG"
+# Reports live outside the repo, somewhere that survives reboots (/tmp does not).
+OUT="$HOME/.sushi/runs/bench-$TAG"
 mkdir -p "$OUT"
 
 # ── Model matrix: logical|path ──

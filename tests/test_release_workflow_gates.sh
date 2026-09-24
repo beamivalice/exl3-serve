@@ -95,6 +95,13 @@ check(len(nax_steps) == 1, "NAX metallib static guard step present")
 check(nax_steps and "if" not in nax_steps[0],
       "NAX guard unconditional (runs on every event incl. PRs)")
 
+# A public release must not ship a tracked file naming a development box's directories.
+path_steps = [s for s in job["steps"]
+              if "test_no_local_paths.sh" in str(s.get("run", ""))]
+check(len(path_steps) == 1, "local-path guard step present")
+check(path_steps and "if" not in path_steps[0],
+      "local-path guard unconditional (runs on every event incl. PRs)")
+
 # The PR build's output must be uploaded as an artifact.
 upload = [s for s in job["steps"]
           if s.get("uses", "").startswith("actions/upload-artifact")]

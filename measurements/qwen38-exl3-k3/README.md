@@ -3,8 +3,8 @@
 The completed four-pack RAM/logit-cosine table and fresh affine3 conversion
 instructions are in [comparison.md](comparison.md).
 
-Target: `/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3`.
-Source: `/Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next`.
+Target: `<models>/Qwen3.8-Flash-Next-EXL3-K3`.
+Source: `<models>/Qwen/Qwen3.8-Flash-Next`.
 Engine base revision: `8d04cedcc5b9d8039e0fd5cb8ffe13f8f1c66010`, plus the
 cosine-scoring changes accompanying this report.
 
@@ -30,7 +30,7 @@ The target declares K3/MUL1 routed experts, affine trunk weights and a raw BF16
 n-gram table. Config hashes identify configuration, not the full tensor payload.
 
 The reference-control fixture is
-`/Users/beam/llm/models/kld-teacher/mlx-serve-bf16-60x64`: 60 WikiText-2
+`<models>/kld-teacher/mlx-serve-bf16-60x64`: 60 WikiText-2
 excerpts rendered with the chat template, with 64 greedy teacher tokens each.
 This is teacher-generated continuation scoring, not perplexity on held-out
 WikiText ground-truth continuations.
@@ -40,14 +40,14 @@ teacher prompt with exactly zero KL divergence and 64/64 top-1 agreement:
 see `bf16-control.json` and `bf16-control.log`.
 
 The new K3 logit measurement instead uses
-`/Users/beam/llm/models/kld-teacher/mlx-serve-bf16-16x512-raw`, matching the
+`<models>/kld-teacher/mlx-serve-bf16-16x512-raw`, matching the
 recovered historical oq8e comparison below: 16 raw excerpts, 512 teacher-generated
 tokens each. Both fixtures were captured from the same BF16-source model.
 
 ```sh
 ./zig-out/bin/mlx-serve kld compare \
-  --model /Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next \
-  --fixture /Users/beam/llm/models/kld-teacher/mlx-serve-bf16-60x64 \
+  --model <models>/Qwen/Qwen3.8-Flash-Next \
+  --fixture <models>/kld-teacher/mlx-serve-bf16-60x64 \
   --limit 1 --ssd-budget-gb 60 --kv-quant off \
   --label bf16-reference-control \
   --json measurements/qwen38-exl3-k3/bf16-control.json
@@ -73,14 +73,14 @@ The corresponding logs explicitly confirm a 16-bit n-gram table.
 | `exl3k4-oq8e` | 0.06076958555902735 | 0.9295853047592542 | 0.05683902929988502 |
 | `mixed-4-8bit-oq8e` | 0.07690571991846509 | 0.9153910381296966 | 0.07156979722083645 |
 
-Original JSON files (each has an adjacent `.log`):
+Original JSON files (each has an adjacent `.log`), kept outside the repo:
 
-- `/Users/beam/claude-tmp/agent-runs/exl3-dense8/K3-new2.kld.json`
-- `/Users/beam/claude-tmp/agent-runs/exl3-dense8/K4-new2.kld.json`
-- `/Users/beam/claude-tmp/agent-runs/dense8b/kld-bf16ng.json`
+- `exl3-dense8/K3-new2.kld.json`
+- `exl3-dense8/K4-new2.kld.json`
+- `dense8b/kld-bf16ng.json`
 
 The JSON model paths use the historical
-`/Users/beam/llm/models/Qwen3.8-Flash-Next-MLX-Serve-` prefix plus the candidate
+`<models>/Qwen3.8-Flash-Next-MLX-Serve-` prefix plus the candidate
 suffixes above. These artifacts alone do not prove tensor identity with the
 current renamed/component-packed directories.
 
@@ -114,8 +114,8 @@ when the softmax distribution is unchanged.
 
 ```sh
 ./zig-out/bin/mlx-serve kld compare \
-  --model /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3 \
-  --fixture /Users/beam/llm/models/kld-teacher/mlx-serve-bf16-16x512-raw \
+  --model <models>/Qwen3.8-Flash-Next-EXL3-K3 \
+  --fixture <models>/kld-teacher/mlx-serve-bf16-16x512-raw \
   --kv-quant off --label K3-cosine-raw16x512 \
   --json measurements/qwen38-exl3-k3/logits.json
 ```
@@ -159,7 +159,7 @@ expert banks or invoking GPU computation.
 
 ```sh
 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
-  /Users/beam/llm/ponyexl3/.venv/bin/python \
+  <sashimi>/.venv/bin/python \
   -m ponyexl3.serve_convert weights-k3 --workers 4 \
   --output measurements/qwen38-exl3-k3/weights.json
 ```

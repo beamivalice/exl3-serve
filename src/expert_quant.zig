@@ -1683,7 +1683,8 @@ test "mimo_v2 is the only additional expert streaming architecture" {
 
 test "real quantized pack resolves nine regions per layer and the per expert bill" {
     const t = std.testing;
-    const path = "/Users/beam/llm/models/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit";
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
     var dir = std.Io.Dir.openDirAbsolute(t.io, path, .{}) catch return error.SkipZigTest;
     defer dir.close(t.io);
     var store = try QuantStore.open(t.allocator, path, .{ .layers = 48, .experts = 512, .hidden = 2560, .intermediate = 640 });
@@ -1750,10 +1751,13 @@ test "real quantized pack resolves nine regions per layer and the per expert bil
 
 test "an eight bit tensor beside four bit ones solves to its own width" {
     const t = std.testing;
-    const path = "/Users/beam/llm/models/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit";
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
     var dir = std.Io.Dir.openDirAbsolute(t.io, path, .{}) catch return error.SkipZigTest;
     dir.close(t.io);
-    const fd = try io_mod.openHinted(path ++ "/model-00051.safetensors", .{});
+    const shard = try std.fmt.allocPrintSentinel(t.allocator, "{s}/model-00051.safetensors", .{path}, 0);
+    defer t.allocator.free(shard);
+    const fd = try io_mod.openHinted(shard, .{});
     defer _ = std.c.close(fd);
     const w = try io_mod.tensorRegion(t.allocator, fd, "language_model.model.layers.3.mlp.shared_expert.gate_proj.weight");
     const sc = try io_mod.tensorRegion(t.allocator, fd, "language_model.model.layers.3.mlp.shared_expert.gate_proj.scales");

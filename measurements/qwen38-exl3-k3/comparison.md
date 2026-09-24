@@ -1,7 +1,7 @@
 # Qwen3.8 Flash Next: quantization, memory and cosine loss
 
 All logit scores use the same BF16-source teacher fixture:
-`/Users/beam/llm/models/kld-teacher/mlx-serve-bf16-16x512-raw`.
+`<models>/kld-teacher/mlx-serve-bf16-16x512-raw`.
 The primary score includes 7,186 positions through the teacher's first EOS,
 inclusive, across 16 prompts. Each row compares all 248,320 raw logits with
 float64 dot products and norms. Loss (%) is `100 * (1 - cosine similarity)`.
@@ -54,8 +54,8 @@ zig build -Doptimize=ReleaseFast
 Each command ran in a separate process, without concurrent GPU inference.
 
 ```sh
-FIXTURE=/Users/beam/llm/models/kld-teacher/mlx-serve-bf16-16x512-raw
-MODELS=/Users/beam/llm/models
+FIXTURE=<models>/kld-teacher/mlx-serve-bf16-16x512-raw
+MODELS=<models>
 OUT=measurements/qwen38-exl3-k3
 
 ./zig-out/bin/mlx-serve kld compare \
@@ -103,7 +103,7 @@ identify the complete tensor payload.
 
 ## Fresh affine3/group128 conversion
 
-Output: `/Users/beam/llm/models/Qwen3.8-Flash-Next-Affine3-G128`.
+Output: `<models>/Qwen3.8-Flash-Next-Affine3-G128`.
 The converter reads original BF16 routed experts, not dequantized affine4
 weights. This is **plain, uncalibrated MLX affine quantization**. All 48 trunk
 layers and the MTP layer use 3-bit/group128; the K3 donor supplies unchanged
@@ -111,11 +111,11 @@ layers and the MTP layer use 3-bit/group128; the K3 donor supplies unchanged
 
 ```sh
 PYTHONPATH=tests PYTHONUNBUFFERED=1 \
-/Users/beam/llm/ponyexl3/.venv/bin/python \
+<sashimi>/.venv/bin/python \
 tests/convert_qwen38_flash_next_affine_graft.py \
-  --src /Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next \
-  --donor /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3 \
-  --dst /Users/beam/llm/models/Qwen3.8-Flash-Next-Affine3-G128 \
+  --src <models>/Qwen/Qwen3.8-Flash-Next \
+  --donor <models>/Qwen3.8-Flash-Next-EXL3-K3 \
+  --dst <models>/Qwen3.8-Flash-Next-Affine3-G128 \
   --bits 3 --expert-gs 128 --batch-experts 64 --cpu-threads 4
 ```
 

@@ -21,8 +21,8 @@ BIN="$ROOT/zig-out/bin/sushi"
 [ -x "$BIN" ] || { echo "FAIL: build first (zig build -Doptimize=ReleaseFast)"; exit 1; }
 
 MODELS_ROOT="${MODELS_ROOT:-$HOME/.sushi/models}"
-BOOT_MODEL="${BOOT_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
-SWITCH_MODEL="${SWITCH_MODEL:-/Users/beam/llm/models/MiMo-V2.6-Flash-Sushi2.5bpw}"
+BOOT_MODEL="${BOOT_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+SWITCH_MODEL="${SWITCH_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/MiMo-V2.6-Flash-Sushi2.5bpw}"
 if [ ! -f "$BOOT_MODEL/config.json" ] || [ ! -f "$SWITCH_MODEL/config.json" ]; then
     echo "SKIP: needs two local chat models (BOOT_MODEL=$BOOT_MODEL, SWITCH_MODEL=$SWITCH_MODEL)"
     exit 0

@@ -41,7 +41,7 @@ server_err.log
 .cursor/
 agent-tools/
 
-# Speculative-decoding working notes (MTP + PLD planning/scratchpad)
+# Speculative-decoding working notes (MTP + PLD planning)
 .mtp-progress.md
 .spec-progress.md
 docs/perf/

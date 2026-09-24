@@ -26,7 +26,7 @@ trap 'rm -rf "$WORK"' EXIT
 MODEL="${MTP_ADAPTIVE_MODEL:-}"
 if [ -z "$MODEL" ]; then
     for cand in \
-        "$HOME/llm/models/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit" \
+        "${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit" \
         "$HOME/.sushi/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-4bit" \
         "$HOME/.sushi/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"; do
         [ -d "$cand" ] && { MODEL="$cand"; break; }

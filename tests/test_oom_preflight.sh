@@ -17,7 +17,7 @@
 
 set -u
 
-MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+MODEL="${1:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11293}"
 BINARY="${BINARY:-./zig-out/bin/sushi}"
 FAKE="/tmp/test_oom_preflight_model"

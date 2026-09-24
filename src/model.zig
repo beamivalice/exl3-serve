@@ -7691,7 +7691,8 @@ test "qwen4 streaming resident byte estimate excludes experts PLE and vision" {
 }
 
 test "real qwen streaming resident estimate is trunk plus MTP only" {
-    const path = "/Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next";
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen/Qwen3.8-Flash-Next");
     var dir = std.Io.Dir.openDirAbsolute(std.testing.io, path, .{}) catch return error.SkipZigTest;
     dir.close(std.testing.io);
     const split = try streamingResidentSplit(std.testing.io, std.testing.allocator, path, .bf16_fused);

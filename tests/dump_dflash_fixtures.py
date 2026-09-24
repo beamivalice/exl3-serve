@@ -21,10 +21,10 @@ Run (the assistant is ~5.11 GB; loading fp32 needs ~11 GB RAM):
     uv run --with torch --with transformers --with numpy --with safetensors \
         python3 tests/dump_dflash_fixtures.py \
         [--assistant-dir <dir with config.json + model.safetensors>] \
-        [--out ~/claude-tmp/dflash_fixtures.json]
+        [--out ~/.sushi/runs/dflash_fixtures.json]
 
 Then:
-    DFLASH_FIXTURES=~/claude-tmp/dflash_fixtures.json \
+    DFLASH_FIXTURES=~/.sushi/runs/dflash_fixtures.json \
     DFLASH_ASSISTANT_DIR=<same dir> \
         zig build test -Doptimize=ReleaseFast -Dtest-filter="dflash fixture"
 """
@@ -56,7 +56,7 @@ def find_assistant_dir(arg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--assistant-dir")
-    ap.add_argument("--out", default=os.path.expanduser("~/claude-tmp/dflash_fixtures.json"))
+    ap.add_argument("--out", default=os.path.expanduser("~/.sushi/runs/dflash_fixtures.json"))
     ap.add_argument("--n-ctx", type=int, default=12)
     ap.add_argument("--n-delta", type=int, default=5)
     args = ap.parse_args()

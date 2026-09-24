@@ -23,7 +23,7 @@
 #   - A built sushi binary (run `zig build -Doptimize=ReleaseFast`)
 #   - Either:
 #       BATCHED_TEST_MODEL set to a model directory, OR
-#       a default MLX checkpoint at /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
+#       a default MLX checkpoint at ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged
 #
 # Usage:
 #   BATCHED_TEST_MODEL=/path/to/model ./tests/test_batched_equivalence.sh [port]
@@ -37,12 +37,12 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-MODEL="${BATCHED_TEST_MODEL:-${PLD_TEST_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
+MODEL="${BATCHED_TEST_MODEL:-${PLD_TEST_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}}"
 
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_batched_equivalence: model directory not found."
     echo "  Set BATCHED_TEST_MODEL or place an MLX checkpoint at"
-    echo "  /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged"
+    echo "  ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged"
     exit 0
 fi
 
@@ -467,7 +467,7 @@ if [ "${SUSHI_PADWASTE_ARM:-0}" = "1" ]; then
     echo
     echo "== pad-waste cap: a 1k stream must NOT batch with a 64k one =="
 
-    PROMPTS_DIR="${PADWASTE_PROMPTS_DIR:-$HOME/claude-tmp/bench-qwen4-ladder/prompts_judge}"
+    PROMPTS_DIR="${PADWASTE_PROMPTS_DIR:-$HOME/.sushi/runs/bench-qwen4-ladder/prompts_judge}"
     PW_LOG=$(mktemp)
     PW_LONG=$(mktemp); PW_SHORT=$(mktemp)
     PW_LONG_BODY=$(mktemp); PW_SHORT_BODY=$(mktemp)

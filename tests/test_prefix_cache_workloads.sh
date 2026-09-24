@@ -21,7 +21,7 @@
 
 set -e
 
-MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+MODEL="${1:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-11433}"
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'
@@ -49,7 +49,7 @@ SERVER_PID=$!
 cleanup() {
     kill $SERVER_PID 2>/dev/null || true
     wait $SERVER_PID 2>/dev/null || true
-    cp "$LOGFILE" "$HOME/claude-tmp/pc378/server.log" 2>/dev/null; rm -f "$LOGFILE"
+    cp "$LOGFILE" "$HOME/.sushi/runs/pc378/server.log" 2>/dev/null; rm -f "$LOGFILE"
 }
 trap cleanup EXIT
 

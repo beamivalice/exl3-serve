@@ -16,7 +16,7 @@ Timings measured 2026-07-16 on the M4 Max 128 GB, AFTER the `stop_all_engines` p
 | 5 | API conformance | `npx llmprobe@latest http://127.0.0.1:<port>/v1 --quick` → expect **100%** engine conformance | ~10 s/model |
 | 6 | Regression scripts | `integration_test.sh`, `test_anthropic_api.sh`, `test_stream_keepalive.sh`, `test_disconnect_cancel.sh`, `test_pld_equivalence.sh`, `test_mtp_equivalence.sh` | ~15 min |
 | 7 | Soak (bigger releases) | `SOAK_DURATION_HOURS=1 ./tests/test_soak_24h.sh` — RSS drift < 10% | 1 h |
-| 8 | **Cross-engine check** (only before a public claim) | start each engine yourself, `./tests/bench.sh --url <host:port> -m <id> --full` per engine; record in `~/claude-tmp/bench-<tag>/`, name the engine in every win — `benchmarks.md` carries sushi only | ~90 min |
+| 8 | **Cross-engine check** (only before a public claim) | start each engine yourself, `./tests/bench.sh --url <host:port> -m <id> --full` per engine; record in `~/.sushi/runs/bench-<tag>/`, name the engine in every win — `benchmarks.md` carries sushi only | ~90 min |
 
 **Rules:**
 - **Steps 3 and 8 are different questions.** 3 = "did our code regress" — sushi only, the ONLY one needed every release. 8 = the public comparison; LM Studio/oMLX/MTPLX numbers cannot move when only OUR code changes, so re-run 8 only when an engine version bumps.
@@ -28,7 +28,7 @@ Timings measured 2026-07-16 on the M4 Max 128 GB, AFTER the `stop_all_engines` p
 
 ## Release benchmark artifacts
 
-The release record is `benchmarks.md` plus the saved llmprobe reports under `~/claude-tmp/bench-<tag>/`; no CSVs or charts land in `docs/`. The working baselines agents inherit between releases live in `docs/perf-baselines.md` (a release column is also added there as a cited row). Run the gate on the FINAL release tree (a number taken mid-cycle is stale the moment another perf round lands):
+The release record is `benchmarks.md` plus the saved llmprobe reports under `~/.sushi/runs/bench-<tag>/`; no CSVs or charts land in `docs/`. The working baselines agents inherit between releases live in `docs/perf-baselines.md` (a release column is also added there as a cited row). Run the gate on the FINAL release tree (a number taken mid-cycle is stale the moment another perf round lands):
 
 ```
 ./tests/bench.sh --tag <ver>

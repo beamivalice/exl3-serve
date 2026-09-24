@@ -700,8 +700,8 @@ const NameCtx = struct {
 // plus LFM2-VL's projector on OUR pack's weights — which ship dense bf16 in
 // every quant width — so a diff is a layout/math bug, never quantization error).
 //
-//   LFM2_VISION_MODEL="/Volumes/G Drive SSD/models-dl/LiquidAI/LFM2.5-VL-3B-MLX-4bit" \
-//   LFM2_VISION_FIXTURE=~/claude-tmp/lfm2-vision/lfm2_vision_fixture.safetensors \
+//   LFM2_VISION_MODEL=~/.sushi/models/LiquidAI/LFM2.5-VL-3B-MLX-4bit \
+//   LFM2_VISION_FIXTURE=<dir>/lfm2_vision_fixture.safetensors \
 //   zig build test -Doptimize=ReleaseFast -Dtest-filter="lfm2 vision live"
 test "lfm2 vision live: tower parity vs the executed reference" {
     const raw_model = std.c.getenv("LFM2_VISION_MODEL") orelse return error.SkipZigTest;

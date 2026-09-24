@@ -9305,7 +9305,7 @@
     "codebook": "mul1",
     "cpu_only": true,
     "exl3_k": 3,
-    "ponyexl3_root": "/Users/beam/llm/ponyexl3",
+    "ponyexl3_root": "<sashimi>",
     "raw_safetensors_reads": "header parsed and one first-axis expert row seek-read at a time",
     "reconstructor": "ponyexl3.ref.reconstruct.reconstruct_public_weights",
     "sample": {
@@ -9377,7 +9377,7 @@
   "schema_version": 1,
   "source_config_sha256": "889658f2508e8c61d409b02e70e0d78d8d4452ec65aaafbe129805d213d2e74b",
   "source_index_sha256": "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
-  "source_path": "/Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next",
+  "source_path": "<models>/Qwen/Qwen3.8-Flash-Next",
   "summary": {
     "global_cosine": 0.9901616405853412,
     "global_loss": 0.009838359414658826,
@@ -9402,5 +9402,5 @@
   },
   "target_config_sha256": "3845514255e0c3aff7af1c6d236164a9c762242ab615c1f43416bf280362d2a7",
   "target_index_sha256": "5dfee0d150a2ee85504641e1911de509eb39e4826bf09db238fa5d2bf55a8a0e",
-  "target_path": "/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3"
+  "target_path": "<models>/Qwen3.8-Flash-Next-EXL3-K3"
 }

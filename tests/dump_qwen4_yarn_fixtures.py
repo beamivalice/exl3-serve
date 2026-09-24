@@ -79,8 +79,9 @@ def vllm_yarn_inv_freq(head_size, rotary_dim, orig_max, base, factor,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default=os.path.expanduser(
-        "~/llm/models/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit/config.json"))
+    ap.add_argument("--config", default=os.path.join(
+        os.environ.get("SUSHI_MODELS_DIR", os.path.expanduser("~/.sushi/models")),
+        "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit/config.json"))
     ap.add_argument("--factor", type=float, default=4.0,
                     help="YaRN scaling factor (4.0 turns 262144 into 1048576)")
     ap.add_argument("--attn_factor", type=float, default=1.0,

@@ -9,9 +9,8 @@
 #include <stdio.h>
 #include <string.h>
 
-/* The MIL emitter mirrors the validated Stage-A harness
- * (~/claude-tmp/perf-aug17/p5-ane-mlp): one fp16 input tensor
- * [1, hidden, 1, rows], K-chunked down conv, fp16 datapath. Since the
+/* The MIL emitter mirrors the validated (out-of-tree) Stage-A harness:
+ * one fp16 input tensor [1, hidden, 1, rows], K-chunked down conv, fp16 datapath. Since the
  * procedure-bank round every layer's slice is one `procedureNNN` function
  * inside ONE program (the private runtime accepts only ~121 resident model
  * handles), so every emitted name carries its procedure index — MIL scopes

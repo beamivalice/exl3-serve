@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-CHECKPOINT=${QWEN4_BF16_STREAM_MODEL:-/Users/beam/llm/models/Qwen/Qwen3.8-Flash-Next}
-FIXTURE=${QWEN4_TEACHER_FIXTURE:-/Users/beam/llm/models/kld-teacher/mlx-serve-bf16-60x64}
+CHECKPOINT=${QWEN4_BF16_STREAM_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen/Qwen3.8-Flash-Next}
+FIXTURE=${QWEN4_TEACHER_FIXTURE:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/kld-teacher/mlx-serve-bf16-60x64}
 PORT=${1:-}
 LOG=$(mktemp /tmp/sushi-bf16-stream.XXXXXX.log)
 BODY1=$(mktemp /tmp/sushi-bf16-stream.XXXXXX.1.json)

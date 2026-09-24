@@ -42,19 +42,20 @@ doc for the area before changing it, and update it in the same landing.
 | [docs/server-tool-calling.md](docs/server-tool-calling.md) | templates, tool-call parse chain and invariants, think tags, loop stops |
 | [docs/server-lifecycle.md](docs/server-lifecycle.md) | arch gate, weight loader, settings precedence, scheduler/batching, threads, ownership, media |
 | [docs/pack-format.md](docs/pack-format.md) | what a pack owes the engine: tensors, `expert_quant`, `__metadata__` stamp, window, g-scale in `suh`, loader rules |
-| [docs/perf-baselines.md](docs/perf-baselines.md) | roofline, recorded tok/s tables with binaries and raw-file paths, ruled-out levers |
+| [docs/perf-baselines.md](docs/perf-baselines.md) | roofline, recorded tok/s tables with binaries and settings, ruled-out levers |
 | [docs/quality-kld.md](docs/quality-kld.md) | `kld` tool, teacher fixtures, the 16x512 reading, lossless teacher rule, KLD of every served pack |
 | [docs/process-measurement.md](docs/process-measurement.md) | GPU lock, binary stamp, QoS, waiting, baseline lookup, recording a number |
 | [tests/CLAUDE.md](tests/CLAUDE.md) | the integration-test matrix (auto-loads in `tests/`) |
 
 **Private, local-only** (`docs/private/`, gitignored): they exist only in the main checkout, so a git worktree does
-not contain them; a worker in a worktree reads them from `/Users/beam/llm/sushi/docs/private/`. Never link to or
+not contain them; a worker in a worktree reads them from the main checkout's `docs/private/`. Never link to or
 quote them from a committed file.
 
 | doc | what it holds |
 |---|---|
 | `docs/private/sashimi-workflow.md` | how to convert with sashimi: venv, subcommands, served-pack recipes, imatrix files and hashes, stamps, window speeds, wall times, speed work, lessons |
 | `docs/private/sashimi-codebooks.md` | MCG decision, TINY dropped, decoder dead ends, fractional-rate trellis |
+| `docs/private/measurement-raw.md` | the raw-file path behind every committed measurement, keyed by doc and section |
 
 Skills: `/release` (CalVer, CHANGELOG), `/bench` (llmprobe methodology, comparison traps).
 
@@ -145,6 +146,8 @@ inherit: [docs/perf-baselines.md](docs/perf-baselines.md), [docs/quality-kld.md]
 ## Conventions
 
 - Minimal DRY Zig; tests at the bottom of each source file; shell integration tests in `tests/`.
+- No tracked file names a box's own directories: packs are `${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/<pack>`, run
+  outputs `~/.sushi/runs/` (guard: `tests/test_no_local_paths.sh`).
 - Env levers only for paths with two arms worth comparing (lossy/tradeoff), never for an obvious win/fix. A
   diagnostic env is read through `diagEnvOn` (absent or `0` = off), never `getenv != null`.
 - **Diffs are read by a human. Keep them small.** A comment says what the code cannot (a non-obvious WHY, a contract,
@@ -195,7 +198,7 @@ timing, traces (`zig build test` is not heavy).
   recorded number. Within a session, inherit the previous number.
 - Run an old-binary baseline only in a clean new session (or when none exists for that exact setting; say which).
 - Existing pack shards are a converter's byte-identity baseline.
-- Cite the recorded file/commit beside every new number.
+- Committed docs cite commit + settings beside every new number; raw-file paths go to `docs/private/measurement-raw.md`.
 
 **Measurement hygiene.**
 - Rebuild ReleaseFast from the head under test right before any live number; stamp commit + binary mtime beside it.

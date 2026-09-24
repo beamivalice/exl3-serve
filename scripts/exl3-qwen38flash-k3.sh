@@ -3,15 +3,16 @@
 # Extra arguments are appended, e.g. ./exl3-qwen38flash-k3.sh --port 11235.
 set -euo pipefail
 
-binary="$HOME/llm/sushi/zig-out/bin/sushi"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+binary="$root/zig-out/bin/sushi"
 if [[ ! -x "$binary" ]]; then
   printf '%s\n' "Missing executable: $binary" \
-    "Build $HOME/llm/sushi first: zig build -Doptimize=ReleaseFast" >&2
+    "Build $root first: zig build -Doptimize=ReleaseFast" >&2
   exit 1
 fi
 
 exec "$binary" serve \
-  --model "$HOME/llm/models/Qwen3.8-Flash-Next-EXL3-K3" \
+  --model "${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3" \
   --host 127.0.0.1 \
   --port 11234 \
   --ctx-size 1048576 \

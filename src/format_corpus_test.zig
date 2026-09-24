@@ -846,13 +846,13 @@ const corpus = [_]Expect{
         .family = "qwen",
         .name = "Python-style False on a boolean param is coerced to JSON false",
         .raw = "\n<tool_call>\n<function=Edit>\n<parameter=replace_all>\nFalse\n</parameter>\n" ++
-            "<parameter=file_path>\n/Users/david/doom/index.html\n</parameter>\n" ++
+            "<parameter=file_path>\n/Users/user/doom/index.html\n</parameter>\n" ++
             "<parameter=old_string>\n<script src=\"game.js\"></script>\n</parameter>\n" ++
             "<parameter=new_string>\n<script src=\"game.js\" type=\"module\"></script>\n</parameter>\n" ++
             "</function>\n</tool_call>",
         .tool_name = "Edit",
         .tool_arg_key = "file_path",
-        .tool_arg_value = "/Users/david/doom/index.html",
+        .tool_arg_value = "/Users/user/doom/index.html",
         .tools_json = edit_tool_schema,
         .tool_bool_key = "replace_all",
         .tool_bool_value = false,
@@ -1483,15 +1483,15 @@ const corpus = [_]Expect{
         .family = "inkling",
         .name = "back-to-back invokes without end_message keep both calls' args",
         .raw =
-        \\<|message_model|><|content_text|>write<|content_invoke_tool_json|>{"name":"write","args":{"content":"import * as T from 'three';\nconst s=new T.Scene(),c=new T.PerspectiveCamera(75,innerWidth/innerHeight,.1,1e3);\nc.position.set(0,1.6,4);s.background=new T.Color(0x111111);\nconst r=new T.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});\nr.setSize(innerWidth,innerHeight);\nexport{T,s,c,r};\n","path":"/Users/david/.sushi/workspace/ink-quake/src/init.js"}}write<|content_invoke_tool_json|>{"name":"write","args":{"content":"import * as T from 'three';\nconst s=new T.Scene(),c=new T.PerspectiveCamera(75,innerWidth/innerHeight,.1,1e3);\nc.position.set(0,1.6,4);s.background=new T.Color(0x111111);\nconst r=new T.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});\nr.setSize(innerWidth,innerHeight);\nexport{T,s,c,r};\n","path":"/Users/david/.sushi/workspace/ink-quake/src/init.js"}}<|end_message|>
+        \\<|message_model|><|content_text|>write<|content_invoke_tool_json|>{"name":"write","args":{"content":"import * as T from 'three';\nconst s=new T.Scene(),c=new T.PerspectiveCamera(75,innerWidth/innerHeight,.1,1e3);\nc.position.set(0,1.6,4);s.background=new T.Color(0x111111);\nconst r=new T.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});\nr.setSize(innerWidth,innerHeight);\nexport{T,s,c,r};\n","path":"/Users/user/.sushi/workspace/ink-quake/src/init.js"}}write<|content_invoke_tool_json|>{"name":"write","args":{"content":"import * as T from 'three';\nconst s=new T.Scene(),c=new T.PerspectiveCamera(75,innerWidth/innerHeight,.1,1e3);\nc.position.set(0,1.6,4);s.background=new T.Color(0x111111);\nconst r=new T.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});\nr.setSize(innerWidth,innerHeight);\nexport{T,s,c,r};\n","path":"/Users/user/.sushi/workspace/ink-quake/src/init.js"}}<|end_message|>
         ,
         .tools_json = write_read_tools_schema,
         .tool_count = 2,
         .tool_name = "write",
         .last_tool_name = "write",
         .tool_arg_key = "path",
-        .tool_arg_value = "/Users/david/.sushi/workspace/ink-quake/src/init.js",
-        .last_tool_arg_value = "/Users/david/.sushi/workspace/ink-quake/src/init.js",
+        .tool_arg_value = "/Users/user/.sushi/workspace/ink-quake/src/init.js",
+        .last_tool_arg_value = "/Users/user/.sushi/workspace/ink-quake/src/init.js",
     },
     .{
         // The marker-echo stage of the loop: the model copied pi's garbage

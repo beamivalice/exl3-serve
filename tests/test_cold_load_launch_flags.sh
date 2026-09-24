@@ -15,7 +15,7 @@
 
 set -u
 
-MODEL=${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}
+MODEL=${1:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}
 PORT=${2:-8131}
 BASE="http://127.0.0.1:$PORT"
 PASS=0

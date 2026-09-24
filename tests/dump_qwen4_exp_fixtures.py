@@ -12,11 +12,11 @@ Two phases, run from the torch venv (transformers main carries the arch):
      full-prefill logits and a stepwise-decode logits block past the QSA
      budget, plus the per-layer residual stream for bisecting.
 
-  venv/bin/python tests/dump_qwen4_exp_fixtures.py build --out ~/claude-tmp/qwen4-tiny/hf
-  python -m sashimi.serve_convert affine-qwen4 --src ~/claude-tmp/qwen4-tiny/hf --dst ~/claude-tmp/qwen4-tiny/pack
-  venv/bin/python tests/dump_qwen4_exp_fixtures.py dump --hf ~/claude-tmp/qwen4-tiny/hf \
-      --pack ~/claude-tmp/qwen4-tiny/pack --out ~/claude-tmp/qwen4-tiny/fixture.safetensors
-  QWEN4_TEST_MODEL=~/claude-tmp/qwen4-tiny/pack QWEN4_FIXTURE=~/claude-tmp/qwen4-tiny/fixture.safetensors \
+  venv/bin/python tests/dump_qwen4_exp_fixtures.py build --out ~/.sushi/runs/qwen4-tiny/hf
+  python -m sashimi.serve_convert affine-qwen4 --src ~/.sushi/runs/qwen4-tiny/hf --dst ~/.sushi/runs/qwen4-tiny/pack
+  venv/bin/python tests/dump_qwen4_exp_fixtures.py dump --hf ~/.sushi/runs/qwen4-tiny/hf \
+      --pack ~/.sushi/runs/qwen4-tiny/pack --out ~/.sushi/runs/qwen4-tiny/fixture.safetensors
+  QWEN4_TEST_MODEL=~/.sushi/runs/qwen4-tiny/pack QWEN4_FIXTURE=~/.sushi/runs/qwen4-tiny/fixture.safetensors \
       zig build test -Dtest-filter="qwen4 fixture"
 
 `--vision` on both phases builds Qwen4ExpForConditionalGeneration with a tiny

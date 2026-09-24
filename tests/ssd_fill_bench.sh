@@ -4,7 +4,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-MODEL="${QWEN4_BF16_STREAM_MODEL:-$HOME/llm/models/Qwen/Qwen3.8-Flash-Next}"
+MODEL="${QWEN4_BF16_STREAM_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen/Qwen3.8-Flash-Next}"
 OUT="${SSD_BENCH_OUT:-$REPO/ssd-fill-bench}"
 SAMPLES="${SSD_BENCH_IOSTAT_SAMPLES:-180}"
 

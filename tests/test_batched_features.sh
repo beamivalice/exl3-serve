@@ -13,14 +13,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-MODEL="${BATCH_FEAT_MODEL:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+MODEL="${BATCH_FEAT_MODEL:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${1:-11513}"
 BASE="http://127.0.0.1:$PORT"
 BINARY="${BINARY:-./zig-out/bin/sushi}"
 [[ -d "$MODEL" ]] || { echo "SKIP: model dir not found: $MODEL"; exit 0; }
 [[ -x "$BINARY" ]] || { echo "SKIP: $BINARY missing"; exit 0; }
 
-WORK=$(mktemp -d "$HOME/claude-tmp/batched-feat.XXXXXX" 2>/dev/null || mktemp -d)
+WORK=$(mktemp -d "$HOME/.sushi/runs/batched-feat.XXXXXX" 2>/dev/null || mktemp -d)
 mkdir -p "$WORK/home"
 pkill -f "sushi.*--port $PORT" 2>/dev/null; sleep 0.5
 HOME="$WORK/home" "$BINARY" --serve --host 127.0.0.1 --port "$PORT" --model "$MODEL" \

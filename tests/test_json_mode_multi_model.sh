@@ -13,8 +13,8 @@
 
 set -u
 
-MODEL_A=${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}
-MODEL_B=${2:-/Users/beam/llm/models/MiMo-V2.6-Flash-Sushi2.5bpw}
+MODEL_A=${1:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}
+MODEL_B=${2:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/MiMo-V2.6-Flash-Sushi2.5bpw}
 PORT=${3:-8121}
 BASE="http://127.0.0.1:$PORT"
 LOG=/tmp/sushi-json-multi-model.log

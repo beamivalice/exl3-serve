@@ -33,7 +33,7 @@
 
 set -e
 
-MODEL="${1:-/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
+MODEL="${1:-${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged}"
 PORT="${2:-8094}"
 BASE="http://127.0.0.1:$PORT"
 RED='\033[0;31m'
@@ -44,7 +44,7 @@ NC='\033[0m'
 if [ ! -d "$MODEL" ]; then
     echo -e "${YELLOW}SKIP${NC} test_kv_quant_equivalence: $MODEL not found."
     echo "  Pass a model dir as the first argument, e.g.:"
-    echo "    $0 /Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged"
+    echo "    $0 ${SUSHI_MODELS_DIR:-$HOME/.sushi/models}/Qwen3.8-Flash-Next-EXL3-K3-w12-mcg-plugged"
     exit 0
 fi
 if [ ! -f "$MODEL/config.json" ]; then

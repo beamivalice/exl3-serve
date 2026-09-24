@@ -8,7 +8,7 @@ PORT=${1:-8098}
 MODEL="${BENCH_MODEL:?set BENCH_MODEL to a qwen4_exp pack}"
 BINARY="${SUSHI_BINARY:-./zig-out/bin/sushi}"
 ORDER="${GATHER_ORDER:-1,0}"
-OUT="${BENCH_OUT:-$HOME/claude-tmp/qsa-batched-gather}"
+OUT="${BENCH_OUT:-$HOME/.sushi/runs/qsa-batched-gather}"
 mkdir -p "$OUT"
 if [ ! -x "$BINARY" ]; then
     echo "FAIL $BINARY missing — build first"

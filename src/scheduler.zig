@@ -9127,7 +9127,8 @@ test "firstMediaPlaceholder: a placeholder id in ORDINARY TEXT is not a media bo
 
 test "the ssd budget leaves a positive expert cache on the real quantized pack" {
     const t = std.testing;
-    const path = "/Users/beam/llm/models/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit";
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
     var probe = std.Io.Dir.openDirAbsolute(t.io, path, .{}) catch return error.SkipZigTest;
     probe.close(t.io);
     var config = model_mod.parseConfig(t.io, t.allocator, path) catch return error.SkipZigTest;

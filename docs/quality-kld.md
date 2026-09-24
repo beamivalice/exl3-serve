@@ -37,18 +37,21 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [perf-baselines](perf-base
 
 ## Teacher fixtures on this box
 
+Under the models root, `${SUSHI_MODELS_DIR:-$HOME/.sushi/models}`:
+
 | fixture | model | notes |
 |---|---|---|
-| `/Users/beam/llm/models/kld-teacher/mlx-serve-bf16-16x512-raw` | Flash-Next | bf16 stream, 16x512, raw; the standard |
-| `/Users/beam/llm/models/kld-teacher/mlx-serve-bf16-f32stream-16x512-raw` | Flash-Next | f32 residual stream variant |
-| `/Users/beam/llm/models/kld-teacher/mlx-serve-bf16-60x64` | Flash-Next | the 60x64 screen |
-| `/Users/beam/llm/models/kld-teacher/mimo-bf16trunk-16x512-raw` | MiMo | original checkpoint, FP8 trunk dequantized to bf16, dense KV; mean strict NLL 0.278; 741 s capture |
+| `kld-teacher/mlx-serve-bf16-16x512-raw` | Flash-Next | bf16 stream, 16x512, raw; the standard |
+| `kld-teacher/mlx-serve-bf16-f32stream-16x512-raw` | Flash-Next | f32 residual stream variant |
+| `kld-teacher/mlx-serve-bf16-60x64` | Flash-Next | the 60x64 screen |
+| `kld-teacher/mimo-bf16trunk-16x512-raw` | MiMo | original checkpoint, FP8 trunk dequantized to bf16, dense KV; mean strict NLL 0.278; 741 s capture |
 
 Commands (MiMo; Flash-Next drops `--ssd-budget-gb` when the source fits):
 
 ```sh
-sushi kld capture --model /Users/beam/llm/models/MiMo-V2.6-Flash-RL \
-  --prompts /Users/beam/llm/models/kld-teacher/mlx-serve-bf16-16x512-raw --out <teacher dir> \
+M=${SUSHI_MODELS_DIR:-$HOME/.sushi/models}
+sushi kld capture --model $M/MiMo-V2.6-Flash-RL \
+  --prompts $M/kld-teacher/mlx-serve-bf16-16x512-raw --out <teacher dir> \
   --tokens 512 --top-k 10 --label <label> --no-template --kv-quant off --ctx-size 8192 --ssd-budget-gb 94
 sushi kld compare --model <pack> --fixture <teacher dir> --label <label> \
   --kv-quant 8 --tokens 512 --top-k 10 --ctx-size 8192 --json <out>.json
@@ -88,9 +91,9 @@ teacher top-2 gap ≤ 0.5 nats, flat across the context); the affine iq2.7 pack 
 | MCG K3 w15 (in-house experts, turboderp dense; sashimi eebb3e9, pre-#17 skew rule; binary 7ed9795) | 0.1012 | 90.26% | 3.14% | 0.0931 |
 
 w12 -> w15 bought 2.8% of KLD on MCG; the remaining gap to turboderp's MUL1 w16 (0.0946) is not mostly the window.
-Raw: scratchpad `qwen_w15_kld.json` (session 3ede61a6); pack `/Users/beam/llm/models/Qwen3.8-Flash-Next-EXL3-K3-w15-mcg-plugged`.
+Pack `Qwen3.8-Flash-Next-EXL3-K3-w15-mcg-plugged`.
 
-Raw: `/Users/beam/claude-tmp/bench-tiny-vs/kld16x512_*.json`. Binaries a05d15f / 28d7fab (the KLD tool is unchanged
+Binaries a05d15f / 28d7fab (the KLD tool is unchanged
 between them).
 
 EXL3 K4 (turboderp), 60x64 screen: the f32 SwiGLU widening moved mean KLD 0.01872 → 0.01816 and top-1 96.20% →
@@ -114,7 +117,7 @@ Stored imatrix-weighted affine-8 trunk vs the load-time MLX packer: the weighted
 ~45% lower (most of it from the error-minimizing search with scale/bias rounded to bf16 before the codes, which the
 same search unweighted also gets; the imatrix weighting adds 4-7%), yet 16x512
 KLD moves +0.0003 (NLL 0.3480 -> 0.3462, top-1 +0.05 pt): at 8 bits these tensors sit below the pack's noise floor,
-which the K2.5 experts set. Raw: `scratchpad/trunkq/live/kld_new.{json,log}`.
+which the K2.5 experts set.
 The served pack stores the three tensors round-to-nearest (exactly `mx.quantize`'s bytes, owner choice): 0.07783
 against the searched shards' 0.07793, inside the rounding-flip floor, so the search buys nothing measurable at 8 bits.
 

@@ -8,7 +8,7 @@ set -u
 MODEL="${QWEN4_MODEL:-$HOME/.sushi/models/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-4bit}"
 PORT="${1:-11413}"
 BIN="${SUSHI_BIN:-./zig-out/bin/sushi}"
-DIR="$HOME/claude-tmp/qwen4-head-persist"
+DIR="$HOME/.sushi/runs/qwen4-head-persist"
 mkdir -p "$DIR"
 [ -f "$MODEL/config.json" ] || { echo "SKIP: no pack at $MODEL"; exit 0; }
 [ -f "$MODEL/ngram_table.bin" ] || { echo "SKIP: pack has no ngram_table.bin"; exit 0; }
