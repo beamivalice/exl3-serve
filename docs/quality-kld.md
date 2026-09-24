@@ -94,15 +94,17 @@ that shares no code with ours.
 Comparison packs, all on binary b64c5a0e (weights in GPU memory, n-gram table excluded; Sushi-3bpw 0.10123 and
 Sushi-4bpw 0.06319 reproduce on it): affine packs = routed experts N-bit g64, dense 8-bit, bf16 n-gram table; oQe =
 oMLX packs as published, restacked for sushi with their 4/5-bit n-gram table unchanged (oQ4e ships the table divided
-by a `weight_scale` tensor, folded into its scales by the restack).
+by a `weight_scale` tensor, folded into its scales by the restack); mlx-serve packs as published, both sharing one 4-bit
+n-gram table.
 
 | pack | GB | KLD | top-1 |
 |---|---|---|---|
 | affine q5 | 89.8 | 0.0433 | 93.86% |
 | oMLX oQ5e (GBP-DE) | 90.2 | 0.0625 | 92.40% |
-| affine 4/8 (the control above) | 75.3 | 0.0818 | 91.39% |
+| mlx-serve mixed-4-8bit (ddalcu; the control above) | 75.3 | 0.0818 | 91.39% |
 | oMLX oQ4e (Jundot) | 74.3 | 0.1370 | 88.87% |
 | affine q3 | 59.0 | 0.1444 | 88.05% |
+| mlx-serve iQ-MLX 3.3bpw (ddalcu; imatrix-weighted affine) | 54.3 | 0.1987 | 86.28% |
 | MCG K2 w15, pin pass 64 (Sushi-3bpw dense) | 36.0 active | 0.2244 | 85.42% |
 
 w12 -> w15 bought 2.8% of KLD on MCG; the remaining gap to turboderp's MUL1 w16 (0.0946) is not mostly the window.
