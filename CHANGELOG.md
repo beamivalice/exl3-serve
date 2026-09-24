@@ -6,6 +6,7 @@ earlier history is mlx-serve's, in that project's changelog.
 
 ## Unreleased
 
+- **`sushi launch pi` passes pi's thinking level to the server**: each level (off, minimal, low, medium, high, xhigh) arrives as an effort word the model accepts, where pi used to send only thinking on or off.
 - **`/v1/responses` enforces the reasoning budget** (`reasoning.effort` or `reasoning_budget_tokens`) as chat does: a capped thought is closed at its budget instead of running to `max_output_tokens`.
 - **Reported logprobs are exact**: they are computed in f32, where bf16 rounded a logprob near -20 by up to 0.06.
 - **A model larger than the GPU working-set limit is refused by name at load** when `iogpu.wired_limit_mb` is set below free RAM, instead of failing warmup and then every request.

@@ -96,6 +96,9 @@ effort word's budget > `--reasoning-budget`. `/v1/responses` parsed the word and
 - Agent budgets (`launch.budgetForContext` + `compactionReserve`): output share ctx/2, compaction reserve ctx/4
   capped at 20000, carried into pi's `settings.json` and opencode's `compaction` + `limit.output`. A launch below the
   agent's context floor WARNS (claude 64k, opencode 32k, others 16k).
+- pi sends its thinking level as `reasoning_effort` through a per-model `thinkingLevelMap` built from the row's
+  `reasoning_efforts` (`launch.piEffortFor`: exact, else the next accepted word up, else down; Qwen3.8 high → xhigh).
+  pi's `thinkingFormat: qwen` sent only `enable_thinking`, so low/medium never reached the server.
 
 ## `sushi run` research tools (client-side)
 

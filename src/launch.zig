@@ -38,7 +38,53 @@ pub const Entry = struct {
     budget: Budget,
     vision: bool,
     loaded: bool,
+    /// The row's `reasoning_efforts`; null when the server lists none.
+    efforts: ?[]const []const u8 = null,
 };
+
+/// pi's thinking levels, in its own order.
+const pi_levels = [_][]const u8{ "off", "minimal", "low", "medium", "high", "xhigh" };
+/// The server's effort vocabulary, in order (`model.Effort`).
+const server_efforts = [_][]const u8{ "off", "low", "medium", "high", "xhigh", "max" };
+
+fn listed(words: []const []const u8, w: []const u8) bool {
+    for (words) |x| if (std.mem.eql(u8, x, w)) return true;
+    return false;
+}
+
+/// The accepted word a pi level reaches the server as: the level itself, else the nearest
+/// accepted word above it (minimal reads as low), else below. A thinking level never lands
+/// on off; null = no accepted word, which pi's map reads as an unsupported level.
+pub fn piEffortFor(level: []const u8, accepted: []const []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, level, "off")) return if (listed(accepted, "off")) "off" else null;
+    const want = if (std.mem.eql(u8, level, "minimal")) "low" else level;
+    var rank: usize = 1;
+    while (rank < server_efforts.len and !std.mem.eql(u8, server_efforts[rank], want)) rank += 1;
+    if (rank == server_efforts.len) return null;
+    for (server_efforts[rank..]) |w| if (listed(accepted, w)) return w;
+    var i = rank;
+    while (i > 1) {
+        i -= 1;
+        if (listed(accepted, server_efforts[i])) return server_efforts[i];
+    }
+    return null;
+}
+
+/// pi's `thinkingLevelMap` for one model: every level to a word the server accepts, which pi
+/// sends as `reasoning_effort`. Without a listed vocabulary only off is spelled, as `none`.
+fn writePiLevelMap(allocator: std.mem.Allocator, out: *std.ArrayList(u8), efforts: ?[]const []const u8) !void {
+    const accepted = efforts orelse return out.appendSlice(allocator, "{\"off\": \"none\"}");
+    try out.append(allocator, '{');
+    for (pi_levels, 0..) |lvl, i| {
+        if (i > 0) try out.appendSlice(allocator, ", ");
+        if (piEffortFor(lvl, accepted)) |w| {
+            try out.print(allocator, "\"{s}\": \"{s}\"", .{ lvl, w });
+        } else {
+            try out.print(allocator, "\"{s}\": null", .{lvl});
+        }
+    }
+    try out.append(allocator, '}');
+}
 
 pub const AgentKind = enum {
     claude,
@@ -78,8 +124,7 @@ pub fn piModelsJson(allocator: std.mem.Allocator, base_url: []const u8, entries:
         \\      "compat": {{
         \\        "supportsDeveloperRole": false,
         \\        "supportsReasoningEffort": true,
-        \\        "maxTokensField": "max_tokens",
-        \\        "thinkingFormat": "qwen"
+        \\        "maxTokensField": "max_tokens"
         \\      }},
         \\      "models": [
     , .{base_url});
@@ -87,7 +132,7 @@ pub fn piModelsJson(allocator: std.mem.Allocator, base_url: []const u8, entries:
         try out.print(allocator,
             \\{s}
             \\        {{"id": "{s}", "name": "{s} (sushi)", "input": [{s}],
-            \\         "contextWindow": {d}, "maxTokens": {d}, "reasoning": true}}
+            \\         "contextWindow": {d}, "maxTokens": {d}, "reasoning": true, "thinkingLevelMap":
         , .{
             if (i == 0) "" else ",",
             e.id,
@@ -96,6 +141,8 @@ pub fn piModelsJson(allocator: std.mem.Allocator, base_url: []const u8, entries:
             e.budget.context,
             e.budget.output,
         });
+        try writePiLevelMap(allocator, &out, e.efforts);
+        try out.append(allocator, '}');
     }
     try out.appendSlice(allocator,
         \\
@@ -450,7 +497,10 @@ fn fetchChatEntries(allocator: std.mem.Allocator, io: std.Io, base_url: []const 
     defer allocator.free(url);
     const body = try curlGet(allocator, io, url);
     defer allocator.free(body);
+    return parseChatEntries(allocator, body);
+}
 
+fn parseChatEntries(allocator: std.mem.Allocator, body: []const u8) !Models {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
@@ -500,12 +550,19 @@ fn fetchChatEntries(allocator: std.mem.Allocator, io: std.Io, base_url: []const 
         }
         var loaded = false;
         if (obj.get("loaded")) |v| loaded = v == .bool and v.bool;
+        var efforts: ?[]const []const u8 = null;
+        if (obj.get("reasoning_efforts")) |v| if (v == .array) {
+            var words = std.ArrayList([]const u8).empty;
+            for (v.array.items) |w| if (w == .string) try words.append(a, try a.dupe(u8, w.string));
+            efforts = try words.toOwnedSlice(a);
+        };
 
         try list.append(a, .{
             .id = try a.dupe(u8, id_val.string),
             .budget = budgetForContext(ctx),
             .vision = vision,
             .loaded = loaded,
+            .efforts = efforts,
         });
     }
     return .{ .arena = arena, .entries = try list.toOwnedSlice(a) };
@@ -788,6 +845,61 @@ test "pi models.json and opencode config parse as JSON and stay single-quote-fre
         // opencode's config rides single-quoted inside the launch script.
         try t.expect(std.mem.indexOf(u8, json, "'") == null);
     }
+}
+
+const qwen4_efforts = [_][]const u8{ "off", "low", "medium", "xhigh" };
+const mimo_efforts = [_][]const u8{ "off", "low", "medium", "high", "xhigh", "max" };
+
+test "piEffortFor: every pi level lands on a word the model accepts" {
+    const want_qwen = [_][]const u8{ "off", "low", "low", "medium", "xhigh", "xhigh" };
+    const want_mimo = [_][]const u8{ "off", "low", "low", "medium", "high", "xhigh" };
+    for (pi_levels, want_qwen, want_mimo) |lvl, q, m| {
+        try t.expectEqualStrings(q, piEffortFor(lvl, &qwen4_efforts).?);
+        try t.expectEqualStrings(m, piEffortFor(lvl, &mimo_efforts).?);
+    }
+    // Rounds up first, then down, and a thinking level never becomes off.
+    const only_low = [_][]const u8{ "off", "low" };
+    try t.expectEqualStrings("low", piEffortFor("xhigh", &only_low).?);
+    try t.expect(piEffortFor("off", &[_][]const u8{"low"}) == null);
+    try t.expect(piEffortFor("low", &[_][]const u8{"off"}) == null);
+}
+
+test "pi models.json sends each thinking level as reasoning_effort the model accepts" {
+    // thinkingFormat "qwen" made pi send only enable_thinking, so low/medium never reached the server.
+    const entries = [_]Entry{
+        .{ .id = "qwen", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true, .efforts = &qwen4_efforts },
+        .{ .id = "mimo", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true, .efforts = &mimo_efforts },
+        .{ .id = "old", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true },
+    };
+    const json = try piModelsJson(t.allocator, "http://127.0.0.1:11234", &entries);
+    defer t.allocator.free(json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, json, .{});
+    defer parsed.deinit();
+    const p = parsed.value.object.get("providers").?.object.get("sushi").?.object;
+    try t.expect(p.get("compat").?.object.get("thinkingFormat") == null);
+    const models = p.get("models").?.array.items;
+    for (models[0..2], [_][]const []const u8{ &qwen4_efforts, &mimo_efforts }) |m, accepted| {
+        const map = m.object.get("thinkingLevelMap").?.object;
+        for (pi_levels) |lvl| try t.expect(listed(accepted, map.get(lvl).?.string));
+    }
+    try t.expectEqualStrings("xhigh", models[0].object.get("thinkingLevelMap").?.object.get("high").?.string);
+    // No listed vocabulary: pi's own words, with off spelled as the server's none.
+    const old = models[2].object.get("thinkingLevelMap").?.object;
+    try t.expectEqual(@as(usize, 1), old.count());
+    try t.expectEqualStrings("none", old.get("off").?.string);
+}
+
+test "parseChatEntries reads each row's reasoning_efforts" {
+    const body =
+        \\{"data":[{"id":"q","capabilities":["chat"],"context_length":8192,"reasoning_efforts":["off","low","medium","xhigh"]},
+        \\ {"id":"old","context_length":8192}]}
+    ;
+    var models = try parseChatEntries(t.allocator, body);
+    defer models.deinit();
+    try t.expectEqual(@as(usize, 2), models.entries.len);
+    try t.expectEqual(@as(usize, 4), models.entries[0].efforts.?.len);
+    try t.expectEqualStrings("xhigh", models.entries[0].efforts.?[3]);
+    try t.expect(models.entries[1].efforts == null);
 }
 
 test "compactionReserve: a quarter of the window, capped where the agents' own defaults take over" {

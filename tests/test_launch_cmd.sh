@@ -131,6 +131,38 @@ else
     run_test "extra args after -- ride the agent invocation" FAIL "$OUT"
 fi
 
+# ── [7] pi --print: every thinking level reaches the server as a word it accepts ──
+OUT=$("$BIN" launch pi --print --url "$BASE" 2>&1)
+WORDS=$(python3 - "$BASE" ~/.sushi/pi/models.json <<'PY'
+import json, sys, urllib.request
+rows = {r["id"]: r for r in json.load(urllib.request.urlopen(sys.argv[1] + "/v1/models"))["data"]}
+p = json.load(open(sys.argv[2]))["providers"]["sushi"]
+bad = []
+if "thinkingFormat" in p["compat"]: bad.append("thinkingFormat present")
+words = set()
+for m in p["models"]:
+    accepted = rows.get(m["id"], {}).get("reasoning_efforts")
+    for lvl, w in m["thinkingLevelMap"].items():
+        if accepted is not None and w not in accepted: bad.append(f"{m['id']}:{lvl}->{w}")
+        if w: words.add(w)
+print("BAD " + " ".join(bad) if bad else " ".join(sorted(words)))
+PY
+)
+OK=1
+echo "$OUT" | grep -q 'export PI_CODING_AGENT_DIR="$HOME/.sushi/pi"' || OK=0
+case "$WORDS" in BAD*|"") OK=0 ;; esac
+for w in $WORDS; do
+    [ "$OK" = 1 ] || break
+    CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
+        -d "{\"model\":\"x\",\"max_tokens\":1,\"reasoning_effort\":\"$w\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+    [ "$CODE" = 200 ] || { OK=0; WORDS="$WORDS ($w -> $CODE)"; }
+done
+if [ "$OK" = 1 ]; then
+    run_test "pi models.json maps every thinking level to an accepted effort word" PASS
+else
+    run_test "pi models.json maps every thinking level to an accepted effort word" FAIL "$WORDS"
+fi
+
 echo ""
 echo "=== Result: $PASS/$TOTAL passed ==="
 [ "$FAIL" -eq 0 ]
