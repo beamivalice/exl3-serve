@@ -36,8 +36,11 @@ scripts/gpu-lock.sh acquire <owner>
 scripts/gpu-lock.sh release <owner>
 ```
 
-- Heavy = model load, conversion or pilot, `kld capture|compare`, bench, kernel microbench or timing, Metal trace.
-  `zig build test` is not heavy.
+- Lock = a full model load (server boot, `kld capture|compare`, live test) or a quiet-box bench or timing whose
+  absolute number is recorded. Conversions, pilots, builds and tests run in parallel without it when memory fits:
+  a conversion peaks near 20 GB, so it may run beside a Qwen-size load (~50-65 GB) but never beside a MiMo-size one
+  (~105 GB), and a MiMo load or a quiet bench waits until the parallel work ends. A timing taken beside parallel work
+  is stated as contended.
 - Acquire immediately before each run, release as soon as it ends: never across a queue or batch, never while
   analysing, editing, building or waiting. An A B B A re-acquires per arm. All agents on the box share one lock
   directory (`GPU_LOCK_DIR`, default `/tmp/sushi-gpu.lock.d`).

@@ -187,8 +187,9 @@ Server log `~/.sushi/logs/sushi-<port>.log` is THE post-mortem file (`--log-leve
 
 Procedures and examples: [docs/process-measurement.md](docs/process-measurement.md).
 
-**GPU sharing.** ONE heavy GPU job at a time on the box: model loads, conversions and pilots, KLD, benches, kernel
-timing, traces (`zig build test` is not heavy).
+**GPU sharing.** The lock is for jobs that need the box to themselves: a full model load (server boot, KLD, live test)
+and a quiet-box bench or timing whose absolute number is recorded. Conversions, pilots, builds and tests run in
+parallel without it, as long as the total fits memory: never beside a MiMo-size (≥ 90 GB) load, and a quiet bench waits.
 - Acquire the lock immediately before EACH run and release right after: `scripts/gpu-lock.sh acquire|release <owner>`;
   waiters are served FIFO by ticket, `status` shows holder + queue (`${GPU_LOCK_DIR:-/tmp/sushi-gpu.lock.d}`).
 - Never hold it across a batch or queue, or while analysing, editing, building or waiting. An A B B A re-acquires per

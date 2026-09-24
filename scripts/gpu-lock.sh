@@ -1,8 +1,9 @@
 #!/bin/bash
-# gpu-lock.sh — one heavy GPU job at a time on this box (CLAUDE.md, Team process).
+# gpu-lock.sh — the box-exclusive lock (CLAUDE.md, Team process).
 #
-# Heavy = a model load, a conversion or conversion pilot, `kld capture|compare`,
-# a bench, a kernel microbench or timing run, a Metal trace. `zig build test` is not.
+# Take it for a full model load (server boot, `kld capture|compare`, a live test) or a quiet-box bench or
+# timing run whose absolute number is recorded. Conversions, pilots, builds and tests run without it, in
+# parallel, as long as memory fits (never beside a MiMo-size load).
 # Acquire right before EACH run and release as soon as it ends; never hold the
 # lock across a queue, or while analysing, editing, building or waiting.
 #
