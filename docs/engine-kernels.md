@@ -40,16 +40,23 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 - `sushi_attn_pd` at (qk,v) 256/256 and 192/128 — the widths MLX's steel kernel lacks (band always fused; q_len < 16
   declined); a width `prefillHeadDimFused` lists owes a dispatch at EVERY prefill site scoring at it.
 - On NAX the 192/128 widths (MiMo global + sliding layers) run `sushi_attn_pd_nax` (`src/kernels/attn_pd_nax.metal`):
-  16 query rows per simdgroup, 16x32x16 matmul2d, K/V fragments read from device, each simdgroup stops at its own
-  diagonal. Same inputs, fp32 carries, dispatch budget and slices as the SIMD kernel; a chunked chain is bit-identical
-  to one dispatch on either arm. Gate `attnPdNaxServes`: NAX + macOS 26.3 + a one-tile probe of both instantiations
-  (causal, band + sinks) against an f32 reference; a failed probe declines by name. `SUSHI_ATTN_PD_NAX=0` = SIMD.
+  16 query rows per simdgroup, 16x32x16 matmul2d, K/V fragments read from device.
+  - Causal: the four simdgroups walk the threadgroup's key range in lockstep, with MLX's barriers, so each K/V block
+    serves all four while it is in cache.
+  - Band: each simdgroup walks its own rows' band, with no barriers.
+  - Loads past the last row clamp to it, so the loads carry no branches.
+  - Same inputs, fp32 carries and slices as the SIMD kernel. A 4x dispatch budget (`ATTN_PD_NAX_DISPATCH_BUDGET`,
+    ~20 ms per dispatch at qL 4096) cuts the carries 4x.
+  - A chunked chain is bit-identical to one dispatch on either arm.
+  - Gate `attnPdNaxServes`: NAX + macOS 26.3 + a one-tile probe of both instantiations (causal, band + sinks)
+    against an f32 reference; a failed probe declines by name. `SUSHI_ATTN_PD_NAX=0` = SIMD.
 - Its PV feeds P as ONE f16 term (P is in [0, 1]; f16 keeps 11 bits). Served-pack 16x512 KLD 0.07768, inside the
   rounding floor ([quality-kld](quality-kld.md#mimo)). Parity bar: per element vs fp64 no
   worse than the SIMD kernel beyond a store rounding flip plus 2^-11 of max|V|. A float P operand into the relaxed
   matmul is truncated (~1e-3).
 - Its ceiling is the matrix units' issue rate for 16x32x16 ops (~55 TFLOPS issued on the M5 Max, the rate MLX's hd-128
-  NAX sdpa also reaches), so a P that costs a second PV pass costs ~20% of the kernel.
+  NAX sdpa also reaches), so a P that costs a second PV pass costs ~20% of the kernel. The f16 P pays only
+  together with the lockstep walk and the branch-free loads ([perf-baselines](perf-baselines.md#mimo-decode)).
 - The SIMD kernel stages K^T with consecutive lanes on consecutive KEY rows: lanes spread over head-dim chunks
   stride 8*LDK halves, one bank. Bit-identical output.
 - hd 256 stays off the NAX attn_pd arm: the same kernel at 256/256 (O in 128 registers per lane) ran 3.2x slower

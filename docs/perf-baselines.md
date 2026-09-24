@@ -204,11 +204,27 @@ reads 0.07772 / 0.07754 / 0.07771 / 0.07836. Per call on real prefills (4 chunks
 sinks) the two arms' error against an f32 reference agrees to 1e-4 relative RMS; a NAX-vs-SIMD KLD delta under ~1% is
 noise.
 
-f16 P in `sushi_attn_pd_nax` (2026-09-24). Harness: a python replica of the dispatch chain, qL 4096, H 64 / Hk 4, kv8
-slices, arms interleaved in one process, `taskpolicy -a`, lock `lever2-attn`.
-- One global layer, main -> f16 P, ms: kL 16384 71.3 -> 53.3, 65536 309 -> 234, 262144 1311 -> 1075 (-25% / -24% /
-  -18%). One dense dispatch at 4096 x 4096: 8.58 -> 6.82 (-20%). The f16 arm also carried lockstep simdgroups and
-  clamped loads, which alone read 67.2 / 302 / 1331.
+`sushi_attn_pd_nax` speed work (2026-09-24). Harness: a python replica of the dispatch chain, qL 4096, H 64 / Hk 4,
+kv8 slices, arms interleaved in one process, `taskpolicy -a`, lock `lever2-attn`. One global layer, ms (this run read
+~30% slower in absolute terms than the same arms an hour earlier, on a contended box; the interleaved ratios hold):
+
+| kL | 08cec69 (before f16 P) | 3ba7272 (f16 P) | f16 P + lockstep causal, clamped loads (250M budget) | this kernel (+ 1e9 NAX budget) |
+|---|---|---|---|---|
+| 4096 | 11.02 | 10.38 | 8.85 | 7.71 (-30%) |
+| 16384 | 74.4 | 72.0 | 61.5 | 59.4 (-20%) |
+| 65536 | 457 | 421 | 364 | 357 (-22%) |
+| 262144 | 2004 | 1930 | 1658 | 1581 (-21%) |
+
+- Live prefill, served pack, kv8, no MTP, ctx 163840 (chunk 2048), same prompts, fans auto, no idle wait, A B A boots:
+  main 08cec69 858 / 713 / 512 tok/s at 3.6k / 54.7k / 136.6k tokens, then this kernel 962 / 789 / 596, then main
+  again 995 / 772 / 555. The main arm drifted 8-16% between its two boots. Against their mean, this kernel reads
+  +4% / +6% / +12%; only the 136.6k cell clears the drift.
+- At qL 2048 (the same harness), the lockstep kernel with f16 P is -20% to -23% at every kL. The 1e9 budget adds
+  nothing there beyond 4k keys.
+- f16 P alone buys little: -3% to -8%. The gain comes when the causal simdgroups also walk in lockstep and loads are
+  branch-free. Without f16 P, those two changes gave only -2% to -8%.
+- Sliding band call, per call, ms (39 layers, window 128, sinks; band keeps per-simdgroup walks): qL 512
+  0.316 -> 0.299, 2048 0.576 -> 0.532, 4096 0.947 -> 0.852.
 - Ruled out in the same harness:
   - a strict float P (1.4x slower);
   - an int8 correction term (costs what a bf16 one does);
@@ -216,8 +232,8 @@ slices, arms interleaved in one process, `taskpolicy -a`, lock `lever2-attn`.
   - `max_total_threads_per_threadgroup` (0);
   - fast exp2 (0);
   - 8 simdgroups (slower);
-  - lockstep simdgroups with a 1e9 dispatch budget: -7.6% / -4.1% / -2.0% at 16k / 64k / 256k, under the 5% bar;
-  - a larger budget alone: slower at long kL (1e9: +2% at 64k, +13% at 256k), because K/V fall out of cache.
+  - a larger budget on the non-lockstep kernel: slower at long kL (1e9: +3% at 64k, +13% at 256k), because K/V fall
+    out of cache.
 
 <a id="mimo-long-decode"></a>
 Long-context decode, global-layer attention (2026-09-24, kv8, no MTP, prefix cache off, one boot per cell,

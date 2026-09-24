@@ -2668,6 +2668,9 @@ pub const Fused256CausalMode = enum { all, off };
 // behavior); default mirrors oMLX's 250M fallback (~23 ms/dispatch on the
 // M4 Max at the kernel's measured ~1.1e10 work-units/s).
 pub const FUSED256_DEFAULT_DISPATCH_BUDGET: i64 = 250_000_000;
+/// `sushi_attn_pd_nax` does the same work in about a third of the time, and its lockstep simdgroups
+/// keep a longer key chunk in cache, so fewer fp32 carries pay.
+pub const ATTN_PD_NAX_DISPATCH_BUDGET: i64 = 1_000_000_000;
 
 /// Rows of a quantized cache one dispatch may dequantize. The work budget
 /// already chunks the key axis, but it scales with heads x q_len, so a narrow
@@ -2677,17 +2680,17 @@ pub const PACKED_KV_SLICE_MAX: c_int = 16384;
 
 /// Test seam: forces the budget without the environment.
 pub var fused256_budget_override: ?i64 = null;
-var fused256_budget_env_cached: ?i64 = null;
+/// null = not read yet; the inner null = unset, each arm takes its own default.
+var fused256_budget_env_cached: ??i64 = null;
 
-pub fn fused256DispatchBudget() i64 {
+pub fn fused256DispatchBudget(arm: AttnPdArm) i64 {
     if (fused256_budget_override) |v| return v;
-    if (fused256_budget_env_cached) |v| return v;
-    const v: i64 = blk: {
-        const raw = std.c.getenv("SUSHI_FUSED_256_BUDGET") orelse break :blk FUSED256_DEFAULT_DISPATCH_BUDGET;
-        break :blk std.fmt.parseInt(i64, std.mem.sliceTo(raw, 0), 10) catch FUSED256_DEFAULT_DISPATCH_BUDGET;
+    if (fused256_budget_env_cached == null) fused256_budget_env_cached = blk: {
+        const raw = std.c.getenv("SUSHI_FUSED_256_BUDGET") orelse break :blk null;
+        break :blk std.fmt.parseInt(i64, std.mem.sliceTo(raw, 0), 10) catch null;
     };
-    fused256_budget_env_cached = v;
-    return v;
+    if (fused256_budget_env_cached.?) |v| return v;
+    return if (arm == .nax) ATTN_PD_NAX_DISPATCH_BUDGET else FUSED256_DEFAULT_DISPATCH_BUDGET;
 }
 
 /// kv-axis chunk length for the budgeted causal dispatch: the largest
@@ -7286,9 +7289,9 @@ fn attnPdDispatch(
     const chunk_len: c_int = if (window > 0)
         kL
     else if (packed_kv != null)
-        @min(PACKED_KV_SLICE_MAX, fused256KvChunkLen(@intCast(qs[0]), @intCast(qs[1]), @intCast(qs[2]), @intCast(kL), fused256DispatchBudget()))
+        @min(PACKED_KV_SLICE_MAX, fused256KvChunkLen(@intCast(qs[0]), @intCast(qs[1]), @intCast(qs[2]), @intCast(kL), fused256DispatchBudget(arm)))
     else
-        fused256KvChunkLen(@intCast(qs[0]), @intCast(qs[1]), @intCast(qs[2]), @intCast(kL), fused256DispatchBudget());
+        fused256KvChunkLen(@intCast(qs[0]), @intCast(qs[1]), @intCast(qs[2]), @intCast(kL), fused256DispatchBudget(arm));
 
     // Dummy 1-elem f32 stands in for absent carry inputs / unwritten outputs.
     const dummy_data = [_]f32{0};
@@ -55034,6 +55037,31 @@ test "sushi_attn_pd every arm: a chunked dispatch chain is bit-identical to one 
         try std.testing.expectEqual(arm, attn_pd_last_arm);
         try std.testing.expectEqual(@as(f32, 0), try attn256MaxDiff(whole, chunked, s));
         try std.testing.expectEqual(@as(f32, 0), try attn256MaxDiff(whole, sliced, s));
+    }
+}
+
+test "sushi_attn_pd_nax takes a 4x dispatch budget: fewer key chunks than the SIMD kernel" {
+    if (mlx.noGpuBackend() or !verifyQmmNaxAvailable() or !qsaNaxOsOk()) return error.SkipZigTest;
+    if (std.c.getenv("SUSHI_FUSED_256_BUDGET") != null) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    fused256_override = true;
+    defer fused256_override = null;
+    var prng = std.Random.DefaultPrng.init(0x1b4d);
+    const rnd = prng.random();
+    // 16 heads x 4096 rows: the SIMD budget covers 3808 keys per dispatch, the NAX one 15232.
+    const q = try attn256RandBf16(rnd, &[_]c_int{ 1, 16, 4096, 192 }, s);
+    defer _ = mlx.mlx_array_free(q);
+    const k = try attn256RandBf16(rnd, &[_]c_int{ 1, 1, 8192, 192 }, s);
+    defer _ = mlx.mlx_array_free(k);
+    const v = try attn256RandBf16(rnd, &[_]c_int{ 1, 1, 8192, 128 }, s);
+    defer _ = mlx.mlx_array_free(v);
+    for ([_]AttnPdArm{ .simd, .nax }, [_]u32{ 3, 1 }) |arm, want| {
+        attn_pd_nax_override = arm == .nax;
+        defer attn_pd_nax_override = null;
+        const out = (try fusedSdpaPrefill(s, q, k, v, 1.0 / @sqrt(192.0), 0)) orelse return error.FusedDeclined;
+        defer _ = mlx.mlx_array_free(out);
+        try std.testing.expectEqual(arm, attn_pd_last_arm);
+        try std.testing.expectEqual(want, fused256_last_dispatch_count);
     }
 }
 

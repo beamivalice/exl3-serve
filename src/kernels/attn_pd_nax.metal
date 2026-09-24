@@ -1,8 +1,7 @@
 // sushi_attn_pd on the matrix units: the same inputs, outputs and fp32 carries as the SIMD kernel
 // (kr = {begin, end, koff, kL_abs}, phase bit 0 = carry-in, bit 1 = final; causal and band in cache
 // coordinates; optional per-head sink), structured after MLX's steel attention_nax: each simdgroup
-// owns 16 query rows and walks the keys to its OWN diagonal, K/V fragments read straight from
-// device memory (no threadgroup staging, no barriers).
+// owns 16 query rows, K/V fragments read straight from device memory (no threadgroup staging).
 constexpr int NSG = 4;
 constexpr int BQ = 16 * NSG;
 constexpr int BK = 32;
@@ -33,8 +32,11 @@ const int q_off = kL_abs - qL;
 
 const int row0 = tqx * BQ + int(warp) * 16;
 const int q_rows = metal::min(16, qL - row0);
-if (q_rows <= 0) return;
-const device T* Qp = q + bb * q_strides[0] + hq * q_strides[1] + (long)row0 * q_strides[2];
+// Causal: the simdgroups walk their threadgroup's key range in step (the barriers below keep each
+// K/V block in cache for all four). Band: each walks its own rows' band, no barriers.
+const bool lockstep = SW == 0;
+if (!lockstep && q_rows <= 0) return;
+const device T* Qh = q + bb * q_strides[0] + hq * q_strides[1];
 const device T* Kp = k + bb * k_strides[0] + (hq / gqa) * k_strides[1];
 const device T* Vp = v + bb * v_strides[0] + (hq / gqa) * v_strides[1];
 const int ldq = int(q_strides[2]), ldk = int(k_strides[2]), ldv = int(v_strides[2]);
@@ -43,6 +45,10 @@ const int ldq = int(q_strides[2]), ldk = int(k_strides[2]), ldv = int(v_strides[
 const short2 cc = SushiNax::coord();
 const int r_abs0 = q_off + row0 + cc.y;
 const int r_abs1 = r_abs0 + 8;
+// Loads past the last query or key row clamp to it, so no load branches: those rows' scores are
+// never stored (queries) or are masked to -inf (keys), and a zero P times a finite V adds zero.
+const device T* Q0 = Qh + (long)metal::min(row0 + cc.y, qL - 1) * ldq + cc.x;
+const device T* Q1 = Qh + (long)metal::min(row0 + cc.y + 8, qL - 1) * ldq + cc.x;
 
 ffrag O[TDV];
 SUSHI_UNROLL for (short i = 0; i < TDV; ++i) O[i] = ffrag(0.0f);
@@ -69,8 +75,8 @@ if (SINK && !has_carry) {
 }
 
 const int NK = (k_end + BK - 1) / BK;
-const int q_lo = row0 + q_off;
-const int q_hi = q_lo + 15;
+const int q_lo = (lockstep ? tqx * BQ : row0) + q_off;
+const int q_hi = (lockstep ? tqx * BQ + BQ - 1 : row0 + 15) + q_off;
 const int kb_lim = metal::min(NK, (q_hi - koff + BK) / BK);
 int kb = k_begin / BK;
 if (SW > 0) kb = metal::max(kb, metal::max(0, q_lo - SW + 1 - koff) / BK);
@@ -83,19 +89,17 @@ for (; kb < kb_lim; kb++) {
   ffrag S[TK];
   SUSHI_UNROLL for (short i = 0; i < TK; ++i) S[i] = ffrag(0.0f);
   SUSHI_UNROLL for (short ik = 0; ik < TK; ik += 2) {
+    const int kr = c0 + ik * 16 + cc.y;
+    const device T* K0 = Kp + (long)metal::min(kr, kL - 1) * ldk + cc.x;
+    const device T* K1 = Kp + (long)metal::min(kr + 8, kL - 1) * ldk + cc.x;
+    const device T* K2 = Kp + (long)metal::min(kr + 16, kL - 1) * ldk + cc.x;
+    const device T* K3 = Kp + (long)metal::min(kr + 24, kL - 1) * ldk + cc.x;
 #pragma clang loop unroll_count(4)
     for (short d = 0; d < TDK; ++d) {
       tfrag qf, k0f, k1f;
-      if (q_rows >= 16) SushiNax::load(qf, Qp + d * 16, ldq);
-      else SushiNax::load_rows(qf, Qp + d * 16, ldq, q_rows);
-      const device T* K0 = Kp + (long)(c0 + ik * 16) * ldk + d * 16;
-      if (full_k) {
-        SushiNax::load(k0f, K0, ldk);
-        SushiNax::load(k1f, K0 + 16 * ldk, ldk);
-      } else {
-        SushiNax::load_rows(k0f, K0, ldk, rows_k - ik * 16);
-        SushiNax::load_rows(k1f, K0 + 16 * ldk, ldk, rows_k - ik * 16 - 16);
-      }
+      SushiNax::load2(qf, Q0 + d * 16, Q1 + d * 16);
+      SushiNax::load2(k0f, K0 + d * 16, K1 + d * 16);
+      SushiNax::load2(k1f, K2 + d * 16, K3 + d * 16);
       SushiNax::mma<float, T, T, false, true>(S[ik], S[ik + 1], qf, k0f, k1f);
     }
   }
@@ -136,21 +140,19 @@ for (; kb < kb_lim; kb++) {
 
   // O += P @ V with P in f16: P is in [0, 1], where f16 keeps 11 bits to bf16's 8 (a float P operand
   // is truncated by the relaxed matmul).
-  SUSHI_UNROLL for (short ik = 0; ik < TK; ++ik) {
-    metal::vec<half, 8> ph;
-    SUSHI_UNROLL for (short j = 0; j < 8; ++j) ph[j] = half(S[ik][j]);
-    const device T* V0 = Vp + (long)(c0 + ik * 16) * ldv;
-    const int vrows = rows_k - ik * 16;
-    SUSHI_UNROLL for (short d = 0; d < TDV; d += 2) {
+  metal::vec<half, 8> ph[TK];
+  SUSHI_UNROLL for (short ik = 0; ik < TK; ++ik) SUSHI_UNROLL for (short j = 0; j < 8; ++j) ph[ik][j] = half(S[ik][j]);
+  metal::simdgroup_barrier(metal::mem_flags::mem_none);
+  SUSHI_UNROLL for (short d = 0; d < TDV; d += 2) {
+    if (lockstep && d == TDV / 2) metal::threadgroup_barrier(metal::mem_flags::mem_none);
+    SUSHI_UNROLL for (short ik = 0; ik < TK; ++ik) {
+      const int vr = c0 + ik * 16 + cc.y;
+      const device T* V0 = Vp + (long)metal::min(vr, kL - 1) * ldv + cc.x + d * 16;
+      const device T* V1 = Vp + (long)metal::min(vr + 8, kL - 1) * ldv + cc.x + d * 16;
       tfrag v0f, v1f;
-      if (full_k) {
-        SushiNax::load(v0f, V0 + d * 16, ldv);
-        SushiNax::load(v1f, V0 + d * 16 + 16, ldv);
-      } else {
-        SushiNax::load_rows(v0f, V0 + d * 16, ldv, vrows);
-        SushiNax::load_rows(v1f, V0 + d * 16 + 16, ldv, vrows);
-      }
-      SushiNax::mma<float, half, T, false, false>(O[d], O[d + 1], ph, v0f, v1f);
+      SushiNax::load2(v0f, V0, V1);
+      SushiNax::load2(v1f, V0 + 16, V1 + 16);
+      SushiNax::mma<float, half, T, false, false>(O[d], O[d + 1], ph[ik], v0f, v1f);
     }
   }
 }

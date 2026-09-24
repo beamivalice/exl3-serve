@@ -27,19 +27,9 @@ struct SushiNax {
     op.run(ca, cb, cc);
     SUSHI_UNROLL for (short i = 0; i < 8; i++) { c0[i] = cc[i]; c1[i] = cc[8 + i]; }
   }
-  // A 16x16 fragment from row-major memory; rows at or past `rows` read zero.
+  // A 16x16 fragment whose two lane rows start at p0 and p1 (column offset included).
   template <typename T, typename P>
-  static void load_rows(thread metal::vec<T, 8>& d, P src, int ld, int rows) {
-    short2 c = coord();
-    SUSHI_UNROLL for (short i = 0; i < 2; i++) {
-      bool ok = (c.y + i * 8) < rows;
-      SUSHI_UNROLL for (short j = 0; j < 4; j++) d[i * 4 + j] = ok ? T(src[(c.y + i * 8) * ld + c.x + j]) : T(0);
-    }
-  }
-  template <typename T, typename P>
-  static void load(thread metal::vec<T, 8>& d, P src, int ld) {
-    short2 c = coord();
-    SUSHI_UNROLL for (short i = 0; i < 2; i++) SUSHI_UNROLL for (short j = 0; j < 4; j++)
-      d[i * 4 + j] = T(src[(c.y + i * 8) * ld + c.x + j]);
+  static void load2(thread metal::vec<T, 8>& d, P p0, P p1) {
+    SUSHI_UNROLL for (short j = 0; j < 4; j++) { d[j] = T(p0[j]); d[4 + j] = T(p1[j]); }
   }
 };
