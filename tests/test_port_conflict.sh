@@ -72,6 +72,19 @@ stop_holder() {
     fi
 }
 
+start_model_free_sushi() {
+    HOME="$WORK/home" "$BIN" serve --host 127.0.0.1 --port "$1" </dev/null >"$WORK/first.log" 2>&1 &
+    HOLDER_PID=$!
+    for _ in $(seq 1 100); do
+        if lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; then
+            return 0
+        fi
+        kill -0 "$HOLDER_PID" 2>/dev/null || die "first sushi exited early: $(cat "$WORK/first.log")"
+        sleep 0.1
+    done
+    die "first sushi never listened on $1"
+}
+
 expect_refusal() {
     local desc=$1
     shift
@@ -112,6 +125,13 @@ stop_holder
 
 start_bound_socket "$PORT"
 expect_refusal "sushi refuses a socket occupying its bind address without a listener" "$BIN" serve --port "$PORT"
+stop_holder
+
+start_model_free_sushi "$PORT"
+expect_refusal "second sushi refuses a port the first sushi serves" "$BIN" serve --port "$PORT"
+if ! kill -0 "$HOLDER_PID" 2>/dev/null; then
+    err "first sushi died after the second's refusal"
+fi
 stop_holder
 
 if [ -n "$FAILED" ]; then

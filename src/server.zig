@@ -83,62 +83,96 @@ pub var g_api_key_strict: bool = false;
 /// mistyped value reaches the client verbatim, which strict clients reject.
 pub var g_tool_autocorrect: bool = true;
 
-/// Should boot print the open-bind warning? True only when serve mode is about
-/// to listen on a non-loopback address the user never chose: no explicit
-/// `--host` (the default is still 0.0.0.0). A future release flips the default
-/// to 127.0.0.1 — at which point the host check silences this without a code change.
-pub fn shouldWarnOpenBind(host_explicit: bool, host: []const u8) bool {
-    if (host_explicit) return false;
-    return !(std.mem.startsWith(u8, host, "127.") or
-        std.mem.eql(u8, host, "::1") or
-        std.mem.eql(u8, host, "localhost"));
-}
-
 pub const default_host: []const u8 = "127.0.0.1";
 pub const default_port: u16 = 11234;
 
 pub const BindConfig = struct {
     host: []const u8,
     port: u16,
-    host_explicit: bool,
 };
 
 pub fn resolveBind(host_flag: ?[]const u8, port_flag: ?u16) BindConfig {
     return .{
         .host = host_flag orelse default_host,
         .port = port_flag orelse default_port,
-        .host_explicit = host_flag != null,
     };
 }
 
-pub fn bindAddress(host: []const u8, port: u16) std.Io.net.IpAddress {
-    var ip4_bytes: [4]u8 = .{ 0, 0, 0, 0 };
-    if (!std.mem.eql(u8, host, "0.0.0.0")) {
+pub fn bindAddress(host: []const u8, port: u16) error{InvalidHost}!std.Io.net.IpAddress {
+    var ip4_bytes: [4]u8 = undefined;
+    if (std.mem.eql(u8, host, "localhost")) {
+        ip4_bytes = .{ 127, 0, 0, 1 };
+    } else if (std.mem.eql(u8, host, "0.0.0.0")) {
+        ip4_bytes = .{ 0, 0, 0, 0 };
+    } else {
         // Parse dotted-decimal IP
         var parts = std.mem.splitScalar(u8, host, '.');
         var idx: usize = 0;
         while (parts.next()) |part| {
-            if (idx >= 4) break;
-            ip4_bytes[idx] = std.fmt.parseInt(u8, part, 10) catch 0;
+            if (idx >= 4) return error.InvalidHost;
+            ip4_bytes[idx] = std.fmt.parseInt(u8, part, 10) catch return error.InvalidHost;
             idx += 1;
         }
+        if (idx != 4) return error.InvalidHost;
     }
     return .{ .ip4 = .{ .bytes = ip4_bytes, .port = port } };
 }
 
-pub fn ensurePortFree(io: std.Io, host: []const u8, port: u16) std.Io.net.IpAddress.ListenError!void {
-    const addr = bindAddress(host, port);
+pub fn startListener(host: []const u8, port: u16) (error{InvalidHost} || std.Io.net.IpAddress.ListenError)!std.Io.net.Server {
+    const addr = try bindAddress(host, port);
+    const ip4 = addr.ip4;
+    const rc = std.posix.system.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => {},
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        .NOMEM, .NOBUFS => return error.SystemResources,
+        else => return error.Unexpected,
+    }
+    const fd: std.posix.socket_t = @intCast(rc);
+    errdefer _ = std.posix.system.close(fd);
+    if (std.posix.errno(std.posix.system.fcntl(fd, std.posix.F.SETFD, @as(usize, std.posix.FD_CLOEXEC))) != .SUCCESS) return error.Unexpected;
+
+    const on: c_int = 1;
+    if (std.posix.errno(std.posix.system.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, @ptrCast(&on), @sizeOf(c_int))) != .SUCCESS) return error.Unexpected;
+
+    const sa = std.posix.sockaddr.in{
+        .port = std.mem.nativeToBig(u16, ip4.port),
+        .addr = @bitCast(ip4.bytes),
+    };
+    switch (std.posix.errno(std.posix.system.bind(fd, @ptrCast(&sa), @sizeOf(std.posix.sockaddr.in)))) {
+        .SUCCESS => {},
+        .ADDRINUSE => return error.AddressInUse,
+        .ACCES => return error.AccessDenied,
+        .ADDRNOTAVAIL => return error.AddressUnavailable,
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+        .NOMEM, .NOBUFS => return error.SystemResources,
+        else => return error.Unexpected,
+    }
+    switch (std.posix.errno(std.posix.system.listen(fd, 128))) {
+        .SUCCESS => {},
+        .ADDRINUSE => return error.AddressInUse,
+        else => return error.Unexpected,
+    }
+    return .{ .socket = .{ .handle = fd, .address = addr }, .options = {} };
+}
+
+pub fn ensurePortFree(io: std.Io, host: []const u8, port: u16) (error{InvalidHost} || std.Io.net.IpAddress.ListenError)!void {
+    const addr = try bindAddress(host, port);
     if (addr.connect(io, .{ .mode = .stream })) |s| {
         s.close(io);
         return error.AddressInUse;
     } else |_| {}
-    var probe = try addr.listen(io, .{ .reuse_address = true });
+    var probe = try startListener(host, port);
     probe.deinit(io);
 }
 
-pub fn startupRefusal(err: anyerror, port: u16, buf: []u8) ?[]const u8 {
-    if (err != error.AddressInUse) return null;
-    return std.fmt.bufPrint(buf, "port {d} is already in use", .{port}) catch unreachable;
+pub fn startupRefusal(err: anyerror, host: []const u8, port: u16, buf: []u8) ?[]const u8 {
+    switch (err) {
+        error.AddressInUse => return std.fmt.bufPrint(buf, "port {d} is already in use", .{port}) catch unreachable,
+        error.InvalidHost => return std.fmt.bufPrint(buf, "invalid --host '{s}'", .{host}) catch "invalid --host",
+        else => return null,
+    }
 }
 
 test "textGenTargetOf: reads config unless the entry is mid-load" {
@@ -169,18 +203,6 @@ test "textGenTargetOf: reads config unless the entry is mid-load" {
     e.state = .loading;
     try std.testing.expect(!textGenTargetOf(e).is_encoder_only);
     try std.testing.expect(textGenRejectReason(textGenTargetOf(e)) == null);
-}
-
-test "shouldWarnOpenBind: warn only on an UNCHOSEN non-loopback bind" {
-    // Default bind (0.0.0.0, nobody asked) → warn: a first-launch user is
-    // serving whatever network the laptop joins.
-    try std.testing.expect(shouldWarnOpenBind(false, "0.0.0.0"));
-    // Someone who CHOSE the bind is not nagged — explicit --host (any value).
-    try std.testing.expect(!shouldWarnOpenBind(true, "0.0.0.0"));
-    // Loopback defaults never warn (the future 127.0.0.1 default).
-    try std.testing.expect(!shouldWarnOpenBind(false, "127.0.0.1"));
-    try std.testing.expect(!shouldWarnOpenBind(false, "localhost"));
-    try std.testing.expect(!shouldWarnOpenBind(false, "::1"));
 }
 
 const io_util = @import("io_util.zig");
@@ -1686,10 +1708,9 @@ pub fn serve(
     std.posix.sigaction(std.posix.SIG.TERM, &sigact, null);
 
     // Parse host address
-    const ip_addr = bindAddress(host, port);
-    var server = ip_addr.listen(io, .{ .reuse_address = true }) catch |err| {
-        var msg_buf: [64]u8 = undefined;
-        if (startupRefusal(err, port, &msg_buf)) |msg| {
+    var server = startListener(host, port) catch |err| {
+        var msg_buf: [512]u8 = undefined;
+        if (startupRefusal(err, host, port, &msg_buf)) |msg| {
             log.err("{s}\n", .{msg});
             std.process.exit(1);
         }
@@ -23687,25 +23708,60 @@ test "resolveBind: no flags bind 127.0.0.1:11234" {
     const d = resolveBind(null, null);
     try std.testing.expectEqualStrings("127.0.0.1", d.host);
     try std.testing.expectEqual(@as(u16, 11234), d.port);
-    try std.testing.expect(!d.host_explicit);
     const e = resolveBind("0.0.0.0", 23817);
     try std.testing.expectEqualStrings("0.0.0.0", e.host);
     try std.testing.expectEqual(@as(u16, 23817), e.port);
-    try std.testing.expect(e.host_explicit);
     const p = resolveBind(null, 23817);
     try std.testing.expectEqualStrings("127.0.0.1", p.host);
     try std.testing.expectEqual(@as(u16, 23817), p.port);
-    try std.testing.expect(!p.host_explicit);
     const h = resolveBind("192.168.7.9", null);
     try std.testing.expectEqualStrings("192.168.7.9", h.host);
     try std.testing.expectEqual(@as(u16, 11234), h.port);
-    try std.testing.expect(h.host_explicit);
 }
 
 test "startupRefusal: AddressInUse refuses naming the port" {
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("port 11234 is already in use", startupRefusal(error.AddressInUse, 11234, &buf).?);
-    try std.testing.expectEqualStrings("port 23817 is already in use", startupRefusal(error.AddressInUse, 23817, &buf).?);
-    try std.testing.expect(startupRefusal(error.AccessDenied, 23817, &buf) == null);
-    try std.testing.expect(startupRefusal(error.SystemResources, 23817, &buf) == null);
+    try std.testing.expectEqualStrings("port 11234 is already in use", startupRefusal(error.AddressInUse, "127.0.0.1", 11234, &buf).?);
+    try std.testing.expectEqualStrings("port 23817 is already in use", startupRefusal(error.AddressInUse, "127.0.0.1", 23817, &buf).?);
+    try std.testing.expect(startupRefusal(error.AccessDenied, "127.0.0.1", 23817, &buf) == null);
+    try std.testing.expect(startupRefusal(error.SystemResources, "127.0.0.1", 23817, &buf) == null);
+}
+
+test "bindAddress: localhost is loopback; wildcards stay" {
+    const l = try bindAddress("localhost", 11234);
+    try std.testing.expect(std.mem.eql(u8, &l.ip4.bytes, &.{ 127, 0, 0, 1 }));
+    try std.testing.expectEqual(@as(u16, 11234), l.ip4.port);
+    const e = try bindAddress("127.0.0.1", 23817);
+    try std.testing.expect(std.mem.eql(u8, &e.ip4.bytes, &.{ 127, 0, 0, 1 }));
+    try std.testing.expectEqual(@as(u16, 23817), e.ip4.port);
+    const w = try bindAddress("0.0.0.0", 11234);
+    try std.testing.expect(std.mem.eql(u8, &w.ip4.bytes, &.{ 0, 0, 0, 0 }));
+    try std.testing.expectEqual(@as(u16, 11234), w.ip4.port);
+}
+
+test "bindAddress: garbage is refused by name" {
+    try std.testing.expectError(error.InvalidHost, bindAddress("example.com", 80));
+    try std.testing.expectError(error.InvalidHost, bindAddress("999.1.2.3", 80));
+    try std.testing.expectError(error.InvalidHost, bindAddress("1.2.3", 80));
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("invalid --host 'example.com'", startupRefusal(error.InvalidHost, "example.com", 80, &buf).?);
+    try std.testing.expectEqualStrings("invalid --host '999.1.2.3'", startupRefusal(error.InvalidHost, "999.1.2.3", 80, &buf).?);
+}
+
+test "startListener: a second bind on the same port is refused" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var p: u16 = 23850;
+    var a: std.Io.net.Server = undefined;
+    var got = false;
+    while (p < 23950) : (p += 1) {
+        a = startListener("127.0.0.1", p) catch |e| switch (e) {
+            error.AddressInUse => continue,
+            else => return e,
+        };
+        got = true;
+        break;
+    }
+    if (!got) return error.NoFreeTestPort;
+    defer a.deinit(io);
+    try std.testing.expectError(error.AddressInUse, startListener("127.0.0.1", p));
 }

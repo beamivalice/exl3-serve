@@ -854,7 +854,6 @@ pub fn main(init: std.process.Init) !void {
 
     const bind = server_mod.resolveBind(host_flag, port_flag);
     const host = bind.host;
-    const host_explicit = bind.host_explicit;
     const port = bind.port;
 
     transformer_mod.Transformer.mtp_head_kv_quant_flag = mtp_head_kv_quant;
@@ -968,18 +967,13 @@ pub fn main(init: std.process.Init) !void {
     // (model loading takes seconds — fail fast instead of wasting time)
     if (serve_mode) {
         server_mod.ensurePortFree(io, host, port) catch |err| {
-            var msg_buf: [64]u8 = undefined;
-            if (server_mod.startupRefusal(err, port, &msg_buf)) |msg| {
+            var msg_buf: [512]u8 = undefined;
+            if (server_mod.startupRefusal(err, host, port, &msg_buf)) |msg| {
                 log.err("{s}\n", .{msg});
                 std.process.exit(1);
             }
             return err;
         };
-        // Above every serve dispatch (unsupported-format/headless/media return early below).
-        if (server_mod.shouldWarnOpenBind(host_explicit, host)) {
-            log.warn("Listening on {s}:{d} — reachable by every device on the network this Mac is on.\n", .{ host, port });
-            log.warn("Restrict to this Mac with --host 127.0.0.1 (a future version will make that the default).\n", .{});
-        }
     }
 
     // `sushi run` on a TTY: chat REPL on a side thread. It polls
