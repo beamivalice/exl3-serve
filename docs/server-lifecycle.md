@@ -26,6 +26,11 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
 
 ## What loads
 
+- **Bind**: `server.resolveBind` defaults to `127.0.0.1:11234`; `--host` takes an IPv4 literal, `0.0.0.0` or
+  `localhost` (= 127.0.0.1; anything else is refused by name, never widened). Before any model loads,
+  `ensurePortFree` probes the address with a connect AND a bind, so a listener or a bound-but-silent socket both refuse
+  with "port N is already in use"; the listener binds with SO_REUSEADDR only, so a racing second sushi fails its bind
+  with the same message instead of co-binding. Guard: `tests/test_port_conflict.sh`.
 - The arch gate: the loader refuses any `model_type` outside `model.served_model_types` (`qwen4_exp`, `mimo_v2`) by
   name (`ArchitectureUnsupported` → 503). A checkpoint in an unsupported file format is refused by name
   (`ModelFormatUnsupported` → 503; `--model` exits).

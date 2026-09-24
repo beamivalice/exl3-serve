@@ -72,8 +72,7 @@ thought is delivered. Guard: `tests/test_reasoning_budget_stream.sh`. Effort bud
 
 ## Security and observability
 
-- `--api-key`: loopback exempt, `/health` + OPTIONS open, `constTimeEql`. Default bind is 0.0.0.0 and serve mode
-  WARNS.
+- `--api-key`: loopback exempt, `/health` + OPTIONS open, `constTimeEql`.
 - `--metrics`: zero cost off; TTFT at prefill completion; live tok/s via ONE atomic per tick; `/metrics(.json)`.
 
 ## Agent launcher (`sushi launch <agent>`)
