@@ -16,6 +16,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
   turns. Test `run` on a real TTY; a serving-only smoke test does not exercise its client.
 - **An arg loop with no else branch is a silent flag eater** (`cli.classifyUnparsedArg`): every `--flag` any script
   passes must be in main.zig's match list. Removed flags are rejected by name, never eaten.
+- **`--parent-pid <pid>`** is for a host that runs sushi as its engine (`src/parent_watch.zig`): a thread polls the pid
+  once a second and, once it is gone (or has reparented sushi), sends this process SIGTERM. Mid-load that ends the
+  process; in the serve loop it is the ordinary graceful shutdown. Test: `tests/test_parent_pid.sh`.
 
 ## What loads
 

@@ -95,7 +95,7 @@ Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds)
 Flags that matter: `--model --serve --host --port --ctx-size --kv-quant --kv-attn-mode --mtp --no-mtp --mtp-depth
 --mtp-head-kv-quant --max-mtp-ctx --ssd-budget-gb --expert-cache-gb --prefix-cache-entries --prefix-cache-mem
 --prefix-cache-disk --prefill-chunk --max-concurrent --max-tokens --timeout --reasoning-budget --wired-margin-gib
---skip-mem-preflight --metrics --api-key --model-dir --log-level --log-file`. `--help` lists the rest.
+--skip-mem-preflight --metrics --api-key --model-dir --log-level --log-file --parent-pid`. `--help` lists the rest.
 
 ## Building
 

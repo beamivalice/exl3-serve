@@ -24,6 +24,7 @@ const metrics_mod = @import("metrics.zig");
 const sleep_inhibit_mod = @import("sleep_inhibit.zig");
 const version_mod = @import("version.zig");
 const ane_mod = @import("ane.zig");
+const parent_watch = @import("parent_watch.zig");
 
 pub const VERSION: []const u8 = build_options.version;
 
@@ -297,6 +298,8 @@ fn printUsage(io: std.Io) void {
         \\  --log-level <lvl>   Log level: error, warn, info, debug (default: info)
         \\  --log-file <path>   Persist the server log ("off" disables).
         \\                      Default: ~/.sushi/logs/sushi-<port>.log
+        \\  --parent-pid <pid>  Shut down when process <pid> exits (for a host
+        \\                        that runs sushi as its engine).
         \\  --version           Print version and exit
         \\  --help              Show this help
         \\
@@ -408,6 +411,7 @@ pub fn main(init: std.process.Init) !void {
     var host_explicit = false;
     // `--log-file <path|off>`. null = default (`~/.sushi/logs/sushi-<port>.log`).
     var log_file_arg: ?[]const u8 = null;
+    var parent_pid: ?std.posix.pid_t = null;
     var serve_mode = false;
     var stream_mode = false;
     var prompt: ?[]const u8 = null;
@@ -667,6 +671,12 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "--log-file") and i + 1 < args.len) {
             i += 1;
             log_file_arg = args[i];
+        } else if (std.mem.eql(u8, args[i], "--parent-pid") and i + 1 < args.len) {
+            i += 1;
+            parent_pid = parent_watch.parseArg(args[i]) catch {
+                log.err("--parent-pid: expected a process id above 1; got '{s}'\n", .{args[i]});
+                std.process.exit(1);
+            };
         } else if (std.mem.eql(u8, args[i], "--warmup-eager")) {
             warmup_eager = true;
         } else if (std.mem.eql(u8, args[i], "--no-warmup-eager")) {
@@ -886,6 +896,13 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     defer log.closeFile();
+
+    if (parent_pid) |pid| {
+        parent_watch.start(pid) catch |err| {
+            log.err("--parent-pid: cannot start the watchdog: {s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+    }
 
     // Plan 05 Phase 1: model discovery. When --model-dir is passed, scan
     // the directory for subdirectories containing config.json. The
