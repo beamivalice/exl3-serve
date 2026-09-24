@@ -13104,19 +13104,17 @@ fn firstTokenLogprobs(allocator: std.mem.Allocator, logits: mlx.mlx_array, chose
 /// saturation above is everywhere: rank 1 was measured to be the chosen token
 /// in 0 of 5 positions on a trivial greedy prompt.
 fn computeLogprobs(allocator: std.mem.Allocator, logits: mlx.mlx_array, chosen_token: u32, top_n: u32, s: mlx.mlx_stream) !LogprobResult {
-    // Compute log_softmax = log(softmax(logits)) on GPU
-    var probs = mlx.mlx_array_new();
-    defer _ = mlx.mlx_array_free(probs);
-    try mlx.check(mlx.mlx_softmax_axis(&probs, logits, -1, true, s));
-
-    var log_probs_raw = mlx.mlx_array_new();
-    defer _ = mlx.mlx_array_free(log_probs_raw);
-    try mlx.check(mlx.mlx_log(&log_probs_raw, probs, s));
-
-    // Cast to float32 for CPU readback (model may produce float16 logits)
+    // log_softmax in f32: `log(softmax(x))` in bf16 lands on bf16's grid (0.125 apart
+    // between -16 and -32), and f16 underflows to -inf.
+    var logits32 = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(logits32);
+    try mlx.check(mlx.mlx_astype(&logits32, logits, .float32, s));
+    var lse = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(lse);
+    try mlx.check(mlx.mlx_logsumexp_axis(&lse, logits32, -1, true, s));
     var log_probs = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(log_probs);
-    try mlx.check(mlx.mlx_astype(&log_probs, log_probs_raw, .float32, s));
+    try mlx.check(mlx.mlx_subtract(&log_probs, logits32, lse, s));
 
     const lp_shape = mlx.getShape(log_probs);
     const rank = lp_shape.len;
@@ -17707,6 +17705,21 @@ test "suppress_mask: a suppressed id is unreachable from both samplers, everythi
     defer _ = mlx.mlx_array_free(probs);
     try testing.expectEqual(@as(f32, 0.0), try probAt(probs, 3, s));
     try testing.expect(try probAt(probs, 5, s) > 0.99);
+}
+
+test "computeLogprobs: bf16 logits report the exact log-probability" {
+    if (mlx.noGpuBackend()) return;
+    const s = mlx.gpuStream();
+    const raw = [_]f32{ 5, 5, 5, -20 };
+    const a32 = mlx.mlx_array_new_data(&raw, &[_]c_int{ 1, 4 }, 2, .float32);
+    defer _ = mlx.mlx_array_free(a32);
+    var a16 = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(a16);
+    try mlx.check(mlx.mlx_astype(&a16, a32, .bfloat16, s));
+    const r = try computeLogprobs(testing.allocator, a16, 3, 4, s);
+    defer testing.allocator.free(r.top_logprobs);
+    // -26.0986; the bf16 grid reads -26.125 there.
+    try testing.expectApproxEqAbs(-20.0 - (5.0 + @log(@as(f32, 3.0))), r.token_logprob, 1e-3);
 }
 
 test "computeLogprobs: rank 1 is the argmax and ranks descend, under a tie-saturated distribution" {

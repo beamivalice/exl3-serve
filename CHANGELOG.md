@@ -6,6 +6,7 @@ earlier history is mlx-serve's, in that project's changelog.
 
 ## Unreleased
 
+- **Reported logprobs are exact**: they are computed in f32, where bf16 rounded a logprob near -20 by up to 0.06.
 - **A model larger than the GPU working-set limit is refused by name at load** when `iogpu.wired_limit_mb` is set below free RAM, instead of failing warmup and then every request.
 - **Several long MiMo-V2.6-Flash prompts arriving together no longer overrun GPU memory**: one that does not fit beside the requests already running waits for one of them to finish.
 - **A `system` turn in the middle of a `/v1/chat/completions` conversation reaches Qwen3.8 Flash Next through its own template**, folded into the leading system prompt; MiMo-V2.6-Flash, whose template renders it in place, is unchanged.
