@@ -73,6 +73,7 @@ Zig 0.17 (pinned nightly via `scripts/fetch-zig.sh`; brew 0.16 no longer builds)
 | File | Role | Doc |
 |---|---|---|
 | `main.zig` / `cli.zig` | entry, flags, subcommands (`run/pull/list/serve/launch/kld`); pull, `run` REPL | server-lifecycle |
+| `repl_tools.zig` | `run` REPL's client-side read-only tools (web search/fetch, confined files, images) | server-http-apis |
 | `server.zig` / `responses.zig` / `ws.zig` | all HTTP: `/v1/*`, `/metrics(.json)`, WS, `--api-key`; Responses store | server-http-apis |
 | `chat.zig` | chat templates (Jinja2 + fallback), thinking tags, tool-call parse/repair/coercion | server-tool-calling |
 | `reasoning_protocol.zig` / `json_schema.zig` / `json_grammar.zig` / `token_mask.zig` / `regex.zig` | constrained decoding | server-http-apis |

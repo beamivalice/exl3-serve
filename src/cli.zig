@@ -21,6 +21,7 @@ const model = @import("model.zig");
 const model_discovery = @import("model_discovery.zig");
 const log = @import("log.zig");
 const status = @import("status.zig");
+const repl_tools = @import("repl_tools.zig");
 
 // ── Unparsed-argument reporting ─────────────────────────────────────────
 
@@ -683,11 +684,78 @@ pub fn formatMemorySummary(buf: []u8, real_bytes: u64, free_bytes: u64, total_by
 
 pub const Turn = struct {
     role: []const u8,
+    /// Owned by the REPL history, like every field below.
     content: []const u8,
+    /// Assistant turn: its OpenAI `tool_calls` array, as JSON.
+    tool_calls_json: ?[]const u8 = null,
+    /// Tool turn: the call it answers.
+    tool_call_id: ?[]const u8 = null,
+    /// data: URLs sent as image parts after the text.
+    images: []const []const u8 = &.{},
+
+    pub fn deinit(t: Turn, allocator: std.mem.Allocator) void {
+        allocator.free(t.content);
+        if (t.tool_calls_json) |j| allocator.free(j);
+        if (t.tool_call_id) |id| allocator.free(id);
+        for (t.images) |i| allocator.free(i);
+        if (t.images.len > 0) allocator.free(t.images);
+    }
 };
 
 /// The REPL's thinking request. `model_default` sends no thinking field.
 pub const Think = union(enum) { model_default, on, effort: model.Effort };
+
+pub const ReplOptions = struct {
+    think: Think = .model_default,
+    /// Client-side research tools (`repl_tools`); off unless asked for.
+    tools: bool = false,
+
+    pub fn toolsJson(o: ReplOptions, vision: bool) ?[]const u8 {
+        return if (o.tools) repl_tools.definitionsJson(vision) else null;
+    }
+};
+
+/// `on`/`off` for `--tool` and `/tool`.
+pub fn parseToolSwitch(word: []const u8) ?bool {
+    if (std.mem.eql(u8, word, "on")) return true;
+    if (std.mem.eql(u8, word, "off")) return false;
+    return null;
+}
+
+pub const ToolCommand = union(enum) { show, set: bool, refuse: []const u8 };
+
+/// `/tool [on|off]`; null when the line is not that command.
+pub fn parseToolCommand(line: []const u8) ?ToolCommand {
+    const word = commandArg(line, "/tool") orelse return null;
+    if (word.len == 0) return .show;
+    return .{ .set = parseToolSwitch(word) orelse return .{ .refuse = word } };
+}
+
+/// `/image <path>`: the raw argument ("" when missing), null for other lines.
+pub fn parseImageCommand(line: []const u8) ?[]const u8 {
+    return commandArg(line, "/image");
+}
+
+fn commandArg(line: []const u8, name: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, line, name)) return null;
+    const rest = line[name.len..];
+    if (rest.len > 0 and rest[0] != ' ') return null;
+    return std.mem.trim(u8, rest, " \t");
+}
+
+/// A path as a terminal pastes it: surrounding quotes dropped, `\ ` unescaped.
+pub fn unquotePath(allocator: std.mem.Allocator, arg: []const u8) ![]u8 {
+    if (arg.len >= 2 and (arg[0] == '\'' or arg[0] == '"') and arg[arg.len - 1] == arg[0])
+        return allocator.dupe(u8, arg[1 .. arg.len - 1]);
+    var out = try std.ArrayList(u8).initCapacity(allocator, arg.len);
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < arg.len) : (i += 1) {
+        if (arg[i] == '\\' and i + 1 < arg.len) i += 1;
+        out.appendAssumeCapacity(arg[i]);
+    }
+    return out.toOwnedSlice(allocator);
+}
 
 pub const ThinkFlag = struct { think: Think, consumed: bool };
 
@@ -745,6 +813,8 @@ pub const ModelEfforts = struct {
     id: []u8,
     /// Empty when the row lists none.
     efforts: []model.Effort,
+    /// The row lists the `vision` capability.
+    vision: bool = false,
 
     pub fn deinit(self: ModelEfforts, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
@@ -766,13 +836,18 @@ pub fn parseModelEfforts(allocator: std.mem.Allocator, body: []const u8) !ModelE
         if (v != .string) continue;
         if (model.parseEffort(v.string)) |e| try efforts.append(allocator, e);
     };
+    var vision = false;
+    if (row.get("capabilities")) |caps| if (caps == .array) for (caps.array.items) |v| {
+        if (v == .string and std.mem.eql(u8, v.string, "vision")) vision = true;
+    };
     const efforts_owned = try efforts.toOwnedSlice(allocator);
     errdefer allocator.free(efforts_owned);
-    return .{ .id = try allocator.dupe(u8, id), .efforts = efforts_owned };
+    return .{ .id = try allocator.dupe(u8, id), .efforts = efforts_owned, .vision = vision };
 }
 
-/// /v1/chat/completions request body for the REPL conversation so far.
-pub fn buildReplChatBody(allocator: std.mem.Allocator, history: []const Turn, think: Think) ![]u8 {
+/// /v1/chat/completions request body for the REPL conversation so far;
+/// `tools` is the OpenAI tools array to offer, null for none.
+pub fn buildReplChatBody(allocator: std.mem.Allocator, history: []const Turn, think: Think, tools: ?[]const u8) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "{\"model\":\"sushi\",\"stream\":true,\"stream_options\":{\"include_usage\":true},");
@@ -781,13 +856,31 @@ pub fn buildReplChatBody(allocator: std.mem.Allocator, history: []const Turn, th
         .on => try out.appendSlice(allocator, "\"enable_thinking\":true,"),
         .effort => |e| try out.print(allocator, "\"reasoning_effort\":\"{s}\",", .{@tagName(e)}),
     }
+    if (tools) |t| try out.print(allocator, "\"tools\":{s},", .{t});
     try out.appendSlice(allocator, "\"messages\":[");
     for (history, 0..) |turn, i| {
         if (i > 0) try out.append(allocator, ',');
         try out.appendSlice(allocator, "{\"role\":");
         try chat.appendJsonString(allocator, &out, turn.role);
         try out.appendSlice(allocator, ",\"content\":");
-        try chat.appendJsonString(allocator, &out, turn.content);
+        if (turn.images.len == 0) {
+            try chat.appendJsonString(allocator, &out, turn.content);
+        } else {
+            try out.appendSlice(allocator, "[{\"type\":\"text\",\"text\":");
+            try chat.appendJsonString(allocator, &out, turn.content);
+            try out.append(allocator, '}');
+            for (turn.images) |url| {
+                try out.appendSlice(allocator, ",{\"type\":\"image_url\",\"image_url\":{\"url\":");
+                try chat.appendJsonString(allocator, &out, url);
+                try out.appendSlice(allocator, "}}");
+            }
+            try out.append(allocator, ']');
+        }
+        if (turn.tool_calls_json) |calls| try out.print(allocator, ",\"tool_calls\":{s}", .{calls});
+        if (turn.tool_call_id) |id| {
+            try out.appendSlice(allocator, ",\"tool_call_id\":");
+            try chat.appendJsonString(allocator, &out, id);
+        }
         try out.append(allocator, '}');
     }
     try out.appendSlice(allocator, "]}");
@@ -805,6 +898,25 @@ pub const ReplStats = struct {
     eval_duration_ns: u64 = 0,
 };
 
+pub const ToolCall = struct {
+    /// Position in the assistant turn; stream deltas with the same index extend one call.
+    index: usize = 0,
+    id: []u8,
+    name: []u8,
+    arguments: []u8,
+
+    pub fn deinit(c: ToolCall, allocator: std.mem.Allocator) void {
+        allocator.free(c.id);
+        allocator.free(c.name);
+        allocator.free(c.arguments);
+    }
+};
+
+fn freeToolCalls(allocator: std.mem.Allocator, calls: []ToolCall) void {
+    for (calls) |c| c.deinit(allocator);
+    allocator.free(calls);
+}
+
 pub const ReplDelta = struct {
     /// Owned by caller.
     content: []u8,
@@ -813,7 +925,54 @@ pub const ReplDelta = struct {
     done: bool,
     stats: ReplStats = .{},
     err: ?[]u8 = null,
+    /// Owned by caller.
+    tool_calls: []ToolCall = &.{},
+
+    pub fn deinit(d: ReplDelta, allocator: std.mem.Allocator) void {
+        allocator.free(d.content);
+        if (d.reasoning) |r| allocator.free(r);
+        if (d.err) |e| allocator.free(e);
+        freeToolCalls(allocator, d.tool_calls);
+    }
 };
+
+/// One model reply: the streamed text and the tool calls it ended with.
+pub const Reply = struct {
+    content: []u8,
+    tool_calls: []ToolCall,
+
+    pub fn deinit(r: Reply, allocator: std.mem.Allocator) void {
+        allocator.free(r.content);
+        freeToolCalls(allocator, r.tool_calls);
+    }
+};
+
+fn dupeJsonString(allocator: std.mem.Allocator, v: ?std.json.Value) ![]u8 {
+    return allocator.dupe(u8, if (v) |s| (if (s == .string) s.string else "") else "");
+}
+
+fn parseToolCallDeltas(allocator: std.mem.Allocator, list: std.json.Value) ![]ToolCall {
+    if (list != .array) return &.{};
+    var calls = std.ArrayList(ToolCall).empty;
+    errdefer {
+        for (calls.items) |c| c.deinit(allocator);
+        calls.deinit(allocator);
+    }
+    for (list.array.items, 0..) |item, i| {
+        if (item != .object) continue;
+        const f = item.object.get("function");
+        const fo: ?std.json.ObjectMap = if (f) |v| (if (v == .object) v.object else null) else null;
+        const id = try dupeJsonString(allocator, item.object.get("id"));
+        errdefer allocator.free(id);
+        const name = try dupeJsonString(allocator, if (fo) |o| o.get("name") else null);
+        errdefer allocator.free(name);
+        const args = try dupeJsonString(allocator, if (fo) |o| o.get("arguments") else null);
+        errdefer allocator.free(args);
+        const index = jsonCount(item.object.get("index"));
+        try calls.append(allocator, .{ .index = if (item.object.get("index") != null) index else i, .id = id, .name = name, .arguments = args });
+    }
+    return calls.toOwnedSlice(allocator);
+}
 
 /// `[prefill P tok (C cached), R tok/s | N tokens, D tok/s]`; either half drops
 /// out when the server did not report it, "" when neither was reported.
@@ -862,6 +1021,7 @@ pub fn parseReplLine(allocator: std.mem.Allocator, line: []const u8) ?ReplDelta 
     }
     var content: []const u8 = "";
     var reasoning: ?[]const u8 = null;
+    var tool_calls: []ToolCall = &.{};
     if (root.get("choices")) |choices| {
         if (choices == .array and choices.array.items.len > 0 and choices.array.items[0] == .object) {
             if (choices.array.items[0].object.get("delta")) |d| {
@@ -870,6 +1030,9 @@ pub fn parseReplLine(allocator: std.mem.Allocator, line: []const u8) ?ReplDelta 
                 };
                 if (d == .object) if (d.object.get("reasoning_content")) |c| {
                     if (c == .string and c.string.len > 0) reasoning = c.string;
+                };
+                if (d == .object) if (d.object.get("tool_calls")) |list| {
+                    tool_calls = parseToolCallDeltas(allocator, list) catch return null;
                 };
             }
         }
@@ -883,15 +1046,20 @@ pub fn parseReplLine(allocator: std.mem.Allocator, line: []const u8) ?ReplDelta 
         const ms = jsonNumber(t.object.get("predicted_ms"));
         if (ms > 0) stats.eval_duration_ns = @intFromFloat(ms * 1e6);
     };
-    const reasoning_owned = if (reasoning) |r| allocator.dupe(u8, r) catch return null else null;
+    const reasoning_owned = if (reasoning) |r| allocator.dupe(u8, r) catch {
+        freeToolCalls(allocator, tool_calls);
+        return null;
+    } else null;
     return .{
         .content = allocator.dupe(u8, content) catch {
             if (reasoning_owned) |r| allocator.free(r);
+            freeToolCalls(allocator, tool_calls);
             return null;
         },
         .reasoning = reasoning_owned,
         .done = false,
         .stats = stats,
+        .tool_calls = tool_calls,
     };
 }
 
@@ -909,10 +1077,99 @@ fn jsonNumber(v: ?std.json.Value) f64 {
     };
 }
 
+pub const max_tool_rounds = 8;
+
+pub const tool_cap_nudge = "You have used every tool round for this question. Answer now from the results above, without calling tools.";
+
+/// Where a tool turn's requests go and its tool calls run; stubbed in tests.
+pub const TurnDriver = struct {
+    ptr: *anyopaque,
+    complete: *const fn (ptr: *anyopaque, body: []const u8) anyerror!Reply,
+    runTool: *const fn (ptr: *anyopaque, name: []const u8, args_json: []const u8) anyerror!repl_tools.Output,
+};
+
+/// Answers the user turn at the end of `history`: requests, runs the tool
+/// calls, appends their results, and repeats until the model answers without
+/// one. `tools` null offers none.
+pub fn runToolTurn(allocator: std.mem.Allocator, history: *std.ArrayList(Turn), think: Think, tools: ?[]const u8, driver: TurnDriver) !void {
+    var round: usize = 0;
+    while (true) : (round += 1) {
+        const offered = if (round < max_tool_rounds) tools else null;
+        if (tools != null and round == max_tool_rounds)
+            try history.append(allocator, .{ .role = "user", .content = try allocator.dupe(u8, tool_cap_nudge) });
+        const body = try buildReplChatBody(allocator, history.items, think, offered);
+        defer allocator.free(body);
+        const reply = try driver.complete(driver.ptr, body);
+        if (offered == null or reply.tool_calls.len == 0) {
+            freeToolCalls(allocator, reply.tool_calls);
+            errdefer allocator.free(reply.content);
+            try history.append(allocator, .{ .role = "assistant", .content = reply.content });
+            return;
+        }
+        defer freeToolCalls(allocator, reply.tool_calls);
+        {
+            errdefer allocator.free(reply.content);
+            const calls_json = try toolCallsJson(allocator, reply.tool_calls);
+            errdefer allocator.free(calls_json);
+            try history.append(allocator, .{ .role = "assistant", .content = reply.content, .tool_calls_json = calls_json });
+        }
+
+        var images = std.ArrayList([]const u8).empty;
+        defer {
+            for (images.items) |i| allocator.free(i);
+            images.deinit(allocator);
+        }
+        for (reply.tool_calls) |call| {
+            const out = try driver.runTool(driver.ptr, call.name, call.arguments);
+            if (out.image) |img| {
+                images.append(allocator, img) catch |err| {
+                    out.deinit(allocator);
+                    return err;
+                };
+            }
+            errdefer allocator.free(out.text);
+            const id = try allocator.dupe(u8, call.id);
+            errdefer allocator.free(id);
+            try history.append(allocator, .{ .role = "tool", .content = out.text, .tool_call_id = id });
+        }
+        // The server shows a model only the images of user turns.
+        if (images.items.len > 0) {
+            const text = try std.fmt.allocPrint(allocator, "(the image{s} from the tool results above)", .{if (images.items.len > 1) "s" else ""});
+            errdefer allocator.free(text);
+            const owned = try images.toOwnedSlice(allocator);
+            errdefer {
+                for (owned) |i| allocator.free(i);
+                allocator.free(owned);
+            }
+            try history.append(allocator, .{ .role = "user", .content = text, .images = owned });
+        }
+    }
+}
+
+/// An assistant turn's OpenAI `tool_calls` array.
+fn toolCallsJson(allocator: std.mem.Allocator, calls: []const ToolCall) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try out.append(allocator, '[');
+    for (calls, 0..) |c, i| {
+        if (i > 0) try out.append(allocator, ',');
+        try out.appendSlice(allocator, "{\"id\":");
+        try chat.appendJsonString(allocator, &out, c.id);
+        try out.appendSlice(allocator, ",\"type\":\"function\",\"function\":{\"name\":");
+        try chat.appendJsonString(allocator, &out, c.name);
+        try out.appendSlice(allocator, ",\"arguments\":");
+        try chat.appendJsonString(allocator, &out, c.arguments);
+        try out.appendSlice(allocator, "}}");
+    }
+    try out.append(allocator, ']');
+    return out.toOwnedSlice(allocator);
+}
+
 /// Interactive loop on the calling thread. Waits for the server to answer
 /// /health, then reads prompts from stdin and streams /v1/chat/completions.
 /// Returns when the user exits (/bye or EOF); caller shuts the server down.
-pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, think_flag: Think) !void {
+pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: ReplOptions) !void {
+    var opts = launch;
     const health_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/health", .{port});
     defer allocator.free(health_url);
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
@@ -949,7 +1206,7 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, think_flag: 
         null;
     defer if (models_info) |m| m.deinit(allocator);
     const accepted: []const model.Effort = if (models_info) |m| m.efforts else &.{};
-    var think = think_flag;
+    var think = opts.think;
     if (think == .effort and !effortAccepted(think.effort, accepted)) {
         try writeEffortRefusal(w, @tagName(think.effort), if (models_info) |m| m.id else "this model", accepted);
         try w.writeAll("\n");
@@ -968,13 +1225,31 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, think_flag: 
     )) |line| {
         try w.print("{s}\n", .{line});
     } else |_| {}
-    try w.writeAll("\n>>> chat is live — /bye to exit\n");
+    const vision = if (models_info) |m| m.vision else false;
+    try w.writeAll("\n>>> chat is live — /bye to exit, /tool on for web search and file tools");
+    try w.writeAll(if (vision) ", /image <path> to show an image\n" else "\n");
     try w.flush();
+
+    // File tools are confined to the folder `sushi run` started in.
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    var driver: ReplDriver = .{
+        .allocator = allocator,
+        .io = io,
+        .url = chat_url,
+        .w = w,
+        .tools = .{ .allocator = allocator, .io = io, .root = root, .vision = vision },
+    };
 
     var history = std.ArrayList(Turn).empty;
     defer {
-        for (history.items) |t| allocator.free(t.content);
+        for (history.items) |t| t.deinit(allocator);
         history.deinit(allocator);
+    }
+    var pending_images = std.ArrayList([]const u8).empty;
+    defer {
+        for (pending_images.items) |i| allocator.free(i);
+        pending_images.deinit(allocator);
     }
 
     var stdin_buf: [16 * 1024]u8 = undefined;
@@ -1000,26 +1275,81 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, think_flag: 
             try w.writeAll("\n");
             continue;
         }
+        if (parseToolCommand(trimmed)) |cmd| {
+            switch (cmd) {
+                .show => {},
+                .set => |on| opts.tools = on,
+                .refuse => |word| try w.print("/tool takes on or off, not '{s}'\n", .{word}),
+            }
+            try w.print("tools: {s} ({s}; files under {s})\n", .{ if (opts.tools) "on" else "off", repl_tools.toolNames(vision), root });
+            continue;
+        }
+        if (parseImageCommand(trimmed)) |arg| {
+            try attachImage(allocator, io, w, vision, arg, &pending_images);
+            continue;
+        }
 
-        try history.append(allocator, .{ .role = "user", .content = try allocator.dupe(u8, trimmed) });
-        const body = try buildReplChatBody(allocator, history.items, think);
-        defer allocator.free(body);
-
-        const reply = streamOneTurn(allocator, io, chat_url, body, w) catch |err| {
+        const mark = history.items.len;
+        const images = try pending_images.toOwnedSlice(allocator);
+        try history.append(allocator, .{ .role = "user", .content = try allocator.dupe(u8, trimmed), .images = images });
+        driver.requests = 0;
+        runToolTurn(allocator, &history, think, opts.toolsJson(vision), driver.turnDriver()) catch |err| {
             try w.print("\n[error: {s}]\n", .{@errorName(err)});
             try w.flush();
-            allocator.free(history.pop().?.content);
+            while (history.items.len > mark) history.pop().?.deinit(allocator);
             continue;
         };
-        try history.append(allocator, .{ .role = "assistant", .content = reply });
         try w.writeAll("\n");
         try w.flush();
     }
 }
 
+fn attachImage(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, vision: bool, arg: []const u8, pending: *std.ArrayList([]const u8)) !void {
+    if (arg.len == 0) return w.writeAll("usage: /image <path>\n");
+    if (!vision) return w.writeAll("this model cannot see images\n");
+    const path = try unquotePath(allocator, arg);
+    defer allocator.free(path);
+    const url = try repl_tools.loadImageFile(allocator, io, path) orelse
+        return w.print("cannot attach {s}: not a readable PNG, JPEG, WebP, GIF or BMP image under {d} MB\n", .{ path, repl_tools.max_image_bytes / (1024 * 1024) });
+    errdefer allocator.free(url);
+    try pending.append(allocator, url);
+    try w.print("attached {s}; it goes with your next message\n", .{path});
+}
+
+/// The live `TurnDriver`: streams from the in-process server and prints one
+/// dim line per tool call.
+const ReplDriver = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    url: []const u8,
+    w: *std.Io.Writer,
+    tools: repl_tools.Context,
+    requests: usize = 0,
+
+    fn complete(ptr: *anyopaque, body: []const u8) anyerror!Reply {
+        const d: *ReplDriver = @ptrCast(@alignCast(ptr));
+        if (d.requests > 0) try d.w.writeAll("\n");
+        d.requests += 1;
+        return streamOneTurn(d.allocator, d.io, d.url, body, d.w);
+    }
+
+    fn runTool(ptr: *anyopaque, name: []const u8, args_json: []const u8) anyerror!repl_tools.Output {
+        const d: *ReplDriver = @ptrCast(@alignCast(ptr));
+        const trace = try repl_tools.traceLine(d.allocator, name, args_json);
+        defer d.allocator.free(trace);
+        try d.w.print("\n\x1b[2m  {s}\x1b[0m", .{trace});
+        try d.w.flush();
+        return repl_tools.run(d.tools, name, args_json);
+    }
+
+    fn turnDriver(d: *ReplDriver) TurnDriver {
+        return .{ .ptr = d, .complete = complete, .runTool = runTool };
+    }
+};
+
 /// POST the body, stream SSE, print content deltas as they arrive.
-/// Returns the full assistant reply (owned).
-fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body: []const u8, w: *std.Io.Writer) ![]u8 {
+/// Returns the full assistant reply and its tool calls (owned).
+fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body: []const u8, w: *std.Io.Writer) !Reply {
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
     var req = try client.request(.POST, try std.Uri.parse(url), .{
@@ -1050,6 +1380,11 @@ fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body
 
     var full = std.ArrayList(u8).empty;
     errdefer full.deinit(allocator);
+    var calls = std.ArrayList(ToolCall).empty;
+    errdefer {
+        for (calls.items) |c| c.deinit(allocator);
+        calls.deinit(allocator);
+    }
     var stats: ReplStats = .{};
     // The thought prints dim so a thinking turn never looks frozen.
     var in_thought = false;
@@ -1059,15 +1394,14 @@ fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body
         const line = r.takeDelimiter('\n') catch break orelse break;
         if (line.len == 0) continue;
         const delta = parseReplLine(allocator, line) orelse continue;
-        defer allocator.free(delta.content);
+        defer delta.deinit(allocator);
         if (delta.err) |e| {
-            defer allocator.free(e);
             try w.print("[server error: {s}]", .{e});
             try w.flush();
             break;
         }
+        for (delta.tool_calls) |tc| try mergeToolCallDelta(allocator, &calls, tc);
         if (delta.reasoning) |t| {
-            defer allocator.free(t);
             if (!in_thought) try w.writeAll("\x1b[2m");
             in_thought = true;
             try w.writeAll(t);
@@ -1088,7 +1422,34 @@ fn streamOneTurn(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body
             break;
         }
     }
-    return full.toOwnedSlice(allocator);
+    const content = try full.toOwnedSlice(allocator);
+    errdefer allocator.free(content);
+    return .{ .content = content, .tool_calls = try calls.toOwnedSlice(allocator) };
+}
+
+/// Folds one streamed tool-call delta into the calls so far, by index.
+fn mergeToolCallDelta(allocator: std.mem.Allocator, calls: *std.ArrayList(ToolCall), tc: ToolCall) !void {
+    for (calls.items) |*c| if (c.index == tc.index) {
+        const args = try std.mem.concat(allocator, u8, &.{ c.arguments, tc.arguments });
+        allocator.free(c.arguments);
+        c.arguments = args;
+        if (c.id.len == 0 and tc.id.len > 0) {
+            allocator.free(c.id);
+            c.id = try allocator.dupe(u8, tc.id);
+        }
+        if (c.name.len == 0 and tc.name.len > 0) {
+            allocator.free(c.name);
+            c.name = try allocator.dupe(u8, tc.name);
+        }
+        return;
+    };
+    const id = try allocator.dupe(u8, tc.id);
+    errdefer allocator.free(id);
+    const name = try allocator.dupe(u8, tc.name);
+    errdefer allocator.free(name);
+    const args = try allocator.dupe(u8, tc.arguments);
+    errdefer allocator.free(args);
+    try calls.append(allocator, .{ .index = tc.index, .id = id, .name = name, .arguments = args });
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -1243,7 +1604,7 @@ test "cli: buildReplChatBody and parseReplLine speak /v1/chat/completions SSE" {
         .{ .role = "user", .content = "hi \"there\"\n" },
         .{ .role = "assistant", .content = "hello" },
     };
-    const body = try buildReplChatBody(allocator, &history, .model_default);
+    const body = try buildReplChatBody(allocator, &history, .model_default, null);
     defer allocator.free(body);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
     defer parsed.deinit();
@@ -1332,7 +1693,7 @@ test "cli: the REPL chat body carries the thinking setting" {
         .{ .think = .{ .effort = .low }, .enable = null, .effort = "low" },
         .{ .think = .{ .effort = .off }, .enable = null, .effort = "off" },
     }) |c| {
-        const body = try buildReplChatBody(allocator, &history, c.think);
+        const body = try buildReplChatBody(allocator, &history, c.think, null);
         defer allocator.free(body);
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
         defer parsed.deinit();
@@ -1345,20 +1706,232 @@ test "cli: the REPL chat body carries the thinking setting" {
 test "cli: the REPL reads the model's efforts from /v1/models and streams reasoning deltas" {
     const allocator = testing.allocator;
     const info = try parseModelEfforts(allocator,
-        \\{"object":"list","data":[{"id":"MiMo","reasoning_efforts":["off","low","max"]},{"id":"other"}]}
+        \\{"object":"list","data":[{"id":"MiMo","capabilities":["chat","vision"],"reasoning_efforts":["off","low","max"]},{"id":"other"}]}
     );
     defer info.deinit(allocator);
     try testing.expectEqualStrings("MiMo", info.id);
     try testing.expectEqualSlices(model.Effort, &.{ .off, .low, .max }, info.efforts);
-    const bare = try parseModelEfforts(allocator, "{\"data\":[{\"id\":\"old\"}]}");
+    try testing.expect(info.vision);
+    const bare = try parseModelEfforts(allocator, "{\"data\":[{\"id\":\"old\",\"capabilities\":[\"chat\"]}]}");
     defer bare.deinit(allocator);
     try testing.expectEqual(@as(usize, 0), bare.efforts.len);
+    try testing.expect(!bare.vision);
 
     const d = parseReplLine(allocator, "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hmm\"}}]}").?;
     defer allocator.free(d.content);
     defer if (d.reasoning) |r| allocator.free(r);
     try testing.expectEqualStrings("hmm", d.reasoning.?);
     try testing.expectEqualStrings("", d.content);
+}
+
+test "cli: tools are off by default; --tool, /tool and /image parse" {
+    const defaults: ReplOptions = .{};
+    try testing.expect(!defaults.tools);
+
+    try testing.expectEqual(@as(?bool, true), parseToolSwitch("on"));
+    try testing.expectEqual(@as(?bool, false), parseToolSwitch("off"));
+    try testing.expectEqual(@as(?bool, null), parseToolSwitch("yes"));
+
+    try testing.expectEqual(@as(?ToolCommand, .show), parseToolCommand("/tool"));
+    try testing.expectEqual(@as(?ToolCommand, .{ .set = true }), parseToolCommand("/tool on"));
+    try testing.expectEqual(@as(?ToolCommand, .{ .set = false }), parseToolCommand("/tool  off "));
+    try testing.expectEqualStrings("maybe", parseToolCommand("/tool maybe").?.refuse);
+    try testing.expectEqual(@as(?ToolCommand, null), parseToolCommand("/tools on"));
+    try testing.expectEqual(@as(?ToolCommand, null), parseToolCommand("/toolbox"));
+    try testing.expectEqual(@as(?ToolCommand, null), parseToolCommand("tool on"));
+
+    try testing.expectEqualStrings("shot.png", parseImageCommand("/image shot.png").?);
+    try testing.expectEqualStrings("", parseImageCommand("/image").?);
+    try testing.expectEqual(@as(?[]const u8, null), parseImageCommand("/images x"));
+    try testing.expectEqual(@as(?[]const u8, null), parseImageCommand("look at shot.png"));
+    const allocator = testing.allocator;
+    for ([_][2][]const u8{
+        .{ "'My Shot.png'", "My Shot.png" },
+        .{ "\"My Shot.png\"", "My Shot.png" },
+        .{ "My\\ Shot\\ 2.png", "My Shot 2.png" },
+        .{ "plain.png", "plain.png" },
+    }) |c| {
+        const got = try unquotePath(allocator, c[0]);
+        defer allocator.free(got);
+        try testing.expectEqualStrings(c[1], got);
+    }
+}
+
+test "cli: the chat body carries tools only while they are on, plus tool turns and image parts" {
+    const allocator = testing.allocator;
+    const images = [_][]const u8{"data:image/png;base64,AAAA"};
+    const history = [_]Turn{
+        .{ .role = "user", .content = "what is this?", .images = &images },
+        .{ .role = "assistant", .content = "", .tool_calls_json = "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"web_search\",\"arguments\":\"{\\\"query\\\":\\\"x\\\"}\"}}]" },
+        .{ .role = "tool", .content = "1. result", .tool_call_id = "call_1" },
+    };
+    const tools = repl_tools.definitionsJson(false);
+    for ([_]?[]const u8{ tools, null }) |offered| {
+        const body = try buildReplChatBody(allocator, &history, .model_default, offered);
+        defer allocator.free(body);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+        defer parsed.deinit();
+        const root = parsed.value.object;
+        if (offered != null) {
+            try testing.expectEqual(@as(usize, 5), root.get("tools").?.array.items.len);
+        } else {
+            try testing.expect(root.get("tools") == null);
+        }
+        const msgs = root.get("messages").?.array.items;
+        const parts = msgs[0].object.get("content").?.array.items;
+        try testing.expectEqualStrings("what is this?", parts[0].object.get("text").?.string);
+        try testing.expectEqualStrings("data:image/png;base64,AAAA", parts[1].object.get("image_url").?.object.get("url").?.string);
+        const call = msgs[1].object.get("tool_calls").?.array.items[0].object;
+        try testing.expectEqualStrings("web_search", call.get("function").?.object.get("name").?.string);
+        try testing.expectEqualStrings("tool", msgs[2].object.get("role").?.string);
+        try testing.expectEqualStrings("call_1", msgs[2].object.get("tool_call_id").?.string);
+        try testing.expectEqualStrings("1. result", msgs[2].object.get("content").?.string);
+    }
+    // A REPL started with tools off sends none.
+    const plain = try buildReplChatBody(allocator, history[2..], .model_default, (ReplOptions{}).toolsJson(true));
+    defer allocator.free(plain);
+    try testing.expect(std.mem.indexOf(u8, plain, "\"tools\"") == null);
+}
+
+test "cli: parseReplLine reads streamed tool calls" {
+    const allocator = testing.allocator;
+    const d = parseReplLine(allocator,
+        \\data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_7_0","type":"function","function":{"name":"fetch_url","arguments":"{\"url\":\"https://ziglang.org\"}"}}]}}]}
+    ).?;
+    defer d.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), d.tool_calls.len);
+    try testing.expectEqualStrings("call_7_0", d.tool_calls[0].id);
+    try testing.expectEqualStrings("fetch_url", d.tool_calls[0].name);
+    try testing.expectEqualStrings("{\"url\":\"https://ziglang.org\"}", d.tool_calls[0].arguments);
+}
+
+/// Scripted server + tool runner for the tool loop.
+const StubServer = struct {
+    allocator: std.mem.Allocator,
+    /// Tool calls returned while tools are offered, per round; then a final answer.
+    rounds_with_calls: usize,
+    call_name: []const u8 = "web_search",
+    tool_image: bool = false,
+    requests: usize = 0,
+    requests_with_tools: usize = 0,
+    ran: std.ArrayList(u8) = .empty,
+    last_body: ?[]u8 = null,
+
+    fn complete(ptr: *anyopaque, body: []const u8) anyerror!Reply {
+        const s: *StubServer = @ptrCast(@alignCast(ptr));
+        s.requests += 1;
+        if (s.last_body) |b| s.allocator.free(b);
+        s.last_body = try s.allocator.dupe(u8, body);
+        const offered = std.mem.indexOf(u8, body, "\"tools\":[") != null;
+        if (offered) s.requests_with_tools += 1;
+        if (offered and s.requests <= s.rounds_with_calls) {
+            const calls = try s.allocator.alloc(ToolCall, 1);
+            calls[0] = .{
+                .id = try std.fmt.allocPrint(s.allocator, "call_{d}", .{s.requests}),
+                .name = try s.allocator.dupe(u8, s.call_name),
+                .arguments = try s.allocator.dupe(u8, "{\"query\":\"q\"}"),
+            };
+            return .{ .content = try s.allocator.dupe(u8, ""), .tool_calls = calls };
+        }
+        return .{ .content = try s.allocator.dupe(u8, "final answer"), .tool_calls = &.{} };
+    }
+
+    fn runTool(ptr: *anyopaque, name: []const u8, args: []const u8) anyerror!repl_tools.Output {
+        const s: *StubServer = @ptrCast(@alignCast(ptr));
+        _ = args;
+        try s.ran.appendSlice(s.allocator, name);
+        try s.ran.append(s.allocator, ' ');
+        return .{
+            .text = try s.allocator.dupe(u8, "result text"),
+            .image = if (s.tool_image) try s.allocator.dupe(u8, "data:image/png;base64,BBBB") else null,
+        };
+    }
+
+    fn driver(s: *StubServer) TurnDriver {
+        return .{ .ptr = s, .complete = complete, .runTool = runTool };
+    }
+
+    fn deinit(s: *StubServer) void {
+        s.ran.deinit(s.allocator);
+        if (s.last_body) |b| s.allocator.free(b);
+    }
+};
+
+fn freeHistory(allocator: std.mem.Allocator, history: *std.ArrayList(Turn)) void {
+    for (history.items) |t| t.deinit(allocator);
+    history.deinit(allocator);
+}
+
+fn roles(allocator: std.mem.Allocator, history: []const Turn) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    for (history) |t| {
+        try out.appendSlice(allocator, t.role);
+        try out.append(allocator, ' ');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "cli: the tool loop runs calls client-side until the model answers" {
+    const allocator = testing.allocator;
+    var stub: StubServer = .{ .allocator = allocator, .rounds_with_calls = 2 };
+    defer stub.deinit();
+    var history = std.ArrayList(Turn).empty;
+    defer freeHistory(allocator, &history);
+    try history.append(allocator, .{ .role = "user", .content = try allocator.dupe(u8, "latest zig?") });
+    try runToolTurn(allocator, &history, .model_default, repl_tools.definitionsJson(false), stub.driver());
+
+    try testing.expectEqual(@as(usize, 3), stub.requests);
+    try testing.expectEqual(@as(usize, 3), stub.requests_with_tools);
+    try testing.expectEqualStrings("web_search web_search ", stub.ran.items);
+    const r = try roles(allocator, history.items);
+    defer allocator.free(r);
+    try testing.expectEqualStrings("user assistant tool assistant tool assistant ", r);
+    try testing.expectEqualStrings("call_1", history.items[2].tool_call_id.?);
+    try testing.expectEqualStrings("result text", history.items[2].content);
+    try testing.expectEqualStrings("final answer", history.items[5].content);
+    try testing.expect(history.items[5].tool_calls_json == null);
+}
+
+test "cli: the tool loop stops offering tools after 8 rounds and asks for an answer" {
+    const allocator = testing.allocator;
+    var stub: StubServer = .{ .allocator = allocator, .rounds_with_calls = 100 };
+    defer stub.deinit();
+    var history = std.ArrayList(Turn).empty;
+    defer freeHistory(allocator, &history);
+    try history.append(allocator, .{ .role = "user", .content = try allocator.dupe(u8, "dig forever") });
+    try runToolTurn(allocator, &history, .model_default, repl_tools.definitionsJson(false), stub.driver());
+
+    try testing.expectEqual(@as(usize, max_tool_rounds + 1), stub.requests);
+    try testing.expectEqual(@as(usize, max_tool_rounds), stub.requests_with_tools);
+    try testing.expect(std.mem.indexOf(u8, stub.last_body.?, "\"tools\"") == null);
+    try testing.expectEqualStrings("final answer", history.items[history.items.len - 1].content);
+    try testing.expectEqualStrings("user", history.items[history.items.len - 2].role);
+    try testing.expectEqualStrings(tool_cap_nudge, history.items[history.items.len - 2].content);
+}
+
+test "cli: a tool image reaches the next request as a user image part; tools off sends none" {
+    const allocator = testing.allocator;
+    var stub: StubServer = .{ .allocator = allocator, .rounds_with_calls = 1, .call_name = "view_image", .tool_image = true };
+    defer stub.deinit();
+    var history = std.ArrayList(Turn).empty;
+    defer freeHistory(allocator, &history);
+    try history.append(allocator, .{ .role = "user", .content = try allocator.dupe(u8, "look at cat.png") });
+    try runToolTurn(allocator, &history, .model_default, repl_tools.definitionsJson(true), stub.driver());
+    const r = try roles(allocator, history.items);
+    defer allocator.free(r);
+    try testing.expectEqualStrings("user assistant tool user assistant ", r);
+    try testing.expectEqualStrings("data:image/png;base64,BBBB", history.items[3].images[0]);
+    try testing.expect(std.mem.indexOf(u8, stub.last_body.?, "data:image/png;base64,BBBB") != null);
+
+    var off: StubServer = .{ .allocator = allocator, .rounds_with_calls = 5 };
+    defer off.deinit();
+    var h2 = std.ArrayList(Turn).empty;
+    defer freeHistory(allocator, &h2);
+    try h2.append(allocator, .{ .role = "user", .content = try allocator.dupe(u8, "hi") });
+    try runToolTurn(allocator, &h2, .model_default, null, off.driver());
+    try testing.expectEqual(@as(usize, 1), off.requests);
+    try testing.expectEqual(@as(usize, 0), off.requests_with_tools);
+    try testing.expectEqualStrings("", off.ran.items);
 }
 
 test "cli: formatSize" {

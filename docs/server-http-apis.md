@@ -82,3 +82,23 @@ thought is delivered. Guard: `tests/test_reasoning_budget_stream.sh`. Effort bud
 - Agent budgets (`launch.budgetForContext` + `compactionReserve`): output share ctx/2, compaction reserve ctx/4
   capped at 20000, carried into pi's `settings.json` and opencode's `compaction` + `limit.output`. A launch below the
   agent's context floor WARNS (claude 64k, opencode 32k, others 16k).
+
+## `sushi run` research tools (client-side)
+
+- **The REPL runs the tools, the server never does** (`src/repl_tools.zig`, loop `cli.runToolTurn`): it sends `tools`,
+  runs the returned calls, appends `tool` messages and asks again. OFF by default: `--tool on|off`, `/tool on|off`,
+  bare `/tool` shows the state and list. One dim trace line per call (`search:`, `fetch:`, `read:` …).
+- Tools: `web_search` (GET html.duckduckgo.com, top 8 title/url/snippet, `uddg=` unwrapped, ads dropped),
+  `fetch_url` (GET, ≤5 redirects, 10 s wall clock, 2 MB, HTML → text ≤20k chars), `read_file` (≤256 KB),
+  `list_dir`, `search_files` (substring or regex, ≤100 hits), `view_image` (only when `/v1/models` lists `vision`).
+- **8 tool rounds per user turn**, then a user nudge and one request WITHOUT tools for the final answer.
+- **Only the latest USER turn's images are decoded** (`server.activeWireMediaIndex`): a tool image rides a synthetic
+  user turn after the tool results. `/image <path>` attaches to the next message; a pasted path is never attached.
+- **File tools are confined to the start folder by REAL path**: `..`, outside absolutes and escaping symlinks are
+  refused, as are dot entries and secret names (`.env*`, `*.pem`, `*.key`, `id_*`, `*.p12`, `credentials*`,
+  `*.keychain*`, `.ssh`, `.aws`, `.gnupg`), checked both as typed and after resolution (`confinePath`).
+- **Web tools reach public hosts only**: http/https, no userinfo, local names refused, EVERY resolved address and the
+  connected peer (`getpeername`, defeats DNS rebinding) must classify public (`classifyIp4/6`; mapped, NAT64 and 6to4
+  judged by their IPv4); each redirect hop re-checked; no cookies, auth headers or POST.
+- Every failure is a short tool-result string; results are data, never executed. A DuckDuckGo bot check (HTTP 202,
+  `anomaly-modal`) reads as "search unavailable", never as zero results.

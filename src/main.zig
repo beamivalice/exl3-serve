@@ -44,8 +44,8 @@ var serve_default_max_tokens: u32 = 0;
 /// `sushi run` REPL thread: chats against the in-process server over
 /// its own Ollama /api/chat endpoint, then brings the server down cleanly
 /// (SIGTERM → the serve loop's shutdown path) when the user exits.
-fn replThreadMain(allocator: std.mem.Allocator, io: std.Io, port: u16, think: cli_mod.Think) void {
-    cli_mod.runRepl(allocator, io, port, think) catch |err| {
+fn replThreadMain(allocator: std.mem.Allocator, io: std.Io, port: u16, opts: cli_mod.ReplOptions) void {
+    cli_mod.runRepl(allocator, io, port, opts) catch |err| {
         log.warn("chat REPL exited: {s}\n", .{@errorName(err)});
     };
     std.posix.raise(std.posix.SIG.TERM) catch {};
@@ -64,7 +64,11 @@ fn printUsage(io: std.Io) void {
         \\  run <model>         Download if needed, serve it, and chat right here
         \\                      (a local model name or a HuggingFace "org/repo")
         \\                      --think [off|low|medium|high|xhigh|max] sets thinking;
-        \\                      /think <effort> changes it in the chat
+        \\                      /think <effort> changes it in the chat;
+        \\                      --tool on (or /tool on) lets the model search the
+        \\                      web, fetch pages and read files in the current
+        \\                      folder, read-only (off by default); /image <path>
+        \\                      shows a vision model an image
         \\  pull <model>        Download a model into ~/.sushi/models
         \\  list                Show downloaded models
         \\  serve               Start the server over ~/.sushi/models
@@ -352,7 +356,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (run_model_dir) |d| allocator.free(d);
     var use_default_models_root = false;
     var repl_after_serve = false;
-    var run_think: cli_mod.Think = .model_default;
+    var run_opts: cli_mod.ReplOptions = .{};
     if (args.len >= 2 and args[1].len > 0 and args[1][0] != '-') {
         const cmd = args[1];
         if (std.mem.eql(u8, cmd, "pull")) {
@@ -521,8 +525,14 @@ pub fn main(init: std.process.Init) !void {
             serve_mode = true;
         } else if (std.mem.eql(u8, args[i], "--think")) {
             const f = cli_mod.parseThinkFlag(if (i + 1 < args.len) args[i + 1] else null);
-            run_think = f.think;
+            run_opts.think = f.think;
             if (f.consumed) i += 1;
+        } else if (std.mem.eql(u8, args[i], "--tool") and i + 1 < args.len) {
+            i += 1;
+            run_opts.tools = cli_mod.parseToolSwitch(args[i]) orelse {
+                log.err("--tool takes on or off, not '{s}'\n", .{args[i]});
+                std.process.exit(1);
+            };
         } else if (std.mem.eql(u8, args[i], "--stream")) {
             stream_mode = true;
         } else if (std.mem.eql(u8, args[i], "--prompt") and i + 1 < args.len) {
@@ -982,7 +992,7 @@ pub fn main(init: std.process.Init) !void {
     // before discovery, so streamed tokens aren't interleaved with [info]
     // lines.)
     if (repl_after_serve and serve_mode) {
-        const t = std.Thread.spawn(.{}, replThreadMain, .{ allocator, io, port, run_think }) catch |err| blk: {
+        const t = std.Thread.spawn(.{}, replThreadMain, .{ allocator, io, port, run_opts }) catch |err| blk: {
             log.warn("could not start chat REPL: {s}\n", .{@errorName(err)});
             break :blk null;
         };

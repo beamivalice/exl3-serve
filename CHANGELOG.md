@@ -6,6 +6,7 @@ earlier history is mlx-serve's, in that project's changelog.
 
 ## Unreleased
 
+- **`sushi run` can research**: `--tool on` (or `/tool on` in the chat) lets the model search the web, read public pages and read files in the current folder, read-only and without prompts, and `/image <path>` shows a vision model an image.
 - **sushi binds `127.0.0.1:11234` by default and refuses a port that is already in use**: `sushi run` and `sushi serve` need no `--host`/`--port`, `--host localhost` means loopback, and a second server on a busy port exits with `port N is already in use` before loading a model.
 - **MiMo-V2.6-Flash's prompt lookup decoding no longer slows long contexts**: a draft verify reads the 8-bit KV cache in place, row by row like a decode step, and rolls back without copying the cache. Greedy output is unchanged, and live decode at 244k tokens rises from 10 to 25 tok/s.
 - **Every load logs `[pld] <on|off> (<source>)`**, and `/props` reports `settings.pld.source`; Qwen3.8 Flash Next reads `off (module spec wiring)`, since it never runs prompt lookup decoding.

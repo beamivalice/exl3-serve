@@ -65,6 +65,7 @@ test {
     _ = @import("ane.zig");
     _ = @import("kld.zig");
     _ = @import("cli.zig");
+    _ = @import("repl_tools.zig");
     _ = @import("launch.zig");
     _ = @import("mlx.zig");
     _ = @import("test_models.zig");
