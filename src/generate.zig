@@ -3250,7 +3250,7 @@ pub const Generator = struct {
                 options.dflash_block_size
             else
                 0;
-            const mtp_cap = mtp_mod.applyExl3DepthCap(ane_mod.chipBrand(), xfm.config.expert_layout, resolveMtpDepthCapForProfile(options.mtp_depth, mtp_cost_profile), options.mtp_depth, mtpAdaptiveEnabled(), mtpForcedDepth() != null);
+            const mtp_cap = resolveMtpDepthCapForProfile(options.mtp_depth, mtp_cost_profile);
             var gen = Generator{
                 .xfm = xfm,
                 .model_has_mtp = options.model_has_mtp,
@@ -15594,6 +15594,8 @@ test "mtpDepthCapFor: auto cap follows the selected cost profile; explicit alway
     try testing.expectEqual(Generator.MTP_ADAPTIVE_DEFAULT_CAP, Generator.mtpDepthCapForProfileChip(0, true, .generic, "Apple M4 Max"));
     try testing.expectEqual(@as(u32, 6), Generator.mtpDepthCapForProfileChip(0, true, .generic, ""));
     try testing.expectEqual(@as(u32, 4), Generator.mtpDepthCapForProfileChip(0, true, .generic, "Apple M1 Pro"));
+    // EXL3 packs included: the M5 Max row is the default.
+    try testing.expectEqual(@as(u32, 6), Generator.mtpDepthCapForProfileChip(0, true, .generic, "Apple M5 Max"));
     // An explicit depth still outranks the table on a measured chip.
     try testing.expectEqual(@as(u32, 8), Generator.mtpDepthCapForProfileChip(8, true, .generic, "Apple M1 Pro"));
     try testing.expectEqual(mtp_mod.DEFAULT_DEPTH, Generator.mtpDepthCapForProfileChip(0, false, .generic, "Apple M1 Pro"));

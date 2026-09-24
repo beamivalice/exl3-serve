@@ -87,8 +87,8 @@ source FP8→bf16 loader (`usesMimoSourceTrunk`), billed dense by `mimoSourceRes
 ## Parity bars
 
 - **Quality bar**: KLD vs the bf16 teacher (`sushi kld capture|compare`), never bytes against the affine pack.
-  The EXL3 kernel arms are not byte-identical to any composite (they round once). MTP: EXL3 cold-start depth cap 2
-  on M5 Max, binding the auto path only (it measured 2.7-3.7 drafts/round, so it binds nothing on MCG K3).
+  The EXL3 kernel arms are not byte-identical to any composite (they round once). MTP: EXL3 packs take the chip's
+  generic depth row ([engine-mtp](engine-mtp.md#round-cost-table)).
 - **A GEMM/GEMV parity bar is relative to the SUMMANDS, never the result** (`Exl3GemmParity`): a trellis dot product
   cancels orders below sum|w·x|, so a result-magnitude floor is seed-locked. Element ceiling = one f16 store + an
   f32 accumulation `in_dim` deep; whole-tensor RMS no worse than 3x mlx's own f16 matmul over the decoded weights

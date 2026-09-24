@@ -109,7 +109,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
 - **The EV seed lives on `Qwen4Mtp`** (`ev_seed_accept`/`ev_seed_m_lo`), per loaded model; publish AND consume
   decline under `SUSHI_MTP_FORCE_DEPTH`. `MtpCostProfile` comes from the runtime fingerprint
   (`g17_nax_qwen4_q4_gs64`; `SUSHI_MTP_QWEN4_PROFILE=0` revokes it); unmeasured = generic/cap-6.
-- EXL3 cold-start depth cap 2 on M5 Max binds the auto path only.
+- EXL3 packs take the chip's generic depth row (6 on M5 Max). A deeper round pays only on predictable text: at the
+  MCG K3 round costs (31.2 / 36.0 / 42.4 ms at depth 1 / 2 / 3, ~5 ms per row after) and a ~20 ms serial token,
+  depth 2 breaks even at ~0.53 per-draft acceptance, depth 3 at ~0.60, depth 4 at ~0.63; depth 4-6 wins only above
+  ~0.85, where the model says cap 2 leaves 25-35% (computed from the recorded costs, not yet measured live).
 
 ## Reproducibility
 
