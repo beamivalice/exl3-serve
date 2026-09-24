@@ -92,11 +92,20 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
   `server.RequestMedia`; `Message` BORROWS. Ownership by PROVENANCE (`{slice, owned}` returns), never
   free-unless-equals-literal.
 - **A media placeholder id occurs in ordinary TEXT**, so a media boundary is gated on the request CARRYING media
-  (`firstMediaPlaceholder(has_media)`); active-turn media is selected from WIRE METADATA before decoding; a decode
-  failure is a NAMED 400, never a silent drop; media on a tower-less/streamed load is refused by NAME
-  (`mediaRejectReason`).
+  (`firstMediaPlaceholder(has_media)`); media on a tower-less/streamed load is refused by NAME (`mediaRejectReason`).
+- **Every message's media is decoded and placed where it was sent**: user parts, OpenAI `tool` messages, Anthropic
+  `tool_result` blocks, Responses `input_image` (tool outputs too). The wire walk (`readOpenAiMessages`,
+  `readAnthropicMessages`, `responses.parseInput`) records each part's offset in the joined text
+  (`Message.media_parts`); the serializer hands the template a typed part list, so the TEMPLATE renders each
+  placeholder; `prepareRequestMedia` expands every pad to its block's rows and encodes all blocks in prompt order.
+  The engine never inserts pads itself: a template that renders fewer placeholders than blocks is a named 400.
+- **Media refusals are named**: an undecodable image is a 400 naming `messages[i]`/`input[i]` and the reason
+  (`imageRejectReason`), an `input_audio` part a 400 unless the model encodes audio (`RequestMedia.accepts_audio`),
+  more than `chat.MAX_REQUEST_IMAGES` (64) a 400 with both counts, a prompt the media pushes past the context a 400
+  naming the media's tokens, an encode that does not fit a 400 (`towerFitFault`), a failed encode a 500
+  (`MediaFault`); never a text-only answer.
 - Media INPUT code: `src/vision.zig` / `src/qwen_vision.zig` / `src/mrope.zig` (Qwen3-VL image/video tower, M-RoPE
-  positions); `stb_image` + libwebp decode image input.
+  positions over every block); `stb_image` + libwebp decode image input.
 
 ## Config reading
 

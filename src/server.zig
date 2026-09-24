@@ -7552,176 +7552,14 @@ fn handleChatCompletions(
         return;
     }
 
-    var messages = std.ArrayList(chat_mod.Message).empty;
-    var image_decode_failed = false;
-    defer messages.deinit(allocator);
-
-    // Decoded image/video/audio buffers for every message in this request.
-    // `Message` borrows them; this is the only thing that frees them.
-    var media = RequestMedia.init(allocator);
-    defer media.deinit();
-
-    // Parse tool call structs for assistant messages (stored temporarily)
-    var tool_call_lists = std.ArrayList([]const chat_mod.ToolCall).empty;
-    defer {
-        for (tool_call_lists.items) |tcs| allocator.free(tcs);
-        tool_call_lists.deinit(allocator);
-    }
-
-    // Joined multi-part text content (allocated only when a message carries
-    // 2+ text parts).
-    var content_allocs = std.ArrayList([]const u8).empty;
-    defer {
-        for (content_allocs.items) |s| allocator.free(s);
-        content_allocs.deinit(allocator);
-    }
-
-    // Decide which raw message owns current-turn media before the parse loop
-    // materializes any attachment. The JSON tree keeps every data URL alive
-    // for the request, so historical attachments can remain borrowed strings
-    // instead of becoming multi-megabyte pixel buffers merely to be ignored by
-    // activeTurnMediaMessage below.
-    const wire_continue_final = wireContinuationRequested(messages_val.array.items, .openai) and
-        (if (root.get("continue_final_message")) |v| v == .bool and v.bool else false);
-    const active_wire_media = activeWireMediaIndex(messages_val.array.items, wire_continue_final, .openai);
-
-    for (messages_val.array.items, 0..) |msg_val, raw_msg_index| {
-        // A non-object array element (e.g. `messages:[1,2,3]`) would panic on
-        // `.object`. Skip it rather than crash — consistent with how malformed
-        // inner fields are already tolerated below.
-        if (msg_val != .object) continue;
-        const obj = msg_val.object;
-        const role_val = obj.get("role") orelse continue;
-        if (role_val != .string) continue;
-
-        // Content can be null for assistant messages with tool_calls
-        const content_val = obj.get("content");
-        var msg_images: ?[]const chat_mod.ImageData = null;
-        var msg_videos: ?[]const chat_mod.VideoData = null;
-        var msg_audio: ?[]const chat_mod.AudioData = null;
-        const decode_this_message = active_wire_media != null and active_wire_media.? == raw_msg_index;
-        const wire_presence = wireMediaPresence(msg_val, .openai);
-        const content: []const u8 = if (content_val) |cv| switch (cv) {
-            .string => |s| s,
-            .array => |arr| blk: {
-                const img_slot = try media.openImages();
-                const vid_slot = try media.openVideos();
-                const aud_slot = try media.openAudio();
-                for (arr.items) |part| {
-                    if (part != .object) continue;
-                    const ptype = part.object.get("type") orelse continue;
-                    if (ptype != .string) continue;
-                    if (std.mem.eql(u8, ptype.string, "image_url")) {
-                        if (!decode_this_message) continue;
-                        // Parse image_url content block
-                        const img_obj = part.object.get("image_url") orelse continue;
-                        if (img_obj != .object) continue;
-                        const url_val = img_obj.object.get("url") orelse continue;
-                        if (url_val != .string) continue;
-                        if (!appendImageUrlContent(allocator, media.images(img_slot), url_val.string, visionPreprocFromConfig(config))) image_decode_failed = true;
-                    } else if (std.mem.eql(u8, ptype.string, "video_url")) {
-                        if (!decode_this_message) continue;
-                        // A video is, on the wire, an ordered array of already-
-                        // decoded frame images — no video codec exists anywhere
-                        // in this codebase, so frame extraction is the CLIENT's
-                        // job. Each frame string is an ordinary image data URL.
-                        const vid_obj = part.object.get("video_url") orelse continue;
-                        if (vid_obj != .object) continue;
-                        const frames_val = vid_obj.object.get("frames") orelse continue;
-                        if (frames_val != .array) continue;
-                        var frame_urls = std.ArrayList([]const u8).empty;
-                        defer frame_urls.deinit(allocator);
-                        for (frames_val.array.items) |f| {
-                            if (f == .string) frame_urls.append(allocator, f.string) catch continue;
-                        }
-                        appendVideoUrlContent(allocator, media.videos(vid_slot), frame_urls.items, visionPreprocFromConfig(config));
-                    } else if (std.mem.eql(u8, ptype.string, "input_audio")) {
-                        if (!decode_this_message) continue;
-                        // OpenAI-style audio block. For the Gemma 4 12B unified
-                        // engine the client sends raw 16 kHz mono float32-LE PCM
-                        // (format "mlx_pcm_f32") base64-encoded in `data`.
-                        const a_obj = part.object.get("input_audio") orelse continue;
-                        if (a_obj != .object) continue;
-                        const data_val = a_obj.object.get("data") orelse continue;
-                        if (data_val != .string) continue;
-                        if (parseAudioContent(allocator, data_val.string)) |aud| {
-                            media.audio(aud_slot).append(allocator, aud) catch {
-                                allocator.free(aud.samples);
-                                continue;
-                            };
-                        }
-                    }
-                }
-                msg_images = media.imagesSlice(img_slot);
-                msg_videos = media.videosSlice(vid_slot);
-                msg_audio = media.audioSlice(aud_slot);
-                const joined = try joinedTextParts(allocator, arr.items);
-                if (joined.owned) try content_allocs.append(allocator, joined.text);
-                break :blk joined.text;
-            },
-            .null => "",
-            else => "",
-        } else "";
-
-        // Parse tool_calls from assistant messages
-        var msg_tool_calls: ?[]const chat_mod.ToolCall = null;
-        if (std.mem.eql(u8, role_val.string, "assistant")) {
-            if (obj.get("tool_calls")) |tc_val| {
-                if (tc_val == .array) {
-                    var tcs = std.ArrayList(chat_mod.ToolCall).empty;
-                    for (tc_val.array.items) |tc_item| {
-                        if (tc_item != .object) continue;
-                        const tc_id = if (tc_item.object.get("id")) |v| (if (v == .string) v.string else "") else "";
-                        const func = tc_item.object.get("function") orelse continue;
-                        if (func != .object) continue;
-                        const fn_name = if (func.object.get("name")) |v| (if (v == .string) v.string else "") else "";
-                        const fn_args = if (func.object.get("arguments")) |v| (if (v == .string) v.string else "{}") else "{}";
-                        try tcs.append(allocator, .{ .id = tc_id, .name = fn_name, .arguments = fn_args });
-                    }
-                    if (tcs.items.len > 0) {
-                        const owned = try tcs.toOwnedSlice(allocator);
-                        try tool_call_lists.append(allocator, owned);
-                        msg_tool_calls = owned;
-                    } else {
-                        tcs.deinit(allocator);
-                    }
-                }
-            }
-        }
-
-        // Parse tool_call_id from tool messages
-        const tool_call_id: ?[]const u8 = if (std.mem.eql(u8, role_val.string, "tool"))
-            (if (obj.get("tool_call_id")) |v| (if (v == .string) v.string else null) else null)
-        else
-            null;
-
-        // Reasoning the client round-trips on assistant history. Dropping it
-        // starves templates that persist reasoning across turns (laguna): every
-        // prior turn renders the empty <think></think> nothink signature and
-        // the model stops thinking from turn 2 of a session.
-        const msg_reasoning: ?[]const u8 = if (std.mem.eql(u8, role_val.string, "assistant"))
-            messageReasoningFromObj(obj)
-        else
-            null;
-
-        // Skip messages with no content, no tool_calls, and no images/videos/audio
-        if (content.len == 0 and msg_tool_calls == null and msg_images == null and msg_videos == null and msg_audio == null and msg_reasoning == null and !wire_presence.any() and !std.mem.eql(u8, role_val.string, "tool")) continue;
-
-        try messages.append(allocator, .{
-            .role = chat_mod.canonicalRole(role_val.string),
-            .content = content,
-            .tool_calls = msg_tool_calls,
-            .tool_call_id = tool_call_id,
-            .images = msg_images,
-            .videos = msg_videos,
-            .audio = msg_audio,
-            .reasoning_content = msg_reasoning,
-        });
-    }
-
-    if (image_decode_failed) {
-        log.warn("POST /v1/chat/completions -> 400 (undecodable image)\n", .{});
-        try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", IMAGE_DECODE_REJECT, 400);
+    var wire = WireMessages.init(allocator);
+    defer wire.deinit();
+    wire.media.accepts_audio = config.audio_token_id != 0;
+    try readOpenAiMessages(&wire, messages_val.array.items, visionPreprocFromConfig(config));
+    const messages = &wire.messages;
+    if (wire.media.refusal()) |fault| {
+        log.warn("POST /v1/chat/completions -> 400 ({s})\n", .{fault.text()});
+        try sendErrorResponse(allocator, stream, fault.status(), fault.errorType(), fault.text(), fault.code());
         return;
     }
     if (messages.items.len == 0) {
@@ -8071,7 +7909,6 @@ fn handleChatCompletions(
     // POST assistant-last history here and expect a fresh turn, and turning
     // that into a prefill would change what every one of them gets back.
     const continue_final = continueFinalMessageRequested(root, messages.items);
-    const active_media = activeTurnMediaMessage(messages.items, continue_final);
     var tokenize_sw = Stopwatch.init(stream.io);
     var prompt_ids_raw = try cachedFormatChat(allocator, stream.io, lm, tok, chat_config, messages.items, tools_json, tool_choice_instruction, enable_thinking, if (effort_cfg) |e| e.effort else null, continue_final);
     var schema_proto: rp_mod.Protocol = undefined;
@@ -8108,45 +7945,23 @@ fn handleChatCompletions(
     log.info("POST /v1/chat/completions ({d} msgs, max_tokens={s}, temp={d:.2}, top_p={d:.2}, top_k={d}, stream={}, thinking={}, sys={d}b, user={d}b, tools={d}b, tool_msgs={d}) \n", .{ messages.items.len, describeMaxTokens(&max_tokens_desc_buf, max_tokens, max_tokens_origin), temperature, top_p, top_k, is_stream, enable_thinking, system_chars, user_chars, tools_len, tool_msg_count });
     log.info("  > \"{s}{s}\"\n", .{ last_msg.content[0..preview_len], if (last_msg.content.len > 80) "..." else "" });
 
-    // Run vision encoder if any messages contain images. Phase A8: each
-    // request owns its embedding locally; we hand it off to the slot at
-    // submit time. Defer frees if we don't transfer ownership.
-    var local_ve: ?mlx.mlx_array = null;
-    var vis_key: u64 = 0;
+    // Every message's media, placed and encoded; the slot takes the
+    // embeddings and M-RoPE table at submit, `deinit` frees what it did not.
     const cache_key = requestCacheKey(root);
-    defer {
-        if (local_ve) |arr| _ = mlx.mlx_array_free(arr);
-    }
-    if (lm.vision_encoder) |ve| {
-        var n_vis: usize = 0;
-        var n_vid: usize = 0;
-        var n_aud: usize = 0;
-        local_ve = processVisionImages(allocator, lm, ve, active_media, &n_vis, &n_vid, &n_aud, &vis_key) catch |err| blk: {
-            log.warn("Vision encoding failed: {}\n", .{err});
-            break :blk null;
-        };
-        if (local_ve != null) {
-            const new_ids = try insertMultimodalTokens(allocator, prompt_ids_raw, config.image_token_id, n_vis, config.video_token_id, n_vid, config.audio_token_id, n_aud, config, active_media);
+    var req_media: PreparedMedia = .{};
+    defer req_media.deinit(allocator);
+    switch (try prepareRequestMedia(allocator, lm, messages.items, &prompt_ids_raw, getEffectiveContextLength(config))) {
+        .ready => |r| req_media = r,
+        .refused => |fault| {
             allocator.free(prompt_ids_raw);
-            prompt_ids_raw = new_ids;
-        }
-    } else if (mediaRejectReason(messages.items)) |reason| {
-        allocator.free(prompt_ids_raw);
-        log.warn("POST /v1/chat/completions -> 400 ({s})\n", .{reason});
-        try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", reason, 400);
-        return;
+            log.warn("POST /v1/chat/completions -> {d} ({s})\n", .{ fault.code(), fault.text() });
+            try sendErrorResponse(allocator, stream, fault.status(), fault.errorType(), fault.text(), fault.code());
+            return;
+        },
     }
     const prompt_ids = prompt_ids_raw;
     defer allocator.free(prompt_ids);
     enable_mtp = admitMtpForCtx(enable_mtp, prompt_ids.len);
-
-    // Qwen3-VL interleaved M-RoPE: compute the position-id table from the final
-    // (image-pad-expanded) prompt + the image grids. Ownership transfers to the
-    // slot at submit (mirrors the vision-embeddings handoff below).
-    var local_mrope = computeQwenMrope(allocator, prompt_ids, if (active_media) |selected| selected.message else null, config) catch MropeData{};
-    defer {
-        if (local_mrope.pos) |p| allocator.free(p);
-    }
 
     // Enforce context size limit
     const effective_ctx = getEffectiveContextLength(config);
@@ -8162,7 +7977,7 @@ fn handleChatCompletions(
     const effective_max_tokens = clampMaxTokens(max_tokens, prompt_ids.len, effective_ctx);
 
     // Check if attention computation would exceed GPU memory.
-    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, false, kv_quant_override, generate_mod.visionPrefillUnchunked(local_ve != null), enable_mtp)) return;
+    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, false, kv_quant_override, generate_mod.visionPrefillUnchunked(req_media.embeddings != null), enable_mtp)) return;
 
     log.info("  prompt={d} tokens, max_gen={d}, ctx={d}\n", .{ prompt_ids.len, effective_max_tokens, effective_ctx });
 
@@ -8259,18 +8074,18 @@ fn handleChatCompletions(
 
     // Hand vision ownership off to the sub-handler, which transfers it to
     // the slot at submit time.
-    const sub_ve = local_ve;
-    local_ve = null;
-    const sub_mrope = local_mrope;
-    local_mrope = .{}; // ownership transferred to the sub-handler → slot
+    const sub_ve = req_media.embeddings;
+    req_media.embeddings = null;
+    const sub_mrope = req_media.mrope;
+    req_media.mrope = .{}; // ownership transferred to the sub-handler → slot
     if (is_stream) {
-        handleStreamingGeneration(allocator, stream, lm, tok, prompt_ids, effective_max_tokens, sampling, eos_slice, stop_sequences.items, model_name, include_usage, has_tools, tools_json, allow_parallel_tools, logprobs_n, enable_thinking, surface_budget, enable_pld, enable_drafter, enable_mtp, allow_batch_mtp, sub_ve, vis_key, cache_key, sub_mrope, kv_quant_override, kv_attn_explicit, tokenize_ns) catch |err| {
+        handleStreamingGeneration(allocator, stream, lm, tok, prompt_ids, effective_max_tokens, sampling, eos_slice, stop_sequences.items, model_name, include_usage, has_tools, tools_json, allow_parallel_tools, logprobs_n, enable_thinking, surface_budget, enable_pld, enable_drafter, enable_mtp, allow_batch_mtp, sub_ve, req_media.chain, cache_key, sub_mrope, kv_quant_override, kv_attn_explicit, tokenize_ns) catch |err| {
             log.err("  -> streaming error: {}\n", .{err});
             // One mapping with the non-streaming arm: an HTTP status before the SSE head, an SSE `error` event after.
             sendGenerationError(allocator, stream, err, .openai) catch {};
         };
     } else {
-        handleNonStreamingGeneration(allocator, stream, lm, tok, prompt_ids, effective_max_tokens, sampling, eos_slice, stop_sequences.items, model_name, has_tools, tools_json, allow_parallel_tools, logprobs_n, enable_thinking, surface_budget, enable_pld, enable_drafter, enable_mtp, allow_batch_mtp, sub_ve, vis_key, cache_key, sub_mrope, kv_quant_override, kv_attn_explicit, tokenize_ns) catch |err| {
+        handleNonStreamingGeneration(allocator, stream, lm, tok, prompt_ids, effective_max_tokens, sampling, eos_slice, stop_sequences.items, model_name, has_tools, tools_json, allow_parallel_tools, logprobs_n, enable_thinking, surface_budget, enable_pld, enable_drafter, enable_mtp, allow_batch_mtp, sub_ve, req_media.chain, cache_key, sub_mrope, kv_quant_override, kv_attn_explicit, tokenize_ns) catch |err| {
             log.err("  -> {s}\n", .{@errorName(err)});
             sendGenerationError(allocator, stream, err, .openai) catch {};
         };
@@ -8522,7 +8337,7 @@ fn handleNonStreamingCompletion(
     const use_pld = spec.use_pld;
 
     // Every failure class propagates to the surface's one error arm (`sendGenerationError`), shared with the streaming twin.
-    var result = try nonStreamingViaScheduler(allocator, global_scheduler.?, lm, tok, prompt_ids, prompt_ids, max_tokens, sampling, eos_token_ids, 0, false, false, use_pld, use_drafter, use_mtp, allow_batch_mtp, getTimeoutNs(), null, 0, cache_key, .{}, logprobs_n, null, null, stream);
+    var result = try nonStreamingViaScheduler(allocator, global_scheduler.?, lm, tok, prompt_ids, prompt_ids, max_tokens, sampling, eos_token_ids, 0, false, false, use_pld, use_drafter, use_mtp, allow_batch_mtp, getTimeoutNs(), null, &.{}, cache_key, .{}, logprobs_n, null, null, stream);
     _ = &result;
     defer allocator.free(result.text);
     defer allocator.free(result.token_ids);
@@ -8853,7 +8668,7 @@ fn nonStreamingViaScheduler(
     allow_batch_mtp: bool,
     timeout_ns: u64,
     vision_embeddings: ?mlx.mlx_array,
-    vision_key: u64,
+    media_chain: []const prefix_cache_mod.MediaSpan,
     cache_key: u64,
     mrope: MropeData,
     logprobs_n: u32,
@@ -8889,7 +8704,8 @@ fn nonStreamingViaScheduler(
         .pld_key_len = server_config.default_pld_key_len,
         .kv_attn_fused = resolveKvAttnFused(lm.config.?, kv_attn_explicit, prompt_ids.len, kv_quant_override),
         .vision_embeddings = vision_embeddings,
-        .vision_key = vision_key,
+        .vision_key = prefix_cache_mod.chainKey(media_chain),
+        .media_chain = media_chain,
         .cache_key = cache_key,
         .mrope_pos = mrope.pos,
         .mrope_total = mrope.total,
@@ -9095,7 +8911,7 @@ fn handleNonStreamingGeneration(
     enable_mtp: bool,
     allow_batch_mtp: bool,
     vision_embeddings: ?mlx.mlx_array,
-    vision_key: u64,
+    media_chain: []const prefix_cache_mod.MediaSpan,
     cache_key: u64,
     mrope: MropeData,
     /// Wave 1.A: per-request KV-quant override; null = inherit scheduler default.
@@ -9133,7 +8949,7 @@ fn handleNonStreamingGeneration(
         break :blk v;
     };
     // Propagates to `handleChatCompletions`' one error arm, shared with the streaming twin.
-    const result = try nonStreamingViaScheduler(allocator, global_scheduler.?, lm, tok, prompt_ids, prompt_ids, max_tokens, sampling, eos_token_ids, 0, has_tools, enable_thinking, use_pld, use_drafter, use_mtp, allow_batch_mtp, getTimeoutNs(), slot_ve, vision_key, cache_key, mrope, logprobs_n, kv_quant_override, kv_attn_explicit, stream);
+    const result = try nonStreamingViaScheduler(allocator, global_scheduler.?, lm, tok, prompt_ids, prompt_ids, max_tokens, sampling, eos_token_ids, 0, has_tools, enable_thinking, use_pld, use_drafter, use_mtp, allow_batch_mtp, getTimeoutNs(), slot_ve, media_chain, cache_key, mrope, logprobs_n, kv_quant_override, kv_attn_explicit, stream);
     defer allocator.free(result.text);
     defer allocator.free(result.token_ids);
     defer if (result.logprobs) |lps| {
@@ -9761,7 +9577,7 @@ fn handleStreamingGeneration(
     enable_mtp: bool,
     allow_batch_mtp: bool,
     vision_embeddings: ?mlx.mlx_array,
-    vision_key: u64,
+    media_chain: []const prefix_cache_mod.MediaSpan,
     cache_key: u64,
     mrope: MropeData,
     /// Wave 1.A: per-request KV-quant override; null = inherit scheduler default.
@@ -9841,7 +9657,8 @@ fn handleStreamingGeneration(
         .kv_attn_fused = resolveKvAttnFused(config, kv_attn_explicit, prompt_ids.len, kv_quant_override),
         .logprobs_n = logprobs_n,
         .vision_embeddings = slot_ve_s,
-        .vision_key = vision_key,
+        .vision_key = prefix_cache_mod.chainKey(media_chain),
+        .media_chain = media_chain,
         .cache_key = cache_key,
         .mrope_pos = mrope.pos,
         .mrope_total = mrope.total,
@@ -12254,745 +12071,700 @@ fn parseKvQuantOverride(root: std.json.ObjectMap) ?transformer_mod.KVQuantConfig
 
 // ── Vision Processing ──
 
-/// The two chat wire formats describe the same turn graph with different
-/// shapes: OpenAI uses role=`tool` messages, while Anthropic nests tool_result
-/// blocks inside a user message. This selector reads only JSON metadata. It is
-/// deliberately upstream of image decoding so historical data URLs never have
-/// to become pixel tensors just to discover that they sit behind an assistant
-/// boundary.
-const WireMediaStyle = enum { openai, anthropic };
+/// Where a request body keeps the message a media fault belongs to
+/// (`messages[3]`, `input[1]`).
+const WirePos = struct { list: []const u8, index: usize };
 
-const WireMediaPresence = struct {
-    images: bool = false,
-    videos: bool = false,
-    audio: bool = false,
+/// A named refusal of a request's media: the status and the text the
+/// surface's error sender ships.
+const MediaFault = struct {
+    server_error: bool = false,
+    buf: [320]u8 = undefined,
+    len: usize = 0,
 
-    fn any(self: WireMediaPresence) bool {
-        return self.images or self.videos or self.audio;
+    fn init(server_error: bool, comptime fmt: []const u8, args: anytype) MediaFault {
+        var f: MediaFault = .{ .server_error = server_error };
+        f.len = (std.fmt.bufPrint(&f.buf, fmt, args) catch @as([]u8, &f.buf)).len;
+        return f;
+    }
+
+    fn text(self: *const MediaFault) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    fn status(self: *const MediaFault) []const u8 {
+        return if (self.server_error) "500 Internal Server Error" else "400 Bad Request";
+    }
+
+    fn code(self: *const MediaFault) u16 {
+        return if (self.server_error) 500 else 400;
+    }
+
+    fn errorType(self: *const MediaFault) []const u8 {
+        return if (self.server_error) "server_error" else "invalid_request_error";
     }
 };
 
-fn wireRole(msg: std.json.Value) ?[]const u8 {
-    if (msg != .object) return null;
-    const role = msg.object.get("role") orelse return null;
-    return if (role == .string) role.string else null;
+fn imageDecodeFault(pos: WirePos, reason: []const u8) MediaFault {
+    return MediaFault.init(false, "{s}[{d}]: image could not be decoded: {s}", .{ pos.list, pos.index, reason });
 }
 
-fn wireMediaPresence(msg: std.json.Value, style: WireMediaStyle) WireMediaPresence {
-    if (msg != .object) return .{};
-    const content = msg.object.get("content") orelse return .{};
-    if (content != .array) return .{};
-    var out: WireMediaPresence = .{};
-    for (content.array.items) |part| {
+fn imageCountFault(n_images: usize) MediaFault {
+    return MediaFault.init(false, "the request carries {d} images; at most {d} are accepted", .{ n_images, chat_mod.MAX_REQUEST_IMAGES });
+}
+
+/// Why an image URL did not decode, in words a client can act on.
+fn imageRejectReason(url: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, url, "data:")) return "remote URLs are not fetched; send a base64 data URL (data:image/jpeg|png|webp;base64,...)";
+    const sep = std.mem.indexOf(u8, url, ";base64,") orelse return "the data URL is not base64 (data:image/jpeg|png|webp;base64,...)";
+    for (url[sep + 8 ..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '/' and c != '=') return "the base64 payload is malformed";
+    }
+    return "the payload is not a readable JPEG, PNG or WebP image";
+}
+
+fn responsesMediaRefusal(pi: *const responses_mod.ParsedInput) ?MediaFault {
+    if (pi.n_images > chat_mod.MAX_REQUEST_IMAGES) return imageCountFault(pi.n_images);
+    const f = pi.media_fault orelse return null;
+    return switch (f.kind) {
+        .undecodable_image => imageDecodeFault(.{ .list = "input", .index = f.item }, f.reason),
+        .unsupported_audio => MediaFault.init(false, "input[{d}]: input_audio is not supported by this model", .{f.item}),
+    };
+}
+
+/// `responses.ImageUrlDecoder`: decode into `list`, or say why not.
+fn decodeImageUrlInto(allocator: std.mem.Allocator, list: *std.ArrayList(chat_mod.ImageData), url: []const u8, vp: chat_mod.VisionPreproc) ?[]const u8 {
+    if (appendImageUrlContent(allocator, list, url, vp)) return null;
+    return imageRejectReason(url);
+}
+
+const WireVocab = enum { openai, anthropic };
+
+/// One message's content array read in order.
+const ReadContent = struct {
+    text: []const u8 = "",
+    images: ?[]const chat_mod.ImageData = null,
+    videos: ?[]const chat_mod.VideoData = null,
+    audio: ?[]const chat_mod.AudioData = null,
+    media_parts: ?[]const chat_mod.MediaPart = null,
+};
+
+fn openAiImageUrl(part: std.json.Value) ?[]const u8 {
+    const img = part.object.get("image_url") orelse return null;
+    return switch (img) {
+        .string => |s| s,
+        .object => |o| if (o.get("url")) |u| (if (u == .string) u.string else null) else null,
+        else => null,
+    };
+}
+
+/// An Anthropic image block's source as a URL the decoder reads: base64 as a
+/// data URL, a `url` source as given. Caller frees.
+fn anthropicImageUrl(allocator: std.mem.Allocator, block: std.json.Value) !?[]u8 {
+    const src = block.object.get("source") orelse return null;
+    if (src != .object) return null;
+    const stype = if (src.object.get("type")) |t| (if (t == .string) t.string else "") else "";
+    if (std.mem.eql(u8, stype, "base64")) {
+        const media_type = if (src.object.get("media_type")) |v| (if (v == .string) v.string else "image/png") else "image/png";
+        const data = if (src.object.get("data")) |v| (if (v == .string) v.string else "") else "";
+        if (data.len == 0) return null;
+        return try std.fmt.allocPrint(allocator, "data:{s};base64,{s}", .{ media_type, data });
+    }
+    if (std.mem.eql(u8, stype, "url")) {
+        const url = if (src.object.get("url")) |v| (if (v == .string) v.string else "") else "";
+        if (url.len == 0) return null;
+        return try allocator.dupe(u8, url);
+    }
+    return null;
+}
+
+/// Read a content array: text parts join as `joinedTextParts` does, and each
+/// media part is decoded into `media` and placed at the text offset it sat at,
+/// so the template renders its placeholder there.
+fn readContentParts(
+    allocator: std.mem.Allocator,
+    media: *RequestMedia,
+    texts: *std.ArrayList([]const u8),
+    parts: []const std.json.Value,
+    vocab: WireVocab,
+    pos: WirePos,
+    vp: chat_mod.VisionPreproc,
+) !ReadContent {
+    const img_slot = try media.openImages();
+    const vid_slot = try media.openVideos();
+    const aud_slot = try media.openAudio();
+    var placed = std.ArrayList(chat_mod.MediaPart).empty;
+    defer placed.deinit(allocator);
+    // The length the joined text has reached: a media part renders there.
+    var joined_len: usize = 0;
+    for (parts) |part| {
         if (part != .object) continue;
         const tv = part.object.get("type") orelse continue;
         if (tv != .string) continue;
-        if (style == .anthropic) {
-            if (std.mem.eql(u8, tv.string, "image")) out.images = true;
-        } else if (std.mem.eql(u8, tv.string, "image_url")) {
-            out.images = true;
-        } else if (std.mem.eql(u8, tv.string, "video_url")) {
-            out.videos = true;
-        } else if (std.mem.eql(u8, tv.string, "input_audio")) {
-            out.audio = true;
+        const ptype = tv.string;
+        if (std.mem.eql(u8, ptype, "text")) {
+            const t = part.object.get("text") orelse continue;
+            if (t != .string or t.string.len == 0) continue;
+            joined_len += t.string.len + @intFromBool(joined_len > 0);
+        } else if (vocab == .openai and std.mem.eql(u8, ptype, "image_url")) {
+            if (media.addImage(img_slot, openAiImageUrl(part), vp, pos))
+                try placed.append(allocator, .{ .at = joined_len, .kind = .image });
+        } else if (vocab == .anthropic and std.mem.eql(u8, ptype, "image")) {
+            const url = try anthropicImageUrl(allocator, part);
+            defer if (url) |u| allocator.free(u);
+            if (media.addImage(img_slot, url, vp, pos))
+                try placed.append(allocator, .{ .at = joined_len, .kind = .image });
+        } else if (vocab == .openai and std.mem.eql(u8, ptype, "video_url")) {
+            // A video is, on the wire, an ordered array of frame image data
+            // URLs: frame extraction is the client's job.
+            var frame_urls = std.ArrayList([]const u8).empty;
+            defer frame_urls.deinit(allocator);
+            if (part.object.get("video_url")) |vid_obj| if (vid_obj == .object) {
+                if (vid_obj.object.get("frames")) |frames| if (frames == .array) {
+                    for (frames.array.items) |f| if (f == .string) try frame_urls.append(allocator, f.string);
+                };
+            };
+            if (media.addVideo(vid_slot, frame_urls.items, vp, pos))
+                try placed.append(allocator, .{ .at = joined_len, .kind = .video });
+        } else if (vocab == .openai and std.mem.eql(u8, ptype, "input_audio")) {
+            const data: ?[]const u8 = if (part.object.get("input_audio")) |a| (if (a == .object) (if (a.object.get("data")) |d| (if (d == .string) d.string else null) else null) else null) else null;
+            media.addAudio(aud_slot, data, pos);
         }
+    }
+    const joined = try joinedTextParts(allocator, parts);
+    if (joined.owned) try texts.append(allocator, joined.text);
+    return .{
+        .text = joined.text,
+        .images = media.imagesSlice(img_slot),
+        .videos = media.videosSlice(vid_slot),
+        .audio = media.audioSlice(aud_slot),
+        .media_parts = try media.ownParts(&placed),
+    };
+}
+
+/// A request body's messages and every buffer they borrow, owned in one place.
+const WireMessages = struct {
+    allocator: std.mem.Allocator,
+    messages: std.ArrayList(chat_mod.Message) = .empty,
+    media: RequestMedia,
+    tool_call_lists: std.ArrayList([]const chat_mod.ToolCall) = .empty,
+    /// Joined text, serialized tool arguments and other strings messages borrow.
+    texts: std.ArrayList([]const u8) = .empty,
+
+    fn init(allocator: std.mem.Allocator) WireMessages {
+        return .{ .allocator = allocator, .media = RequestMedia.init(allocator) };
+    }
+
+    fn deinit(self: *WireMessages) void {
+        for (self.tool_call_lists.items) |tcs| self.allocator.free(tcs);
+        self.tool_call_lists.deinit(self.allocator);
+        for (self.texts.items) |s| self.allocator.free(s);
+        self.texts.deinit(self.allocator);
+        self.media.deinit();
+        self.messages.deinit(self.allocator);
+    }
+};
+
+/// Every message of a chat-completions body, each with its media decoded and
+/// placed where it sat — user, tool or any other role.
+fn readOpenAiMessages(wire: *WireMessages, items: []const std.json.Value, vp: chat_mod.VisionPreproc) !void {
+    const allocator = wire.allocator;
+    for (items, 0..) |msg_val, raw_index| {
+        // A malformed element is skipped rather than crashing on `.object`.
+        if (msg_val != .object) continue;
+        const obj = msg_val.object;
+        const role_val = obj.get("role") orelse continue;
+        if (role_val != .string) continue;
+
+        var read: ReadContent = .{};
+        if (obj.get("content")) |cv| switch (cv) {
+            .string => |s| read.text = s,
+            .array => |arr| read = try readContentParts(allocator, &wire.media, &wire.texts, arr.items, .openai, .{ .list = "messages", .index = raw_index }, vp),
+            else => {},
+        };
+
+        var msg_tool_calls: ?[]const chat_mod.ToolCall = null;
+        if (std.mem.eql(u8, role_val.string, "assistant")) {
+            if (obj.get("tool_calls")) |tc_val| {
+                if (tc_val == .array) {
+                    var tcs = std.ArrayList(chat_mod.ToolCall).empty;
+                    for (tc_val.array.items) |tc_item| {
+                        if (tc_item != .object) continue;
+                        const tc_id = if (tc_item.object.get("id")) |v| (if (v == .string) v.string else "") else "";
+                        const func = tc_item.object.get("function") orelse continue;
+                        if (func != .object) continue;
+                        const fn_name = if (func.object.get("name")) |v| (if (v == .string) v.string else "") else "";
+                        const fn_args = if (func.object.get("arguments")) |v| (if (v == .string) v.string else "{}") else "{}";
+                        try tcs.append(allocator, .{ .id = tc_id, .name = fn_name, .arguments = fn_args });
+                    }
+                    if (tcs.items.len > 0) {
+                        const owned = try tcs.toOwnedSlice(allocator);
+                        try wire.tool_call_lists.append(allocator, owned);
+                        msg_tool_calls = owned;
+                    } else {
+                        tcs.deinit(allocator);
+                    }
+                }
+            }
+        }
+
+        const tool_call_id: ?[]const u8 = if (std.mem.eql(u8, role_val.string, "tool"))
+            (if (obj.get("tool_call_id")) |v| (if (v == .string) v.string else null) else null)
+        else
+            null;
+
+        // Reasoning the client round-trips on assistant history. Dropping it
+        // starves templates that persist reasoning across turns (laguna): every
+        // prior turn renders the empty <think></think> nothink signature and
+        // the model stops thinking from turn 2 of a session.
+        const msg_reasoning: ?[]const u8 = if (std.mem.eql(u8, role_val.string, "assistant"))
+            messageReasoningFromObj(obj)
+        else
+            null;
+
+        if (read.text.len == 0 and msg_tool_calls == null and read.images == null and read.videos == null and read.audio == null and msg_reasoning == null and !std.mem.eql(u8, role_val.string, "tool")) continue;
+
+        try wire.messages.append(allocator, .{
+            .role = chat_mod.canonicalRole(role_val.string),
+            .content = read.text,
+            .tool_calls = msg_tool_calls,
+            .tool_call_id = tool_call_id,
+            .images = read.images,
+            .videos = read.videos,
+            .audio = read.audio,
+            .media_parts = read.media_parts,
+            .reasoning_content = msg_reasoning,
+        });
+    }
+}
+
+/// Every message of a /v1/messages body. A user message's `tool_result`
+/// blocks become tool messages ahead of its own text, and every image — in a
+/// tool result or beside the text — is decoded and placed where it sat.
+fn readAnthropicMessages(wire: *WireMessages, items: []const std.json.Value, vp: chat_mod.VisionPreproc) !void {
+    const allocator = wire.allocator;
+    for (items, 0..) |msg_val, raw_index| {
+        if (msg_val != .object) continue;
+        const msg_obj = msg_val.object;
+        const role_val = msg_obj.get("role") orelse continue;
+        if (role_val != .string) continue;
+        const role = role_val.string;
+        const content_val = msg_obj.get("content");
+        const pos: WirePos = .{ .list = "messages", .index = raw_index };
+
+        if (std.mem.eql(u8, role, "user")) {
+            if (content_val) |cv| switch (cv) {
+                .string => |s| {
+                    try wire.messages.append(allocator, .{ .role = "user", .content = s });
+                },
+                .array => |arr| {
+                    for (arr.items) |block| {
+                        if (block != .object) continue;
+                        const btype = if (block.object.get("type")) |t| (if (t == .string) t.string else "") else "";
+                        if (!std.mem.eql(u8, btype, "tool_result")) continue;
+
+                        const tool_use_id = if (block.object.get("tool_use_id")) |v| (if (v == .string) v.string else "") else "";
+                        var result: ReadContent = .{};
+                        if (block.object.get("content")) |rc| switch (rc) {
+                            .string => |s| result.text = s,
+                            .array => |result_arr| result = try readContentParts(allocator, &wire.media, &wire.texts, result_arr.items, .anthropic, pos, vp),
+                            else => {},
+                        };
+                        try wire.messages.append(allocator, .{
+                            .role = "tool",
+                            .content = result.text,
+                            .tool_call_id = tool_use_id,
+                            .images = result.images,
+                            .media_parts = result.media_parts,
+                        });
+                    }
+
+                    const read = try readContentParts(allocator, &wire.media, &wire.texts, arr.items, .anthropic, pos, vp);
+                    if (read.text.len > 0 or read.images != null) {
+                        try wire.messages.append(allocator, .{
+                            .role = "user",
+                            .content = read.text,
+                            .images = read.images,
+                            .media_parts = read.media_parts,
+                        });
+                    }
+                },
+                else => {},
+            };
+        } else if (std.mem.eql(u8, role, "assistant")) {
+            if (content_val) |cv| switch (cv) {
+                .string => |s| {
+                    try wire.messages.append(allocator, .{ .role = "assistant", .content = s });
+                },
+                .array => |arr| {
+                    // Extract text, tool_use and thinking blocks
+                    var text_content = std.ArrayList(u8).empty;
+                    defer text_content.deinit(allocator);
+                    var think_content = std.ArrayList(u8).empty;
+                    defer think_content.deinit(allocator);
+                    var tcs = std.ArrayList(chat_mod.ToolCall).empty;
+
+                    for (arr.items) |block| {
+                        if (block != .object) continue;
+                        const btype = if (block.object.get("type")) |t| (if (t == .string) t.string else "") else "";
+
+                        if (std.mem.eql(u8, btype, "text")) {
+                            const text = if (block.object.get("text")) |t| (if (t == .string) t.string else "") else "";
+                            try text_content.appendSlice(allocator, text);
+                        } else if (std.mem.eql(u8, btype, "tool_use")) {
+                            const tc_id = if (block.object.get("id")) |v| (if (v == .string) v.string else "") else "";
+                            const tc_name = if (block.object.get("name")) |v| (if (v == .string) v.string else "") else "";
+                            // Serialize input object to JSON string
+                            var args_buf = std.ArrayList(u8).empty;
+                            if (block.object.get("input")) |input_val| {
+                                try serializeJsonValue(allocator, &args_buf, input_val);
+                            } else {
+                                try args_buf.appendSlice(allocator, "{}");
+                            }
+                            const args_str = try args_buf.toOwnedSlice(allocator);
+                            try wire.texts.append(allocator, args_str);
+                            try tcs.append(allocator, .{ .id = tc_id, .name = tc_name, .arguments = args_str });
+                        } else if (std.mem.eql(u8, btype, "thinking")) {
+                            // History reasoning → Message.reasoning_content, same
+                            // round-trip as chat completions' reasoning_content:
+                            // templates that persist reasoning across turns
+                            // (laguna) starve into nothink without it.
+                            // "redacted_thinking" stays skipped (opaque payload).
+                            const t = if (block.object.get("thinking")) |v| (if (v == .string) v.string else "") else "";
+                            if (t.len > 0) {
+                                if (think_content.items.len > 0) try think_content.append(allocator, '\n');
+                                try think_content.appendSlice(allocator, t);
+                            }
+                        }
+                    }
+
+                    var msg_tool_calls: ?[]const chat_mod.ToolCall = null;
+                    if (tcs.items.len > 0) {
+                        const owned = try tcs.toOwnedSlice(allocator);
+                        try wire.tool_call_lists.append(allocator, owned);
+                        msg_tool_calls = owned;
+                    } else {
+                        tcs.deinit(allocator);
+                    }
+
+                    const content: []const u8 = if (text_content.items.len > 0) blk: {
+                        const duped = try allocator.dupe(u8, text_content.items);
+                        try wire.texts.append(allocator, duped);
+                        break :blk duped;
+                    } else "";
+                    const msg_reasoning: ?[]const u8 = if (think_content.items.len > 0) blk: {
+                        const duped = try allocator.dupe(u8, think_content.items);
+                        try wire.texts.append(allocator, duped);
+                        break :blk duped;
+                    } else null;
+                    try wire.messages.append(allocator, .{ .role = "assistant", .content = content, .tool_calls = msg_tool_calls, .reasoning_content = msg_reasoning });
+                },
+                else => {},
+            };
+        } else if (std.mem.eql(u8, role, "system")) {
+            // Claude Code puts SessionStart hook output here; dropping it is silent context loss.
+            const sys_text: []const u8 = if (content_val) |cv| switch (cv) {
+                .string => |s| s,
+                .array => |arr| blk: {
+                    const joined = try joinedTextParts(allocator, arr.items);
+                    if (joined.owned) try wire.texts.append(allocator, joined.text);
+                    break :blk joined.text;
+                },
+                else => "",
+            } else "";
+            if (sys_text.len > 0) {
+                try wire.messages.append(allocator, .{ .role = "system", .content = sys_text });
+            }
+        }
+    }
+}
+
+/// Every message's images and videos in the order the template renders their
+/// placeholders: message order, each message's own order within a kind.
+const FlatMedia = struct {
+    images: []chat_mod.ImageData,
+    videos: []chat_mod.VideoData,
+    has_audio: bool,
+
+    fn deinit(self: *FlatMedia, allocator: std.mem.Allocator) void {
+        allocator.free(self.images);
+        allocator.free(self.videos);
+    }
+};
+
+fn flattenMedia(allocator: std.mem.Allocator, messages: []const chat_mod.Message) !FlatMedia {
+    var n_images: usize = 0;
+    var n_videos: usize = 0;
+    var has_audio = false;
+    for (messages) |m| {
+        if (m.images) |imgs| n_images += imgs.len;
+        if (m.videos) |vids| n_videos += vids.len;
+        if (m.audio != null) has_audio = true;
+    }
+    const images = try allocator.alloc(chat_mod.ImageData, n_images);
+    errdefer allocator.free(images);
+    const videos = try allocator.alloc(chat_mod.VideoData, n_videos);
+    var next_image: usize = 0;
+    var next_video: usize = 0;
+    for (messages) |m| {
+        if (m.images) |imgs| {
+            @memcpy(images[next_image..][0..imgs.len], imgs);
+            next_image += imgs.len;
+        }
+        if (m.videos) |vids| {
+            @memcpy(videos[next_video..][0..vids.len], vids);
+            next_video += vids.len;
+        }
+    }
+    return .{ .images = images, .videos = videos, .has_audio = has_audio };
+}
+
+/// A media kind the loaded model cannot encode is refused by name, never
+/// answered from the text alone.
+fn mediaKindRefusal(messages: []const chat_mod.Message, flat: FlatMedia, has_tower: bool) ?MediaFault {
+    if (!has_tower) return MediaFault.init(false, "{s}", .{mediaRejectReason(messages).?});
+    if (flat.has_audio) return MediaFault.init(false, "input_audio is not supported by this model: its tower encodes images and video only", .{});
+    return null;
+}
+
+/// Peak GPU scratch of one ViT call over `patches` rows: the f32 scores, their
+/// scaled copy and the softmax (heads x N^2 each), plus the row activations.
+fn visionScratchBytes(config: *const model_mod.ModelConfig, patches: u64) u64 {
+    const heads: u64 = @max(config.qv_heads, 1);
+    const row_floats: u64 = 4 * @as(u64, @max(config.qv_hidden, 1)) + @max(config.qv_intermediate, 1);
+    return 3 * heads * patches * patches * 4 + patches * row_floats * 4;
+}
+
+/// The encode's fit check, before it runs: the largest block's tower scratch
+/// plus every block's soft-token rows must fit what the GPU has left.
+fn towerFitFault(config: *const model_mod.ModelConfig, images: []const chat_mod.ImageData, videos: []const chat_mod.VideoData, rows: usize, available: u64) ?MediaFault {
+    if (config.qv_heads == 0) return null;
+    var worst: u64 = 0;
+    for (images) |im| worst = @max(worst, @as(u64, im.grid_h) * im.grid_w);
+    for (videos) |vd| worst = @max(worst, @as(u64, vd.grid_t) * vd.grid_h * vd.grid_w);
+    const needed = visionScratchBytes(config, worst) + @as(u64, rows) * @max(config.qv_out_hidden, 1) * 2;
+    if (needed <= available) return null;
+    const mb: u64 = 1024 * 1024;
+    return MediaFault.init(false, "encoding the media needs ~{d} MB of GPU memory (its largest block has {d} patches), ~{d} MB is available", .{ needed / mb, worst, available / mb });
+}
+
+/// One media block of the expanded prompt, in prompt order.
+const PlacedMedia = struct { kind: chat_mod.MediaPart.Kind, start: usize, rows: usize };
+
+const MediaPlacement = struct {
+    ids: []u32,
+    items: []PlacedMedia,
+    rows: usize,
+
+    fn deinit(self: *MediaPlacement, allocator: std.mem.Allocator) void {
+        allocator.free(self.ids);
+        allocator.free(self.items);
+    }
+};
+
+/// How many image / video placeholders the rendered prompt holds: one pad
+/// token per block, which `placeMedia` expands.
+fn countMediaPlaceholders(ids: []const u32, config: *const model_mod.ModelConfig) struct { images: usize, videos: usize } {
+    var images: usize = 0;
+    var videos: usize = 0;
+    for (ids) |t| {
+        if (config.image_token_id > 0 and t == config.image_token_id) images += 1;
+        if (config.video_token_id > 0 and t == config.video_token_id) videos += 1;
+    }
+    return .{ .images = images, .videos = videos };
+}
+
+/// Soft-token rows a patch-grid tower produces for one block: its merged grid.
+fn mediaRows(grid_t: u32, grid_h: u32, grid_w: u32, merge: u32) usize {
+    const m = @max(merge, 1);
+    return @as(usize, grid_t) * (grid_h / m) * (grid_w / m);
+}
+
+/// Expand each template placeholder to its block's run of pad tokens: the
+/// k-th image pad takes `images[k]`, the k-th video pad `videos[k]`. The
+/// caller has checked the counts match (`countMediaPlaceholders`).
+fn placeMedia(
+    allocator: std.mem.Allocator,
+    ids: []const u32,
+    config: *const model_mod.ModelConfig,
+    images: []const chat_mod.ImageData,
+    videos: []const chat_mod.VideoData,
+) !MediaPlacement {
+    const merge = visionPreprocFromConfig(config).merge;
+    var out = std.ArrayList(u32).empty;
+    errdefer out.deinit(allocator);
+    var items = std.ArrayList(PlacedMedia).empty;
+    errdefer items.deinit(allocator);
+    var next_image: usize = 0;
+    var next_video: usize = 0;
+    var rows_total: usize = 0;
+    for (ids) |t| {
+        const is_image = config.image_token_id > 0 and t == config.image_token_id;
+        const is_video = config.video_token_id > 0 and t == config.video_token_id;
+        if (!is_image and !is_video) {
+            try out.append(allocator, t);
+            continue;
+        }
+        const rows = if (is_image) blk: {
+            const im = images[next_image];
+            next_image += 1;
+            // A gridless (fixed-square) tower has no per-image row count here.
+            if (im.grid_h == 0) return error.MediaLayoutUnsupported;
+            break :blk mediaRows(1, im.grid_h, im.grid_w, merge);
+        } else blk: {
+            const vd = videos[next_video];
+            next_video += 1;
+            break :blk mediaRows(vd.grid_t, vd.grid_h, vd.grid_w, merge);
+        };
+        try items.append(allocator, .{ .kind = if (is_image) .image else .video, .start = out.items.len, .rows = rows });
+        try out.appendNTimes(allocator, t, rows);
+        rows_total += rows;
+    }
+    const owned_ids = try out.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_ids);
+    return .{ .ids = owned_ids, .items = try items.toOwnedSlice(allocator), .rows = rows_total };
+}
+
+/// Prefix-cache identity of a request's media: per block in prompt order, a
+/// hash of that block and every block before it, pixels and positions both.
+fn mediaChain(
+    allocator: std.mem.Allocator,
+    placed: []const PlacedMedia,
+    images: []const chat_mod.ImageData,
+    videos: []const chat_mod.VideoData,
+) ![]prefix_cache_mod.MediaSpan {
+    const out = try allocator.alloc(prefix_cache_mod.MediaSpan, placed.len);
+    var prev: u64 = 0x5ec0de;
+    var next_image: usize = 0;
+    var next_video: usize = 0;
+    for (placed, out) |p, *span| {
+        var h = std.hash.Wyhash.init(prev);
+        h.update(std.mem.asBytes(&p.start));
+        switch (p.kind) {
+            .image => {
+                const im = images[next_image];
+                next_image += 1;
+                h.update(std.mem.asBytes(&im.width));
+                h.update(std.mem.asBytes(&im.height));
+                h.update(std.mem.asBytes(&im.grid_h));
+                h.update(std.mem.asBytes(&im.grid_w));
+                h.update(im.pixels);
+            },
+            .video => {
+                const vd = videos[next_video];
+                next_video += 1;
+                h.update(std.mem.asBytes(&vd.grid_t));
+                h.update(std.mem.asBytes(&vd.grid_h));
+                h.update(std.mem.asBytes(&vd.grid_w));
+                h.update(vd.pixels);
+            },
+        }
+        prev = h.final() | 1;
+        span.* = .{ .start = p.start, .key = prev };
     }
     return out;
 }
 
-fn wireMessageHasToolResult(msg: std.json.Value, style: WireMediaStyle) bool {
-    const role = wireRole(msg) orelse return false;
-    if (style == .openai) return std.mem.eql(u8, role, "tool");
-    if (!std.mem.eql(u8, role, "user") or msg != .object) return false;
-    const content = msg.object.get("content") orelse return false;
-    if (content != .array) return false;
-    for (content.array.items) |part| {
-        if (part != .object) continue;
-        const tv = part.object.get("type") orelse continue;
-        if (tv == .string and std.mem.eql(u8, tv.string, "tool_result")) return true;
+/// What a request's media hands its slot. Whatever the slot has not taken is
+/// freed by `deinit`.
+const PreparedMedia = struct {
+    embeddings: ?mlx.mlx_array = null,
+    chain: []const prefix_cache_mod.MediaSpan = &.{},
+    mrope: MropeData = .{},
+
+    fn deinit(self: *PreparedMedia, allocator: std.mem.Allocator) void {
+        if (self.embeddings) |arr| _ = mlx.mlx_array_free(arr);
+        allocator.free(self.chain);
+        if (self.mrope.pos) |p| allocator.free(p);
+        self.* = .{};
     }
-    return false;
-}
-
-fn wireAssistantHasTools(msg: std.json.Value, style: WireMediaStyle) bool {
-    const role = wireRole(msg) orelse return false;
-    if (!std.mem.eql(u8, role, "assistant") or msg != .object) return false;
-    if (style == .openai) {
-        const calls = msg.object.get("tool_calls") orelse return false;
-        return calls == .array and calls.array.items.len > 0;
-    }
-    const content = msg.object.get("content") orelse return false;
-    if (content != .array) return false;
-    for (content.array.items) |part| {
-        if (part != .object) continue;
-        const tv = part.object.get("type") orelse continue;
-        if (tv == .string and std.mem.eql(u8, tv.string, "tool_use")) return true;
-    }
-    return false;
-}
-
-fn wireMessageHasText(msg: std.json.Value) bool {
-    if (msg != .object) return false;
-    const content = msg.object.get("content") orelse return false;
-    if (content == .string) return std.mem.trim(u8, content.string, " \t\r\n").len > 0;
-    if (content != .array) return false;
-    for (content.array.items) |part| {
-        if (part != .object) continue;
-        const tv = part.object.get("type") orelse continue;
-        const text = part.object.get("text") orelse continue;
-        if (tv == .string and std.mem.eql(u8, tv.string, "text") and text == .string and
-            std.mem.trim(u8, text.string, " \t\r\n").len > 0) return true;
-    }
-    return false;
-}
-
-/// Whether OpenAI's parse loop will retain any content from this wire message.
-/// This deliberately accepts malformed non-empty tool_calls as visible: the
-/// wire gate may be wider than parsing (one wasted decode), never narrower
-/// (pixels missing from a prompt that still renders their placeholder).
-fn wireOpenAiParserSkips(msg: std.json.Value) bool {
-    const role = wireRole(msg) orelse return true;
-    if (std.mem.eql(u8, role, "tool")) return false;
-    if (wireMediaPresence(msg, .openai).any()) return false;
-    if (msg == .object) {
-        if (msg.object.get("content")) |content| switch (content) {
-            .string => |s| if (s.len > 0) return false,
-            .array => |parts| for (parts.items) |part| {
-                if (part != .object) continue;
-                const tv = part.object.get("type") orelse continue;
-                const text = part.object.get("text") orelse continue;
-                if (tv == .string and std.mem.eql(u8, tv.string, "text") and
-                    text == .string and text.string.len > 0) return false;
-            },
-            else => {},
-        };
-        if (std.mem.eql(u8, role, "assistant")) {
-            if (wireAssistantHasTools(msg, .openai)) return false;
-            if (messageReasoningFromObj(msg.object) != null) return false;
-        }
-    }
-    return true;
-}
-
-fn wireParserSkips(msg: std.json.Value, style: WireMediaStyle) bool {
-    // Anthropic appends empty assistant/user strings, so every valid-role
-    // message remains a real boundary on that surface.
-    return style == .openai and wireOpenAiParserSkips(msg);
-}
-
-fn wireContinuationRequested(msgs: []const std.json.Value, style: WireMediaStyle) bool {
-    var i = msgs.len;
-    while (i > 0) {
-        i -= 1;
-        if (wireParserSkips(msgs[i], style)) continue;
-        const role = wireRole(msgs[i]) orelse continue;
-        return std.mem.eql(u8, role, "assistant") and wireMessageHasText(msgs[i]);
-    }
-    return false;
-}
-
-/// Return the raw-message index whose media belongs to the active turn.
-/// Mirrors activeTurnMediaMessage but consults only content-block types. This
-/// is the key ordering guarantee: callers invoke it before their parse loop,
-/// then decode attachments only when the loop reaches the returned index.
-fn activeWireMediaIndex(msgs: []const std.json.Value, continue_final: bool, style: WireMediaStyle) ?usize {
-    var last_valid: ?usize = null;
-    var j = msgs.len;
-    while (j > 0) {
-        j -= 1;
-        if (wireParserSkips(msgs[j], style)) continue;
-        if (wireRole(msgs[j]) != null) {
-            last_valid = j;
-            break;
-        }
-    }
-
-    var i = msgs.len;
-    var follows_tool_result = false;
-    while (i > 0) {
-        i -= 1;
-        if (wireParserSkips(msgs[i], style)) continue;
-        const role = wireRole(msgs[i]) orelse continue;
-        if (style == .openai and std.mem.eql(u8, role, "tool")) {
-            follows_tool_result = true;
-            continue;
-        }
-        if (std.mem.eql(u8, role, "assistant")) {
-            if (continue_final and last_valid != null and i == last_valid.?) continue;
-            if (follows_tool_result and wireAssistantHasTools(msgs[i], style)) {
-                follows_tool_result = false;
-                continue;
-            }
-            break;
-        }
-        if (!std.mem.eql(u8, role, "user")) continue;
-        if (wireMediaPresence(msgs[i], style).any()) return i;
-        if (style == .anthropic and wireMessageHasToolResult(msgs[i], style)) follows_tool_result = true;
-    }
-    return null;
-}
-
-test "activeWireMediaIndex skips historical OpenAI images without decoding" {
-    const body =
-        \\{"messages":[
-        \\  {"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AAAA"}},{"type":"text","text":"look"}]},
-        \\  {"role":"assistant","content":"seen"},
-        \\  {"role":"user","content":"continue"}
-        \\]}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-    defer parsed.deinit();
-    const msgs = parsed.value.object.get("messages").?.array.items;
-    try std.testing.expect(activeWireMediaIndex(msgs, false, .openai) == null);
-}
-
-test "activeWireMediaIndex finds media before trailing injected context" {
-    const body =
-        \\{"messages":[
-        \\  {"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AAAA"}},{"type":"text","text":"look"}]},
-        \\  {"role":"user","content":"injected context"}
-        \\]}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-    defer parsed.deinit();
-    const msgs = parsed.value.object.get("messages").?.array.items;
-    try std.testing.expectEqual(@as(?usize, 0), activeWireMediaIndex(msgs, false, .openai));
-}
-
-test "activeWireMediaIndex crosses Anthropic tool use and result" {
-    const body =
-        \\{"messages":[
-        \\  {"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"AAAA"}},{"type":"text","text":"inspect"}]},
-        \\  {"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"inspect","input":{}}]},
-        \\  {"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"done"}]}
-        \\]}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-    defer parsed.deinit();
-    const msgs = parsed.value.object.get("messages").?.array.items;
-    try std.testing.expectEqual(@as(?usize, 0), activeWireMediaIndex(msgs, false, .anthropic));
-}
-
-test "activeWireMediaIndex keeps media for an assistant-prefix continuation" {
-    const body =
-        \\{"messages":[
-        \\  {"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AAAA"}},{"type":"text","text":"look"}]},
-        \\  {"role":"assistant","content":"The image shows "}
-        \\]}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-    defer parsed.deinit();
-    const msgs = parsed.value.object.get("messages").?.array.items;
-    try std.testing.expect(wireContinuationRequested(msgs, .openai));
-    try std.testing.expectEqual(@as(?usize, 0), activeWireMediaIndex(msgs, true, .openai));
-}
-
-test "activeWireMediaIndex ignores an OpenAI assistant the parser skips" {
-    const body =
-        \\{"messages":[
-        \\  {"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AAAA"}},{"type":"text","text":"look"}]},
-        \\  {"role":"assistant","content":""},
-        \\  {"role":"user","content":"hi"}
-        \\]}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-    defer parsed.deinit();
-    const msgs = parsed.value.object.get("messages").?.array.items;
-    try std.testing.expectEqual(@as(?usize, 0), activeWireMediaIndex(msgs, false, .openai));
-}
-
-test "wireContinuationRequested ignores an OpenAI user the parser skips" {
-    const body =
-        \\{"messages":[
-        \\  {"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AAAA"}},{"type":"text","text":"look"}]},
-        \\  {"role":"assistant","content":"The image shows "},
-        \\  {"role":"user","content":""}
-        \\]}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-    defer parsed.deinit();
-    const msgs = parsed.value.object.get("messages").?.array.items;
-    try std.testing.expect(wireContinuationRequested(msgs, .openai));
-    try std.testing.expectEqual(@as(?usize, 0), activeWireMediaIndex(msgs, true, .openai));
-}
-
-/// Return the newest media-bearing user message in the active turn.
-///
-/// Agent clients may append user-role context injections after the human's
-/// message. Looking only at the final user message therefore drops media from
-/// requests shaped like `[user(image), user(context)]`. The last assistant
-/// message is the durable turn boundary: media before it belongs to history
-/// and is deliberately not re-encoded by this request, while media after it
-/// is new input. Reconstructing historical multimodal placeholders is a
-/// separate, multi-message concern; this selector only identifies new media.
-const ActiveTurnMedia = struct {
-    message: *const chat_mod.Message,
-    /// Number of user messages rendered after `message`. This selects the
-    /// matching user-turn marker when media is followed by injected context.
-    user_markers_after: usize,
-    /// Tool-role messages after `message`, and the maximal consecutive runs
-    /// they form. ChatML templates wrap each tool-response RUN in its own
-    /// `<|im_start|>user`, so tool turns can add user markers the role count
-    /// above cannot see; `resolvedUserMarkersAfter` decides from the rendered
-    /// prompt which convention is in play.
-    tool_msgs_after: usize = 0,
-    tool_runs_after: usize = 0,
-    /// Whole-conversation totals the same resolver compares against.
-    total_users: usize = 0,
-    total_tool_msgs: usize = 0,
-    total_tool_runs: usize = 0,
 };
 
-fn activeTurnMediaMessage(msgs: []const chat_mod.Message, continue_final: bool) ?ActiveTurnMedia {
-    var i = msgs.len;
-    var user_markers_after: usize = 0;
-    var follows_tool_result = false;
-    while (i > 0) {
-        i -= 1;
-        const msg = &msgs[i];
-        if (std.mem.eql(u8, msg.role, "tool")) {
-            follows_tool_result = true;
-            continue;
-        }
-        if (std.mem.eql(u8, msg.role, "assistant")) {
-            // An explicit assistant-prefix continuation ends in an assistant
-            // message that is part of the current turn, not its boundary.
-            if (continue_final and i + 1 == msgs.len) continue;
-            // Tool results continue the user turn that caused the assistant's
-            // tool call. Cross only that typed boundary; an ordinary assistant
-            // answer still closes the turn. Repeated tool-call/result pairs
-            // work because the next result rearms this condition.
-            if (follows_tool_result and msg.tool_calls != null and msg.tool_calls.?.len > 0) {
-                follows_tool_result = false;
-                continue;
-            }
-            break;
-        }
-        if (!std.mem.eql(u8, msg.role, "user")) continue;
-        if ((msg.images != null and msg.images.?.len > 0) or
-            (msg.videos != null and msg.videos.?.len > 0) or
-            (msg.audio != null and msg.audio.?.len > 0))
-        {
-            var media = ActiveTurnMedia{ .message = msg, .user_markers_after = user_markers_after };
-            var prev_tool = false;
-            for (msgs, 0..) |*m, j| {
-                const is_tool = std.mem.eql(u8, m.role, "tool");
-                if (std.mem.eql(u8, m.role, "user")) media.total_users += 1;
-                if (is_tool) {
-                    media.total_tool_msgs += 1;
-                    if (!prev_tool) media.total_tool_runs += 1;
-                    if (j > i) {
-                        media.tool_msgs_after += 1;
-                        if (!prev_tool) media.tool_runs_after += 1;
-                    }
-                }
-                prev_tool = is_tool;
-            }
-            return media;
-        }
-        user_markers_after += 1;
-    }
-    return null;
-}
+const MediaOutcome = union(enum) { ready: PreparedMedia, refused: MediaFault };
 
-/// How many user-turn markers sit after the media message in the RENDERED
-/// prompt. The role count alone cannot answer that: ChatML templates wrap a
-/// tool-response run in its own `<|im_start|>user` (token-exact — the
-/// `<tool_response>` special token keeps the marker's trailing newline its
-/// own token), while Llama renders tool results under an ipython header. The
-/// prompt is the authority: its total marker count matches exactly one
-/// convention's prediction; an unrecognized total keeps the conservative
-/// role-only count.
-fn resolvedUserMarkersAfter(prompt_ids: []const u32, config: *const model_mod.ModelConfig, media: ActiveTurnMedia) usize {
-    if (media.tool_msgs_after == 0) return media.user_markers_after;
-    const marker = config.userTurnMarkerSlice();
-    if (marker.len == 0 or prompt_ids.len < marker.len) return media.user_markers_after;
-    var found: usize = 0;
-    var i: usize = 0;
-    while (i + marker.len <= prompt_ids.len) {
-        if (std.mem.eql(u32, prompt_ids[i .. i + marker.len], marker)) {
-            found += 1;
-            i += marker.len;
-        } else i += 1;
-    }
-    if (found == media.total_users + media.total_tool_runs)
-        return media.user_markers_after + media.tool_runs_after;
-    if (found == media.total_users + media.total_tool_msgs)
-        return media.user_markers_after + media.tool_msgs_after;
-    return media.user_markers_after;
-}
-
-test "activeTurnMediaMessage sees media before trailing user context" {
-    const images = [_]chat_mod.ImageData{.{
-        .pixels = &.{},
-        .width = 1,
-        .height = 1,
-    }};
-    const msgs = [_]chat_mod.Message{
-        .{ .role = "system", .content = "system" },
-        .{ .role = "user", .content = "human image prompt", .images = &images },
-        .{ .role = "user", .content = "<system-reminder>injected context</system-reminder>" },
-    };
-
-    const selected = activeTurnMediaMessage(&msgs, false) orelse return error.TestExpectedMedia;
-    try std.testing.expectEqualStrings("human image prompt", selected.message.content);
-    try std.testing.expectEqual(@as(usize, 1), selected.user_markers_after);
-}
-
-test "activeTurnMediaMessage does not reprocess media before the assistant boundary" {
-    const images = [_]chat_mod.ImageData{.{
-        .pixels = &.{},
-        .width = 1,
-        .height = 1,
-    }};
-    const msgs = [_]chat_mod.Message{
-        .{ .role = "user", .content = "historical image", .images = &images },
-        .{ .role = "assistant", .content = "historical answer" },
-        .{ .role = "user", .content = "text-only continuation" },
-        .{ .role = "user", .content = "<system-reminder>current context</system-reminder>" },
-    };
-
-    try std.testing.expect(activeTurnMediaMessage(&msgs, false) == null);
-}
-
-test "activeTurnMediaMessage includes media before an assistant prefix continuation" {
-    const images = [_]chat_mod.ImageData{.{
-        .pixels = &.{},
-        .width = 1,
-        .height = 1,
-    }};
-    const msgs = [_]chat_mod.Message{
-        .{ .role = "user", .content = "image prompt", .images = &images },
-        .{ .role = "assistant", .content = "partial answer" },
-    };
-
-    try std.testing.expect(activeTurnMediaMessage(&msgs, false) == null);
-    const selected = activeTurnMediaMessage(&msgs, true) orelse return error.TestExpectedMedia;
-    try std.testing.expectEqualStrings("image prompt", selected.message.content);
-}
-
-test "activeTurnMediaMessage crosses an assistant tool call and tool result" {
-    const images = [_]chat_mod.ImageData{.{
-        .pixels = &.{},
-        .width = 1,
-        .height = 1,
-    }};
-    const calls = [_]chat_mod.ToolCall{.{
-        .id = "call-1",
-        .name = "inspect",
-        .arguments = "{}",
-    }};
-    const msgs = [_]chat_mod.Message{
-        .{ .role = "user", .content = "image prompt", .images = &images },
-        .{ .role = "assistant", .content = "", .tool_calls = &calls },
-        .{ .role = "tool", .content = "result", .tool_call_id = "call-1" },
-    };
-
-    const selected = activeTurnMediaMessage(&msgs, false) orelse return error.TestExpectedMedia;
-    try std.testing.expectEqualStrings("image prompt", selected.message.content);
-
-    const ordinary = [_]chat_mod.Message{
-        .{ .role = "user", .content = "historical image", .images = &images },
-        .{ .role = "assistant", .content = "ordinary answer" },
-        .{ .role = "tool", .content = "malformed stray result" },
-    };
-    try std.testing.expect(activeTurnMediaMessage(&ordinary, false) == null);
-}
-
-test "activeTurnMediaMessage chooses the newest media-bearing user in the active turn" {
-    const old_images = [_]chat_mod.ImageData{.{
-        .pixels = &.{},
-        .width = 1,
-        .height = 1,
-    }};
-    const new_images = [_]chat_mod.ImageData{.{
-        .pixels = &.{},
-        .width = 2,
-        .height = 2,
-    }};
-    const msgs = [_]chat_mod.Message{
-        .{ .role = "user", .content = "historical image", .images = &old_images },
-        .{ .role = "assistant", .content = "historical answer" },
-        .{ .role = "user", .content = "new image", .images = &new_images },
-        .{ .role = "user", .content = "trailing injected context" },
-    };
-
-    const selected = activeTurnMediaMessage(&msgs, false) orelse return error.TestExpectedMedia;
-    try std.testing.expectEqualStrings("new image", selected.message.content);
-    try std.testing.expectEqual(@as(u32, 2), selected.message.images.?[0].width);
-}
-
-/// Collect images from messages, run vision encoder, set embeddings on transformer.
-/// Encode vision images from the active turn and return the resulting
-/// `[1, total_tokens, hidden]` array. Caller owns the returned array (free
-/// via `mlx_array_free` if not transferred to a scheduler slot). Returns
-/// `null` when the active turn has no media.
-///
-/// Phase A8: per-request ownership. Earlier versions wrote the result into
-/// `xfm.vision_embeddings` (a global field on Transformer), which raced
-/// under `--max-concurrent ≥ 2`: two concurrent vision requests would
-/// clobber each other's array. Returning the value lets each conn thread
-/// hold its own local — no global state involved.
-/// Prefix-cache key for a request's media: the pixel/PCM bytes hashed in
-/// order (never 0 when media is present).
-fn mediaKey(images: []const chat_mod.ImageData, videos: []const chat_mod.VideoData, audio: []const chat_mod.AudioData) u64 {
-    var h = std.hash.Wyhash.init(0x5ec0de);
-    for (images) |im| {
-        h.update(std.mem.asBytes(&im.width));
-        h.update(std.mem.asBytes(&im.height));
-        h.update(im.pixels);
-    }
-    for (videos) |vd| {
-        h.update(std.mem.asBytes(&vd.grid_t));
-        h.update(vd.pixels);
-    }
-    for (audio) |au| h.update(au.samples);
-    return h.final() | 1;
-}
-
-fn processVisionImages(
+/// Place every message's media at its template placeholder, refuse by name
+/// what cannot be served, then encode it on the inference thread and key it
+/// for the prefix cache. On `.ready`, `ids` holds the expanded prompt.
+fn prepareRequestMedia(
     allocator: std.mem.Allocator,
     lm: *LoadedModel,
-    vision_enc: *VisionEncoder,
-    active_media: ?ActiveTurnMedia,
-    out_n_vision: *usize,
-    out_n_video: *usize,
-    out_n_audio: *usize,
-    out_vision_key: *u64,
-) !?mlx.mlx_array {
-    out_n_vision.* = 0;
-    out_n_video.* = 0;
-    out_n_audio.* = 0;
-    out_vision_key.* = 0;
-    // Restrict selection to the suffix after the last assistant message so a
-    // text-only continuation does not re-encode historical media, while
-    // trailing user-role context injections cannot hide a new attachment.
-    const media_msg = (active_media orelse return null).message;
-    const images: []const chat_mod.ImageData = media_msg.images orelse &.{};
-    const videos: []const chat_mod.VideoData = media_msg.videos orelse &.{};
-    const audio: []const chat_mod.AudioData = media_msg.audio orelse &.{};
-    out_vision_key.* = mediaKey(images, videos, audio);
+    messages: []const chat_mod.Message,
+    ids: *[]u32,
+    ctx_limit: usize,
+) !MediaOutcome {
+    var flat = try flattenMedia(allocator, messages);
+    defer flat.deinit(allocator);
+    if (flat.images.len == 0 and flat.videos.len == 0 and !flat.has_audio) return .{ .ready = .{} };
+    if (mediaKindRefusal(messages, flat, lm.vision_encoder != null)) |fault| return .{ .refused = fault };
+    const config = lm.config.?;
 
-    log.info("Multimodal: processing {d} image(s), {d} video(s), {d} audio clip(s)\n", .{ images.len, videos.len, audio.len });
-
-    // Phase A4: route encoding to the scheduler's inference thread when
-    // available. Conn thread only decodes pixels/PCM (CPU); the mlx ops
-    // (array construction, encoder forward, concatenation) run on the
-    // inference thread so we don't disturb the JIT-compiled stream binding.
-    if (global_scheduler) |sch| {
-        var pix_list = std.ArrayList(scheduler_mod.VisionImagePixels).empty;
-        defer pix_list.deinit(allocator);
-        try pix_list.ensureTotalCapacity(allocator, images.len);
-        for (images) |img| {
-            pix_list.appendAssumeCapacity(.{
-                .pixels = img.pixels,
-                .width = @intCast(img.width),
-                .height = @intCast(img.height),
-                .grid_h = img.grid_h,
-                .grid_w = img.grid_w,
-            });
-        }
-        var vid_list = std.ArrayList(scheduler_mod.VisionVideoPixels).empty;
-        defer vid_list.deinit(allocator);
-        try vid_list.ensureTotalCapacity(allocator, videos.len);
-        for (videos) |vid| {
-            vid_list.appendAssumeCapacity(.{
-                .pixels = vid.pixels,
-                .grid_t = vid.grid_t,
-                .grid_h = vid.grid_h,
-                .grid_w = vid.grid_w,
-            });
-        }
-        var aud_list = std.ArrayList([]const u8).empty;
-        defer aud_list.deinit(allocator);
-        try aud_list.ensureTotalCapacity(allocator, audio.len);
-        for (audio) |a| aud_list.appendAssumeCapacity(a.samples);
-        var req = scheduler_mod.VisionEncodeRequest{
-            .model = lm,
-            .images = pix_list.items,
-            .videos = vid_list.items,
-            .audio = aud_list.items,
-            .allocator = allocator,
-        };
-        const arr = sch.encodeVision(&req) catch |err| {
-            if (req.error_name) |e| {
-                log.err("Vision encode (via scheduler) failed: {s}\n", .{e});
-                allocator.free(e);
-            }
-            return err;
-        };
-        out_n_vision.* = req.n_vision_tokens;
-        out_n_video.* = req.n_video_tokens;
-        out_n_audio.* = req.n_audio_tokens;
-        const ve_shape = mlx.getShape(arr);
-        if (ve_shape.len >= 3) {
-            log.info("  Multimodal: → [{d},{d},{d}] tokens ({d} vision + {d} video + {d} audio)\n", .{ ve_shape[0], ve_shape[1], ve_shape[2], req.n_vision_tokens, req.n_video_tokens, req.n_audio_tokens });
-        }
-        return arr;
+    const found = countMediaPlaceholders(ids.*, config);
+    if (found.images != flat.images.len or found.videos != flat.videos.len) {
+        return .{ .refused = MediaFault.init(false, "the rendered prompt holds {d} image and {d} video placeholders for {d} images and {d} videos (media in a system message, or placeholder text in the content)", .{ found.images, found.videos, flat.images.len, flat.videos.len }) };
     }
-
-    // Legacy path (offline / no scheduler): encode on this thread. Encode
-    // each image and concatenate embeddings along the token dimension. Each
-    // image produces [1, N, hidden], concatenated → [1, total_tokens, hidden].
-    var emb_parts = std.ArrayList(mlx.mlx_array).empty;
-    defer {
-        for (emb_parts.items) |e| _ = mlx.mlx_array_free(e);
-        emb_parts.deinit(allocator);
+    var placed = placeMedia(allocator, ids.*, config, flat.images, flat.videos) catch |err| switch (err) {
+        error.MediaLayoutUnsupported => return .{ .refused = MediaFault.init(false, "this model's vision tower cannot place images inside a conversation", .{}) },
+        else => return err,
+    };
+    defer placed.deinit(allocator);
+    if (placed.ids.len > ctx_limit) {
+        return .{ .refused = MediaFault.init(false, "prompt ({d} tokens, {d} of them from {d} images and {d} videos) exceeds the {d}-token context", .{ placed.ids.len, placed.rows, flat.images.len, flat.videos.len, ctx_limit }) };
     }
+    var active_mem: usize = 0;
+    _ = mlx.mlx_get_active_memory(&active_mem);
+    const ceiling = currentGpuMemoryCeiling(config, active_mem);
+    if (towerFitFault(config, flat.images, flat.videos, placed.rows, ceiling -| active_mem)) |fault| return .{ .refused = fault };
 
-    for (images) |img| {
-        var emb: mlx.mlx_array = undefined;
-        if (img.grid_h > 0) {
-            const n: usize = @as(usize, img.grid_h) * img.grid_w;
-            const feat: usize = (img.pixels.len / 4) / n;
-            const shape = [_]c_int{ @intCast(n), @intCast(feat) };
-            const pixel_arr = mlx.mlx_array_new_data(img.pixels.ptr, &shape, 2, .float32);
-            defer _ = mlx.mlx_array_free(pixel_arr);
-            emb = try vision_enc.forwardPatches(pixel_arr, img.grid_h, img.grid_w);
-        } else {
-            const h: c_int = @intCast(img.height);
-            const w: c_int = @intCast(img.width);
-            const shape = [_]c_int{ 1, 3, h, w };
-            const pixel_arr = mlx.mlx_array_new_data(img.pixels.ptr, &shape, 4, .float32);
-            defer _ = mlx.mlx_array_free(pixel_arr);
-            emb = try vision_enc.forward(pixel_arr);
-        }
-        const es = mlx.getShape(emb);
-        out_n_vision.* += @intCast(es[1]);
-        try emb_parts.append(allocator, emb);
+    const chain = try mediaChain(allocator, placed.items, flat.images, flat.videos);
+    var ready: PreparedMedia = .{ .chain = chain };
+    errdefer ready.deinit(allocator);
+
+    const order = try allocator.alloc(chat_mod.MediaPart.Kind, placed.items.len);
+    defer allocator.free(order);
+    for (placed.items, order) |p, *k| k.* = p.kind;
+    const pix = try allocator.alloc(scheduler_mod.VisionImagePixels, flat.images.len);
+    defer allocator.free(pix);
+    for (flat.images, pix) |img, *p| p.* = .{
+        .pixels = img.pixels,
+        .width = @intCast(img.width),
+        .height = @intCast(img.height),
+        .grid_h = img.grid_h,
+        .grid_w = img.grid_w,
+    };
+    const vids = try allocator.alloc(scheduler_mod.VisionVideoPixels, flat.videos.len);
+    defer allocator.free(vids);
+    for (flat.videos, vids) |vid, *v| v.* = .{ .pixels = vid.pixels, .grid_t = vid.grid_t, .grid_h = vid.grid_h, .grid_w = vid.grid_w };
+
+    log.info("Multimodal: processing {d} image(s), {d} video(s)\n", .{ flat.images.len, flat.videos.len });
+    var req = scheduler_mod.VisionEncodeRequest{
+        .model = lm,
+        .images = pix,
+        .videos = vids,
+        .order = order,
+        .allocator = allocator,
+    };
+    const arr = global_scheduler.?.encodeVision(&req) catch |err| {
+        const name = req.error_name orelse @errorName(err);
+        const fault = MediaFault.init(true, "vision encoding failed: {s}", .{name});
+        if (req.error_name) |e| allocator.free(e);
+        ready.deinit(allocator);
+        return .{ .refused = fault };
+    };
+    ready.embeddings = arr;
+    if (req.n_vision_tokens + req.n_video_tokens != placed.rows) {
+        const fault = MediaFault.init(true, "vision encoder produced {d} rows for {d} placeholder tokens", .{ req.n_vision_tokens + req.n_video_tokens, placed.rows });
+        ready.deinit(allocator);
+        return .{ .refused = fault };
     }
+    ready.mrope = computeQwenMrope(allocator, placed.ids, flat.images, flat.videos, config) catch MropeData{};
+    log.info("  Multimodal: {d} soft tokens placed in a {d}-token prompt\n", .{ placed.rows, placed.ids.len });
 
-    for (videos) |vid| {
-        const n: usize = @as(usize, vid.grid_t) * vid.grid_h * vid.grid_w;
-        const feat: usize = (vid.pixels.len / 4) / n;
-        const shape = [_]c_int{ @intCast(n), @intCast(feat) };
-        const pixel_arr = mlx.mlx_array_new_data(vid.pixels.ptr, &shape, 2, .float32);
-        defer _ = mlx.mlx_array_free(pixel_arr);
-        const emb = try vision_enc.forwardVideoPatches(pixel_arr, vid.grid_t, vid.grid_h, vid.grid_w);
-        const es = mlx.getShape(emb);
-        out_n_video.* += @intCast(es[1]);
-        try emb_parts.append(allocator, emb);
-    }
-
-    for (audio) |clip| {
-        const n_samples = clip.samples.len / 4;
-        if (n_samples == 0) continue;
-        const spt: usize = if (lm.config.?.audio_samples_per_token > 0) lm.config.?.audio_samples_per_token else 640;
-        const n_frames = (n_samples + spt - 1) / spt;
-        const padded = n_frames * spt;
-        const buf = try allocator.alloc(f32, padded);
-        @memset(buf, 0);
-        @memcpy(std.mem.sliceAsBytes(buf)[0..clip.samples.len], clip.samples);
-        const shape = [_]c_int{ 1, @intCast(n_frames), @intCast(spt) };
-        const frames_arr = mlx.mlx_array_new_data(buf.ptr, &shape, 3, .float32);
-        allocator.free(buf);
-        defer _ = mlx.mlx_array_free(frames_arr);
-        const emb = try vision_enc.forwardAudio(frames_arr);
-        out_n_audio.* += n_frames;
-        try emb_parts.append(allocator, emb);
-    }
-
-    if (emb_parts.items.len == 0) return null;
-    if (emb_parts.items.len == 1) {
-        // Single part — return directly. Detach so the defer-free skips it.
-        const out = emb_parts.items[0];
-        emb_parts.items[0] = mlx.mlx_array_new();
-        return out;
-    }
-
-    // Multiple parts (vision + audio, or multiple clips) — concat along tokens.
-    const cat_vec = mlx.mlx_vector_array_new_data(emb_parts.items.ptr, emb_parts.items.len);
-    defer _ = mlx.mlx_vector_array_free(cat_vec);
-    var combined = mlx.mlx_array_new();
-    try mlx.check(mlx.mlx_concatenate_axis(&combined, cat_vec, 1, vision_enc.s));
-    return combined;
+    allocator.free(ids.*);
+    ids.* = placed.ids;
+    placed.ids = placed.ids[0..0];
+    return .{ .ready = ready };
 }
 
-/// Insert BOI + N×image_token + EOI into the prompt before the last user turn's content.
-/// n_tokens: the expected image_seq_length (e.g. 280 from config).
-fn insertImageTokens(allocator: std.mem.Allocator, prompt_ids: []const u32, image_token_id: u32, n_tokens: usize, config: *const model_mod.ModelConfig) ![]u32 {
-    if (image_token_id == 0 or n_tokens == 0) return try allocator.dupe(u32, prompt_ids);
-
-    // Find the last USER turn and insert image tokens immediately after it.
-    // The marker IDs come from encoding an architecture-specific prefix
-    // (e.g. "<|turn>user\n") at server startup — see populateUserTurnMarker.
-    const marker = config.userTurnMarkerSlice();
-    var insert_pos: usize = 0;
-    var found_turn = false;
-    if (marker.len > 0 and prompt_ids.len >= marker.len) {
-        var i = prompt_ids.len - marker.len;
-        while (true) {
-            if (std.mem.eql(u32, prompt_ids[i .. i + marker.len], marker)) {
-                insert_pos = i + marker.len;
-                found_turn = true;
-                break;
-            }
-            if (i == 0) break;
-            i -= 1;
-        }
-    }
-    if (!found_turn) {
-        // Fallback: insert after BOS + system prompt, before last few tokens
-        log.warn("insertImageTokens: user turn marker not found (marker_len={d}, prompt_len={d}); using end-anchored fallback\n", .{ marker.len, prompt_ids.len });
-        insert_pos = if (prompt_ids.len > 5) prompt_ids.len - 5 else 0;
-    }
-
-    // Insert: BOI + n_tokens × image_token + EOI. Qwen3-VL wraps the image-pad run
-    // with <|vision_start|> / <|vision_end|> instead (get_rope_index keys on a
-    // vision_start immediately followed by image tokens).
-    const boi: u32 = if (config.qwen_vision) config.vision_start_token_id else config.boi_token_id;
-    const eoi: u32 = if (config.qwen_vision) config.vision_end_token_id else config.eoi_token_id;
-    const has_boi = boi > 0;
-    const has_eoi = eoi > 0;
-    const extra = n_tokens + (if (has_boi) @as(usize, 1) else 0) + (if (has_eoi) @as(usize, 1) else 0);
-    const new_len = prompt_ids.len + extra;
-    const result = try allocator.alloc(u32, new_len);
-
-    @memcpy(result[0..insert_pos], prompt_ids[0..insert_pos]);
-    var pos = insert_pos;
-    if (has_boi) {
-        result[pos] = boi;
-        pos += 1;
-    }
-    @memset(result[pos .. pos + n_tokens], image_token_id);
-    pos += n_tokens;
-    if (has_eoi) {
-        result[pos] = eoi;
-        pos += 1;
-    }
-    @memcpy(result[pos..], prompt_ids[insert_pos..]);
-
-    log.info("  Inserted {s}{d} image tokens{s} at position {d} (prompt: {d} -> {d} tokens)\n", .{
-        if (has_boi) "BOI + " else "", n_tokens, if (has_eoi) " + EOI" else "", insert_pos, prompt_ids.len, new_len,
-    });
-    return result;
-}
-
-/// Locate the byte offset just after the user-turn marker that owns the media.
-/// `markers_after=0` preserves the historical last-user behavior; injected
-/// user-role context increments it so media is placed beside its source turn.
-fn userTurnInsertPos(prompt_ids: []const u32, config: *const model_mod.ModelConfig, markers_after: usize) usize {
-    const marker = config.userTurnMarkerSlice();
-    if (marker.len > 0 and prompt_ids.len >= marker.len) {
-        var remaining = markers_after;
-        var i = prompt_ids.len - marker.len;
-        while (true) {
-            if (std.mem.eql(u32, prompt_ids[i .. i + marker.len], marker)) {
-                if (remaining == 0) return i + marker.len;
-                remaining -= 1;
-            }
-            if (i == 0) break;
-            i -= 1;
-        }
-    }
-    return if (prompt_ids.len > 5) prompt_ids.len - 5 else 0;
-}
-
-/// Insert an image block (BOI + n_image × image_token + EOI) followed by an
-/// audio block (BOA + n_audio × audio_token + EOA) at the last user turn. The
-/// block order MUST match the [vision ; audio] concatenation order of the
-/// soft-token embedding so the splice scatters each row into its slot.
-/// Gemma 4 12B unified routes both modalities through one splice channel.
 /// Qwen3-VL interleaved M-RoPE position-id table for a request. `pos` (owned) is
 /// the flat [3 × total] i32 table threaded to the slot; null for non-Qwen / no
 /// images. Pass-through bundle so sub-handlers thread one value, not three.
@@ -13002,25 +12774,23 @@ pub const MropeData = struct {
     delta: i32 = 0,
 };
 
-/// Compute the interleaved-M-RoPE table from the FINAL prompt_ids (after image-pad
-/// expansion) + the active media message's image grids. Returns an empty bundle when the
-/// model isn't Qwen-vision or there are no images. Caller owns `pos`.
-fn computeQwenMrope(allocator: std.mem.Allocator, prompt_ids: []const u32, media_msg: ?*const chat_mod.Message, config: *const model_mod.ModelConfig) !MropeData {
+/// Compute the interleaved-M-RoPE table from the FINAL prompt_ids (after pad
+/// expansion) + every image and video grid in prompt order. Returns an empty
+/// bundle when the model isn't Qwen-vision or there are no grids. Caller owns `pos`.
+fn computeQwenMrope(allocator: std.mem.Allocator, prompt_ids: []const u32, images: []const chat_mod.ImageData, videos: []const chat_mod.VideoData, config: *const model_mod.ModelConfig) !MropeData {
     if (!config.qwen_vision) return .{};
-    const msg = media_msg orelse return .{};
-    // Collect the active message's image AND video grids (full patch grid
-    // per block, in their own modality's document order — getRopeIndex
-    // interleaves the two lists by whichever marker occurs first in tokens).
+    // Each modality's grids in its own document order: getRopeIndex
+    // interleaves the two lists by whichever marker occurs first in tokens.
     var image_grids = std.ArrayList(mrope_mod.ImageGrid).empty;
     defer image_grids.deinit(allocator);
     var video_grids = std.ArrayList(mrope_mod.ImageGrid).empty;
     defer video_grids.deinit(allocator);
-    if (msg.images) |imgs| for (imgs) |im| {
+    for (images) |im| {
         if (im.grid_h > 0) try image_grids.append(allocator, .{ .t = 1, .h = im.grid_h, .w = im.grid_w });
-    };
-    if (msg.videos) |vids| for (vids) |vd| {
+    }
+    for (videos) |vd| {
         try video_grids.append(allocator, .{ .t = vd.grid_t, .h = vd.grid_h, .w = vd.grid_w });
-    };
+    }
     if (image_grids.items.len == 0 and video_grids.items.len == 0) return .{};
 
     var ri = mrope_mod.getRopeIndex(allocator, prompt_ids, image_grids.items, video_grids.items, config.image_token_id, config.video_token_id, config.vision_start_token_id, config.qv_merge) catch |err| {
@@ -13035,125 +12805,6 @@ fn computeQwenMrope(allocator: std.mem.Allocator, prompt_ids: []const u32, media
     @memcpy(flat[2 * total .. 3 * total], ri.pos[2]);
     log.info("  M-RoPE: {d} images, {d} videos, position ids over {d} tokens, decode delta {d}\n", .{ image_grids.items.len, video_grids.items.len, total, ri.delta });
     return .{ .pos = flat, .total = total, .delta = ri.delta };
-}
-
-/// LFM2-VL's image block is NOT a flat run of pads: each image opens with
-/// `<|image_start|>` and closes with `<|image_end|>`, and a TILED image labels
-/// every tile with `<|img_row_R_col_C|>` and its thumbnail with
-/// `<|img_thumbnail|>` before that piece's pads. The marker order has to match
-/// the order the encoder concatenated the pieces — both walk `images` — because
-/// the splice scatters embedding rows into pad slots positionally.
-///
-/// Returns null when the model isn't LFM2-VL or the turn carries no images, in
-/// which case the caller falls back to the flat BOI/pads/EOI run.
-fn lfm2ImageSegment(
-    allocator: std.mem.Allocator,
-    media_msg: ?*const chat_mod.Message,
-    config: *const model_mod.ModelConfig,
-) !?[]u32 {
-    if (!config.lfm2_vision or config.image_token_id == 0) return null;
-    const msg = media_msg orelse return null;
-    const images: []const chat_mod.ImageData = msg.images orelse &.{};
-    if (images.len == 0) return null;
-
-    var seg = std.ArrayList(u32).empty;
-    errdefer seg.deinit(allocator);
-    const merge = if (config.lv_downsample > 0) config.lv_downsample else 1;
-    var open = false;
-    for (images) |img| {
-        // A tiled source contributes several entries in a row; they share one
-        // start/end pair, so the block opens on the first piece and closes when
-        // the last piece of that source has been emitted.
-        if (!open) {
-            if (config.boi_token_id > 0) try seg.append(allocator, config.boi_token_id);
-            open = true;
-        }
-        if (img.tile_rows > 0) {
-            const tiles: u16 = img.tile_rows * img.tile_cols;
-            if (img.tile_index == tiles) {
-                if (config.lv_thumbnail_token_id > 0) try seg.append(allocator, config.lv_thumbnail_token_id);
-            } else if (config.lv_row_col_base_id > 0) {
-                // The `<|img_row_R_col_C|>` block is contiguous and row-major
-                // over the MAX tile grid, not this image's.
-                const row = img.tile_index / img.tile_cols;
-                const col = img.tile_index % img.tile_cols;
-                const max_cols = if (config.lv_max_tiles > 0) config.lv_max_tiles else 10;
-                try seg.append(allocator, config.lv_row_col_base_id + row * max_cols + col);
-            }
-        }
-        const pads = (img.grid_h / merge) * (img.grid_w / merge);
-        try seg.appendNTimes(allocator, config.image_token_id, pads);
-        // Untiled, or the thumbnail that ends a tiled source.
-        if (img.tile_rows == 0 or img.tile_index == img.tile_rows * img.tile_cols) {
-            if (config.eoi_token_id > 0) try seg.append(allocator, config.eoi_token_id);
-            open = false;
-        }
-    }
-    // A tiled source whose thumbnail was suppressed leaves the block open.
-    if (open and config.eoi_token_id > 0) try seg.append(allocator, config.eoi_token_id);
-    return try seg.toOwnedSlice(allocator);
-}
-
-fn insertMultimodalTokens(
-    allocator: std.mem.Allocator,
-    prompt_ids: []const u32,
-    image_token_id: u32,
-    n_image: usize,
-    video_token_id: u32,
-    n_video: usize,
-    audio_token_id: u32,
-    n_audio: usize,
-    config: *const model_mod.ModelConfig,
-    active_media: ?ActiveTurnMedia,
-) ![]u32 {
-    const want_image = image_token_id != 0 and n_image > 0;
-    const want_video = video_token_id != 0 and n_video > 0;
-    const want_audio = audio_token_id != 0 and n_audio > 0;
-    if (!want_image and !want_video and !want_audio) return try allocator.dupe(u32, prompt_ids);
-
-    const insert_pos = userTurnInsertPos(prompt_ids, config, if (active_media) |media| resolvedUserMarkersAfter(prompt_ids, config, media) else 0);
-
-    // Qwen3-VL wraps the image-pad run (and, identically, the video-pad run)
-    // with <|vision_start|>/<|vision_end|> (get_rope_index keys on vision_start
-    // immediately followed by an image OR video token); Gemma uses BOI/EOI.
-    const boi = if (config.qwen_vision) config.vision_start_token_id else config.boi_token_id;
-    const eoi = if (config.qwen_vision) config.vision_end_token_id else config.eoi_token_id;
-    const boa = config.boa_token_id;
-    const eoa = config.eoa_token_id;
-
-    const lfm2_seg: ?[]u32 = if (want_image) try lfm2ImageSegment(allocator, if (active_media) |media| media.message else null, config) else null;
-    defer if (lfm2_seg) |ls| allocator.free(ls);
-
-    var seg = std.ArrayList(u32).empty;
-    defer seg.deinit(allocator);
-    if (want_image) {
-        if (lfm2_seg) |ls| {
-            try seg.appendSlice(allocator, ls);
-        } else {
-            if (boi > 0) try seg.append(allocator, boi);
-            try seg.appendNTimes(allocator, image_token_id, n_image);
-            if (eoi > 0) try seg.append(allocator, eoi);
-        }
-    }
-    if (want_video) {
-        if (boi > 0) try seg.append(allocator, boi);
-        try seg.appendNTimes(allocator, video_token_id, n_video);
-        if (eoi > 0) try seg.append(allocator, eoi);
-    }
-    if (want_audio) {
-        if (boa > 0) try seg.append(allocator, boa);
-        try seg.appendNTimes(allocator, audio_token_id, n_audio);
-        if (eoa > 0) try seg.append(allocator, eoa);
-    }
-
-    const new_len = prompt_ids.len + seg.items.len;
-    const result = try allocator.alloc(u32, new_len);
-    @memcpy(result[0..insert_pos], prompt_ids[0..insert_pos]);
-    @memcpy(result[insert_pos .. insert_pos + seg.items.len], seg.items);
-    @memcpy(result[insert_pos + seg.items.len ..], prompt_ids[insert_pos..]);
-
-    log.info("  Inserted {d} image + {d} video + {d} audio soft tokens at position {d} (prompt: {d} -> {d} tokens)\n", .{ n_image, n_video, n_audio, insert_pos, prompt_ids.len, new_len });
-    return result;
 }
 
 /// Decode an `input_audio.data` payload into raw float32-LE PCM samples for the
@@ -13380,6 +13031,13 @@ const RequestMedia = struct {
     image_bag: MediaBag(chat_mod.ImageData) = .{},
     video_bag: MediaBag(chat_mod.VideoData) = .{},
     audio_bag: MediaBag(chat_mod.AudioData) = .{},
+    part_lists: std.ArrayList([]chat_mod.MediaPart) = .empty,
+    /// Images the body names anywhere, decoded or not.
+    n_images: usize = 0,
+    /// The first media part that did not decode.
+    fault: ?MediaFault = null,
+    /// Whether the loaded model encodes `input_audio`; otherwise the part is refused.
+    accepts_audio: bool = false,
 
     fn init(allocator: std.mem.Allocator) RequestMedia {
         return .{ .allocator = allocator };
@@ -13389,6 +13047,57 @@ const RequestMedia = struct {
         self.image_bag.deinit(self.allocator);
         self.video_bag.deinit(self.allocator);
         self.audio_bag.deinit(self.allocator);
+        for (self.part_lists.items) |l| self.allocator.free(l);
+        self.part_lists.deinit(self.allocator);
+    }
+
+    /// The body's media refusal, if any; too many images outranks a decode failure.
+    fn refusal(self: *const RequestMedia) ?MediaFault {
+        if (self.n_images > chat_mod.MAX_REQUEST_IMAGES) return imageCountFault(self.n_images);
+        return self.fault;
+    }
+
+    /// Decode `url` into image slot `slot`. Past the image limit or after a
+    /// fault nothing more decodes: the request is refused either way.
+    fn addImage(self: *RequestMedia, slot: usize, url: ?[]const u8, vp: chat_mod.VisionPreproc, pos: WirePos) bool {
+        self.n_images += 1;
+        if (self.n_images > chat_mod.MAX_REQUEST_IMAGES or self.fault != null) return false;
+        const u = url orelse {
+            self.fault = imageDecodeFault(pos, "the part carries no image URL or base64 data");
+            return false;
+        };
+        if (appendImageUrlContent(self.allocator, self.images(slot), u, vp)) return true;
+        self.fault = imageDecodeFault(pos, imageRejectReason(u));
+        return false;
+    }
+
+    fn addVideo(self: *RequestMedia, slot: usize, frame_urls: []const []const u8, vp: chat_mod.VisionPreproc, pos: WirePos) bool {
+        if (self.fault != null) return false;
+        if (appendVideoUrlContent(self.allocator, self.videos(slot), frame_urls, vp)) return true;
+        self.fault = MediaFault.init(false, "{s}[{d}]: video could not be decoded: its frames must be base64 image data URLs of one size", .{ pos.list, pos.index });
+        return false;
+    }
+
+    fn addAudio(self: *RequestMedia, slot: usize, data: ?[]const u8, pos: WirePos) void {
+        if (self.fault != null) return;
+        if (!self.accepts_audio) {
+            self.fault = MediaFault.init(false, "{s}[{d}]: input_audio is not supported by this model", .{ pos.list, pos.index });
+            return;
+        }
+        if (data) |d| if (parseAudioContent(self.allocator, d)) |aud| {
+            self.audio(slot).append(self.allocator, aud) catch self.allocator.free(aud.samples);
+            return;
+        };
+        self.fault = MediaFault.init(false, "{s}[{d}]: input_audio could not be decoded: data must be base64 float32 PCM", .{ pos.list, pos.index });
+    }
+
+    /// Take ownership of a message's placed parts; null when it placed none.
+    fn ownParts(self: *RequestMedia, list: *std.ArrayList(chat_mod.MediaPart)) !?[]const chat_mod.MediaPart {
+        if (list.items.len == 0) return null;
+        try self.part_lists.ensureUnusedCapacity(self.allocator, 1);
+        const owned = try list.toOwnedSlice(self.allocator);
+        self.part_lists.appendAssumeCapacity(owned);
+        return owned;
     }
 
     fn openImages(self: *RequestMedia) !usize {
@@ -13447,8 +13156,6 @@ pub fn appendImageUrlContent(
     }
     return list.items.len > before;
 }
-
-const IMAGE_DECODE_REJECT = "image could not be decoded: send a base64 data URL (data:image/jpeg|png|webp;base64,...) with a readable payload; remote URLs are not fetched";
 
 /// `Lfm2VlImageProcessor.resize_and_split`: a source inside the budget is one
 /// resized image; past it, the WHOLE image is resized onto a `cols`x`rows`
@@ -13834,16 +13541,19 @@ fn decodeVideoUrlContent(allocator: std.mem.Allocator, frame_urls: []const []con
 }
 
 /// Decode a `video_url` block's `frames` array into `list`, mirroring
-/// `appendImageUrlContent`'s append-or-drop shape.
+/// `appendImageUrlContent`'s append-or-report shape.
 pub fn appendVideoUrlContent(
     allocator: std.mem.Allocator,
     list: *std.ArrayList(chat_mod.VideoData),
     frame_urls: []const []const u8,
     vp: chat_mod.VisionPreproc,
-) void {
-    if (decodeVideoUrlContent(allocator, frame_urls, vp)) |vid| {
-        list.append(allocator, vid) catch allocator.free(vid.pixels);
-    }
+) bool {
+    const vid = decodeVideoUrlContent(allocator, frame_urls, vp) orelse return false;
+    list.append(allocator, vid) catch {
+        allocator.free(vid.pixels);
+        return false;
+    };
+    return true;
 }
 
 test "a request handler never owns its own media list — RequestMedia does" {
@@ -13876,7 +13586,7 @@ test "a request handler never owns its own media list — RequestMedia does" {
     if (std.mem.indexOf(u8, src, "const RequestMedia " ++ "= struct") == null) return error.OwnerMissing;
     var installs: usize = 0;
     var i: usize = 0;
-    const install = "RequestMedia" ++ ".init(allocator)";
+    const install = "WireMessages" ++ ".init(allocator)";
     while (std.mem.indexOfPos(u8, src, i, install)) |at| : (i = at + install.len) installs += 1;
     if (installs < 2) return error.AHandlerDoesNotInstallTheOwner;
 }
@@ -13920,6 +13630,229 @@ test "RequestMedia frees every decoded buffer it was handed" {
     try std.testing.expect(media.imagesSlice(empty) == null);
 
     media.deinit();
+}
+
+// 8x8 solid PNGs: red and blue.
+const test_png_red = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR42mP4z8CAFTEMLQkAKP8/wc53yE8AAAAASUVORK5CYII=";
+const test_png_blue = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR42mNgYPiPAw0pCQCpcD/B/MtF/AAAAABJRU5ErkJggg==";
+const test_qwen_vp: chat_mod.VisionPreproc = .{ .mode = .qwen, .patch = 16, .tps = 2, .merge = 2 };
+
+fn testWire(body: []const u8, vocab: WireVocab) !struct { parsed: std.json.Parsed(std.json.Value), wire: WireMessages } {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    errdefer parsed.deinit();
+    var wire = WireMessages.init(std.testing.allocator);
+    errdefer wire.deinit();
+    const items = parsed.value.object.get("messages").?.array.items;
+    switch (vocab) {
+        .openai => try readOpenAiMessages(&wire, items, test_qwen_vp),
+        .anthropic => try readAnthropicMessages(&wire, items, test_qwen_vp),
+    }
+    return .{ .parsed = parsed, .wire = wire };
+}
+
+test "readOpenAiMessages: every message's media decodes and sits at its content offset" {
+    // An agent turn: the human's screenshot two turns back, then a tool result
+    // carrying a new one. Both reach the prompt, each where it was sent.
+    var t = try testWire("{\"messages\":[" ++
+        "{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64," ++ test_png_red ++ "\"}},{\"type\":\"text\",\"text\":\"look\"}]}," ++
+        "{\"role\":\"assistant\",\"content\":\"seen\"}," ++
+        "{\"role\":\"user\",\"content\":\"take a screenshot\"}," ++
+        "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"screenshot\",\"arguments\":\"{}\"}}]}," ++
+        "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":[{\"type\":\"text\",\"text\":\"shot:\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64," ++ test_png_blue ++ "\"}}]}" ++
+        "]}", .openai);
+    defer t.parsed.deinit();
+    defer t.wire.deinit();
+    try std.testing.expect(t.wire.media.refusal() == null);
+    const msgs = t.wire.messages.items;
+    try std.testing.expectEqual(@as(usize, 5), msgs.len);
+    try std.testing.expectEqualStrings("look", msgs[0].content);
+    try std.testing.expectEqual(@as(usize, 1), msgs[0].images.?.len);
+    try std.testing.expectEqualSlices(chat_mod.MediaPart, &.{.{ .at = 0, .kind = .image }}, msgs[0].media_parts.?);
+    try std.testing.expectEqualStrings("tool", msgs[4].role);
+    try std.testing.expectEqualStrings("shot:", msgs[4].content);
+    try std.testing.expectEqual(@as(usize, 1), msgs[4].images.?.len);
+    try std.testing.expectEqualSlices(chat_mod.MediaPart, &.{.{ .at = 5, .kind = .image }}, msgs[4].media_parts.?);
+    try std.testing.expect(!std.mem.eql(u8, msgs[0].images.?[0].pixels, msgs[4].images.?[0].pixels));
+
+    var flat = try flattenMedia(std.testing.allocator, msgs);
+    defer flat.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), flat.images.len);
+    try std.testing.expectEqual(msgs[0].images.?[0].pixels.ptr, flat.images[0].pixels.ptr);
+}
+
+test "readAnthropicMessages: a tool_result image is the tool message's placed media" {
+    var t = try testWire("{\"messages\":[" ++
+        "{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++ test_png_red ++ "\"}},{\"type\":\"text\",\"text\":\"open it\"}]}," ++
+        "{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"screenshot\",\"input\":{}}]}," ++
+        "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":[{\"type\":\"text\",\"text\":\"here\"},{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++ test_png_blue ++ "\"}}]},{\"type\":\"text\",\"text\":\"describe it\"}]}" ++
+        "]}", .anthropic);
+    defer t.parsed.deinit();
+    defer t.wire.deinit();
+    try std.testing.expect(t.wire.media.refusal() == null);
+    const msgs = t.wire.messages.items;
+    try std.testing.expectEqual(@as(usize, 4), msgs.len);
+    try std.testing.expectEqual(@as(usize, 1), msgs[0].images.?.len);
+    try std.testing.expectEqualStrings("tool", msgs[2].role);
+    try std.testing.expectEqualStrings("t1", msgs[2].tool_call_id.?);
+    try std.testing.expectEqualStrings("here", msgs[2].content);
+    try std.testing.expectEqual(@as(usize, 1), msgs[2].images.?.len);
+    try std.testing.expectEqualSlices(chat_mod.MediaPart, &.{.{ .at = 4, .kind = .image }}, msgs[2].media_parts.?);
+    try std.testing.expectEqualStrings("user", msgs[3].role);
+    try std.testing.expectEqualStrings("describe it", msgs[3].content);
+    try std.testing.expect(msgs[3].images == null);
+}
+
+test "an undecodable image is refused naming its message and the reason" {
+    const Case = struct { url: []const u8, reason: []const u8 };
+    const cases = [_]Case{
+        .{ .url = "https://example.com/shot.png", .reason = "remote URLs are not fetched" },
+        .{ .url = "data:image/png;base64,@@@@", .reason = "base64 payload is malformed" },
+        .{ .url = "data:image/png;base64,AAAA", .reason = "not a readable JPEG, PNG or WebP" },
+    };
+    for (cases) |c| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}},{{\"role\":\"assistant\",\"content\":\"ok\"}},{{\"role\":\"user\",\"content\":[{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"{s}\"}}}}]}}]}}", .{c.url});
+        defer std.testing.allocator.free(body);
+        var t = try testWire(body, .openai);
+        defer t.parsed.deinit();
+        defer t.wire.deinit();
+        const fault = t.wire.media.refusal() orelse return error.TestExpectedRefusal;
+        try std.testing.expect(!fault.server_error);
+        try std.testing.expect(std.mem.startsWith(u8, fault.text(), "messages[2]: image could not be decoded"));
+        try std.testing.expect(std.mem.indexOf(u8, fault.text(), c.reason) != null);
+    }
+    // An Anthropic image block with no data is refused too, not dropped.
+    var t = try testWire("{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"\"}}]}]}", .anthropic);
+    defer t.parsed.deinit();
+    defer t.wire.deinit();
+    try std.testing.expect(std.mem.startsWith(u8, t.wire.media.refusal().?.text(), "messages[0]: image could not be decoded"));
+}
+
+test "a body past the image limit is refused with both counts" {
+    var body = std.ArrayList(u8).empty;
+    defer body.deinit(std.testing.allocator);
+    try body.appendSlice(std.testing.allocator, "{\"messages\":[{\"role\":\"user\",\"content\":[");
+    for (0..chat_mod.MAX_REQUEST_IMAGES + 1) |i| {
+        if (i > 0) try body.append(std.testing.allocator, ',');
+        try body.appendSlice(std.testing.allocator, "{\"type\":\"image_url\",\"image_url\":{\"url\":\"http://x/y.png\"}}");
+    }
+    try body.appendSlice(std.testing.allocator, "]}]}");
+    var t = try testWire(body.items, .openai);
+    defer t.parsed.deinit();
+    defer t.wire.deinit();
+    var want_buf: [96]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "the request carries {d} images; at most {d} are accepted", .{ chat_mod.MAX_REQUEST_IMAGES + 1, chat_mod.MAX_REQUEST_IMAGES });
+    try std.testing.expectEqualStrings(want, t.wire.media.refusal().?.text());
+}
+
+test "an input_audio part sent to a vision-only model is refused by name" {
+    // In the walk, where the part is named...
+    var t = try testWire("{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"listen\"},{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"AAAAAA==\",\"format\":\"wav\"}}]}]}", .openai);
+    defer t.parsed.deinit();
+    defer t.wire.deinit();
+    try std.testing.expectEqualStrings("messages[1]: input_audio is not supported by this model", t.wire.media.refusal().?.text());
+    // ...and at placement, for decoded audio a vision tower cannot encode.
+    const audio = [_]chat_mod.AudioData{.{ .samples = "\x00\x00\x00\x00" }};
+    const msgs = [_]chat_mod.Message{.{ .role = "user", .content = "listen", .audio = &audio }};
+    var flat = try flattenMedia(std.testing.allocator, &msgs);
+    defer flat.deinit(std.testing.allocator);
+    const fault = mediaKindRefusal(&msgs, flat, true) orelse return error.TestExpectedRefusal;
+    try std.testing.expect(std.mem.startsWith(u8, fault.text(), "input_audio is not supported by this model"));
+    try std.testing.expect(std.mem.indexOf(u8, mediaKindRefusal(&msgs, flat, false).?.text(), "audio") != null);
+}
+
+test "towerFitFault refuses an encode whose scratch does not fit, naming both sizes" {
+    var config = model_mod.ModelConfig{};
+    config.qv_heads = 16;
+    config.qv_hidden = 1152;
+    config.qv_intermediate = 4304;
+    config.qv_out_hidden = 2560;
+    // A 1920x1080 screenshot is ~8100 patches: 3 f32 score sheets of 16 x 8100^2.
+    const shot = [_]chat_mod.ImageData{ testGridImage(90, 90, ""), testGridImage(8, 8, "") };
+    const need = visionScratchBytes(&config, 8100);
+    try std.testing.expect(need > 12 * (1 << 30));
+    const fault = towerFitFault(&config, &shot, &.{}, 2041, need / 2) orelse return error.TestExpectedRefusal;
+    try std.testing.expect(std.mem.indexOf(u8, fault.text(), "8100 patches") != null);
+    try std.testing.expect(!fault.server_error);
+    try std.testing.expect(towerFitFault(&config, &shot, &.{}, 2041, need * 2) == null);
+    // A tower this check does not model is not refused by it.
+    config.qv_heads = 0;
+    try std.testing.expect(towerFitFault(&config, &shot, &.{}, 2041, 0) == null);
+}
+
+test "tokenize cache keyFor: a media part's position keys the render, its pixels do not" {
+    // The template renders a placeholder per part; the pixels never reach
+    // the rendered text, so two screenshots at the same spot share a prompt.
+    const a = [_]chat_mod.ImageData{.{ .pixels = "a", .width = 8, .height = 8 }};
+    const b = [_]chat_mod.ImageData{.{ .pixels = "b", .width = 8, .height = 8 }};
+    const lead = [_]chat_mod.MediaPart{.{ .at = 0, .kind = .image }};
+    const tail = [_]chat_mod.MediaPart{.{ .at = 15, .kind = .image }};
+    const with_a = [_]chat_mod.Message{.{ .role = "user", .content = "what's in this?", .images = &a, .media_parts = &lead }};
+    const with_b = [_]chat_mod.Message{.{ .role = "user", .content = "what's in this?", .images = &b, .media_parts = &lead }};
+    const moved = [_]chat_mod.Message{.{ .role = "user", .content = "what's in this?", .images = &a, .media_parts = &tail }};
+    const text = [_]chat_mod.Message{.{ .role = "user", .content = "what's in this?" }};
+    const k_a = tokenize_cache_mod.TokenizeCache.keyFor(&with_a, null, null, false, null, false).?;
+    try std.testing.expectEqual(k_a, tokenize_cache_mod.TokenizeCache.keyFor(&with_b, null, null, false, null, false).?);
+    try std.testing.expect(k_a != tokenize_cache_mod.TokenizeCache.keyFor(&moved, null, null, false, null, false).?);
+    try std.testing.expect(k_a != tokenize_cache_mod.TokenizeCache.keyFor(&text, null, null, false, null, false).?);
+}
+
+fn testGridImage(grid_h: u32, grid_w: u32, pixels: []const u8) chat_mod.ImageData {
+    return .{ .pixels = pixels, .width = grid_w * 16, .height = grid_h * 16, .grid_h = grid_h, .grid_w = grid_w };
+}
+
+test "placeMedia expands each placeholder to its block's rows, in prompt order" {
+    var config = model_mod.ModelConfig{};
+    config.qwen_vision = true;
+    config.qv_merge = 2;
+    config.image_token_id = 9;
+    config.video_token_id = 8;
+    // <vs> image <ve> text <vs> video <ve> text <vs> image <ve>
+    const ids = [_]u32{ 1, 7, 9, 6, 2, 7, 8, 6, 3, 7, 9, 6 };
+    const images = [_]chat_mod.ImageData{ testGridImage(4, 4, "a"), testGridImage(2, 6, "b") };
+    const videos = [_]chat_mod.VideoData{.{ .pixels = "v", .grid_t = 2, .grid_h = 2, .grid_w = 2 }};
+    const found = countMediaPlaceholders(&ids, &config);
+    try std.testing.expectEqual(@as(usize, 2), found.images);
+    try std.testing.expectEqual(@as(usize, 1), found.videos);
+    var placed = try placeMedia(std.testing.allocator, &ids, &config, &images, &videos);
+    defer placed.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 7, 9, 9, 9, 9, 6, 2, 7, 8, 8, 6, 3, 7, 9, 9, 9, 6 }, placed.ids);
+    try std.testing.expectEqual(@as(usize, 9), placed.rows);
+    try std.testing.expectEqualSlices(PlacedMedia, &.{
+        .{ .kind = .image, .start = 2, .rows = 4 },
+        .{ .kind = .video, .start = 9, .rows = 2 },
+        .{ .kind = .image, .start = 14, .rows = 3 },
+    }, placed.items);
+}
+
+test "mediaChain keys every block by its pixels, its position and the blocks before it" {
+    const a = testGridImage(2, 2, "pixels-a");
+    const b = testGridImage(2, 2, "pixels-b");
+    const chainOf = struct {
+        fn f(placed: []const PlacedMedia, images: []const chat_mod.ImageData) ![]prefix_cache_mod.MediaSpan {
+            return mediaChain(std.testing.allocator, placed, images, &.{});
+        }
+    }.f;
+    const one = try chainOf(&.{.{ .kind = .image, .start = 3, .rows = 1 }}, &.{a});
+    defer std.testing.allocator.free(one);
+    const two = try chainOf(&.{ .{ .kind = .image, .start = 3, .rows = 1 }, .{ .kind = .image, .start = 10, .rows = 1 } }, &.{ a, b });
+    defer std.testing.allocator.free(two);
+    const moved = try chainOf(&.{.{ .kind = .image, .start = 4, .rows = 1 }}, &.{a});
+    defer std.testing.allocator.free(moved);
+    const other = try chainOf(&.{.{ .kind = .image, .start = 3, .rows = 1 }}, &.{b});
+    defer std.testing.allocator.free(other);
+    const swapped = try chainOf(&.{ .{ .kind = .image, .start = 3, .rows = 1 }, .{ .kind = .image, .start = 10, .rows = 1 } }, &.{ b, a });
+    defer std.testing.allocator.free(swapped);
+
+    // Appending a block keeps the earlier keys: the prefix cache matches on them.
+    try std.testing.expectEqual(one[0], two[0]);
+    try std.testing.expectEqual(@as(usize, 10), two[1].start);
+    try std.testing.expect(two[1].key != one[0].key);
+    try std.testing.expect(moved[0].key != one[0].key);
+    try std.testing.expect(other[0].key != one[0].key);
+    try std.testing.expect(swapped[1].key != two[1].key);
+    for ([_][]const prefix_cache_mod.MediaSpan{ one, two, moved, other, swapped }) |chain| {
+        for (chain) |span| try std.testing.expect(span.key != 0);
+    }
 }
 
 // ── Anthropic Messages API ──
@@ -14160,32 +14093,9 @@ fn handleAnthropicMessages(
         return;
     }
 
-    var messages = std.ArrayList(chat_mod.Message).empty;
-    var image_decode_failed = false;
-    defer messages.deinit(allocator);
-
-    // Decoded image buffers for every message in this request. `Message`
-    // borrows them; this is the only thing that frees them.
-    var media = RequestMedia.init(allocator);
-    defer media.deinit();
-
-    // Track allocations for serialized tool arguments (need to outlive generation)
-    var arg_allocs = std.ArrayList([]const u8).empty;
-    defer {
-        for (arg_allocs.items) |a| allocator.free(a);
-        arg_allocs.deinit(allocator);
-    }
-    var tool_call_lists = std.ArrayList([]const chat_mod.ToolCall).empty;
-    defer {
-        for (tool_call_lists.items) |tcs| allocator.free(tcs);
-        tool_call_lists.deinit(allocator);
-    }
-    // Track allocated content strings (concatenated text)
-    var content_allocs = std.ArrayList([]const u8).empty;
-    defer {
-        for (content_allocs.items) |s| allocator.free(s);
-        content_allocs.deinit(allocator);
-    }
+    var wire = WireMessages.init(allocator);
+    defer wire.deinit();
+    const messages = &wire.messages;
 
     // System prompt (Anthropic puts it at top level). Array form JOINS every
     // text block — Claude Code sends 2+ (identity + the instructions block),
@@ -14195,7 +14105,7 @@ fn handleAnthropicMessages(
             .string => |s| s,
             .array => |arr| blk: {
                 const joined = try joinedTextParts(allocator, arr.items);
-                if (joined.owned) try content_allocs.append(allocator, joined.text);
+                if (joined.owned) try wire.texts.append(allocator, joined.text);
                 break :blk joined.text;
             },
             else => "",
@@ -14205,203 +14115,13 @@ fn handleAnthropicMessages(
         }
     }
 
-    // Anthropic carries tool results inside user content blocks, but the same
-    // active-turn rule applies: inspect those blocks without decoding their
-    // media, then materialize only the selected raw message below.
-    const wire_continue_final = wireContinuationRequested(messages_val.array.items, .anthropic);
-    const active_wire_media = activeWireMediaIndex(messages_val.array.items, wire_continue_final, .anthropic);
+    try readAnthropicMessages(&wire, messages_val.array.items, visionPreprocFromConfig(config));
 
-    // Convert Anthropic messages to internal format
-    for (messages_val.array.items, 0..) |msg_val, raw_msg_index| {
-        if (msg_val != .object) continue;
-        const msg_obj = msg_val.object;
-        const role_val = msg_obj.get("role") orelse continue;
-        if (role_val != .string) continue;
-        const role = role_val.string;
-        const content_val = msg_obj.get("content");
-        const decode_this_message = active_wire_media != null and active_wire_media.? == raw_msg_index;
+    if (try chat_mod.foldSystemMessages(allocator, messages)) |joined| try wire.texts.append(allocator, joined);
 
-        if (std.mem.eql(u8, role, "user")) {
-            if (content_val) |cv| switch (cv) {
-                .string => |s| {
-                    try messages.append(allocator, .{ .role = "user", .content = s, .tool_calls = null, .tool_call_id = null });
-                },
-                .array => |arr| {
-                    const wire_presence = wireMediaPresence(msg_val, .anthropic);
-                    // Process tool_result blocks first, then text+image blocks.
-                    for (arr.items) |block| {
-                        if (block != .object) continue;
-                        const btype = if (block.object.get("type")) |t| (if (t == .string) t.string else "") else "";
-                        if (!std.mem.eql(u8, btype, "tool_result")) continue;
-
-                        const tool_use_id = if (block.object.get("tool_use_id")) |v| (if (v == .string) v.string else "") else "";
-                        var result_text: []const u8 = "";
-                        if (block.object.get("content")) |rc| switch (rc) {
-                            .string => |s| result_text = s,
-                            .array => |result_arr| {
-                                const joined = try joinedTextParts(allocator, result_arr.items);
-                                if (joined.owned) try content_allocs.append(allocator, joined.text);
-                                result_text = joined.text;
-                            },
-                            else => {},
-                        };
-                        try messages.append(allocator, .{ .role = "tool", .content = result_text, .tool_calls = null, .tool_call_id = tool_use_id });
-                    }
-
-                    // Collect text + image blocks into a single user message so
-                    // the vision encoder sees them attached to the right turn.
-                    var msg_text = std.ArrayList(u8).empty;
-                    defer msg_text.deinit(allocator);
-                    const img_slot = try media.openImages();
-                    for (arr.items) |block| {
-                        if (block != .object) continue;
-                        const btype = if (block.object.get("type")) |t| (if (t == .string) t.string else "") else "";
-                        if (std.mem.eql(u8, btype, "text")) {
-                            const text = if (block.object.get("text")) |t| (if (t == .string) t.string else "") else "";
-                            if (text.len > 0) {
-                                if (msg_text.items.len > 0) try msg_text.append(allocator, '\n');
-                                try msg_text.appendSlice(allocator, text);
-                            }
-                        } else if (std.mem.eql(u8, btype, "image")) {
-                            if (!decode_this_message) continue;
-                            // Anthropic image block: source = {type:"base64", media_type, data}
-                            //                    or = {type:"url", url}
-                            const src_val = block.object.get("source") orelse continue;
-                            if (src_val != .object) continue;
-                            const stype = if (src_val.object.get("type")) |t| (if (t == .string) t.string else "") else "";
-                            const data_url = blk: {
-                                if (std.mem.eql(u8, stype, "base64")) {
-                                    const media_type = if (src_val.object.get("media_type")) |v| (if (v == .string) v.string else "image/png") else "image/png";
-                                    const data = if (src_val.object.get("data")) |v| (if (v == .string) v.string else "") else "";
-                                    if (data.len == 0) break :blk @as(?[]const u8, null);
-                                    break :blk @as(?[]const u8, try std.fmt.allocPrint(allocator, "data:{s};base64,{s}", .{ media_type, data }));
-                                } else if (std.mem.eql(u8, stype, "url")) {
-                                    const url = if (src_val.object.get("url")) |v| (if (v == .string) v.string else "") else "";
-                                    if (url.len == 0) break :blk @as(?[]const u8, null);
-                                    // Pass through as-is (parseImageUrlContent handles data URLs).
-                                    break :blk @as(?[]const u8, try allocator.dupe(u8, url));
-                                }
-                                break :blk @as(?[]const u8, null);
-                            };
-                            if (data_url) |du| {
-                                defer allocator.free(du);
-                                if (!appendImageUrlContent(allocator, media.images(img_slot), du, visionPreprocFromConfig(config))) image_decode_failed = true;
-                            }
-                        }
-                    }
-                    // Preserve a historical image-only user turn even though
-                    // its pixels were deliberately not materialized. It still
-                    // contributes the same empty user-role template boundary
-                    // as before this optimization.
-                    if (msg_text.items.len > 0 or media.images(img_slot).items.len > 0 or wire_presence.images) {
-                        const owned_text = if (msg_text.items.len > 0) blk: {
-                            const s = try allocator.dupe(u8, msg_text.items);
-                            try content_allocs.append(allocator, s);
-                            break :blk s;
-                        } else "";
-                        try messages.append(allocator, .{
-                            .role = "user",
-                            .content = owned_text,
-                            .tool_calls = null,
-                            .tool_call_id = null,
-                            .images = media.imagesSlice(img_slot),
-                        });
-                    }
-                },
-                else => {},
-            };
-        } else if (std.mem.eql(u8, role, "assistant")) {
-            if (content_val) |cv| switch (cv) {
-                .string => |s| {
-                    try messages.append(allocator, .{ .role = "assistant", .content = s, .tool_calls = null, .tool_call_id = null });
-                },
-                .array => |arr| {
-                    // Extract text, tool_use and thinking blocks
-                    var text_content = std.ArrayList(u8).empty;
-                    defer text_content.deinit(allocator);
-                    var think_content = std.ArrayList(u8).empty;
-                    defer think_content.deinit(allocator);
-                    var tcs = std.ArrayList(chat_mod.ToolCall).empty;
-
-                    for (arr.items) |block| {
-                        if (block != .object) continue;
-                        const btype = if (block.object.get("type")) |t| (if (t == .string) t.string else "") else "";
-
-                        if (std.mem.eql(u8, btype, "text")) {
-                            const text = if (block.object.get("text")) |t| (if (t == .string) t.string else "") else "";
-                            try text_content.appendSlice(allocator, text);
-                        } else if (std.mem.eql(u8, btype, "tool_use")) {
-                            const tc_id = if (block.object.get("id")) |v| (if (v == .string) v.string else "") else "";
-                            const tc_name = if (block.object.get("name")) |v| (if (v == .string) v.string else "") else "";
-                            // Serialize input object to JSON string
-                            var args_buf = std.ArrayList(u8).empty;
-                            if (block.object.get("input")) |input_val| {
-                                try serializeJsonValue(allocator, &args_buf, input_val);
-                            } else {
-                                try args_buf.appendSlice(allocator, "{}");
-                            }
-                            const args_str = try args_buf.toOwnedSlice(allocator);
-                            try arg_allocs.append(allocator, args_str);
-                            try tcs.append(allocator, .{ .id = tc_id, .name = tc_name, .arguments = args_str });
-                        } else if (std.mem.eql(u8, btype, "thinking")) {
-                            // History reasoning → Message.reasoning_content, same
-                            // round-trip as chat completions' reasoning_content:
-                            // templates that persist reasoning across turns
-                            // (laguna) starve into nothink without it.
-                            // "redacted_thinking" stays skipped (opaque payload).
-                            const t = if (block.object.get("thinking")) |v| (if (v == .string) v.string else "") else "";
-                            if (t.len > 0) {
-                                if (think_content.items.len > 0) try think_content.append(allocator, '\n');
-                                try think_content.appendSlice(allocator, t);
-                            }
-                        }
-                    }
-
-                    var msg_tool_calls: ?[]const chat_mod.ToolCall = null;
-                    if (tcs.items.len > 0) {
-                        const owned = try tcs.toOwnedSlice(allocator);
-                        try tool_call_lists.append(allocator, owned);
-                        msg_tool_calls = owned;
-                    } else {
-                        tcs.deinit(allocator);
-                    }
-
-                    const content: []const u8 = if (text_content.items.len > 0) blk: {
-                        const duped = try allocator.dupe(u8, text_content.items);
-                        try content_allocs.append(allocator, duped);
-                        break :blk duped;
-                    } else "";
-                    const msg_reasoning: ?[]const u8 = if (think_content.items.len > 0) blk: {
-                        const duped = try allocator.dupe(u8, think_content.items);
-                        try content_allocs.append(allocator, duped);
-                        break :blk duped;
-                    } else null;
-                    try messages.append(allocator, .{ .role = "assistant", .content = content, .tool_calls = msg_tool_calls, .tool_call_id = null, .reasoning_content = msg_reasoning });
-                },
-                else => {},
-            };
-        } else if (std.mem.eql(u8, role, "system")) {
-            // Claude Code puts SessionStart hook output here; dropping it is silent context loss.
-            const sys_text: []const u8 = if (content_val) |cv| switch (cv) {
-                .string => |s| s,
-                .array => |arr| blk: {
-                    const joined = try joinedTextParts(allocator, arr.items);
-                    if (joined.owned) try content_allocs.append(allocator, joined.text);
-                    break :blk joined.text;
-                },
-                else => "",
-            } else "";
-            if (sys_text.len > 0) {
-                try messages.append(allocator, .{ .role = "system", .content = sys_text, .tool_calls = null, .tool_call_id = null });
-            }
-        }
-    }
-
-    if (try chat_mod.foldSystemMessages(allocator, &messages)) |joined| try content_allocs.append(allocator, joined);
-
-    if (image_decode_failed) {
-        log.warn("POST /v1/messages -> 400 (undecodable image)\n", .{});
-        try sendAnthropicError(allocator, stream, "invalid_request_error", IMAGE_DECODE_REJECT, 400);
+    if (wire.media.refusal()) |fault| {
+        log.warn("POST /v1/messages -> 400 ({s})\n", .{fault.text()});
+        try sendAnthropicError(allocator, stream, if (fault.server_error) "api_error" else "invalid_request_error", fault.text(), fault.code());
         return;
     }
     if (messages.items.len == 0) {
@@ -14576,11 +14296,11 @@ fn handleAnthropicMessages(
         }
         if (messages.items.len > 0 and std.mem.eql(u8, messages.items[0].role, "system")) {
             const combined = try std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ messages.items[0].content, schema_instruction.items });
-            try content_allocs.append(allocator, combined);
+            try wire.texts.append(allocator, combined);
             messages.items[0].content = combined;
         } else {
             const instruction = try allocator.dupe(u8, schema_instruction.items);
-            try content_allocs.append(allocator, instruction);
+            try wire.texts.append(allocator, instruction);
             try messages.insert(allocator, 0, .{ .role = "system", .content = instruction, .tool_calls = null, .tool_call_id = null });
         }
     }
@@ -14607,7 +14327,6 @@ fn handleAnthropicMessages(
     // continuation, so refusing its request would take away an answer this
     // endpoint has always given.
     const continue_final = chat_mod.continuationRequested(messages.items);
-    const active_media = activeTurnMediaMessage(messages.items, continue_final);
     var tokenize_sw = Stopwatch.init(stream.io);
     // The `thinking` budget object carries no effort string, but
     // `output_config.effort` does — templates that read the word (dsv4,
@@ -14656,30 +14375,17 @@ fn handleAnthropicMessages(
     // Vision encoder: encode any images on the last user message and splice
     // image tokens into the prompt at the model's configured image_token_id.
     // Phase A8: per-request ownership.
-    var local_ve: ?mlx.mlx_array = null;
-    var vis_key: u64 = 0;
     const cache_key = requestCacheKey(root);
-    defer {
-        if (local_ve) |arr| _ = mlx.mlx_array_free(arr);
-    }
-    if (lm.vision_encoder) |ve| {
-        var n_vis: usize = 0;
-        var n_vid: usize = 0;
-        var n_aud: usize = 0;
-        local_ve = processVisionImages(allocator, lm, ve, active_media, &n_vis, &n_vid, &n_aud, &vis_key) catch |err| blk: {
-            log.warn("Vision encoding failed: {}\n", .{err});
-            break :blk null;
-        };
-        if (local_ve != null) {
-            const new_ids = try insertMultimodalTokens(allocator, prompt_ids_raw, config.image_token_id, n_vis, config.video_token_id, n_vid, config.audio_token_id, n_aud, config, active_media);
+    var req_media: PreparedMedia = .{};
+    defer req_media.deinit(allocator);
+    switch (try prepareRequestMedia(allocator, lm, messages.items, &prompt_ids_raw, getEffectiveContextLength(config))) {
+        .ready => |r| req_media = r,
+        .refused => |fault| {
             allocator.free(prompt_ids_raw);
-            prompt_ids_raw = new_ids;
-        }
-    } else if (mediaRejectReason(messages.items)) |reason| {
-        allocator.free(prompt_ids_raw);
-        log.warn("POST /v1/messages -> 400 ({s})\n", .{reason});
-        try sendAnthropicError(allocator, stream, "invalid_request_error", reason, 400);
-        return;
+            log.warn("POST /v1/messages -> {d} ({s})\n", .{ fault.code(), fault.text() });
+            try sendAnthropicError(allocator, stream, if (fault.server_error) "api_error" else "invalid_request_error", fault.text(), fault.code());
+            return;
+        },
     }
     const prompt_ids = prompt_ids_raw;
     defer allocator.free(prompt_ids);
@@ -14722,7 +14428,7 @@ fn handleAnthropicMessages(
     const effective_max_tokens = clampMaxTokens(max_tokens, prompt_ids.len, effective_ctx);
 
     // Check if attention computation would exceed GPU memory.
-    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, true, kv_quant_override, generate_mod.visionPrefillUnchunked(local_ve != null), enable_mtp)) return;
+    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, true, kv_quant_override, generate_mod.visionPrefillUnchunked(req_media.embeddings != null), enable_mtp)) return;
 
     log.info("  prompt={d} tokens, max_gen={d}, ctx={d}\n", .{ prompt_ids.len, effective_max_tokens, effective_ctx });
 
@@ -14772,15 +14478,17 @@ fn handleAnthropicMessages(
     if (think_bound) |*tb| sampling.think_bound = tb;
 
     // Hand vision ownership to the sub-handler (slot takes it on submit).
-    const sub_ve = local_ve;
-    local_ve = null;
+    const sub_ve = req_media.embeddings;
+    req_media.embeddings = null;
+    const sub_mrope = req_media.mrope;
+    req_media.mrope = .{}; // ownership transferred to the sub-handler → slot
     if (is_stream) {
-        handleAnthropicStreaming(allocator, stream, lm, tok, prompt_ids, effective_max_tokens, sampling, eos_slice, stop_sequences.items, model_name, has_tools, tools_json, allow_parallel_tools, enable_thinking, surface_budget, @intCast(prompt_ids.len), enable_pld, enable_drafter, enable_mtp, allow_batch_mtp, sub_ve, vis_key, cache_key, kv_quant_override, kv_attn_explicit, tokenize_ns) catch |err| {
+        handleAnthropicStreaming(allocator, stream, lm, tok, prompt_ids, effective_max_tokens, sampling, eos_slice, stop_sequences.items, model_name, has_tools, tools_json, allow_parallel_tools, enable_thinking, surface_budget, @intCast(prompt_ids.len), enable_pld, enable_drafter, enable_mtp, allow_batch_mtp, sub_ve, req_media.chain, cache_key, sub_mrope, kv_quant_override, kv_attn_explicit, tokenize_ns) catch |err| {
             log.err("  -> streaming error: {}\n", .{err});
             sendGenerationError(allocator, stream, err, .anthropic) catch {};
         };
     } else {
-        handleAnthropicNonStreaming(allocator, stream, lm, tok, prompt_ids, effective_max_tokens, sampling, eos_slice, stop_sequences.items, model_name, has_tools, tools_json, allow_parallel_tools, enable_thinking, surface_budget, @intCast(prompt_ids.len), enable_pld, enable_drafter, enable_mtp, allow_batch_mtp, sub_ve, vis_key, cache_key, kv_quant_override, kv_attn_explicit, tokenize_ns) catch |err| {
+        handleAnthropicNonStreaming(allocator, stream, lm, tok, prompt_ids, effective_max_tokens, sampling, eos_slice, stop_sequences.items, model_name, has_tools, tools_json, allow_parallel_tools, enable_thinking, surface_budget, @intCast(prompt_ids.len), enable_pld, enable_drafter, enable_mtp, allow_batch_mtp, sub_ve, req_media.chain, cache_key, sub_mrope, kv_quant_override, kv_attn_explicit, tokenize_ns) catch |err| {
             log.err("  -> {s}\n", .{@errorName(err)});
             sendGenerationError(allocator, stream, err, .anthropic) catch {};
         };
@@ -14813,8 +14521,9 @@ fn handleAnthropicNonStreaming(
     enable_mtp: bool,
     allow_batch_mtp: bool,
     vision_embeddings: ?mlx.mlx_array,
-    vision_key: u64,
+    media_chain: []const prefix_cache_mod.MediaSpan,
     cache_key: u64,
+    mrope: MropeData,
     /// Wave 1.A: per-request KV-quant override.
     kv_quant_override: ?transformer_mod.KVQuantConfig,
     kv_attn_explicit: ?bool,
@@ -14851,7 +14560,7 @@ fn handleAnthropicNonStreaming(
     // wired for /v1/chat/completions; see computeQwenMrope). Qwen image requests
     // still decode correctly — M-RoPE refines spatial grounding only.
     // Propagates to `handleAnthropicMessages`' one error arm, shared with the streaming twin.
-    const result = try nonStreamingViaScheduler(allocator, global_scheduler.?, lm, tok, prompt_ids, prompt_ids, max_tokens, sampling, eos_token_ids, 0, has_tools, enable_thinking, use_pld, use_drafter, use_mtp, allow_batch_mtp, getTimeoutNs(), slot_ve, vision_key, cache_key, .{}, 0, kv_quant_override, kv_attn_explicit, stream);
+    const result = try nonStreamingViaScheduler(allocator, global_scheduler.?, lm, tok, prompt_ids, prompt_ids, max_tokens, sampling, eos_token_ids, 0, has_tools, enable_thinking, use_pld, use_drafter, use_mtp, allow_batch_mtp, getTimeoutNs(), slot_ve, media_chain, cache_key, mrope, 0, kv_quant_override, kv_attn_explicit, stream);
     defer allocator.free(result.text);
     defer allocator.free(result.token_ids);
 
@@ -15072,8 +14781,9 @@ fn handleAnthropicStreaming(
     enable_mtp: bool,
     allow_batch_mtp: bool,
     vision_embeddings: ?mlx.mlx_array,
-    vision_key: u64,
+    media_chain: []const prefix_cache_mod.MediaSpan,
     cache_key: u64,
+    mrope: MropeData,
     /// Wave 1.A: per-request KV-quant override.
     kv_quant_override: ?transformer_mod.KVQuantConfig,
     kv_attn_explicit: ?bool,
@@ -15132,8 +14842,12 @@ fn handleAnthropicStreaming(
         .kv_attn_fused = resolveKvAttnFused(config, kv_attn_explicit, prompt_ids.len, kv_quant_override),
         .logprobs_n = 0,
         .vision_embeddings = slot_ve_anth,
-        .vision_key = vision_key,
+        .vision_key = prefix_cache_mod.chainKey(media_chain),
+        .media_chain = media_chain,
         .cache_key = cache_key,
+        .mrope_pos = mrope.pos,
+        .mrope_total = mrope.total,
+        .mrope_delta = mrope.delta,
         .kv_quant_config = kv_quant_override,
     });
     var ts = StreamingTokenStream.initFromSlot(slot_handle.?, stream_mode, eos_token_ids);
@@ -16050,8 +15764,8 @@ fn handleResponsesCompact(
     }
 
     // ── parse → resolved message history ──
-    // Compaction drops images, so the preprocessing selector is irrelevant here.
-    var pi = responses_mod.parseInput(allocator, input_val, instructions, prev_messages, appendImageUrlContent, .{}) catch |err| {
+    // Compaction drops images, so none is decoded.
+    var pi = responses_mod.parseInput(allocator, input_val, instructions, prev_messages, null, .{}) catch |err| {
         log.warn("POST /v1/responses/compact -> 400 (input parse: {s})\n", .{@errorName(err)});
         try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", "Failed to parse input", 400);
         return;
@@ -16324,16 +16038,16 @@ fn handleResponsesInner(
     }
 
     // ── parse input → messages ──
-    var pi = responses_mod.parseInput(allocator, input_val, instructions, prev_messages, appendImageUrlContent, visionPreprocFromConfig(config)) catch |err| {
+    var pi = responses_mod.parseInput(allocator, input_val, instructions, prev_messages, decodeImageUrlInto, visionPreprocFromConfig(config)) catch |err| {
         log.warn("POST /v1/responses -> 400 (input parse: {s})\n", .{@errorName(err)});
         try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", "Failed to parse input", 400);
         return;
     };
     defer pi.deinit();
 
-    if (pi.image_decode_failed) {
-        log.warn("POST /v1/responses -> 400 (undecodable image)\n", .{});
-        try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", IMAGE_DECODE_REJECT, 400);
+    if (responsesMediaRefusal(&pi)) |fault| {
+        log.warn("POST /v1/responses -> 400 ({s})\n", .{fault.text()});
+        try sendErrorResponse(allocator, stream, fault.status(), fault.errorType(), fault.text(), fault.code());
         return;
     }
     if (pi.messages.items.len == 0) {
@@ -16401,35 +16115,19 @@ fn handleResponsesInner(
     log.info("POST /v1/responses ({d} msgs, max_out={d}, temp={d:.2}, stream={}, thinking={}, prev={?s})\n", .{
         pi.messages.items.len, max_tokens, temperature, is_stream, enable_thinking, prev_id,
     });
-    const active_media = activeTurnMediaMessage(pi.messages.items, false);
 
-    // ── vision encoder ──
-    // Phase A8: per-request ownership. Defer frees if we don't end up
-    // transferring the array to a scheduler slot.
-    var local_ve: ?mlx.mlx_array = null;
-    var vis_key: u64 = 0;
+    // ── media ──
     const cache_key = requestCacheKey(root);
-    defer {
-        if (local_ve) |arr| _ = mlx.mlx_array_free(arr);
-    }
-    if (lm.vision_encoder) |ve| {
-        var n_vis: usize = 0;
-        var n_vid: usize = 0;
-        var n_aud: usize = 0;
-        local_ve = processVisionImages(allocator, lm, ve, active_media, &n_vis, &n_vid, &n_aud, &vis_key) catch |err| blk: {
-            log.warn("Vision encoding failed: {}\n", .{err});
-            break :blk null;
-        };
-        if (local_ve != null) {
-            const new_ids = try insertMultimodalTokens(allocator, prompt_ids_raw, config.image_token_id, n_vis, config.video_token_id, n_vid, config.audio_token_id, n_aud, config, active_media);
+    var req_media: PreparedMedia = .{};
+    defer req_media.deinit(allocator);
+    switch (try prepareRequestMedia(allocator, lm, pi.messages.items, &prompt_ids_raw, getEffectiveContextLength(config))) {
+        .ready => |r| req_media = r,
+        .refused => |fault| {
             allocator.free(prompt_ids_raw);
-            prompt_ids_raw = new_ids;
-        }
-    } else if (mediaRejectReason(pi.messages.items)) |reason| {
-        allocator.free(prompt_ids_raw);
-        log.warn("POST /v1/responses -> 400 ({s})\n", .{reason});
-        try sendErrorResponse(allocator, stream, "400 Bad Request", "invalid_request_error", reason, 400);
-        return;
+            log.warn("POST /v1/responses -> {d} ({s})\n", .{ fault.code(), fault.text() });
+            try sendErrorResponse(allocator, stream, fault.status(), fault.errorType(), fault.text(), fault.code());
+            return;
+        },
     }
     const prompt_ids = prompt_ids_raw;
     defer allocator.free(prompt_ids);
@@ -16460,7 +16158,7 @@ fn handleResponsesInner(
     enable_mtp_resp = admitMtpForCtx(enable_mtp_resp, prompt_ids.len);
 
     // Check if attention computation would exceed GPU memory.
-    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, false, kv_quant_override, generate_mod.visionPrefillUnchunked(local_ve != null), enable_mtp_resp)) return;
+    if (!try checkAttentionMemory(allocator, stream, prompt_ids, effective_max_tokens, config, false, kv_quant_override, generate_mod.visionPrefillUnchunked(req_media.embeddings != null), enable_mtp_resp)) return;
 
     // ── sampling ──
     var sampling = generate_mod.SamplingParams{
@@ -16651,8 +16349,10 @@ fn handleResponsesInner(
         defer if (slot_handle) |s| global_scheduler.?.complete(s);
 
         // Transfer vision ownership into the slot.
-        const slot_ve_resp = local_ve;
-        local_ve = null;
+        const slot_ve_resp = req_media.embeddings;
+        req_media.embeddings = null;
+        const slot_mrope_resp = req_media.mrope;
+        req_media.mrope = .{};
         const sch = global_scheduler.?;
         slot_handle = try sch.submit(.{
             .model = lm,
@@ -16675,8 +16375,12 @@ fn handleResponsesInner(
             .mtp = if (stream_mode == .mtp) lm.mtp else null,
             .mtp_depth = lm.mtp_depth,
             .vision_embeddings = slot_ve_resp,
-            .vision_key = vis_key,
+            .vision_key = prefix_cache_mod.chainKey(req_media.chain),
+            .media_chain = req_media.chain,
             .cache_key = cache_key,
+            .mrope_pos = slot_mrope_resp.pos,
+            .mrope_total = slot_mrope_resp.total,
+            .mrope_delta = slot_mrope_resp.delta,
             .pld_draft_len = server_config.default_pld_draft_len,
             .pld_key_len = server_config.default_pld_key_len,
             .kv_attn_fused = resolveKvAttnFused(config, kv_attn_explicit, prompt_ids.len, kv_quant_override),
@@ -16988,13 +16692,12 @@ fn handleResponsesInner(
         const use_drafter = spec.use_drafter;
         const use_pld = spec.use_pld;
         // Transfer vision ownership into the slot.
-        const slot_ve_ns: ?mlx.mlx_array = blk: {
-            const v = local_ve;
-            local_ve = null;
-            break :blk v;
-        };
+        const slot_ve_ns = req_media.embeddings;
+        req_media.embeddings = null;
+        const slot_mrope_ns = req_media.mrope;
+        req_media.mrope = .{};
         // Propagates to `handleResponses`' one error arm, shared with the streaming half.
-        result = try nonStreamingViaScheduler(allocator, global_scheduler.?, lm, tok, prompt_ids, prompt_ids, effective_max_tokens, sampling, eos_slice, 0, active_has_tools, enable_thinking, use_pld, use_drafter, use_mtp, allow_batch_mtp, getTimeoutNs(), slot_ve_ns, vis_key, cache_key, .{}, 0, kv_quant_override, kv_attn_explicit, stream);
+        result = try nonStreamingViaScheduler(allocator, global_scheduler.?, lm, tok, prompt_ids, prompt_ids, effective_max_tokens, sampling, eos_slice, 0, active_has_tools, enable_thinking, use_pld, use_drafter, use_mtp, allow_batch_mtp, getTimeoutNs(), slot_ve_ns, req_media.chain, cache_key, slot_mrope_ns, 0, kv_quant_override, kv_attn_explicit, stream);
     }
     defer allocator.free(result.text);
     defer allocator.free(result.token_ids);
@@ -19237,91 +18940,6 @@ test "isJsonObjectString only accepts JSON objects" {
     try testing.expect(!isJsonObjectString(testing.allocator, "not-json"));
 }
 
-test "insertImageTokens lands right after the user-turn marker (Gemma 4)" {
-    var config = model_mod.ModelConfig{};
-    // Simulate the marker that populateUserTurnMarker would store for Gemma 4:
-    // <|turn>(105) user(2364) \n(107).
-    config.user_turn_marker_ids[0] = 105;
-    config.user_turn_marker_ids[1] = 2364;
-    config.user_turn_marker_ids[2] = 107;
-    config.user_turn_marker_len = 3;
-    config.boi_token_id = 200;
-    config.eoi_token_id = 201;
-
-    // Prompt: BOS, system text, then a user turn followed by its content tokens
-    // and the trailing model-generation prompt. The marker [105, 2364, 107]
-    // appears once at the start of the user turn (positions 5-7).
-    const prompt = [_]u32{
-        2, 500, 501, 502, 503, // BOS + system prefix
-        105, 2364, 107, // <|turn>user\n
-        900, 901, 902, // user content
-        106, 107, // <turn|>\n
-        105, 4368, 107, // <|turn>model\n (generation prompt)
-    };
-
-    const out = try insertImageTokens(testing.allocator, &prompt, 999, 4, &config);
-    defer testing.allocator.free(out);
-
-    // Image tokens should be inserted right after position 7 (end of marker),
-    // i.e., between "<|turn>user\n" and the user content.
-    // Expected: prompt[0..8] + BOI + image*4 + EOI + prompt[8..]
-    try testing.expectEqual(@as(usize, prompt.len + 6), out.len);
-    try testing.expectEqual(@as(u32, 200), out[8]); // BOI
-    try testing.expectEqual(@as(u32, 999), out[9]); // image
-    try testing.expectEqual(@as(u32, 999), out[10]);
-    try testing.expectEqual(@as(u32, 999), out[11]);
-    try testing.expectEqual(@as(u32, 999), out[12]);
-    try testing.expectEqual(@as(u32, 201), out[13]); // EOI
-    try testing.expectEqual(@as(u32, 900), out[14]); // first user content token preserved
-}
-
-test "insertImageTokens picks the LAST user turn when multiple are present" {
-    var config = model_mod.ModelConfig{};
-    config.user_turn_marker_ids[0] = 105;
-    config.user_turn_marker_ids[1] = 2364;
-    config.user_turn_marker_ids[2] = 107;
-    config.user_turn_marker_len = 3;
-    config.boi_token_id = 200;
-    config.eoi_token_id = 201;
-
-    // Two user turns. Vision tokens must land inside the LATER one.
-    const prompt = [_]u32{
-        105, 2364, 107, 800, 801, // first user turn
-        106, 107,
-        105, 4368, 107, 850, 851, // first model turn
-        106, 107,
-        105, 2364, 107, 900, // second user turn (the one we're answering)
-    };
-
-    const out = try insertImageTokens(testing.allocator, &prompt, 999, 1, &config);
-    defer testing.allocator.free(out);
-
-    // Marker at positions 14-16; insert after position 17.
-    // Original first-user-turn content (800, 801) must be untouched.
-    try testing.expectEqual(@as(u32, 800), out[3]);
-    try testing.expectEqual(@as(u32, 801), out[4]);
-    // BOI at position 17, image at 18, EOI at 19, then original 900 at 20.
-    try testing.expectEqual(@as(u32, 200), out[17]);
-    try testing.expectEqual(@as(u32, 999), out[18]);
-    try testing.expectEqual(@as(u32, 201), out[19]);
-    try testing.expectEqual(@as(u32, 900), out[20]);
-}
-
-test "insertImageTokens falls back gracefully when marker is unset" {
-    var config = model_mod.ModelConfig{};
-    // user_turn_marker_len stays 0 — simulates an architecture we don't know
-    // how to detect a turn boundary for. Should still produce a valid prompt.
-    config.boi_token_id = 200;
-    config.eoi_token_id = 201;
-
-    const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
-    const out = try insertImageTokens(testing.allocator, &prompt, 999, 2, &config);
-    defer testing.allocator.free(out);
-
-    // Should be original len + 2 image + 2 BOI/EOI = +4
-    try testing.expectEqual(@as(usize, prompt.len + 4), out.len);
-}
-
 test "a stream never starts inside a think block because the REQUEST asked for thinking" {
     // Every streaming surface seeded the think flag by OR-ing the request's
     // enable-thinking flag into the prompt-derived one (the needle below is
@@ -19350,256 +18968,6 @@ test "a stream never starts inside a think block because the REQUEST asked for t
     const init = "in_think_block = prompt_opened_think";
     while (std.mem.indexOfPos(u8, src, i, init)) |at| : (i = at + init.len) count += 1;
     try testing.expect(count >= 2);
-}
-
-test "lfm2ImageSegment labels every tile and closes on the thumbnail" {
-    // LFM2-VL's block is `<|image_start|>`, then per tile
-    // `<|img_row_R_col_C|>` + that tile's pads, then `<|img_thumbnail|>` +
-    // the thumbnail's pads, then `<|image_end|>`. Emitting a flat pad run
-    // instead still SPLICES (the counts match), so the model gets every tile
-    // with no idea where any of them sits — which is the whole point of tiling.
-    var config = model_mod.ModelConfig{ .model_type = "lfm2" };
-    config.lfm2_vision = true;
-    config.image_token_id = 124907;
-    config.boi_token_id = 125009;
-    config.eoi_token_id = 125010;
-    config.lv_thumbnail_token_id = 125008;
-    config.lv_row_col_base_id = 124908;
-    config.lv_max_tiles = 10;
-    config.lv_downsample = 2;
-
-    // A 2x2 tile grid (4 patches each → 1 pad each) plus a 1-pad thumbnail.
-    const imgs = [_]chat_mod.ImageData{
-        .{ .pixels = "", .width = 0, .height = 0, .grid_h = 2, .grid_w = 2, .tile_rows = 2, .tile_cols = 2, .tile_index = 0 },
-        .{ .pixels = "", .width = 0, .height = 0, .grid_h = 2, .grid_w = 2, .tile_rows = 2, .tile_cols = 2, .tile_index = 1 },
-        .{ .pixels = "", .width = 0, .height = 0, .grid_h = 2, .grid_w = 2, .tile_rows = 2, .tile_cols = 2, .tile_index = 2 },
-        .{ .pixels = "", .width = 0, .height = 0, .grid_h = 2, .grid_w = 2, .tile_rows = 2, .tile_cols = 2, .tile_index = 3 },
-        .{ .pixels = "", .width = 0, .height = 0, .grid_h = 2, .grid_w = 2, .tile_rows = 2, .tile_cols = 2, .tile_index = 4 },
-    };
-    const msgs = [_]chat_mod.Message{.{ .role = "user", .content = "hi", .images = &imgs }};
-    const seg = (try lfm2ImageSegment(testing.allocator, &msgs[0], &config)) orelse return error.NoSegment;
-    defer testing.allocator.free(seg);
-
-    // Row/col ids are laid out over the MAX grid (10 wide), not this image's:
-    // (0,0)=124908, (0,1)=124909, (1,0)=124918, (1,1)=124919.
-    const want = [_]u32{
-        125009,
-        124908,
-        124907,
-        124909,
-        124907,
-        124918,
-        124907,
-        124919,
-        124907,
-        125008,
-        124907,
-        125010,
-    };
-    try testing.expectEqualSlices(u32, &want, seg);
-}
-
-test "lfm2ImageSegment wraps an untiled image and declines every other arch" {
-    var config = model_mod.ModelConfig{ .model_type = "lfm2" };
-    config.lfm2_vision = true;
-    config.image_token_id = 124907;
-    config.boi_token_id = 125009;
-    config.eoi_token_id = 125010;
-    config.lv_downsample = 2;
-
-    const imgs = [_]chat_mod.ImageData{
-        .{ .pixels = "", .width = 0, .height = 0, .grid_h = 4, .grid_w = 2 },
-    };
-    const msgs = [_]chat_mod.Message{.{ .role = "user", .content = "hi", .images = &imgs }};
-    const seg = (try lfm2ImageSegment(testing.allocator, &msgs[0], &config)) orelse return error.NoSegment;
-    defer testing.allocator.free(seg);
-    const want = [_]u32{ 125009, 124907, 124907, 125010 };
-    try testing.expectEqualSlices(u32, &want, seg);
-
-    // Not LFM2-VL ⇒ null, so every other arch keeps the flat BOI/pads/EOI run.
-    config.lfm2_vision = false;
-    try testing.expect((try lfm2ImageSegment(testing.allocator, &msgs[0], &config)) == null);
-}
-
-test "insertImageTokens is a no-op when image_token_id or n_tokens is zero" {
-    var config = model_mod.ModelConfig{};
-    config.user_turn_marker_ids[0] = 105;
-    config.user_turn_marker_len = 1;
-
-    const prompt = [_]u32{ 1, 2, 105, 3, 4 };
-
-    const out_zero_id = try insertImageTokens(testing.allocator, &prompt, 0, 4, &config);
-    defer testing.allocator.free(out_zero_id);
-    try testing.expectEqualSlices(u32, &prompt, out_zero_id);
-
-    const out_zero_n = try insertImageTokens(testing.allocator, &prompt, 999, 0, &config);
-    defer testing.allocator.free(out_zero_n);
-    try testing.expectEqualSlices(u32, &prompt, out_zero_n);
-}
-
-test "insertMultimodalTokens lays out image block then audio block at the user turn" {
-    // Gemma 4 12B unified: the image placeholder block MUST precede the audio
-    // block so a single splice scatters the [vision ; audio] embedding in order.
-    var config = model_mod.ModelConfig{};
-    config.user_turn_marker_ids[0] = 105;
-    config.user_turn_marker_ids[1] = 2364;
-    config.user_turn_marker_ids[2] = 107;
-    config.user_turn_marker_len = 3;
-    config.boi_token_id = 200; // BOI
-    config.eoi_token_id = 201; // EOI
-    config.boa_token_id = 300; // BOA
-    config.eoa_token_id = 301; // EOA
-
-    const prompt = [_]u32{ 2, 500, 105, 2364, 107, 900, 901 };
-    // image_token=999 ×2, video absent (token=777, n=0), audio_token=888 ×3.
-    const out = try insertMultimodalTokens(testing.allocator, &prompt, 999, 2, 777, 0, 888, 3, &config, null);
-    defer testing.allocator.free(out);
-
-    // Inserted after marker (position 5): [BOI 999 999 EOI][BOA 888 888 888 EOA].
-    const expected = [_]u32{
-        2, 500, 105, 2364, 107,
-        200, 999, 999, 201, // image block
-        300, 888, 888, 888, 301, // audio block
-        900, 901,
-    };
-    try testing.expectEqualSlices(u32, &expected, out);
-}
-
-test "insertMultimodalTokens lays out image block then video block then audio block" {
-    // Qwen3-VL-style: image and video pad runs both wrap in vision_start/end
-    // (get_rope_index keys on vision_start immediately followed by EITHER
-    // pad token), inserted image-block-first, then video, then audio.
-    var config = model_mod.ModelConfig{};
-    config.qwen_vision = true;
-    config.user_turn_marker_ids[0] = 105;
-    config.user_turn_marker_len = 1;
-    config.vision_start_token_id = 200;
-    config.vision_end_token_id = 201;
-    config.boa_token_id = 300;
-    config.eoa_token_id = 301;
-    const prompt = [_]u32{ 1, 105, 7 };
-
-    // image_token=999 ×2, video_token=777 ×3, audio_token=888 ×1.
-    const out = try insertMultimodalTokens(testing.allocator, &prompt, 999, 2, 777, 3, 888, 1, &config, null);
-    defer testing.allocator.free(out);
-    const expected = [_]u32{
-        1, 105,
-        200, 999, 999, 201, // image block
-        200, 777, 777, 777, 201, // video block
-        300, 888, 301, // audio block
-        7,
-    };
-    try testing.expectEqualSlices(u32, &expected, out);
-}
-
-test "insertMultimodalTokens handles audio-only, image-only, and video-only" {
-    var config = model_mod.ModelConfig{};
-    config.user_turn_marker_ids[0] = 105;
-    config.user_turn_marker_len = 1;
-    config.boi_token_id = 200;
-    config.eoi_token_id = 201;
-    config.boa_token_id = 300;
-    config.eoa_token_id = 301;
-    const prompt = [_]u32{ 1, 105, 7 };
-
-    // Audio only (n_image=0, n_video=0) → just the audio block.
-    const ao = try insertMultimodalTokens(testing.allocator, &prompt, 999, 0, 777, 0, 888, 2, &config, null);
-    defer testing.allocator.free(ao);
-    try testing.expectEqualSlices(u32, &[_]u32{ 1, 105, 300, 888, 888, 301, 7 }, ao);
-
-    // Image only (n_video=0, n_audio=0) → just the image block.
-    const io = try insertMultimodalTokens(testing.allocator, &prompt, 999, 2, 777, 0, 888, 0, &config, null);
-    defer testing.allocator.free(io);
-    try testing.expectEqualSlices(u32, &[_]u32{ 1, 105, 200, 999, 999, 201, 7 }, io);
-
-    // Video only (n_image=0, n_audio=0) → just the video block, wrapped in the
-    // SAME BOI/EOI as an image block (non-Qwen config here; Qwen's vision_start
-    // is exercised by the interleaved test above).
-    const vo = try insertMultimodalTokens(testing.allocator, &prompt, 999, 0, 777, 2, 888, 0, &config, null);
-    defer testing.allocator.free(vo);
-    try testing.expectEqualSlices(u32, &[_]u32{ 1, 105, 200, 777, 777, 201, 7 }, vo);
-
-    // Neither → unchanged.
-    const none = try insertMultimodalTokens(testing.allocator, &prompt, 999, 0, 777, 0, 888, 0, &config, null);
-    defer testing.allocator.free(none);
-    try testing.expectEqualSlices(u32, &prompt, none);
-}
-
-test "insertMultimodalTokens targets the media user before injected context" {
-    var config = model_mod.ModelConfig{};
-    config.user_turn_marker_ids[0] = 105;
-    config.user_turn_marker_len = 1;
-    config.boi_token_id = 200;
-    config.eoi_token_id = 201;
-
-    const images = [_]chat_mod.ImageData{.{ .pixels = &.{}, .width = 1, .height = 1 }};
-    const msgs = [_]chat_mod.Message{
-        .{ .role = "user", .content = "image prompt", .images = &images },
-        .{ .role = "user", .content = "context one" },
-        .{ .role = "user", .content = "context two" },
-    };
-    const media = activeTurnMediaMessage(&msgs, false) orelse return error.TestExpectedMedia;
-    const prompt = [_]u32{ 1, 105, 11, 105, 22, 105, 33 };
-    const out = try insertMultimodalTokens(testing.allocator, &prompt, 999, 1, 777, 0, 888, 0, &config, media);
-    defer testing.allocator.free(out);
-
-    try testing.expectEqualSlices(u32, &[_]u32{ 1, 105, 200, 999, 201, 11, 105, 22, 105, 33 }, out);
-}
-
-test "insertMultimodalTokens counts a ChatML tool-response user marker" {
-    var config = model_mod.ModelConfig{};
-    config.user_turn_marker_ids[0] = 105;
-    config.user_turn_marker_len = 1;
-    config.boi_token_id = 200;
-    config.eoi_token_id = 201;
-
-    // ChatML templates wrap a tool-response run in its OWN `<|im_start|>user`
-    // (token-exact: `<tool_response>` is a special token, so the marker bytes
-    // survive BPE). Counting user-ROLE messages alone lands the pads after the
-    // tool response instead of the human's image turn.
-    const images = [_]chat_mod.ImageData{.{ .pixels = &.{}, .width = 1, .height = 1 }};
-    const calls = [_]chat_mod.ToolCall{.{ .id = "call-1", .name = "inspect", .arguments = "{}" }};
-    const msgs = [_]chat_mod.Message{
-        .{ .role = "user", .content = "image prompt", .images = &images },
-        .{ .role = "assistant", .content = "", .tool_calls = &calls },
-        .{ .role = "tool", .content = "result", .tool_call_id = "call-1" },
-        .{ .role = "user", .content = "injected context" },
-    };
-    const media = activeTurnMediaMessage(&msgs, false) orelse return error.TestExpectedMedia;
-    // Markers: image turn, tool-response wrapper, injected context — 3 total
-    // for 2 user messages + 1 tool run, which is the ChatML signature.
-    const prompt = [_]u32{ 1, 105, 11, 105, 22, 105, 33 };
-    const out = try insertMultimodalTokens(testing.allocator, &prompt, 999, 1, 777, 0, 888, 0, &config, media);
-    defer testing.allocator.free(out);
-    try testing.expectEqualSlices(u32, &[_]u32{ 1, 105, 200, 999, 201, 11, 105, 22, 105, 33 }, out);
-
-    // Consecutive tool messages share ONE wrapper (a run), still 3 markers.
-    const run_msgs = [_]chat_mod.Message{
-        .{ .role = "user", .content = "image prompt", .images = &images },
-        .{ .role = "assistant", .content = "", .tool_calls = &calls },
-        .{ .role = "tool", .content = "result a", .tool_call_id = "call-1" },
-        .{ .role = "tool", .content = "result b", .tool_call_id = "call-2" },
-        .{ .role = "user", .content = "injected context" },
-    };
-    const run_media = activeTurnMediaMessage(&run_msgs, false) orelse return error.TestExpectedMedia;
-    const run_out = try insertMultimodalTokens(testing.allocator, &prompt, 999, 1, 777, 0, 888, 0, &config, run_media);
-    defer testing.allocator.free(run_out);
-    try testing.expectEqualSlices(u32, &[_]u32{ 1, 105, 200, 999, 201, 11, 105, 22, 105, 33 }, run_out);
-
-    // A per-message template (no run merging) renders one marker per tool
-    // message: 4 markers for 2 users + 2 tool messages.
-    const permsg_prompt = [_]u32{ 1, 105, 11, 105, 22, 105, 23, 105, 33 };
-    const permsg_out = try insertMultimodalTokens(testing.allocator, &permsg_prompt, 999, 1, 777, 0, 888, 0, &config, run_media);
-    defer testing.allocator.free(permsg_out);
-    try testing.expectEqualSlices(u32, &[_]u32{ 1, 105, 200, 999, 201, 11, 105, 22, 105, 23, 105, 33 }, permsg_out);
-
-    // A family that renders tool results under its OWN header (Llama ipython)
-    // emits NO user marker for the tool turn: 2 markers for 2 user messages —
-    // the role-only count is already right and must stay untouched.
-    const llama_prompt = [_]u32{ 1, 105, 11, 44, 44, 105, 33 };
-    const llama_out = try insertMultimodalTokens(testing.allocator, &llama_prompt, 999, 1, 777, 0, 888, 0, &config, media);
-    defer testing.allocator.free(llama_out);
-    try testing.expectEqualSlices(u32, &[_]u32{ 1, 105, 200, 999, 201, 11, 44, 44, 105, 33 }, llama_out);
 }
 
 test "parseAudioContent decodes base64 float32 PCM and rejects bad lengths" {
@@ -22054,9 +21422,9 @@ test "the memory guard's vision billing routes through visionPrefillUnchunked at
     // that chunks (over-refusal), and one passing false under the kill
     // switch under-bills straight into an uncatchable Metal OOM.
     const src = @embedFile("server.zig");
-    const raw = "kv_quant_override, local_ve" ++ " != null,";
+    const raw = "kv_quant_override, req_media.embeddings" ++ " != null,";
     try std.testing.expect(std.mem.indexOf(u8, src, raw) == null);
-    const routed = "kv_quant_override, generate_mod.visionPrefill" ++ "Unchunked(local_ve != null),";
+    const routed = "kv_quant_override, generate_mod.visionPrefill" ++ "Unchunked(req_media.embeddings != null),";
     var n: usize = 0;
     var at: usize = 0;
     while (std.mem.indexOfPos(u8, src, at, routed)) |i| {

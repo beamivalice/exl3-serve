@@ -118,6 +118,19 @@ pub fn foldSystemMessages(allocator: std.mem.Allocator, messages: *std.ArrayList
     return text;
 }
 
+/// The most images one request may carry, counted across every message.
+pub const MAX_REQUEST_IMAGES: usize = 64;
+
+/// Where one image or video sits in `Message.content`: the template renders
+/// its placeholder at byte offset `at`. Parts of a kind consume the message's
+/// `images` / `videos` in order.
+pub const MediaPart = struct {
+    at: usize,
+    kind: Kind,
+
+    pub const Kind = enum { image, video };
+};
+
 pub const Message = struct {
     role: []const u8,
     content: []const u8,
@@ -126,6 +139,7 @@ pub const Message = struct {
     images: ?[]const ImageData = null, // Preprocessed image data for vision
     videos: ?[]const VideoData = null, // Preprocessed video data for vision
     audio: ?[]const AudioData = null, // Raw PCM for the unified audio embedder
+    media_parts: ?[]const MediaPart = null,
     /// Reasoning the client round-trips on assistant HISTORY messages
     /// (`reasoning_content`/`reasoning` on chat completions, `thinking`
     /// blocks on /v1/messages). Templates that persist reasoning across
@@ -802,6 +816,38 @@ pub fn serializeMessagesJsonFor(allocator: std.mem.Allocator, messages: []const 
     return serializeMessagesJsonImpl(allocator, messages, empty_content, templateRequiresReasoningField(chat_config.chat_template));
 }
 
+/// `content` as the typed part list vision templates render, each media part
+/// a `{"type":"image"|"video"}` placeholder at its offset.
+fn appendContentParts(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), content: []const u8, parts: []const MediaPart) !void {
+    try buf.append(allocator, '[');
+    var from: usize = 0;
+    var first = true;
+    for (parts) |p| {
+        const at = @max(from, @min(p.at, content.len));
+        if (at > from) {
+            if (!first) try buf.append(allocator, ',');
+            try buf.appendSlice(allocator, "{\"type\":\"text\",\"text\":");
+            try appendJsonString(allocator, buf, content[from..at]);
+            try buf.append(allocator, '}');
+            from = at;
+            first = false;
+        }
+        if (!first) try buf.append(allocator, ',');
+        try buf.appendSlice(allocator, switch (p.kind) {
+            .image => "{\"type\":\"image\"}",
+            .video => "{\"type\":\"video\"}",
+        });
+        first = false;
+    }
+    if (from < content.len) {
+        if (!first) try buf.append(allocator, ',');
+        try buf.appendSlice(allocator, "{\"type\":\"text\",\"text\":");
+        try appendJsonString(allocator, buf, content[from..]);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+}
+
 fn serializeMessagesJsonImpl(allocator: std.mem.Allocator, messages: []const Message, empty_content: EmptyContent, reasoning_required: bool) ![]const u8 {
     var buf = std.ArrayList(u8).empty;
     errdefer buf.deinit(allocator);
@@ -813,7 +859,9 @@ fn serializeMessagesJsonImpl(allocator: std.mem.Allocator, messages: []const Mes
         try appendJsonString(allocator, &buf, msg.role);
 
         try buf.appendSlice(allocator, ",\"content\":");
-        if (msg.content.len > 0) {
+        if (msg.media_parts != null and msg.media_parts.?.len > 0) {
+            try appendContentParts(allocator, &buf, msg.content, msg.media_parts.?);
+        } else if (msg.content.len > 0) {
             try appendJsonString(allocator, &buf, msg.content);
         } else switch (empty_content) {
             .null_literal => try buf.appendSlice(allocator, "null"),
@@ -10091,6 +10139,24 @@ test "serializeMessagesJson tool response with empty content" {
     // Should have tool_call_id but no tool_responses
     try testing.expect(std.mem.indexOf(u8, result, "\"tool_call_id\"") != null);
     try testing.expect(std.mem.indexOf(u8, result, "\"tool_responses\"") == null);
+}
+
+test "serializeMessagesJson renders each media part at its offset as a typed part" {
+    const allocator = testing.allocator;
+    const parts = [_]MediaPart{
+        .{ .at = 0, .kind = .image },
+        .{ .at = 5, .kind = .video },
+        .{ .at = 11, .kind = .image },
+    };
+    const messages = [_]Message{
+        .{ .role = "tool", .content = "shot:\nafter", .tool_call_id = "c1", .media_parts = &parts },
+        .{ .role = "user", .content = "plain" },
+    };
+    const result = try serializeMessagesJson(allocator, &messages);
+    defer allocator.free(result);
+    try testing.expectEqualStrings(
+        \\[{"role":"tool","content":[{"type":"image"},{"type":"text","text":"shot:"},{"type":"video"},{"type":"text","text":"\nafter"},{"type":"image"}],"tool_call_id":"c1"},{"role":"user","content":"plain"}]
+    , result);
 }
 
 // ── Fallback formatter tests ──

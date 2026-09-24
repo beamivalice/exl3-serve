@@ -313,8 +313,12 @@ pub const ParsedInput = struct {
     owned_strings: std.ArrayList([]const u8),
     owned_tool_calls: std.ArrayList([]chat_mod.ToolCall),
     owned_images: std.ArrayList([]chat_mod.ImageData),
+    owned_parts: std.ArrayList([]chat_mod.MediaPart) = .empty,
     allocator: std.mem.Allocator,
-    image_decode_failed: bool = false,
+    /// `input_image` parts named anywhere in the input, decoded or not.
+    n_images: usize = 0,
+    /// The first media part refused.
+    media_fault: ?MediaFault = null,
 
     pub fn deinit(self: *ParsedInput) void {
         for (self.owned_strings.items) |s| self.allocator.free(s);
@@ -323,17 +327,26 @@ pub const ParsedInput = struct {
             for (imgs) |img| self.allocator.free(img.pixels);
             self.allocator.free(imgs);
         }
+        for (self.owned_parts.items) |parts| self.allocator.free(parts);
         self.owned_strings.deinit(self.allocator);
         self.owned_tool_calls.deinit(self.allocator);
         self.owned_images.deinit(self.allocator);
+        self.owned_parts.deinit(self.allocator);
         self.messages.deinit(self.allocator);
     }
 };
 
+/// A media part refused: the `input` item it sat in, what it was, and why.
+pub const MediaFault = struct {
+    item: usize,
+    kind: enum { undecodable_image, unsupported_audio } = .undecodable_image,
+    reason: []const u8 = "",
+};
+
 /// Decode a single image_url string into preprocessed pixels. Provided as a
 /// callback because the actual decoder lives in `server.zig` (uses stb_image
-/// + libwebp). Returns whether it appended anything; a false is recorded as
-/// `image_decode_failed` so the surface can refuse the request by name.
+/// + libwebp). Returns null when it appended the image, else the reason it
+/// could not, recorded as `image_fault` so the surface refuses by name.
 /// Appends one entry per tower call an `image_url` expands into — usually one,
 /// but LFM2-VL splits a large source into tiles plus a thumbnail. Appending
 /// rather than returning is what lets a single URL produce several.
@@ -342,7 +355,15 @@ pub const ImageUrlDecoder = *const fn (
     list: *std.ArrayList(chat_mod.ImageData),
     url: []const u8,
     vp: chat_mod.VisionPreproc,
-) bool;
+) ?[]const u8;
+
+/// How one `input` item's image parts decode: the callback, the processor,
+/// and the item index a fault names.
+const ImageSink = struct {
+    decoder: ?ImageUrlDecoder,
+    vp: chat_mod.VisionPreproc,
+    item: usize,
+};
 
 /// Translate a Responses `input` value (string or array of input items) into
 /// `chat_mod.Message`s. Optionally prepends `instructions` as the single leading
@@ -390,22 +411,23 @@ pub fn parseInput(
             try pi.messages.append(allocator, .{ .role = "user", .content = s });
         },
         .array => |arr| {
-            for (arr.items) |item| {
+            for (arr.items, 0..) |item, item_index| {
                 if (item != .object) continue;
                 const obj = item.object;
+                const sink: ImageSink = .{ .decoder = image_decoder, .vp = vp, .item = item_index };
                 const t_val = obj.get("type") orelse {
                     // Bare {role, content} (some clients omit "type":"message")
-                    try appendMessageItem(allocator, &pi, obj, image_decoder, vp);
+                    try appendMessageItem(allocator, &pi, obj, sink);
                     continue;
                 };
                 if (t_val != .string) continue;
                 const t = t_val.string;
                 if (std.mem.eql(u8, t, "message")) {
-                    try appendMessageItem(allocator, &pi, obj, image_decoder, vp);
+                    try appendMessageItem(allocator, &pi, obj, sink);
                 } else if (std.mem.eql(u8, t, "function_call")) {
                     try appendFunctionCallInputItem(allocator, &pi, obj);
                 } else if (std.mem.eql(u8, t, "function_call_output")) {
-                    try appendFunctionCallOutputItem(allocator, &pi, obj);
+                    try appendFunctionCallOutputItem(allocator, &pi, obj, sink);
                 } else if (std.mem.eql(u8, t, "reasoning")) {
                     // Drop on input — model regenerates its own reasoning.
                     continue;
@@ -423,75 +445,99 @@ pub fn parseInput(
     return pi;
 }
 
+/// One item's content parts: text joined by '\n', and each `input_image`
+/// decoded and placed at the text offset it sat at.
+const InputParts = struct {
+    text: []const u8 = "",
+    images: ?[]const chat_mod.ImageData = null,
+    media_parts: ?[]const chat_mod.MediaPart = null,
+};
+
+fn readInputParts(allocator: std.mem.Allocator, pi: *ParsedInput, parts: []const std.json.Value, sink: ImageSink) !InputParts {
+    var text_parts = std.ArrayList(u8).empty;
+    defer text_parts.deinit(allocator);
+    var image_list = std.ArrayList(chat_mod.ImageData).empty;
+    errdefer {
+        for (image_list.items) |img| allocator.free(img.pixels);
+        image_list.deinit(allocator);
+    }
+    var placed = std.ArrayList(chat_mod.MediaPart).empty;
+    defer placed.deinit(allocator);
+    for (parts) |part| {
+        if (part != .object) continue;
+        const pt_val = part.object.get("type") orelse continue;
+        if (pt_val != .string) continue;
+        const pt = pt_val.string;
+        if (std.mem.eql(u8, pt, "input_text") or std.mem.eql(u8, pt, "text") or std.mem.eql(u8, pt, "output_text")) {
+            const tx = part.object.get("text") orelse continue;
+            if (tx == .string) {
+                if (text_parts.items.len > 0) try text_parts.append(allocator, '\n');
+                try text_parts.appendSlice(allocator, tx.string);
+            }
+        } else if (std.mem.eql(u8, pt, "input_image")) {
+            pi.n_images += 1;
+            const dec = sink.decoder orelse continue;
+            if (pi.n_images > chat_mod.MAX_REQUEST_IMAGES or pi.media_fault != null) continue;
+            const url: ?[]const u8 = if (part.object.get("image_url")) |url_val| switch (url_val) {
+                .string => |u| u,
+                .object => |io| if (io.get("url")) |u| (if (u == .string) u.string else null) else null,
+                else => null,
+            } else null;
+            const reason = if (url) |u| dec(allocator, &image_list, u, sink.vp) else "the part carries no image_url";
+            if (reason) |r| {
+                pi.media_fault = .{ .item = sink.item, .reason = r };
+            } else {
+                try placed.append(allocator, .{ .at = text_parts.items.len, .kind = .image });
+            }
+        } else if (std.mem.eql(u8, pt, "input_audio")) {
+            if (pi.media_fault == null) pi.media_fault = .{ .item = sink.item, .kind = .unsupported_audio };
+        }
+    }
+    var out: InputParts = .{};
+    if (text_parts.items.len > 0) {
+        const owned = try allocator.dupe(u8, text_parts.items);
+        try pi.owned_strings.append(allocator, owned);
+        out.text = owned;
+    }
+    if (image_list.items.len > 0) {
+        const owned = try image_list.toOwnedSlice(allocator);
+        try pi.owned_images.append(allocator, owned);
+        out.images = owned;
+    } else {
+        image_list.deinit(allocator);
+    }
+    if (placed.items.len > 0) {
+        const owned = try placed.toOwnedSlice(allocator);
+        try pi.owned_parts.append(allocator, owned);
+        out.media_parts = owned;
+    }
+    return out;
+}
+
 fn appendMessageItem(
     allocator: std.mem.Allocator,
     pi: *ParsedInput,
     obj: std.json.ObjectMap,
-    image_decoder: ?ImageUrlDecoder,
-    vp: chat_mod.VisionPreproc,
+    sink: ImageSink,
 ) !void {
     const role_val = obj.get("role") orelse return;
     if (role_val != .string) return;
     const role = chat_mod.canonicalRole(role_val.string);
 
     const content_val = obj.get("content") orelse return;
-    var content: []const u8 = "";
-    var images: ?[]chat_mod.ImageData = null;
-
+    var read: InputParts = .{};
     switch (content_val) {
-        .string => |s| content = s,
-        .array => |arr| {
-            var text_parts = std.ArrayList(u8).empty;
-            defer text_parts.deinit(allocator);
-            var image_list = std.ArrayList(chat_mod.ImageData).empty;
-            errdefer {
-                for (image_list.items) |img| allocator.free(img.pixels);
-                image_list.deinit(allocator);
-            }
-            for (arr.items) |part| {
-                if (part != .object) continue;
-                const pt_val = part.object.get("type") orelse continue;
-                if (pt_val != .string) continue;
-                const pt = pt_val.string;
-                if (std.mem.eql(u8, pt, "input_text") or std.mem.eql(u8, pt, "text") or std.mem.eql(u8, pt, "output_text")) {
-                    const tx = part.object.get("text") orelse continue;
-                    if (tx == .string) {
-                        if (text_parts.items.len > 0) try text_parts.append(allocator, '\n');
-                        try text_parts.appendSlice(allocator, tx.string);
-                    }
-                } else if (std.mem.eql(u8, pt, "input_image")) {
-                    const url_val = part.object.get("image_url") orelse continue;
-                    const url = switch (url_val) {
-                        .string => |s| s,
-                        .object => |io| if (io.get("url")) |u| (if (u == .string) u.string else continue) else continue,
-                        else => continue,
-                    };
-                    if (image_decoder) |dec| if (!dec(allocator, &image_list, url, vp)) {
-                        pi.image_decode_failed = true;
-                    };
-                }
-            }
-            if (text_parts.items.len > 0) {
-                const owned = try allocator.dupe(u8, text_parts.items);
-                try pi.owned_strings.append(allocator, owned);
-                content = owned;
-            }
-            if (image_list.items.len > 0) {
-                const owned = try image_list.toOwnedSlice(allocator);
-                try pi.owned_images.append(allocator, owned);
-                images = owned;
-            } else {
-                image_list.deinit(allocator);
-            }
-        },
+        .string => |s| read.text = s,
+        .array => |arr| read = try readInputParts(allocator, pi, arr.items, sink),
         else => {},
     }
 
-    if (content.len == 0 and images == null) return;
+    if (read.text.len == 0 and read.images == null) return;
     try pi.messages.append(allocator, .{
         .role = role,
-        .content = content,
-        .images = if (images) |im| im else null,
+        .content = read.text,
+        .images = read.images,
+        .media_parts = read.media_parts,
     });
 }
 
@@ -519,13 +565,22 @@ fn appendFunctionCallOutputItem(
     allocator: std.mem.Allocator,
     pi: *ParsedInput,
     obj: std.json.ObjectMap,
+    sink: ImageSink,
 ) !void {
     const call_id = if (obj.get("call_id")) |v| (if (v == .string) v.string else "") else "";
-    const output = if (obj.get("output")) |v| (if (v == .string) v.string else "") else "";
+    // `output` is a string, or a part list that can carry `input_image`.
+    var read: InputParts = .{};
+    if (obj.get("output")) |v| switch (v) {
+        .string => |out| read.text = out,
+        .array => |arr| read = try readInputParts(allocator, pi, arr.items, sink),
+        else => {},
+    };
     try pi.messages.append(allocator, .{
         .role = "tool",
-        .content = output,
+        .content = read.text,
         .tool_call_id = call_id,
+        .images = read.images,
+        .media_parts = read.media_parts,
     });
 }
 
@@ -895,8 +950,8 @@ test "parseInput reads a developer item as the system turn" {
     try testing.expectEqualStrings("You are S.", pi.messages.items[0].content);
 }
 
-fn testRejectingDecoder(_: std.mem.Allocator, _: *std.ArrayList(chat_mod.ImageData), _: []const u8, _: chat_mod.VisionPreproc) bool {
-    return false;
+fn testRejectingDecoder(_: std.mem.Allocator, _: *std.ArrayList(chat_mod.ImageData), _: []const u8, _: chat_mod.VisionPreproc) ?[]const u8 {
+    return "unreadable";
 }
 
 test "parseInput records an input_image the decoder could not read" {
@@ -907,8 +962,63 @@ test "parseInput records an input_image the decoder could not read" {
     defer parsed.deinit();
     var pi = try parseInput(allocator, parsed.value, null, null, testRejectingDecoder, .{});
     defer pi.deinit();
-    try std.testing.expect(pi.image_decode_failed);
+    try std.testing.expectEqual(@as(usize, 0), pi.media_fault.?.item);
+    try std.testing.expectEqualStrings("unreadable", pi.media_fault.?.reason);
     try std.testing.expectEqual(@as(usize, 1), pi.messages.items.len);
+}
+
+fn testAcceptingDecoder(allocator: std.mem.Allocator, list: *std.ArrayList(chat_mod.ImageData), _: []const u8, _: chat_mod.VisionPreproc) ?[]const u8 {
+    const pixels = allocator.alloc(u8, 4) catch return "oom";
+    list.append(allocator, .{ .pixels = pixels, .width = 1, .height = 1 }) catch {
+        allocator.free(pixels);
+        return "oom";
+    };
+    return null;
+}
+
+test "parseInput places input_image parts wherever they appear, tool outputs included" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"},{"type":"input_text","text":"open it"}]},
+        \\ {"type":"function_call","call_id":"c1","name":"screenshot","arguments":"{}"},
+        \\ {"type":"function_call_output","call_id":"c1","output":[{"type":"input_text","text":"shot:"},{"type":"input_image","image_url":{"url":"data:image/png;base64,AAAA"}}]}]
+    , .{});
+    defer parsed.deinit();
+    var pi = try parseInput(allocator, parsed.value, null, null, testAcceptingDecoder, .{});
+    defer pi.deinit();
+    try std.testing.expect(pi.media_fault == null);
+    try std.testing.expectEqual(@as(usize, 2), pi.n_images);
+    const msgs = pi.messages.items;
+    try std.testing.expectEqual(@as(usize, 3), msgs.len);
+    try std.testing.expectEqualSlices(chat_mod.MediaPart, &.{.{ .at = 0, .kind = .image }}, msgs[0].media_parts.?);
+    try std.testing.expectEqualStrings("tool", msgs[2].role);
+    try std.testing.expectEqualStrings("shot:", msgs[2].content);
+    try std.testing.expectEqual(@as(usize, 1), msgs[2].images.?.len);
+    try std.testing.expectEqualSlices(chat_mod.MediaPart, &.{.{ .at = 5, .kind = .image }}, msgs[2].media_parts.?);
+}
+
+test "parseInput names the input item of an image it could not decode" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\[{"role":"user","content":"hi"},
+        \\ {"type":"function_call_output","call_id":"c1","output":[{"type":"input_image","image_url":"http://example.invalid/x.png"}]}]
+    , .{});
+    defer parsed.deinit();
+    var pi = try parseInput(allocator, parsed.value, null, null, testRejectingDecoder, .{});
+    defer pi.deinit();
+    try std.testing.expectEqual(@as(usize, 1), pi.media_fault.?.item);
+}
+
+test "parseInput refuses an input_audio part by name" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\[{"role":"user","content":[{"type":"input_text","text":"listen"},{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]
+    , .{});
+    defer parsed.deinit();
+    var pi = try parseInput(allocator, parsed.value, null, null, testAcceptingDecoder, .{});
+    defer pi.deinit();
+    try std.testing.expectEqual(@as(usize, 0), pi.media_fault.?.item);
+    try std.testing.expect(pi.media_fault.?.kind == .unsupported_audio);
 }
 
 test "parseInput with instructions prepends system" {

@@ -18566,9 +18566,8 @@ pub const Transformer = struct {
         defer _ = mlx.mlx_array_free(mask_2d);
         try mlx.check(mlx.mlx_equal(&mask_2d, token_ids, img_id_arr, s));
         // Qwen video pads (`video_token_id`) and Gemma audio pads ride the same
-        // row stream in prompt order — the encoder output is concatenated
-        // [image ; video ; audio] the way `insertMultimodalTokens` lays the
-        // placeholder runs out.
+        // row stream in prompt order — the encoder output is concatenated in
+        // the order the placeholder runs sit in the prompt.
         for ([_]u32{ audio_token_id, video_token_id }) |extra_id| {
             if (extra_id == 0) continue;
             const extra_arr = mlx.mlx_array_new_int(@intCast(extra_id));

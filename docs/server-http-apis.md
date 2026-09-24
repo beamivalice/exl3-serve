@@ -24,7 +24,13 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-tool-calling](serv
 - `/v1/models` rows carry `context_length` + `max_model_len` at TOP level. Context-overflow 400s name BOTH counts.
 - Endpoint EXISTENCE never depends on model state and the 404 is answered BEFORE the model resolves (`ROUTE_PATHS`);
   a status route never reaches `ensureLoaded` (`handlePropsNoModel`). Removed upstream routes answer named 404s.
-- A content array's text parts JOIN in order (`joinedTextParts`).
+- A content array's text parts JOIN in order (`joinedTextParts`); its media parts render at the offset they sat at.
+- **Media is read from EVERY message** on all three surfaces: chat `image_url`/`video_url` parts in any role
+  (`tool` included), Anthropic `image` blocks beside the text or inside a `tool_result`, Responses `input_image` in
+  a message or a `function_call_output` array. Only base64 data URLs decode (remote URLs are refused, not fetched);
+  a failure is a 400 naming the message index and the reason, an `input_audio` part a 400 on a model without an
+  audio encoder, more than 64 images a 400 with both counts, an encode failure a 500 (Anthropic: `api_error`).
+  Stored Responses history keeps text only.
 
 ## Streaming
 

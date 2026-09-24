@@ -55,9 +55,9 @@ pub const TokenizeCache = struct {
         self.entries.deinit(self.allocator);
     }
 
-    /// Compute the cache key for a chat-template render. Returns null if
-    /// any input forbids caching (currently: images present on any
-    /// message).
+    /// Compute the cache key for a chat-template render. Media pixels never
+    /// reach the rendered text; where each media part renders does. Returns
+    /// null if any input forbids caching (none does today).
     pub fn keyFor(
         messages: []const chat_mod.Message,
         tools_json: ?[]const u8,
@@ -66,7 +66,6 @@ pub const TokenizeCache = struct {
         reasoning_effort: ?[]const u8,
         continue_final: bool,
     ) ?u64 {
-        for (messages) |m| if (m.images != null) return null;
         var h = std.hash.Wyhash.init(0xC0DEC0DE);
         for (messages) |m| {
             h.update(m.role);
@@ -76,6 +75,11 @@ pub const TokenizeCache = struct {
             if (m.tool_call_id) |id| h.update(id);
             h.update("\x1e");
             if (m.reasoning_content) |rc| h.update(rc);
+            h.update("\x1e");
+            if (m.media_parts) |parts| for (parts) |part| {
+                h.update(std.mem.asBytes(&part.at));
+                h.update(@tagName(part.kind));
+            };
             h.update("\x1e");
             if (m.tool_calls) |tcs| {
                 for (tcs) |tc| {
@@ -208,15 +212,6 @@ test "TokenizeCache key distinguishes reasoning_effort" {
     const k_max = TokenizeCache.keyFor(&m, null, null, true, "max", false).?;
     try std.testing.expect(k_default != k_high);
     try std.testing.expect(k_high != k_max);
-}
-
-test "TokenizeCache images null key" {
-    const m_img = [_]chat_mod.Message{
-        .{ .role = "user", .content = "what's in this?", .images = &[_]chat_mod.ImageData{
-            .{ .pixels = "", .width = 8, .height = 8 },
-        } },
-    };
-    try std.testing.expect(TokenizeCache.keyFor(&m_img, null, null, false, null, false) == null);
 }
 
 test "keyFor: a continuation does not share a key with the same messages as history" {

@@ -23,6 +23,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
   ALL-pad generation declines); hot cache spills to SSD; RAM invalidation propagates to disk.
 - Restore ALWAYS clamps (`truncate(final_len)`); a failed restore hands back an EMPTY cache; every eviction loop has
   a no-progress exit (checked-out entries are unevictable).
+- **Media keys are a CHAIN** (`MediaSpan`: per block, a hash of its pixels, its position and every block before it;
+  the entry key is the last). An entry keyed by a request's block k restores up to block k+1, so a turn that appends
+  a screenshot reuses everything before it; any other key mismatch shares only the text before the first media row
+  (`crossKeyBoundary`). The splice resumes at the placeholder count inside the restored prefix.
 - **A restore is not bit-identical on a HYBRID** (≤ 0.047 nats; the chunking class ~0.3 nats top-5 for QSA state) ⇒
   byte-stable greedy needs `--prefix-cache-entries 0`. A hybrid cache hit moves the top logprob ~0.2 nats, so any
   scorer boots with the cache off.

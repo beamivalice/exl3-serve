@@ -46,6 +46,10 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
   provably reclaimable bytes; `PrefillDoesNotFit` → 400 by name.
 - The hot-cache budget is clamped at load and follows residency ([engine-prefix-cache](engine-prefix-cache.md#budget)).
 - Context-overflow 400s name BOTH counts.
+- **A vision encode is billed before it runs** (`towerFitFault`): the Qwen ViT materializes f32 scores, their scaled
+  copy and the softmax per layer (3 x heads x N^2 x 4 bytes, `visionScratchBytes`) for its largest block, plus every
+  block's soft-token rows; past what the GPU has left it is a named 400. A 1920x1080 screenshot (~8.1k patches)
+  bills ~12.6 GB at 16 heads.
 
 ## Observing memory
 

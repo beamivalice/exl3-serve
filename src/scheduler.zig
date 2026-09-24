@@ -241,6 +241,9 @@ pub const SubmitParams = struct {
     vision_embeddings: ?mlx.mlx_array = null,
     /// Prefix-cache key for the media under the placeholder tokens (0 = none).
     vision_key: u64 = 0,
+    /// Per media block of `full_prompt`, its start and chained key
+    /// (`prefix_cache.MediaSpan`). Borrowed; the slot keeps a copy.
+    media_chain: []const prefix_cache_mod.MediaSpan = &.{},
     /// Workload key for hot-cache eviction (`server.requestCacheKey`, 0 = anonymous).
     cache_key: u64 = 0,
     /// Qwen3-VL interleaved M-RoPE: server-computed flat [3 × mrope_total] i32
@@ -402,6 +405,8 @@ pub const Slot = struct {
     /// First dynamic image/audio/video placeholder in `full_prompt`. Cache
     /// state before this position is safe to share across media hashes.
     media_start: ?usize,
+    /// Owned copy of `SubmitParams.media_chain`.
+    media_chain: []const prefix_cache_mod.MediaSpan,
     /// Qwen3-VL M-RoPE position-id table (flat [3 × mrope_total]) + decode delta.
     /// Owned by the slot; `mrope_pos` freed on deinit.
     mrope_pos: ?[]const i32,
@@ -580,6 +585,8 @@ pub const Slot = struct {
         const full_prompt_src = params.full_prompt orelse params.prompt_ids;
         const full_prompt_owned = try allocator.dupe(u32, full_prompt_src);
         errdefer allocator.free(full_prompt_owned);
+        const media_chain_owned = try allocator.dupe(prefix_cache_mod.MediaSpan, params.media_chain);
+        errdefer allocator.free(media_chain_owned);
         const media_start = firstMediaPlaceholder(
             params.vision_embeddings != null,
             full_prompt_owned,
@@ -601,6 +608,7 @@ pub const Slot = struct {
             .vision_key = params.vision_key,
             .cache_key = params.cache_key,
             .media_start = media_start,
+            .media_chain = media_chain_owned,
             .mrope_pos = params.mrope_pos,
             .mrope_total = params.mrope_total,
             .mrope_delta = params.mrope_delta,
@@ -717,6 +725,7 @@ pub const Slot = struct {
         if (self.mrope_pos) |mp| self.allocator.free(mp);
         self.allocator.free(self.prompt_ids);
         self.allocator.free(self.full_prompt);
+        self.allocator.free(self.media_chain);
         self.allocator.free(self.eos_token_ids);
         if (self.error_code) |code| self.allocator.free(code);
         if (self.generated_ids) |g| self.allocator.free(g);
@@ -980,9 +989,12 @@ pub const VisionEncodeRequest = struct {
     /// buffers. Borrowed; must outlive the call. The inference thread frames
     /// each into 640-sample tokens and projects them through the audio embedder.
     audio: []const []const u8 = &.{},
-    /// Output: encoded embedding tensor on success — vision soft tokens, then
-    /// video soft tokens, then audio soft tokens, concatenated along the token
-    /// axis (matches the prompt's image/video/audio block insertion order).
+    /// The prompt order of the image and video blocks (each kind in its own
+    /// list order); empty means every image, then every video.
+    order: []const chat_mod.MediaPart.Kind = &.{},
+    /// Output: encoded embedding tensor on success — image and video soft
+    /// tokens in `order`, then audio soft tokens, concatenated along the token
+    /// axis so the splice scatters each row into its placeholder.
     /// Ownership transfers to the caller.
     result: ?mlx.mlx_array = null,
     /// Output: number of vision / video / audio soft tokens in `result` (in
@@ -4279,10 +4291,36 @@ fn flushImatrixCaptures(sch: *Scheduler) void {
     }
 }
 
-/// Phase A4: encode one or more images on the inference thread. Mirrors the
-/// existing `processVisionImages` shape but writes the result into a request
-/// struct + signals done, so the conn thread (blocked in `encodeVision`)
-/// gets the output. On error, sets `req.error_name` and still signals done.
+/// One image through the tower: a patch-grid ViT takes pixel_values [N, feat]
+/// and yields [1, N/merge², hidden]; a fixed-square tower takes CHW.
+fn encodeImageBlock(vision_enc: *VisionEncoder, img: VisionImagePixels) !mlx.mlx_array {
+    if (img.grid_h > 0) {
+        const n: usize = @as(usize, img.grid_h) * img.grid_w;
+        const feat: usize = (img.pixels.len / 4) / n;
+        const shape = [_]c_int{ @intCast(n), @intCast(feat) };
+        const pixel_arr = mlx.mlx_array_new_data(img.pixels.ptr, &shape, 2, .float32);
+        defer _ = mlx.mlx_array_free(pixel_arr);
+        return vision_enc.forwardPatches(pixel_arr, img.grid_h, img.grid_w);
+    }
+    const shape = [_]c_int{ 1, 3, @intCast(img.height), @intCast(img.width) };
+    const pixel_arr = mlx.mlx_array_new_data(img.pixels.ptr, &shape, 4, .float32);
+    defer _ = mlx.mlx_array_free(pixel_arr);
+    return vision_enc.forward(pixel_arr);
+}
+
+fn encodeVideoBlock(vision_enc: *VisionEncoder, vid: VisionVideoPixels) !mlx.mlx_array {
+    const n: usize = @as(usize, vid.grid_t) * vid.grid_h * vid.grid_w;
+    const feat: usize = (vid.pixels.len / 4) / n;
+    const shape = [_]c_int{ @intCast(n), @intCast(feat) };
+    const pixel_arr = mlx.mlx_array_new_data(vid.pixels.ptr, &shape, 2, .float32);
+    defer _ = mlx.mlx_array_free(pixel_arr);
+    return vision_enc.forwardVideoPatches(pixel_arr, vid.grid_t, vid.grid_h, vid.grid_w);
+}
+
+/// Phase A4: encode one or more images on the inference thread. Writes the
+/// result into a request struct + signals done, so the conn thread (blocked
+/// in `encodeVision`) gets the output. On error, sets `req.error_name` and
+/// still signals done.
 /// Plan 05 Phase D: routes the encode through `req.model.vision_encoder`,
 /// not the scheduler's borrowed-view singleton — each LoadedModel has its
 /// own vision encoder when applicable.
@@ -4296,10 +4334,9 @@ fn runVisionEncode(sch: *Scheduler, req: *VisionEncodeRequest) void {
         return;
     }
 
-    // Encode all soft tokens into `emb_parts`: vision, then video, then audio,
-    // so the single splice channel scatters them in the same order as the
-    // placeholder blocks the conn thread injected (image block, then video
-    // block, then audio block).
+    // Encode all soft tokens into `emb_parts`: images and videos in prompt
+    // `order`, then audio, so the single splice channel scatters them in the
+    // order of the placeholder rows.
     var emb_parts = std.ArrayList(mlx.mlx_array).empty;
     defer emb_parts.deinit(req.allocator);
     const failParts = struct {
@@ -4309,54 +4346,32 @@ fn runVisionEncode(sch: *Scheduler, req: *VisionEncodeRequest) void {
         }
     }.f;
 
-    var n_vision: usize = 0;
-    for (req.images) |img| {
-        var emb: mlx.mlx_array = undefined;
-        if (img.grid_h > 0) {
-            // Patch-grid ViT: pixels hold pixel_values [N, feat]; the tower
-            // produces [1, N/merge², out_hidden].
-            const n: usize = @as(usize, img.grid_h) * img.grid_w;
-            const feat: usize = (img.pixels.len / 4) / n;
-            const shape = [_]c_int{ @intCast(n), @intCast(feat) };
-            const pixel_arr = mlx.mlx_array_new_data(img.pixels.ptr, &shape, 2, .float32);
-            defer _ = mlx.mlx_array_free(pixel_arr);
-            emb = vision_enc.forwardPatches(pixel_arr, img.grid_h, img.grid_w) catch |err| {
-                failParts(sch, req, emb_parts.items, @errorName(err));
-                return;
-            };
-        } else {
-            const h: c_int = @intCast(img.height);
-            const w: c_int = @intCast(img.width);
-            const shape = [_]c_int{ 1, 3, h, w };
-            const pixel_arr = mlx.mlx_array_new_data(img.pixels.ptr, &shape, 4, .float32);
-            defer _ = mlx.mlx_array_free(pixel_arr);
-            emb = vision_enc.forward(pixel_arr) catch |err| {
-                failParts(sch, req, emb_parts.items, @errorName(err));
-                return;
-            };
-        }
-        const es = mlx.getShape(emb);
-        n_vision += @intCast(es[1]);
-        emb_parts.append(req.allocator, emb) catch |err| {
-            _ = mlx.mlx_array_free(emb);
-            failParts(sch, req, emb_parts.items, @errorName(err));
-            return;
-        };
+    if (req.order.len > 0 and req.order.len != req.images.len + req.videos.len) {
+        finishVisionRequest(sch, req, "MediaOrderMismatch");
+        return;
     }
-
+    var n_vision: usize = 0;
     var n_video: usize = 0;
-    for (req.videos) |vid| {
-        const n: usize = @as(usize, vid.grid_t) * vid.grid_h * vid.grid_w;
-        const feat: usize = (vid.pixels.len / 4) / n;
-        const shape = [_]c_int{ @intCast(n), @intCast(feat) };
-        const pixel_arr = mlx.mlx_array_new_data(vid.pixels.ptr, &shape, 2, .float32);
-        defer _ = mlx.mlx_array_free(pixel_arr);
-        const emb = vision_enc.forwardVideoPatches(pixel_arr, vid.grid_t, vid.grid_h, vid.grid_w) catch |err| {
+    var next_image: usize = 0;
+    var next_video: usize = 0;
+    for (0..req.images.len + req.videos.len) |block| {
+        const is_image = if (req.order.len > 0) req.order[block] == .image else block < req.images.len;
+        if ((is_image and next_image == req.images.len) or (!is_image and next_video == req.videos.len)) {
+            failParts(sch, req, emb_parts.items, "MediaOrderMismatch");
+            return;
+        }
+        const emb = (if (is_image) encodeImageBlock(vision_enc, req.images[next_image]) else encodeVideoBlock(vision_enc, req.videos[next_video])) catch |err| {
             failParts(sch, req, emb_parts.items, @errorName(err));
             return;
         };
-        const es = mlx.getShape(emb);
-        n_video += @intCast(es[1]);
+        const rows: usize = @intCast(mlx.getShape(emb)[1]);
+        if (is_image) {
+            next_image += 1;
+            n_vision += rows;
+        } else {
+            next_video += 1;
+            n_video += rows;
+        }
         emb_parts.append(req.allocator, emb) catch |err| {
             _ = mlx.mlx_array_free(emb);
             failParts(sch, req, emb_parts.items, @errorName(err));
@@ -5422,6 +5437,7 @@ fn runPrefill(sch: *Scheduler, slot: *Slot) !void {
                 slot.has_tools,
                 slot.vision_key,
                 slot.media_start,
+                slot.media_chain,
                 if (dfl_target) |*dc| .{ .cache = &dc.cache, .base_pos = &dfl_base } else null,
                 if (mtp_kv) |k| .{ .cache = k, .base_pos = &mtp_base, .head = mtp_head } else null,
                 @intFromPtr(slot),

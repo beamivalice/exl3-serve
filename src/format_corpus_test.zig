@@ -2631,3 +2631,88 @@ test "format corpus: constrained JSON marker strings are data on every protocol"
         try testing.expectEqualStrings(json, output.items);
     }
 }
+
+// A vision template's content-part branch (the Qwen3-VL / MiMo shape): each
+// media part is a placeholder at its own position, in every role.
+const vision_template =
+    \\{%- macro render_content(content) -%}
+    \\{%- if content is string -%}{{- content -}}
+    \\{%- elif content is iterable -%}{%- for item in content -%}
+    \\{%- if item.type == 'image' -%}{{- '<|vision_start|><|image_pad|><|vision_end|>' -}}
+    \\{%- elif item.type == 'video' -%}{{- '<|vision_start|><|video_pad|><|vision_end|>' -}}
+    \\{%- elif 'text' in item -%}{{- item.text -}}{%- endif -%}
+    \\{%- endfor -%}{%- endif -%}
+    \\{%- endmacro -%}
+    \\{%- for message in messages -%}
+    \\{%- set content = render_content(message.content) -%}
+    \\{%- if message.role == 'tool' -%}{{- '<|im_start|>user\n<tool_response>\n' + content + '\n</tool_response><|im_end|>\n' -}}
+    \\{%- else -%}{{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>\n' -}}{%- endif -%}
+    \\{%- endfor -%}
+;
+
+test "format corpus: every wire shape's media renders its placeholder where it was sent" {
+    const img = [_]chat.ImageData{.{ .pixels = "", .width = 1, .height = 1 }};
+    const vid = [_]chat.VideoData{.{ .pixels = "", .grid_t = 1, .grid_h = 1, .grid_w = 1 }};
+    const call = [_]chat.ToolCall{.{ .id = "c1", .name = "screenshot", .arguments = "{}" }};
+    const P = "<|vision_start|><|image_pad|><|vision_end|>";
+    const V = "<|vision_start|><|video_pad|><|vision_end|>";
+    const Case = struct { shape: []const u8, messages: []const chat.Message, want: []const u8 };
+    const cases = [_]Case{
+        .{
+            .shape = "OpenAI user image_url before its text",
+            .messages = &.{.{ .role = "user", .content = "look", .images = &img, .media_parts = &.{.{ .at = 0, .kind = .image }} }},
+            .want = "<|im_start|>user\n" ++ P ++ "look<|im_end|>\n",
+        },
+        .{
+            .shape = "OpenAI tool message with an image_url part",
+            .messages = &.{
+                .{ .role = "assistant", .content = "", .tool_calls = &call },
+                .{ .role = "tool", .content = "shot:", .tool_call_id = "c1", .images = &img, .media_parts = &.{.{ .at = 5, .kind = .image }} },
+            },
+            .want = "<|im_start|>assistant\n<|im_end|>\n<|im_start|>user\n<tool_response>\nshot:" ++ P ++ "\n</tool_response><|im_end|>\n",
+        },
+        .{
+            .shape = "Anthropic tool_result image block, then the user's text",
+            .messages = &.{
+                .{ .role = "tool", .content = "here", .tool_call_id = "t1", .images = &img, .media_parts = &.{.{ .at = 4, .kind = .image }} },
+                .{ .role = "user", .content = "describe it" },
+            },
+            .want = "<|im_start|>user\n<tool_response>\nhere" ++ P ++ "\n</tool_response><|im_end|>\n<|im_start|>user\ndescribe it<|im_end|>\n",
+        },
+        .{
+            .shape = "Responses input_image between two input_text parts",
+            .messages = &.{.{ .role = "user", .content = "a\nb", .images = &img, .media_parts = &.{.{ .at = 1, .kind = .image }} }},
+            .want = "<|im_start|>user\na" ++ P ++ "\nb<|im_end|>\n",
+        },
+        .{
+            .shape = "Responses function_call_output carrying only an image",
+            .messages = &.{.{ .role = "tool", .content = "", .tool_call_id = "c1", .images = &img, .media_parts = &.{.{ .at = 0, .kind = .image }} }},
+            .want = "<|im_start|>user\n<tool_response>\n" ++ P ++ "\n</tool_response><|im_end|>\n",
+        },
+        .{
+            .shape = "two image parts in one message: each its own vision_start/vision_end",
+            .messages = &.{.{ .role = "user", .content = "compare", .images = &(img ++ img), .media_parts = &.{ .{ .at = 0, .kind = .image }, .{ .at = 0, .kind = .image } } }},
+            .want = "<|im_start|>user\n" ++ P ++ P ++ "compare<|im_end|>\n",
+        },
+        .{
+            .shape = "OpenAI video_url then image_url in one message",
+            .messages = &.{.{ .role = "user", .content = "x", .images = &img, .videos = &vid, .media_parts = &.{ .{ .at = 0, .kind = .video }, .{ .at = 1, .kind = .image } } }},
+            .want = "<|im_start|>user\n" ++ V ++ "x" ++ P ++ "<|im_end|>\n",
+        },
+    };
+    var config = chat.ChatConfig{
+        .chat_template = vision_template,
+        .bos_token = null,
+        .eos_token = null,
+        .add_bos_token = false,
+        .allocator = testing.allocator,
+    };
+    for (cases) |c| {
+        const rendered = try chat.renderChatTemplate(testing.allocator, c.messages, &config, null, null, true, null, false);
+        defer testing.allocator.free(rendered);
+        testing.expectEqualStrings(c.want, rendered) catch |err| {
+            std.debug.print("\n[{s}]\n", .{c.shape});
+            return err;
+        };
+    }
+}

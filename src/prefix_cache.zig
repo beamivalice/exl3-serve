@@ -137,6 +137,29 @@ pub const LookupResult = struct {
     checked_out: bool = false,
 };
 
+/// One media block of a prompt: where its placeholder rows start, and a key
+/// over that block and every block before it (pixels and positions).
+pub const MediaSpan = struct { start: usize, key: u64 };
+
+/// The key of a whole media chain: its last block's (0 = no media).
+pub fn chainKey(chain: []const MediaSpan) u64 {
+    return if (chain.len == 0) 0 else chain[chain.len - 1].key;
+}
+
+/// Rows an entry keyed `entry_key` may share with a request under a different
+/// key. An entry whose media is the request's first k blocks shares up to the
+/// request's block k+1; any other pair shares only the text before either
+/// side's first media row. Null = nothing is provably shared.
+fn crossKeyBoundary(entry_key: u64, entry_start: ?usize, request_start: ?usize, chain: []const MediaSpan) ?usize {
+    if (entry_key != 0 and chain.len > 1) {
+        for (chain[0 .. chain.len - 1], chain[1..]) |span, next| {
+            if (span.key == entry_key) return next.start;
+        }
+    }
+    const es = entry_start orelse return request_start;
+    return if (request_start) |rs| @min(es, rs) else es;
+}
+
 const Entry = struct {
     /// `prompt_ids ++ generated_ids` from the request that produced this snapshot.
     /// Owned by the entry; freed on eviction.
@@ -957,6 +980,7 @@ pub const HotPrefixCache = struct {
         has_tools: bool,
         vision_key: u64,
         media_start: ?usize,
+        media_chain: []const MediaSpan,
         quant_config: kv_quant.KVQuantConfig,
         require_ssm_checkpoint: bool,
         probe: ?*MatchProbe,
@@ -974,12 +998,9 @@ pub const HotPrefixCache = struct {
             if (e.vision_key != vision_key) {
                 // Placeholder token IDs do not encode media pixels. Once an
                 // image/audio/video row is forwarded, model state depends on
-                // the media hash and cannot cross keys. State strictly before
-                // the first such row remains ordinary text.
-                const safe_boundary = if (e.media_start) |entry_start|
-                    if (media_start) |request_start| @min(entry_start, request_start) else entry_start
-                else
-                    media_start orelse continue;
+                // the media and cannot cross keys past the first block the
+                // two prompts do not share.
+                const safe_boundary = crossKeyBoundary(e.vision_key, e.media_start, media_start, media_chain) orelse continue;
                 max_shared = @min(max_shared, safe_boundary);
             }
             var shared: usize = 0;
@@ -1032,7 +1053,7 @@ pub const HotPrefixCache = struct {
     }
 
     fn findBestMatch(self: *const HotPrefixCache, prompt_ids: []const u32, has_tools: bool, vision_key: u64, quant_config: kv_quant.KVQuantConfig) ?struct { idx: usize, shared: usize } {
-        const match = self.findBestRestorableMatch(prompt_ids, has_tools, vision_key, null, quant_config, false, null) orelse return null;
+        const match = self.findBestRestorableMatch(prompt_ids, has_tools, vision_key, null, &.{}, quant_config, false, null) orelse return null;
         return .{ .idx = match.idx, .shared = match.shared };
     }
 
@@ -1064,6 +1085,7 @@ pub const HotPrefixCache = struct {
             has_tools,
             vision_key,
             null,
+            &.{},
             dflash_target,
             mtp_target,
             null,
@@ -1095,6 +1117,7 @@ pub const HotPrefixCache = struct {
             has_tools,
             vision_key,
             media_start,
+            &.{},
             dflash_target,
             mtp_target,
             slot_id,
@@ -1112,6 +1135,9 @@ pub const HotPrefixCache = struct {
         has_tools: bool,
         vision_key: u64,
         media_start: ?usize,
+        /// The request's media blocks (`MediaSpan`); an entry holding a prefix
+        /// of them restores up to the first block it lacks.
+        media_chain: []const MediaSpan,
         dflash_target: ?DflashTarget,
         mtp_target: ?DflashTarget,
         /// Restore by move: non-null opts this request into the checkout (the caller promises
@@ -1133,6 +1159,7 @@ pub const HotPrefixCache = struct {
             has_tools,
             vision_key,
             media_start,
+            media_chain,
             target_cache.config,
             target_ssm_entries != null,
             &probe,
@@ -2564,10 +2591,7 @@ pub const HotPrefixCache = struct {
             if (e.vision_key != vision_key) {
                 // Same rule as `findBestRestorableMatch`: rows before the
                 // earliest media placeholder are ordinary text and cross keys.
-                const safe_boundary = if (e.media_start) |entry_start|
-                    if (media_start) |commit_start| @min(entry_start, commit_start) else entry_start
-                else
-                    media_start orelse continue;
+                const safe_boundary = crossKeyBoundary(e.vision_key, e.media_start, media_start, &.{}) orelse continue;
                 max_shared = @min(max_shared, safe_boundary);
             }
             var shared: usize = 0;
@@ -3108,6 +3132,42 @@ test "HotPrefixCache: findBestMatch returns longest shared prefix" {
     // Scheme mismatch returns null — entries are dense, a query for affine
     // 4-bit cannot match (Wave 1.A: cross-scheme cache hits never happen).
     try testing.expectEqual(@as(?@TypeOf(m), null), cache.findBestMatch(&lookup_ids, false, 0, kv_quant.KVQuantConfig.affine(4)));
+}
+
+test "HotPrefixCache: an entry holding the request's first images restores up to the new one" {
+    // An agent turn appends a screenshot to a conversation that already holds
+    // one: the previous turn's entry carries the first image's rows, keyed by
+    // that image alone, and serves everything before the new image.
+    var cache = HotPrefixCache.init(testing.allocator, 4);
+    defer cache.deinit();
+    const P = 99;
+    const chain = [_]MediaSpan{ .{ .start = 3, .key = 0xA1 }, .{ .start = 8, .key = 0xB3 } };
+    const request = [_]u32{ 1, 2, 3, P, P, 5, 6, 7, P, P, 9 };
+    for ([_]u64{ 0xA1, 0xF0 }, 0..) |key, i| {
+        try cache.entries.append(testing.allocator, .{
+            .tokens = try testing.allocator.dupe(u32, &[_]u32{ 1, 2, 3, P, P, 5, 6, 7, 4 }),
+            .has_tools = false,
+            .vision_key = key,
+            .media_start = 3,
+            .snapshot = .{ .entries = try testing.allocator.alloc(transformer_mod.KVCacheEntry, 0), .step = 0, .allocator = testing.allocator, .config = transformer_mod.KVQuantConfig.dense },
+            .last_used = i,
+            .quant_config = kv_quant.KVQuantConfig.dense,
+            .kv_bytes = 0,
+            .ssm_checkpoints = null,
+            .ssm_bytes = 0,
+        });
+    }
+    const dense = kv_quant.KVQuantConfig.dense;
+    const m = cache.findBestRestorableMatch(&request, false, chainKey(&chain), 3, &chain, dense, false, null).?;
+    try testing.expectEqual(@as(usize, 0), m.idx);
+    try testing.expectEqual(@as(usize, 8), m.shared);
+
+    // Foreign pixels under the first placeholder share only the text before it.
+    cache.entries.items[0].vision_key = 0xA2;
+    try testing.expectEqual(@as(usize, 3), cache.findBestRestorableMatch(&request, false, chainKey(&chain), 3, &chain, dense, false, null).?.shared);
+    // Without the chain the old rule holds: the first media row bounds it.
+    cache.entries.items[0].vision_key = 0xA1;
+    try testing.expectEqual(@as(usize, 3), cache.findBestRestorableMatch(&request, false, chainKey(&chain), 3, &.{}, dense, false, null).?.shared);
 }
 
 test "HotPrefixCache: restore clamps an inflated snapshot to the matched length (gemma mask crash)" {
@@ -3722,7 +3782,7 @@ test "HotPrefixCache: an entry shorter than its media boundary is pure text" {
         var c2 = try KVCache.init(testing.allocator, 2);
         defer c2.deinit();
         var moe: usize = 0;
-        const res = try hc.lookupAndRestoreWithMedia(&c2, &moe, null, s, &tokens, false, 0, null, null, null, null, false);
+        const res = try hc.lookupAndRestoreWithMedia(&c2, &moe, null, s, &tokens, false, 0, null, &.{}, null, null, null, false);
         try testing.expectEqual(@as(usize, 400), res.matched);
     }
     // A different-image request caps at ITS media boundary (500 > 400 here,
@@ -3731,7 +3791,7 @@ test "HotPrefixCache: an entry shorter than its media boundary is pure text" {
         var c3 = try KVCache.init(testing.allocator, 2);
         defer c3.deinit();
         var moe: usize = 0;
-        const res = try hc.lookupAndRestoreWithMedia(&c3, &moe, null, s, &tokens, false, 0xFFFF, 500, null, null, null, false);
+        const res = try hc.lookupAndRestoreWithMedia(&c3, &moe, null, s, &tokens, false, 0xFFFF, 500, &.{}, null, null, null, false);
         try testing.expectEqual(@as(usize, 400), res.matched);
     }
 
@@ -3792,7 +3852,7 @@ test "HotPrefixCache: media request restores the pre-media text prefix from SSD"
         var cache2 = try KVCache.init(testing.allocator, 2);
         defer cache2.deinit();
         var moe: usize = 0;
-        const res = try hc2.lookupAndRestoreWithMedia(&cache2, &moe, null, s, &tokens, false, 0xDEAD, 400, null, null, null, false);
+        const res = try hc2.lookupAndRestoreWithMedia(&cache2, &moe, null, s, &tokens, false, 0xDEAD, 400, &.{}, null, null, null, false);
         try testing.expect(!res.full_match);
         try testing.expectEqual(@as(usize, 400), res.matched);
         try testing.expectEqual(@as(usize, 400), cache2.step);
@@ -4100,6 +4160,7 @@ test "HotPrefixCache: hybrid lookup reuses only the prefix before changed media"
         false,
         0x2222,
         media_start,
+        &.{},
         null,
         null,
         null,
@@ -4218,6 +4279,7 @@ test "HotPrefixCache: a text turn after image turns restores the pre-media prefi
         false,
         image_key,
         media_start,
+        &.{},
         null,
         null,
         null,
@@ -4253,6 +4315,7 @@ test "HotPrefixCache: a text turn after image turns restores the pre-media prefi
         false,
         0,
         null,
+        &.{},
         null,
         null,
         null,
@@ -6742,14 +6805,14 @@ test "HotPrefixCache: skip set on the cache without a lookup does not poison the
     var target = pcEmptySsm();
     defer pcFreeQsaHybrid(&target);
     var moe_off: usize = 0;
-    const skipped = try hc.lookupAndRestoreWithMedia(&target_cache, &moe_off, &target, s, &tokens, false, 0, null, null, null, null, true);
+    const skipped = try hc.lookupAndRestoreWithMedia(&target_cache, &moe_off, &target, s, &tokens, false, 0, null, &.{}, null, null, null, true);
     try testing.expectEqual(@as(usize, 0), skipped.matched);
     var cache2 = try KVCache.init(testing.allocator, 3);
     defer cache2.deinit();
     var target2 = pcEmptySsm();
     defer pcFreeQsaHybrid(&target2);
     var moe2: usize = 0;
-    const leaked = try hc.lookupAndRestoreWithMedia(&cache2, &moe2, &target2, s, &tokens, false, 0, null, null, null, null, false);
+    const leaked = try hc.lookupAndRestoreWithMedia(&cache2, &moe2, &target2, s, &tokens, false, 0, null, &.{}, null, null, null, false);
     try testing.expect(leaked.matched > 0);
 }
 
@@ -6774,7 +6837,7 @@ test "HotPrefixCache: skip_prefix_cache lookup is cold even when a covering entr
     var target = pcEmptySsm();
     defer pcFreeQsaHybrid(&target);
     var moe_off: usize = 0;
-    const skipped = try hc.lookupAndRestoreWithMedia(&target_cache, &moe_off, &target, s, &tokens, false, 0, null, null, null, null, true);
+    const skipped = try hc.lookupAndRestoreWithMedia(&target_cache, &moe_off, &target, s, &tokens, false, 0, null, &.{}, null, null, null, true);
     try testing.expectEqual(@as(usize, 0), skipped.matched);
 
     var target2 = pcEmptySsm();
@@ -6807,7 +6870,7 @@ test "HotPrefixCache: a skipped lookup of a covering prompt matches a cold cache
     var skipped_ssm = pcEmptySsm();
     defer pcFreeQsaHybrid(&skipped_ssm);
     var skip_off: usize = 7;
-    const skipped = try hc.lookupAndRestoreWithMedia(&skipped_cache, &skip_off, &skipped_ssm, s, &tokens, false, 0, null, null, null, null, true);
+    const skipped = try hc.lookupAndRestoreWithMedia(&skipped_cache, &skip_off, &skipped_ssm, s, &tokens, false, 0, null, &.{}, null, null, null, true);
 
     var cold = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
     defer cold.deinit();
@@ -7335,7 +7398,7 @@ test "a 0-token outcome is not a restore: no LRU bump, no protection, and the en
     var ssm = pcEmptySsm();
     defer pcFreeHybrid(&ssm);
     var moe_off: usize = 0;
-    const hit = try hc.lookupAndRestoreWithMedia(&slot_cache, &moe_off, &ssm, s, &tokens, false, 0, null, null, null, 0xF5, false);
+    const hit = try hc.lookupAndRestoreWithMedia(&slot_cache, &moe_off, &ssm, s, &tokens, false, 0, null, &.{}, null, null, 0xF5, false);
 
     // The outcome: nothing delivered.
     try t.expectEqual(@as(usize, 0), hit.matched);
