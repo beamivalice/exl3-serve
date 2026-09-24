@@ -286,6 +286,24 @@ MiMo EXL3 kernel history (n=40 readers, codebook-generic): the n=40 prefill read
 funnel cut the decode chain 20% at one row and 36% at seven; the prepared-mid dispatch took rows-1 from 0.524 to
 0.485 ms. A 16-lane affine down with f32 scores was slower at every width and is parked.
 
+<a id="mimo-prefill-gemm"></a>
+## MiMo prefill: the EXL3 expert GEMMs (79a4cb4)
+
+Live prefill (served pack, kv8, no MTP, prefix cache off, chunk 2048, `taskpolicy -a`, lock `lever1-gemm`,
+2026-09-24): 3.5k 1055 tok/s, 13k 1002, 53k 820. Share of prefill wall in the three EXL3 GEMMs
+(`SUSHI_EXL3_LAYER_UBENCH=1`, ~6% overhead): 64% at 3.5k (~29 TFLOPS), 62% at 13.8k, 50% at 52.5k; prepare, mid
+and reduce ~3-4%; trunk, attention and router the rest.
+
+Kernel microbench at MiMo geometry (E256, 4096x2048, n40, MCG w12, uniform top-8, R=2048, window fill 0.815, arms
+interleaved in one process, median of 7): gate/up base 7.52 ms (36.6 TFLOPS); decode ALU removed 5.87 (-22%); MMA
+removed 6.78 (-10%); MMA plus x loads only 5.47 (50 TFLOPS); MLX dense f16 at the same FLOPs 4.60 (60 TFLOPS).
+Decode ALU is ~22% of the GEMM, weight reads ~5%, and the device-read-x 16x32x16 MMA structure caps it near 50
+TFLOPS. Flash-Next shows the same ratios. A zero-cost decode would make a 4k prefill ~13% faster; no design found
+reaches any of it (ruled out in [engine-exl3-experts](engine-exl3-experts.md)).
+
+The FP8 trunk's prefill dequant-to-bf16-scratch costs ~0.27 ms per qkv layer at M=2048 (4.36 vs 4.10 ms
+pre-dequantized), ~13 ms per 2048-row chunk over 48 layers: ~0.6% of prefill. There is no FP8 MMA to read into.
+
 <a id="exl3-decode-layout"></a>
 ## EXL3 decode GEMV layout (two tiles per threadgroup)
 

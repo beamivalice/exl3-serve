@@ -71,6 +71,10 @@ source FP8→bf16 loader (`usesMimoSourceTrunk`), billed dense by `mimoSourceRes
   ([perf-baselines](perf-baselines.md#mimo-verify-attribution)).
 - Dead for the decode GEMVs (microbenched): 4 or 8 tiles per threadgroup, software prefetch, 2 simdgroups, a
   threadgroup LUT decode, a 24-bit multiply split, half2 input reads, bitfield extracts.
+- Dead for the prefill GEMM on the NAX body (MiMo and Flash-Next, outputs bit-identical, all slower): 64-row windows
+  with one decode feeding 4 MMAs (+7-18%), a threadgroup-shared double-buffered decode (+30%), decoding tile k+1
+  before tile k's MMA (+27%), 256- or 64-thread groups (+12% at 2048 rows). The kernel is register/occupancy bound:
+  added live state loses ([perf-baselines](perf-baselines.md#mimo-prefill-gemm)).
 - **The SwiGLU chain is f32**: gate, up, sigmoid, SiLU and their product stay in f32 registers through the multiply
   by the down suh. In f16, MiMo's activations put gate and up near 400 each and the product past 65504, so a whole
   routed row became inf. The next ceiling is the f16 down inner plane (about 2x above the measured peak).
