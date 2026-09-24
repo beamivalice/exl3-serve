@@ -85,6 +85,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
 - Detach every per-connection `std.Thread` immediately; on teardown drain conn threads before `scheduler.deinit`.
 - Sleep inhibition follows the inference-thread wait.
 - `Slot.deinit` runs on conn threads: it stores marks, the inference thread frees.
+- A request's sampling state (`think_bound`, `constraint`) lives in its handler's frame: `complete` waits out any
+  inference pass holding the slot (`Slot.in_pass`, taken under `queue_mu`) before the handler may free it.
+  Guard: `tests/test_cancel_mid_tick.sh`.
 
 ## Request ownership and media
 

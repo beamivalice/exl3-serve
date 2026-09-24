@@ -6,6 +6,7 @@ earlier history is mlx-serve's, in that project's changelog.
 
 ## Unreleased
 
+- **Stopping a request while another stream decodes with MTP no longer crashes the server.**
 - **Large images need about half the free GPU memory they did**: the Qwen3.8 Flash Next vision tower now runs one block at a time, and a request is billed by its measured peak, so a 1536x1536 image is admitted with about 8 GB free instead of about 17 GB.
 - **MiMo-V2.6-Flash prefills faster at every context length**: its prefill attention walks the causal band in lockstep with branch-free loads and larger dispatches, with output unchanged byte for byte.
 - **`sushi run` can research**: `--tool on` (or `/tool on` in the chat) lets the model search the web, read public pages and read files in the current folder, read-only and without prompts, and `/image <path>` shows a vision model an image.
