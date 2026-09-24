@@ -7009,10 +7009,9 @@ pub const Generator = struct {
         if (self.spec_disabled_runtime and self.spec_disable_reason == .adaptive and
             mtpAdaptiveSerialEnabled() and self.mtpAdaptiveHeadMayResume())
         {
-            const b = self.mtpAdaptiveBucket(self.mtpKvLen());
             const prev_bucket = self.mtp_adaptive.bucket;
             const prev_arm = self.mtp_adaptive.arm;
-            const action = self.mtp_adaptive.serialTick(b, mtpAdaptiveReentryTokens());
+            const action = mtpAdaptiveSerialTickFor(&self.mtp_adaptive, &self.xfm.round_cost, self.mtpKvLen(), mtpAdaptiveReentryTokens());
             self.mtpAdaptiveSyncWindow(prev_bucket, prev_arm);
             // Re-entry only when the head can prove it is in sync (else `qwen4MtpForward` returns
             // `error.MtpPositionGap`). A decline latches: the drift cannot shrink on its own.
@@ -7032,7 +7031,7 @@ pub const Generator = struct {
             if (may_reenter) {
                 log.info(
                     "  [mtp] adaptive: kv {d} crossed into bucket {s} -> mtp\n",
-                    .{ self.mtpKvLen(), round_cost.bucketName(self.xfm.round_cost.layout, b) },
+                    .{ self.mtpKvLen(), round_cost.bucketName(self.xfm.round_cost.layout, self.xfm.round_cost.bucketOf(self.mtpKvLen())) },
                 );
                 self.spec_disabled_runtime = false;
                 self.spec_disable_reason = .none;
@@ -9706,6 +9705,11 @@ pub const Generator = struct {
         return read orelse round_cost.bucketForLayout(kv_len, layout);
     }
 
+    /// One serial tick of the adaptive arm at `kv_len`, buckets resolved as the decision resolved them.
+    pub fn mtpAdaptiveSerialTickFor(a: *MtpAdaptive, t: *const round_cost.Table, kv_len: u32, redecide_tokens: u32) MtpAdaptiveAction {
+        return a.serialTickAt(mtpAdaptiveBucketOf(t.bucketToRead(kv_len), kv_len, t.layout), t.bucketOf(kv_len), redecide_tokens);
+    }
+
     fn mtpAdaptiveBucket(self: *const Generator, kv_len: u32) usize {
         const t = &self.xfm.round_cost;
         return mtpAdaptiveBucketOf(t.bucketToRead(kv_len), kv_len, t.layout);
@@ -9841,6 +9845,9 @@ pub const Generator = struct {
         /// Round index of the last `round()`: `mtpRoundPlan` has two call sites per round.
         last_round: ?u32 = null,
         switches: u32 = 0,
+        /// The request's own KV bucket at its first serial tick. The crossing watches it: the
+        /// read bucket resolves a never-measured bucket back onto the one the switch read.
+        serial_own: ?usize = null,
 
         pub fn round(self: *MtpAdaptive, round_idx: u32, bucket: usize, vote: MtpAdaptiveVote, need: u32) MtpAdaptiveAction {
             if (self.sticky_serial) return .none;
@@ -9869,6 +9876,7 @@ pub const Generator = struct {
                     self.confirm = 0;
                     self.arm = .serial;
                     self.serial_ticks = 0;
+                    self.serial_own = null;
                     self.switches += 1;
                     return .to_serial;
                 },
@@ -9896,6 +9904,16 @@ pub const Generator = struct {
             self.sticky_serial = true;
         }
 
+        /// `serialTick` plus a crossing of the request's own bucket (`own`).
+        pub fn serialTickAt(self: *MtpAdaptive, bucket: usize, own: usize, redecide_tokens: u32) MtpAdaptiveAction {
+            if (self.arm == .serial and !self.sticky_serial and !self.reentry_declined) {
+                const at = self.serial_own orelse own;
+                self.serial_own = at;
+                if (own != at) return self.reopen(bucket);
+            }
+            return self.serialTick(bucket, redecide_tokens);
+        }
+
         pub fn serialTick(self: *MtpAdaptive, bucket: usize, redecide_tokens: u32) MtpAdaptiveAction {
             // Sticky outranks both re-entry triggers, the bucket crossing included.
             if (self.sticky_serial) return .none;
@@ -9916,6 +9934,7 @@ pub const Generator = struct {
             self.bucket = bucket;
             self.confirm = 0;
             self.serial_ticks = 0;
+            self.serial_own = null;
             self.arm = .undecided;
             self.switches += 1;
             return .to_mtp;
@@ -18054,6 +18073,37 @@ test "mtpAdaptiveBucketOf: the decision and the re-entry resolve ONE bucket (H6 
         try testing.expectEqual(G.MtpAdaptiveAction.none, ok.serialTick(G.mtpAdaptiveBucketOf(own + 1, kv, .long), 0));
     }
     try testing.expectEqual(G.MtpAdaptiveArm.serial, ok.arm);
+}
+
+test "adaptive serial re-enters when the request crosses into a bucket nothing has measured" {
+    // The pagoda request: w2 trusted in 32-64k only, the switch at 33k, then 58k serial tokens
+    // to 91.8k that never re-entered: the read bucket kept resolving 64-128k back onto 32-64k.
+    const G = Generator;
+    var t = round_cost.Table{ .layout = .long };
+    for (0..round_cost.MIN_SAMPLES) |_| _ = t.observe(2, 33_000, 36.8, 1.65, true, false);
+    const kv_switch: u32 = 33_000;
+    const read = G.mtpAdaptiveBucketOf(t.bucketToRead(kv_switch), kv_switch, t.layout);
+    var a = G.MtpAdaptive{};
+    for (0..G.MTP_ADAPTIVE_CONFIRM) |i| _ = a.round(@intCast(i), read, .serial, G.MTP_ADAPTIVE_CONFIRM);
+    try testing.expectEqual(G.MtpAdaptiveArm.serial, a.arm);
+
+    var kv: u32 = kv_switch + 1;
+    while (kv < 65_536) : (kv += 61) {
+        try testing.expectEqual(G.MtpAdaptiveAction.none, G.mtpAdaptiveSerialTickFor(&a, &t, kv, 0));
+    }
+    try testing.expectEqual(G.MtpAdaptiveAction.to_mtp, G.mtpAdaptiveSerialTickFor(&a, &t, 65_536, 0));
+    try testing.expectEqual(G.MtpAdaptiveArm.undecided, a.arm);
+
+    // A switch that read a neighbour (own bucket unmeasured) must not re-enter on its next tick (H6).
+    var lo = round_cost.Table{ .layout = .long };
+    for (0..round_cost.MIN_SAMPLES) |_| _ = lo.observe(2, 20_000, 36.8, 1.65, true, false);
+    var n = G.MtpAdaptive{};
+    _ = n.round(0, G.mtpAdaptiveBucketOf(lo.bucketToRead(40_000), 40_000, lo.layout), .serial, 1);
+    kv = 40_001;
+    while (kv < 65_536) : (kv += 61) {
+        try testing.expectEqual(G.MtpAdaptiveAction.none, G.mtpAdaptiveSerialTickFor(&n, &lo, kv, 0));
+    }
+    try testing.expectEqual(G.MtpAdaptiveAction.to_mtp, G.mtpAdaptiveSerialTickFor(&n, &lo, 65_536, 0));
 }
 
 test "mtpAdaptiveRegimeMoved: a switch either way, or a crossing, drops the price window" {
