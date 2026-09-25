@@ -57,10 +57,29 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
   company waits in `pending` (`[admission] held`); alone it proceeds.
 - The hot-cache budget is clamped at load and follows residency ([engine-prefix-cache](engine-prefix-cache.md#budget)).
 - Context-overflow 400s name BOTH counts.
-- **A vision encode is billed before it runs** (`towerFitFault`): the largest block's tower scratch
-  (`qwen_vision.encodeScratchBytes`, fitted >= 25% over the measured peak) plus every block's soft-token rows; past
-  what the GPU has left it is a named 400. The tower evaluates per block, so the peak is one block's f32 score sheet
+- **A vision encode is billed before it runs** (`towerFitFault`, `server.visionEncodeBill`): the largest block's tower
+  scratch (`qwen_vision.encodeScratchBytes`, fitted >= 25% over the measured peak) plus every block's float32 pixels
+  and three bf16 copies of its soft-token rows (group outputs, video concatenation, request concatenation); past what
+  the GPU has left it is a named 400. The tower evaluates per block, so the peak is one block's f32 score sheet
   (heads x N^2) and rows; table in [arch-qwen4exp](arch-qwen4exp.md#vision-tower).
+- **A video's block is ONE temporal group**, never the whole video: `forwardVideo` encodes and evaluates each group
+  alone, so the bill grows linearly with the group count (the old N^2 over all groups billed 79 GB at 8x46x82).
+  Measured peak (pixel upload to evaluated output) = one group's scratch + all pixels + the earlier groups' rows:
+
+  | video (t x h x w patches) | peak | old bill | bill | bill / peak |
+  |---|---|---|---|---|
+  | 1 x 46x82 | 1249 MB | 1626 MB | 1658 MB | 1.33x |
+  | 2 x 46x82 | 1277 MB | 5.6 GB | 1696 MB | 1.33x |
+  | 4 x 46x82 | 1333 MB | 20.6 GB | 1771 MB | 1.33x |
+  | 8 x 46x82 | 1445 MB | 79.1 GB | 1922 MB | 1.33x |
+  | 2 x 24x42 | 172 MB | 590 MB | 246 MB | 1.43x |
+  | 8 x 24x42 | 217 MB | 6.3 GB | 306 MB | 1.41x |
+  | 2 x 96x96 (1536² cap) | 6237 MB | 30.3 GB | 8270 MB | 1.33x |
+  | 8 x 96x96 (1536² cap) | 6648 MB | 460 GB | 8822 MB | 1.33x |
+
+  `qwen vision ubench` on `242a5545` plus this change, Sushi-3bpw tower, random pixels, 3 passes (the image rows'
+  peaks reproduced to the MB), `taskpolicy -a`, GPU lock `video-bill`, 2026-09-25; pinned by `visionEncodeBill covers
+  each measured video peak`.
 
 ## Observing memory
 

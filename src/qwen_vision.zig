@@ -1801,10 +1801,12 @@ test "qwen encodeScratchBytes covers each measured peak by >= 25% without the N^
 
 // Encode time and scratch peak on the real tower, per image, at a small image, a
 // 1920x1080 screenshot and the engine's 1536^2 cap (random pixels; numerics are
-// the parity test's job), with and without the per-block eval, arms interleaved:
+// the parity test's job), with and without the per-block eval, arms interleaved;
+// then per video, its peak from the pixel upload to the evaluated output against
+// `server.visionEncodeBill`:
 //   QWEN_VISION_TEST_MODEL=<pack> SUSHI_QWEN_VISION_UBENCH=<reps> \
 //   zig build test -Doptimize=ReleaseFast -Dtest-filter="qwen vision ubench"
-test "qwen vision ubench: encode time and scratch peak per image" {
+test "qwen vision ubench: encode time and scratch peak per image and video" {
     const reps_raw = std.c.getenv("SUSHI_QWEN_VISION_UBENCH") orelse return error.SkipZigTest;
     const model_raw = std.c.getenv("QWEN_VISION_TEST_MODEL") orelse return error.SkipZigTest;
     const reps = std.fmt.parseInt(u32, std.mem.span(reps_raw), 10) catch return error.SkipZigTest;
@@ -1874,6 +1876,52 @@ test "qwen vision ubench: encode time and scratch peak per image" {
             @as(f64, @floatFromInt(bill)) / mb,     reps,
         });
         if (bill < peak[1]) under_billed = true;
+    }
+    const server = @import("server.zig");
+    const merge2 = config.qv_merge * config.qv_merge;
+    for ([_][3]u32{ .{ 1, 46, 82 }, .{ 2, 46, 82 }, .{ 4, 46, 82 }, .{ 8, 46, 82 }, .{ 2, 24, 42 }, .{ 8, 24, 42 }, .{ 2, cap_side, cap_side }, .{ 8, cap_side, cap_side } }) |v| {
+        const n: c_int = @intCast(v[0] * v[1] * v[2]);
+        var src = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(src);
+        const shape = [_]c_int{ n, feat };
+        try mlx.check(mlx.mlx_random_normal(&src, &shape, 2, .float32, 0, 1, .{ .ctx = null }, tower.s));
+        try mlx.check(mlx.mlx_array_eval(src));
+        const host = (mlx.mlx_array_data_float32(src) orelse return error.TestUnexpectedNullData)[0..@intCast(n * feat)];
+        var best: u64 = std.math.maxInt(u64);
+        var peak: usize = 0;
+        for (0..reps + 1) |r| {
+            try mlx.check(mlx.mlx_synchronize(tower.s));
+            _ = mlx.mlx_clear_cache();
+            var before: usize = 0;
+            _ = mlx.mlx_get_active_memory(&before);
+            _ = mlx.mlx_reset_peak_memory();
+            const t0 = std.Io.Timestamp.now(io, .boot);
+            // As `scheduler.encodeVideoBlock`: the upload is a copy the encode owns.
+            const pixels = mlx.mlx_array_new_data(host.ptr, &shape, 2, .float32);
+            const out = tower.forwardVideo(pixels, v[0], v[1], v[2]);
+            _ = mlx.mlx_array_free(pixels);
+            const emb = try out;
+            defer _ = mlx.mlx_array_free(emb);
+            try mlx.check(mlx.mlx_array_eval(emb));
+            try mlx.check(mlx.mlx_synchronize(tower.s));
+            const ns: u64 = @intCast(t0.untilNow(io, .boot).nanoseconds);
+            var p: usize = 0;
+            _ = mlx.mlx_get_peak_memory(&p);
+            peak = @max(peak, p -| before);
+            if (r > 0) best = @min(best, ns);
+        }
+        const rows: u64 = @as(u64, @intCast(n)) / merge2;
+        const video = [_]@import("chat.zig").VideoData{.{ .pixels = std.mem.sliceAsBytes(host), .grid_t = v[0], .grid_h = v[1], .grid_w = v[2] }};
+        const bill = server.visionEncodeBill(&config, &.{}, &video, rows).bytes;
+        const mb = 1e6;
+        const peak_f: f64 = @floatFromInt(peak);
+        const bill_f: f64 = @floatFromInt(bill);
+        std.debug.print("[qwen-vit ubench] video {d}x{d}x{d} ({d} patches, {d} tokens): best {d:.1} ms peak {d} B ({d:.1} MB) | bill {d} B ({d:.1} MB, {d:.2}x) (reps {d})\n", .{
+            v[0], v[1], v[2], n, rows,
+            @as(f64, @floatFromInt(best)) / 1e6, peak, peak_f / mb,
+            bill, bill_f / mb, bill_f / peak_f, reps,
+        });
+        if (bill < peak) under_billed = true;
     }
     try std.testing.expect(!under_billed);
 }

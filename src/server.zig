@@ -12575,14 +12575,34 @@ fn visionScratchBytes(config: *const model_mod.ModelConfig, patches: u64) u64 {
     return qwen_vision.encodeScratchBytes(config, patches);
 }
 
-/// The encode's fit check, before it runs: the largest block's tower scratch
-/// plus every block's soft-token rows must fit what the GPU has left.
+/// GPU bytes a request's media encode peaks at: the largest block's tower scratch
+/// (a video's block is one temporal group, `forwardVideo` evaluates each alone),
+/// every block's f32 pixels, and three bf16 copies of the soft-token rows.
+pub fn visionEncodeBill(config: *const model_mod.ModelConfig, images: []const chat_mod.ImageData, videos: []const chat_mod.VideoData, rows: usize) struct { bytes: u64, largest_group_patches: u64 } {
+    var worst: u64 = 0;
+    var input_bytes: u64 = 0;
+    const patch_bytes: u64 = 3 * @as(u64, config.qv_temporal_patch) * config.qv_patch * config.qv_patch * 4;
+    for (images) |im| {
+        const patches = @as(u64, im.grid_h) * im.grid_w;
+        worst = @max(worst, patches);
+        input_bytes += @max(im.pixels.len, patches * patch_bytes);
+    }
+    for (videos) |vd| {
+        const patches = @as(u64, vd.grid_h) * vd.grid_w;
+        worst = @max(worst, patches);
+        input_bytes += @max(vd.pixels.len, @as(u64, vd.grid_t) * patches * patch_bytes);
+    }
+    const output_bytes = @as(u64, rows) * @max(config.qv_out_hidden, 1) * 2;
+    return .{ .bytes = visionScratchBytes(config, worst) + input_bytes + 3 * output_bytes, .largest_group_patches = worst };
+}
+
+/// The encode's fit check, before it runs: `visionEncodeBill` must fit what the
+/// GPU has left.
 fn towerFitFault(config: *const model_mod.ModelConfig, images: []const chat_mod.ImageData, videos: []const chat_mod.VideoData, rows: usize, available: u64) ?MediaFault {
     if (config.qv_heads == 0) return null;
-    var worst: u64 = 0;
-    for (images) |im| worst = @max(worst, @as(u64, im.grid_h) * im.grid_w);
-    for (videos) |vd| worst = @max(worst, @as(u64, vd.grid_t) * vd.grid_h * vd.grid_w);
-    const needed = visionScratchBytes(config, worst) + @as(u64, rows) * @max(config.qv_out_hidden, 1) * 2;
+    const bill = visionEncodeBill(config, images, videos, rows);
+    const worst = bill.largest_group_patches;
+    const needed = bill.bytes;
     if (needed <= available) return null;
     const mb: u64 = 1024 * 1024;
     return MediaFault.init(false, "encoding the media needs ~{d} MB of GPU memory (its largest block has {d} patches), ~{d} MB is available", .{ needed / mb, worst, available / mb });
@@ -23317,4 +23337,42 @@ test "startListener: a second bind on the same port is refused" {
     if (!got) return error.NoFreeTestPort;
     defer a.deinit(io);
     try std.testing.expectError(error.AddressInUse, startListener("127.0.0.1", p));
+}
+
+test "video admission bills the largest temporal group" {
+    const config = model_mod.ModelConfig{ .qv_heads = 16, .qv_hidden = 1152, .qv_intermediate = 4304, .qv_out_hidden = 2560 };
+    const videos = [_]chat_mod.VideoData{.{ .pixels = &.{}, .grid_t = 8, .grid_h = 46, .grid_w = 82 }};
+    const patches: u64 = 46 * 82;
+    const rows = 8 * patches / 4;
+    const old_bill = visionScratchBytes(&config, 8 * patches) + rows * config.qv_out_hidden * 2;
+    const floor = visionScratchBytes(&config, patches) + 8 * patches * 3 * 2 * 16 * 16 * 4 + rows * config.qv_out_hidden * 2;
+    const bill = visionEncodeBill(&config, &.{}, &videos, rows);
+    try std.testing.expectEqual(patches, bill.largest_group_patches);
+    try std.testing.expect(bill.bytes < old_bill / 8);
+    try std.testing.expect(bill.bytes >= floor);
+    try std.testing.expect(towerFitFault(&config, &.{}, &videos, rows, bill.bytes) == null);
+    try std.testing.expect(towerFitFault(&config, &.{}, &videos, rows, bill.bytes - 1) != null);
+    try std.testing.expect(towerFitFault(&config, &.{}, &videos, rows, old_bill / 8) == null);
+    try std.testing.expect(towerFitFault(&config, &.{}, &videos, rows, floor - 1) != null);
+}
+
+test "visionEncodeBill covers each measured video peak by >= 25% and within 1.5x" {
+    const config = model_mod.ModelConfig{ .qv_heads = 16, .qv_hidden = 1152, .qv_intermediate = 4304, .qv_out_hidden = 2560 };
+    // Peak from pixel upload to evaluated output, bytes (`qwen vision ubench`, Sushi-3bpw tower).
+    const measured = [_]struct { t: u32, h: u32, w: u32, peak: u64 }{
+        .{ .t = 1, .h = 46, .w = 82, .peak = 1_248_628_098 },
+        .{ .t = 2, .h = 46, .w = 82, .peak = 1_276_628_354 },
+        .{ .t = 4, .h = 46, .w = 82, .peak = 1_332_645_250 },
+        .{ .t = 8, .h = 46, .w = 82, .peak = 1_444_679_042 },
+        .{ .t = 2, .h = 24, .w = 42, .peak = 172_203_426 },
+        .{ .t = 8, .h = 24, .w = 42, .peak = 217_128_354 },
+        .{ .t = 2, .h = 96, .w = 96, .peak = 6_237_093_916 },
+        .{ .t = 8, .h = 96, .w = 96, .peak = 6_647_611_420 },
+    };
+    for (measured) |m| {
+        const video = [_]chat_mod.VideoData{.{ .pixels = &.{}, .grid_t = m.t, .grid_h = m.h, .grid_w = m.w }};
+        const bill = visionEncodeBill(&config, &.{}, &video, m.t * m.h * m.w / 4).bytes;
+        try std.testing.expect(bill * 4 >= m.peak * 5);
+        try std.testing.expect(bill * 2 <= m.peak * 3);
+    }
 }
