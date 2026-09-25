@@ -13,13 +13,16 @@
 #   ./release.sh -y         # skip the confirmation prompt
 #   ./release.sh --dry-run  # print what it would do, never dispatch
 #
-# Env overrides: CHANGELOG, ZON, WORKFLOW (default release.yml), REF (default main).
+# Env overrides: CHANGELOG, ZON, WORKFLOW (default release.yml), REF (default main), GH_REPO (default: origin).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHANGELOG="${CHANGELOG:-$REPO_ROOT/CHANGELOG.md}"
 ZON="${ZON:-$REPO_ROOT/build.zig.zon}"
 WORKFLOW="${WORKFLOW:-release.yml}"
 REF="${REF:-main}"
+# gh must act on this repo's origin, never an `upstream` remote it would otherwise pick (a fork has both).
+GH_REPO="${GH_REPO:-$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null | sed -E 's#^(https?://|git@)##; s#:#/#; s#\.git$##')}"
+export GH_REPO
 
 usage() {
   sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
