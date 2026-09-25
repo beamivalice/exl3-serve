@@ -1128,10 +1128,42 @@ fn imageOutput(allocator: std.mem.Allocator, bytes: []const u8, src: []const u8)
 
 pub const ImageLoad = union(enum) { ok: []u8, refused: []const u8 };
 
-/// The user's `/image <path>` as a data URL, confined like `view_image`: a
-/// relative path resolves in the tools' folder. `refused` is worded for the user.
-pub fn loadUserImage(allocator: std.mem.Allocator, io: std.Io, root: []const u8, path: []const u8) !ImageLoad {
-    const real = switch (try confinePath(allocator, io, root, path)) {
+/// A secret name anywhere on an absolute path, or a hidden file at its end.
+fn userPathRefusal(path: []const u8) ?[]const u8 {
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |c| if (isSecretName(c)) return refuse_secret;
+    const name = std.fs.path.basename(path);
+    if (name.len > 0 and name[0] == '.' and !std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) return refuse_hidden;
+    return null;
+}
+
+/// The real path of an absolute path the user typed: no folder to stay in, but
+/// `userPathRefusal` holds, as typed and after resolution.
+fn userRealPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Confined {
+    if (userPathRefusal(path)) |msg| return .{ .refused = msg };
+    const real_z = std.Io.Dir.realPathFileAbsoluteAlloc(io, path, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .{ .refused = "no such file or folder" },
+    };
+    defer allocator.free(real_z);
+    if (userPathRefusal(real_z)) |msg| return .{ .refused = msg };
+    return .{ .ok = try allocator.dupe(u8, real_z) };
+}
+
+/// The user's `/image <path>` as a data URL. A relative path is confined like
+/// `view_image`; an absolute or `~` path may leave the folder. `refused` is worded for the user.
+pub fn loadUserImage(allocator: std.mem.Allocator, io: std.Io, root: []const u8, home: []const u8, path: []const u8) !ImageLoad {
+    const target = std.mem.trim(u8, path, " \t\r\n");
+    const expanded = if (std.mem.eql(u8, target, "~") or std.mem.startsWith(u8, target, "~/"))
+        try std.fs.path.join(allocator, &.{ home, target[1..] })
+    else
+        try allocator.dupe(u8, target);
+    defer allocator.free(expanded);
+    const found = if (std.fs.path.isAbsolute(expanded))
+        try userRealPath(allocator, io, expanded)
+    else
+        try confinePath(allocator, io, root, expanded);
+    const real = switch (found) {
         .ok => |p| p,
         .refused => |msg| return .{ .refused = if (std.mem.eql(u8, msg, refuse_outside))
             "that path is outside the folder; /cd to its folder first"
@@ -1552,23 +1584,50 @@ test "repl tools: after /cd the file tools are confined to the new folder, just 
     }
 }
 
-test "repl tools: the user's /image reads inside the tools' folder under the file tools' refusals" {
+test "repl tools: the user's /image: relative paths stay in the folder, absolute ones may leave it but not for secrets" {
     const allocator = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR";
     try tmp.dir.createDirPath(io, "proj/shots");
+    try tmp.dir.createDirPath(io, "Desktop/.cache");
+    try tmp.dir.createDirPath(io, "Desktop/.aws");
     try tmp.dir.writeFile(io, .{ .sub_path = "proj/shots/pic.png", .data = png });
     try tmp.dir.writeFile(io, .{ .sub_path = "proj/.hidden.png", .data = png });
     try tmp.dir.writeFile(io, .{ .sub_path = "proj/id_card.png", .data = png });
     try tmp.dir.writeFile(io, .{ .sub_path = "proj/notes.txt", .data = "not an image\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "outside.png", .data = png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "Desktop/shot.png", .data = png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "Desktop/.cache/thumb.png", .data = png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "Desktop/.shot.png", .data = png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "Desktop/.aws/diagram.png", .data = png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "Desktop/id_scan.png", .data = png });
     try tmp.dir.symLink(io, "../outside.png", "proj/link.png", .{});
+    try tmp.dir.symLink(io, "id_scan.png", "Desktop/innocent.png", .{});
+    const home = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(home);
     const root = try tmp.dir.realPathFileAlloc(io, "proj", allocator);
     defer allocator.free(root);
-    const outside_abs = try std.fmt.allocPrint(allocator, "{s}/../outside.png", .{root});
+    const abs = struct {
+        fn of(a: std.mem.Allocator, dir: []const u8, rel: []const u8) ![]u8 {
+            return std.fmt.allocPrint(a, "{s}/{s}", .{ dir, rel });
+        }
+    }.of;
+    const outside_abs = try abs(allocator, root, "../outside.png");
     defer allocator.free(outside_abs);
+    const shot_abs = try abs(allocator, home, "Desktop/shot.png");
+    defer allocator.free(shot_abs);
+    const in_hidden_abs = try abs(allocator, home, "Desktop/.cache/thumb.png");
+    defer allocator.free(in_hidden_abs);
+    const hidden_abs = try abs(allocator, home, "Desktop/.shot.png");
+    defer allocator.free(hidden_abs);
+    const secret_dir_abs = try abs(allocator, home, "Desktop/.aws/diagram.png");
+    defer allocator.free(secret_dir_abs);
+    const secret_abs = try abs(allocator, home, "Desktop/id_scan.png");
+    defer allocator.free(secret_abs);
+    const secret_link_abs = try abs(allocator, home, "Desktop/innocent.png");
+    defer allocator.free(secret_link_abs);
 
     const Case = struct { path: []const u8, ok: bool, says: []const u8 = "" };
     for ([_]Case{
@@ -1576,14 +1635,22 @@ test "repl tools: the user's /image reads inside the tools' folder under the fil
         .{ .path = "./shots/pic.png", .ok = true },
         .{ .path = "shots/../shots/pic.png", .ok = false, .says = "/cd" },
         .{ .path = "../outside.png", .ok = false, .says = "/cd" },
-        .{ .path = outside_abs, .ok = false, .says = "/cd" },
         .{ .path = "link.png", .ok = false, .says = "/cd" },
         .{ .path = ".hidden.png", .ok = false, .says = "hidden" },
         .{ .path = "id_card.png", .ok = false, .says = "secrets" },
         .{ .path = "notes.txt", .ok = false, .says = "not a PNG" },
         .{ .path = "missing.png", .ok = false, .says = "no such file" },
+        .{ .path = outside_abs, .ok = true },
+        .{ .path = shot_abs, .ok = true },
+        .{ .path = "~/Desktop/shot.png", .ok = true },
+        .{ .path = in_hidden_abs, .ok = true },
+        .{ .path = hidden_abs, .ok = false, .says = "hidden" },
+        .{ .path = secret_dir_abs, .ok = false, .says = "secrets" },
+        .{ .path = secret_abs, .ok = false, .says = "secrets" },
+        .{ .path = secret_link_abs, .ok = false, .says = "secrets" },
+        .{ .path = "~/Desktop/missing.png", .ok = false, .says = "no such file" },
     }) |c| {
-        switch (try loadUserImage(allocator, io, root, c.path)) {
+        switch (try loadUserImage(allocator, io, root, home, c.path)) {
             .ok => |url| {
                 defer allocator.free(url);
                 testing.expect(c.ok) catch |err| {
@@ -1601,6 +1668,13 @@ test "repl tools: the user's /image reads inside the tools' folder under the fil
             },
         }
     }
+
+    // The model's own view_image stays confined for the same absolute path.
+    const args = try std.fmt.allocPrint(allocator, "{{\"path_or_url\":\"{s}\"}}", .{shot_abs});
+    defer allocator.free(args);
+    const text = try runForTest(.{ .allocator = allocator, .io = io, .root = root, .vision = true }, "view_image", args);
+    defer allocator.free(text);
+    try expectStartsWith("refused:", text);
 }
 
 test "repl tools: web tools refuse local, private and non-http targets before connecting" {

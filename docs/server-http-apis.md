@@ -139,8 +139,9 @@ effort word's budget > `--reasoning-budget`. `/v1/responses` parsed the word and
   `.aws`, `.gnupg`), checked both as typed and after resolution (`confinePath`).
 - An outside path's refusal tells the model the folder is fixed and the user can type `/cd <folder>`, so it asks for
   that instead of guessing other paths.
-- The user's `/image <path>` is confined the same way (`loadUserImage`): a relative path resolves in the `/cd` folder,
-  and the refusals are reworded for the user.
+- The user's `/image <path>` (`loadUserImage`): a RELATIVE path resolves in the `/cd` folder under the same
+  confinement; an ABSOLUTE or `~` path (typed or dragged in) may leave it, but a secret name anywhere on it or a hidden
+  file name is refused, as typed and resolved (`userPathRefusal`). The model's `view_image` stays confined.
 - Every prompt carries that folder and the tools state, dim: `~/project · tools on >>> ` (`formatPromptStatus`: `~` for
   `$HOME`, `…` and the tail past 32 characters); it is rebuilt before each input, so `/cd` and `/tool` show at once.
   The ready banner prints the same pair.

@@ -1316,7 +1316,7 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
 pub fn writeReadyBanner(w: *std.Io.Writer, vision: bool, port: u16, state: []const u8) !void {
     try w.writeAll("\n>>> chat is live — /bye to exit, /tool on for web search and file tools");
     try w.writeAll(if (vision) ", /image <path> to show an image\n" else "\n");
-    try w.print(">>> {s} (shown before each prompt); /cd <folder> moves the folder the file tools{s} read\n", .{ state, if (vision) " and /image" else "" });
+    try w.print(">>> {s} (shown before each prompt); /cd <folder> moves the folder the file tools{s} read\n", .{ state, if (vision) " and relative /image paths" else "" });
     try w.print(">>> chat in your browser: http://127.0.0.1:{d}/\n", .{port});
 }
 
@@ -1358,13 +1358,13 @@ fn changeToolFolder(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer,
     try w.print("file tools read under {s}\n", .{tools.root});
 }
 
-/// `/image <path>`: reads in the tools' folder, under the file tools' refusals.
+/// `/image <path>`: a relative path reads in the tools' folder (`repl_tools.loadUserImage`).
 fn attachImage(allocator: std.mem.Allocator, w: *std.Io.Writer, tools: repl_tools.Context, arg: []const u8, pending: *std.ArrayList([]const u8)) !void {
     if (arg.len == 0) return w.writeAll("usage: /image <path>\n");
     if (!tools.vision) return w.writeAll("this model cannot see images\n");
     const path = try unquotePath(allocator, arg);
     defer allocator.free(path);
-    const url = switch (try repl_tools.loadUserImage(allocator, tools.io, tools.root, path)) {
+    const url = switch (try repl_tools.loadUserImage(allocator, tools.io, tools.root, homeDir(), path)) {
         .ok => |u| u,
         .refused => |msg| return w.print("cannot attach {s}: {s}\n", .{ path, msg }),
     };
@@ -1884,13 +1884,18 @@ test "cli: /cd moves the file tools' folder, and a refused /cd keeps it" {
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, text, "file tools read under "));
 }
 
-test "cli: /image follows /cd, and is refused outside the folder" {
+test "cli: a relative /image follows /cd and stays in the folder; an absolute one may leave it" {
     const allocator = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "proj/shots");
     try tmp.dir.writeFile(io, .{ .sub_path = "proj/shots/pic.png", .data = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "desk.png", .data = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" });
+    const base = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(base);
+    const desk_abs = try std.fmt.allocPrint(allocator, "{s}/desk.png", .{base});
+    defer allocator.free(desk_abs);
     var tools: repl_tools.Context = .{ .allocator = allocator, .io = io, .root = try tmp.dir.realPathFileAlloc(io, "proj", allocator), .vision = true };
     defer allocator.free(tools.root);
     var pending = std.ArrayList([]const u8).empty;
@@ -1908,6 +1913,8 @@ test "cli: /image follows /cd, and is refused outside the folder" {
     try testing.expectEqual(@as(usize, 1), pending.items.len);
     try attachImage(allocator, &w, tools, "../../proj/shots/pic.png", &pending);
     try testing.expectEqual(@as(usize, 1), pending.items.len);
+    try attachImage(allocator, &w, tools, desk_abs, &pending);
+    try testing.expectEqual(@as(usize, 2), pending.items.len);
 
     const text = w.buffered();
     try testing.expect(std.mem.indexOf(u8, text, "cannot attach pic.png: no such file") != null);
