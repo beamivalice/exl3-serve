@@ -87,8 +87,25 @@ effort word's budget > `--reasoning-budget`. `/v1/responses` parsed the word and
 
 ## Security and observability
 
-- `--api-key`: loopback exempt, `/health` + OPTIONS open, `constTimeEql`.
+- `--api-key`: loopback exempt, `/health` + OPTIONS + `GET` of the chat page open, `constTimeEql`.
 - `--metrics`: zero cost off; TTFT at prefill completion; live tok/s via ONE atomic per tick; `/metrics(.json)`.
+
+## Chat page (`GET /`, `GET /chat`)
+
+- One self-contained file, `src/webui/index.html` (CSS, JS and the logo inline, no external fetch), embedded with
+  `@embedFile` and served as `text/html; charset=utf-8`. Any other method on those two paths is a 405 answered BEFORE
+  model resolution, so it can never cold-load a model. Guards: `tests/test_webui.sh`, the `chat page:` tests.
+- It speaks only the public API: `/v1/models` for the picker (`reasoning_efforts` fills the effort select, `vision` or
+  an `image` input modality shows the attach button), `/v1/chat/completions` streamed with `include_usage` (the
+  readout is the final chunk's `usage` + `timings`), `reasoning_content` shown collapsed. Stop aborts the fetch; the
+  server cancels on disconnect.
+- Under `--api-key` the page is served without the key (it holds no data), asks for it on the first 401 and sends it as
+  a Bearer token. Its fetches use `credentials: "omit"`: the 401's Basic challenge would otherwise open the browser's
+  own login dialog.
+- Conversations live in the browser's `localStorage` (every access guarded); attached images stay in memory only, as a
+  few photos would fill the storage quota.
+- Startup prints `chat in your browser: <url>` once (`chatPageUrl`: a `0.0.0.0` bind shows as `127.0.0.1`); `sushi run`
+  prints it under its banner, since its log is quieted to warn.
 
 ## Agent launcher (`sushi launch <agent>`)
 

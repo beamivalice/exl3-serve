@@ -4,6 +4,11 @@ sushi began as a fork of [mlx-serve](https://github.com/ddalcu/mlx-serve) and wa
 mlx-serve commit `ef5e667` (two commits after mlx-serve v26.9.4). This file covers sushi's own changes since then;
 earlier history is mlx-serve's, in that project's changelog.
 
+## Unreleased
+
+- **Chat in your browser**: `sushi serve` and `sushi run` serve a chat page at `http://127.0.0.1:12345/` that streams
+  replies, shows the model's thinking, takes images for vision models and keeps your conversations in the browser.
+
 ## v1.0.3 — Hotfixes
 
 - **Prompt cache**: re-packing a model in place no longer restores stale SSD cache entries, and the RAM cache stays

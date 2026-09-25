@@ -796,6 +796,8 @@ pub fn parseModelFromBody(body: []const u8) ?[]const u8 {
 /// instead of 404 — and a path's existence has nothing to do with model state.
 /// The drift guard is a test that reads the dispatch chain out of this file.
 const ROUTE_PATHS = [_][]const u8{
+    "/",
+    "/chat",
     "/detokenize",
     "/health",
     "/metrics",
@@ -813,6 +815,20 @@ const ROUTE_PATHS = [_][]const u8{
     "/v1/responses/compact",
     "/v1/unload-model",
 };
+
+/// The browser chat page: one self-contained file that talks to this server's own API.
+const chat_page_html = @embedFile("webui/index.html");
+
+fn isChatPagePath(path: []const u8) bool {
+    return std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/chat");
+}
+
+/// The chat page URL printed at startup. A wildcard bind is shown as loopback,
+/// because browsers refuse to open 0.0.0.0.
+pub fn chatPageUrl(buf: []u8, host: []const u8, port: u16) []const u8 {
+    const shown = if (std.mem.eql(u8, host, "0.0.0.0")) "127.0.0.1" else host;
+    return std.fmt.bufPrint(buf, "http://{s}:{d}/", .{ shown, port }) catch "http://127.0.0.1/";
+}
 
 /// Is `path` an endpoint this server serves at all (any method)?
 fn routeExists(path: []const u8) bool {
@@ -1642,7 +1658,7 @@ pub fn serve(
             .stop = &sampler_stop,
         };
         sampler_thread = try std.Thread.spawn(.{}, gaugeSamplerLoop, .{ctx});
-        log.info("Prometheus metrics: ENABLED — GET http://{s}:{d}/metrics (live panel at GET /)\n", .{ host, port });
+        log.info("Prometheus metrics: ENABLED — GET http://{s}:{d}/metrics and /metrics.json\n", .{ host, port });
     }
     // LIFO: join deferred first → runs second. stop deferred second → runs first.
     defer if (sampler_thread) |t| t.join();
@@ -1789,9 +1805,9 @@ pub fn serve(
     }
     log.info("\nServer listening on http://{s}:{d}\n", .{ host, port });
     if (g_api_key != null) {
-        log.info("API key auth: ENABLED for non-loopback requests (localhost is trusted; /health stays open)\n", .{});
+        log.info("API key auth: ENABLED for non-loopback requests (localhost is trusted; /health and the chat page stay open)\n", .{});
     }
-    log.info("  GET  /\n", .{});
+    log.info("  GET  /, /chat (chat page)\n", .{});
     log.info("  GET  /health\n", .{});
     log.info("  GET  /props\n", .{});
     log.info("  GET  /v1/models\n", .{});
@@ -1805,6 +1821,8 @@ pub fn serve(
     log.info("  DEL  /v1/responses/{{id}}\n", .{});
     log.info("  POST /tokenize\n", .{});
     log.info("  POST /detokenize\n\n", .{});
+    var chat_url_buf: [96]u8 = undefined;
+    log.info("chat in your browser: {s}\n\n", .{chatPageUrl(&chat_url_buf, host, port)});
 
     // Print system metrics once at startup
     const rss = metrics.getAppRssMb();
@@ -2014,7 +2032,8 @@ fn handleConnection(
 
     // ── API-key auth gate. When --api-key is set, every NON-LOOPBACK request
     //    requires the key (the OpenAI/Anthropic APIs AND the metrics feed) —
-    //    EXCEPT `/health` and CORS preflight, which load balancers and browsers must reach unauthenticated. Loopback is
+    //    EXCEPT `/health`, CORS preflight and the chat page (it holds no data and asks for the key itself),
+    //    which load balancers and browsers must reach unauthenticated. Loopback is
     //    trusted (the local app connects via 127.0.0.1), so it's exempt: the app
     //    + a local browser never need credentials, and the key protects network
     //    exposure. Browser-facing pages get a `WWW-Authenticate: Basic`
@@ -2023,6 +2042,7 @@ fn handleConnection(
     if (apiKeyGateApplies(g_api_key != null, g_api_key_strict, peerIsLoopback(stream)) and
         !std.mem.eql(u8, method, "OPTIONS") and
         !(std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/health")) and
+        !(std.mem.eql(u8, method, "GET") and isChatPagePath(path)) and
         !apiKeyAuthorized(request[0..header_end_pos], raw_path))
     {
         log.debug("{s} {s} -> 401 (missing/invalid API key)\n", .{ method, path });
@@ -2072,6 +2092,15 @@ fn handleConnection(
     if (std.mem.eql(u8, method, "OPTIONS")) {
         log.debug("OPTIONS {s} -> 204\n", .{path});
         try sendResponse(stream, "204 No Content", "text/plain", "");
+        return;
+    }
+    // Every method is answered here: past this point a request resolves (and may cold-load) a model.
+    if (isChatPagePath(path)) {
+        if (std.mem.eql(u8, method, "GET")) {
+            try sendResponseQuiet(stream, "200 OK", "text/html; charset=utf-8", chat_page_html);
+        } else {
+            try sendErrorResponse(allocator, stream, "405 Method Not Allowed", "invalid_request_error", "The chat page answers GET only", 405);
+        }
         return;
     }
     if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/v1/models")) {
@@ -11239,6 +11268,120 @@ test "apiKeyAuthorized accepts Bearer, x-api-key, Basic, and query param" {
     // No key configured ⇒ always authorized (open mode)
     g_api_key = null;
     try std.testing.expect(apiKeyAuthorized("", "/v1/chat/completions"));
+}
+
+/// One raw request through `handleConnection` from a loopback peer, over a
+/// socketpair against an empty registry; returns the raw response (caller frees).
+fn serveOneForTest(request: []const u8) ![]u8 {
+    const a = std.testing.allocator;
+    const reg = try ModelRegistry.init(a, std.testing.io, null, 1, 0, null);
+    defer reg.deinit();
+    const prev_registry = global_registry;
+    defer global_registry = prev_registry;
+    global_registry = reg;
+
+    var sv: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(1, 1, 0, &sv) != 0) return error.SocketPairFailed; // AF_UNIX, SOCK_STREAM
+    defer _ = std.c.close(sv[1]);
+    var conn: Conn = undefined;
+    Conn.init(&conn, .{ .socket = .{ .handle = sv[0], .address = .{ .ip4 = .loopback(0) } } }, std.testing.io);
+    if (std.c.write(sv[1], request.ptr, request.len) != @as(isize, @intCast(request.len))) return error.WriteFailed;
+    const server = try std.Thread.spawn(.{}, struct {
+        fn run(c: *Conn) void {
+            handleConnection(std.testing.allocator, c) catch {};
+            c.close();
+        }
+    }.run, .{&conn});
+
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(a);
+    var buf: [16 * 1024]u8 = undefined;
+    while (true) {
+        const n = std.c.read(sv[1], &buf, buf.len);
+        if (n <= 0) break;
+        try out.appendSlice(a, buf[0..@intCast(n)]);
+    }
+    server.join();
+    return out.toOwnedSlice(a);
+}
+
+fn responseBody(response: []const u8) []const u8 {
+    const at = std.mem.indexOf(u8, response, "\r\n\r\n") orelse return "";
+    return response[at + 4 ..];
+}
+
+test "chat page: GET / and GET /chat serve the embedded page as HTML" {
+    const t = std.testing;
+    for ([_][]const u8{ "/", "/chat", "/?utm=x" }) |path| {
+        const request = try std.fmt.allocPrint(t.allocator, "GET {s} HTTP/1.1\r\nHost: localhost\r\n\r\n", .{path});
+        defer t.allocator.free(request);
+        const response = try serveOneForTest(request);
+        defer t.allocator.free(response);
+        try t.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
+        try t.expect(std.mem.indexOf(u8, response, "\r\nContent-Type: text/html; charset=utf-8\r\n") != null);
+        try t.expectEqualStrings(@embedFile("webui/index.html"), responseBody(response));
+    }
+}
+
+test "chat page: another method on the page paths is refused before any model resolves" {
+    const t = std.testing;
+    const response = try serveOneForTest("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}");
+    defer t.allocator.free(response);
+    try t.expect(std.mem.startsWith(u8, response, "HTTP/1.1 405 Method Not Allowed\r\n"));
+}
+
+test "chat page: the API routes beside it answer as before" {
+    const t = std.testing;
+    const Case = struct { request: []const u8, body: []const u8 };
+    for ([_]Case{
+        .{ .request = "GET /health HTTP/1.1\r\n\r\n", .body = "{\"status\":\"ok\"}" },
+        .{ .request = "GET /v1/models HTTP/1.1\r\n\r\n", .body = "{\"object\":\"list\",\"data\":[]}" },
+    }) |c| {
+        const response = try serveOneForTest(c.request);
+        defer t.allocator.free(response);
+        try t.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
+        try t.expectEqualStrings(c.body, responseBody(response));
+    }
+    // Only the two exact paths are the page.
+    for ([_][]const u8{ "GET /index.html HTTP/1.1\r\n\r\n", "GET /chat/x HTTP/1.1\r\n\r\n" }) |request| {
+        const response = try serveOneForTest(request);
+        defer t.allocator.free(response);
+        try t.expect(!std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
+    }
+}
+
+test "chat page: --api-key leaves the page open and keeps the API behind the key" {
+    const t = std.testing;
+    const prev_key = g_api_key;
+    const prev_strict = g_api_key_strict;
+    defer {
+        g_api_key = prev_key;
+        g_api_key_strict = prev_strict;
+    }
+    // Strict so the loopback test peer is gated like a network one.
+    g_api_key = "s3cret";
+    g_api_key_strict = true;
+    const Case = struct { request: []const u8, status: []const u8 };
+    for ([_]Case{
+        .{ .request = "GET / HTTP/1.1\r\n\r\n", .status = "HTTP/1.1 200 OK\r\n" },
+        .{ .request = "GET /chat HTTP/1.1\r\n\r\n", .status = "HTTP/1.1 200 OK\r\n" },
+        .{ .request = "POST / HTTP/1.1\r\n\r\n", .status = "HTTP/1.1 401 Unauthorized\r\n" },
+        .{ .request = "GET /v1/models HTTP/1.1\r\n\r\n", .status = "HTTP/1.1 401 Unauthorized\r\n" },
+        .{ .request = "GET /v1/models HTTP/1.1\r\nAuthorization: Bearer s3cret\r\n\r\n", .status = "HTTP/1.1 200 OK\r\n" },
+    }) |c| {
+        const response = try serveOneForTest(c.request);
+        defer t.allocator.free(response);
+        try t.expect(std.mem.startsWith(u8, response, c.status));
+    }
+}
+
+test "chat page URL: a wildcard bind is opened through loopback" {
+    const t = std.testing;
+    var buf: [64]u8 = undefined;
+    try t.expectEqualStrings("http://127.0.0.1:12345/", chatPageUrl(&buf, "127.0.0.1", 12345));
+    try t.expectEqualStrings("http://127.0.0.1:8080/", chatPageUrl(&buf, "0.0.0.0", 8080));
+    try t.expectEqualStrings("http://localhost:1/", chatPageUrl(&buf, "localhost", 1));
+    try t.expectEqualStrings("http://192.168.1.5:18800/", chatPageUrl(&buf, "192.168.1.5", 18800));
 }
 
 test "the route-existence 404 is answered BEFORE the model is resolved" {

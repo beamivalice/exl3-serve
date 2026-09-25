@@ -1,0 +1,2099 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="system">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#f7f5f2" />
+<link rel="icon" id="favicon" href="data:," />
+<title>sushi</title>
+<style>
+/* ============================================================
+   sushi chat — design tokens
+   ============================================================ */
+:root {
+  --bg: #f7f5f2;
+  --surface: #ffffff;
+  --surface-2: #f1eeea;
+  --surface-3: #e8e4de;
+  --border: #e6e1da;
+  --border-strong: #d4cec5;
+  --text: #1d1b19;
+  --text-2: #5c5752;
+  --text-3: #928b83;
+  --accent: #d9542a;
+  --accent-hover: #bf4721;
+  --accent-soft: #fbe7de;
+  --accent-2: #326fae;
+  --accent-3: #5f7a4a;
+  --on-accent: #ffffff;
+  --ok: #177a3f;
+  --ok-soft: #e2f3e9;
+  --warn: #8a5b06;
+  --warn-soft: #f8efd8;
+  --err: #b3261e;
+  --err-soft: #fbe9e7;
+  --code-bg: #f3f0ec;
+  --shadow: 0 1px 2px rgb(20 22 25 / 5%), 0 6px 24px rgb(20 22 25 / 6%);
+  --shadow-pop: 0 4px 12px rgb(20 22 25 / 10%), 0 16px 48px rgb(20 22 25 / 14%);
+  --theme-color: #f7f5f2;
+  --topbar-h: 56px;
+  color-scheme: light;
+}
+:root[data-theme="night"] {
+  --bg: #0f1115;
+  --surface: #16191f;
+  --surface-2: #1d2129;
+  --surface-3: #262b35;
+  --border: #272c36;
+  --border-strong: #363d4a;
+  --text: #eceef1;
+  --text-2: #a9b0bc;
+  --text-3: #737c8a;
+  --accent: #ff8a5c;
+  --accent-hover: #ffa27c;
+  --accent-soft: #3a2419;
+  --accent-2: #6cb4d6;
+  --accent-3: #9cc27a;
+  --on-accent: #1a0f0a;
+  --ok: #4cc38a;
+  --ok-soft: #16281f;
+  --warn: #e2b45b;
+  --warn-soft: #2d2413;
+  --err: #f27b72;
+  --err-soft: #331c1a;
+  --code-bg: #1b1f27;
+  --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 6px 24px rgb(0 0 0 / 25%);
+  --shadow-pop: 0 4px 12px rgb(0 0 0 / 40%), 0 16px 48px rgb(0 0 0 / 45%);
+  --theme-color: #0f1115;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --bg: #0f1115;
+    --surface: #16191f;
+    --surface-2: #1d2129;
+    --surface-3: #262b35;
+    --border: #272c36;
+    --border-strong: #363d4a;
+    --text: #eceef1;
+    --text-2: #a9b0bc;
+    --text-3: #737c8a;
+    --accent: #ff8a5c;
+    --accent-hover: #ffa27c;
+    --accent-soft: #3a2419;
+    --accent-2: #6cb4d6;
+    --accent-3: #9cc27a;
+    --on-accent: #1a0f0a;
+    --ok: #4cc38a;
+    --ok-soft: #16281f;
+    --warn: #e2b45b;
+    --warn-soft: #2d2413;
+    --err: #f27b72;
+    --err-soft: #331c1a;
+    --code-bg: #1b1f27;
+    --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 6px 24px rgb(0 0 0 / 25%);
+    --shadow-pop: 0 4px 12px rgb(0 0 0 / 40%), 0 16px 48px rgb(0 0 0 / 45%);
+    --theme-color: #0f1115;
+    color-scheme: dark;
+  }
+}
+
+/* ============================================================
+   Base
+   ============================================================ */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+h1, h2, h3 { margin: 0; letter-spacing: -0.015em; }
+a { color: var(--accent-2); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.num { font-variant-numeric: tabular-nums; }
+:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; border-radius: 6px; }
+::selection { background: color-mix(in srgb, var(--accent-2) 25%, transparent); }
+
+/* ============================================================
+   Buttons & controls
+   ============================================================ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 7px 14px;
+  font-size: 13.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, transform .05s ease;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--surface-2); }
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 35%, var(--border-strong)); }
+.btn.danger:hover { background: var(--err-soft); }
+.btn.ghost { border-color: transparent; background: transparent; }
+.btn.ghost:hover { background: var(--surface-2); }
+.btn.small { padding: 4px 10px; font-size: 12.5px; border-radius: 8px; }
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.icon-btn:hover { background: var(--surface-2); color: var(--text); }
+.icon-btn svg { width: 18px; height: 18px; }
+input[type="text"], input[type="password"], input[type="number"], select, textarea {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 14px;
+  color: var(--text);
+  width: 100%;
+}
+input::placeholder, textarea::placeholder { color: var(--text-3); }
+select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%), linear-gradient(135deg, var(--text-3) 50%, transparent 50%); background-position: calc(100% - 18px) 55%, calc(100% - 13px) 55%; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 32px; }
+select:disabled { opacity: .6; }
+label.field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; font-weight: 550; color: var(--text-2); }
+
+/* ============================================================
+   Pills, dots
+   ============================================================ */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .01em;
+  background: var(--surface-2);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.pill.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.pill.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
+.dot.ok { background: var(--ok); }
+.dot.warn { background: var(--warn); }
+.dot.err { background: var(--err); }
+
+/* ============================================================
+   App shell
+   ============================================================ */
+#appShell { display: flex; flex-direction: column; height: 100dvh; }
+#appTopbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: var(--topbar-h);
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex: none;
+  z-index: 30;
+}
+.mark { display: block; flex: none; background: #fff; border-radius: 8px; object-fit: contain; box-shadow: 0 0 0 1px var(--border); }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand .mark { width: 30px; height: 30px; }
+.brand .name { font-size: 17px; font-weight: 700; letter-spacing: -0.02em; }
+.brand .ver { font-size: 10.5px; font-weight: 600; color: var(--text-3); margin-top: 5px; }
+.spacer { flex: 1; }
+.topbar-actions { display: flex; align-items: center; gap: 6px; }
+#serverDot { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-2); padding: 5px 10px; border-radius: 999px; }
+#appMain { flex: 1; min-height: 0; position: relative; }
+
+/* ============================================================
+   Chat
+   ============================================================ */
+#chatPanel { display: flex; height: 100%; overflow: hidden; }
+#chatSidebar {
+  width: 272px;
+  flex: none;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  transition: margin-left .2s ease, visibility .2s;
+}
+#chatRightbar {
+  width: 300px;
+  flex: none;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  min-height: 0;
+  overflow-y: auto;
+  transition: margin-right .2s ease, visibility .2s;
+}
+.side-section { border-bottom: 1px solid var(--border); }
+.side-section summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  padding: 13px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.side-section summary::-webkit-details-marker { display: none; }
+.side-section summary svg { width: 14px; height: 14px; color: var(--accent-3); }
+.side-section summary::after { content: "›"; margin-left: auto; font-size: 15px; transition: transform .15s ease; }
+.side-section[open] summary::after { transform: rotate(90deg); }
+.side-body { padding: 2px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+.side-status { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); }
+.perf-rows { display: flex; flex-direction: column; }
+.perf-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12.5px;
+}
+.perf-row:last-child { border-bottom: 0; }
+.perf-row .k { color: var(--text-2); }
+.perf-row .v { font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
+.perf-row .v em { font-style: normal; font-weight: 500; font-size: 11px; color: var(--text-3); margin-left: 3px; }
+.sidebar-top { padding: 14px 14px 8px; }
+#newChatButton { width: 100%; }
+#conversationList { flex: 1; overflow-y: auto; padding: 6px 8px 8px; display: flex; flex-direction: column; gap: 2px; }
+.conv-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  width: 100%;
+  color: var(--text);
+}
+.conv-item:hover { background: var(--surface-2); }
+.conv-item.selected { background: var(--accent-soft); }
+.conv-item .c-body { flex: 1; min-width: 0; }
+.conv-item .c-title { font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-item.selected .c-title { color: var(--accent); font-weight: 600; }
+.conv-item .c-sub { font-size: 11.5px; color: var(--text-3); }
+.conv-item .c-actions { display: none; gap: 2px; flex: none; }
+.conv-item:hover .c-actions, .conv-item.selected .c-actions { display: inline-flex; }
+.conv-item .c-actions .icon-btn { width: 26px; height: 26px; border-radius: 7px; }
+.conv-item .c-actions .icon-btn svg { width: 14px; height: 14px; }
+.conv-item input { padding: 4px 8px; font-size: 13px; border-radius: 7px; }
+.conv-empty { padding: 18px 12px; color: var(--text-3); font-size: 13px; text-align: center; white-space: pre-line; }
+.sidebar-note {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-3);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.sidebar-note svg { width: 13px; height: 13px; flex: none; color: var(--ok); }
+
+.chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
+#chatScroll { flex: 1; overflow-y: auto; }
+.chat-column { max-width: 780px; margin: 0 auto; padding: 56px 20px 10px; }
+#chatEmpty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  text-align: center;
+  padding: 8vh 24px 40px;
+}
+#chatEmpty .mark { width: 72px; height: 72px; border-radius: 18px; box-shadow: var(--shadow); }
+#chatEmpty h2 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
+#chatEmpty p { margin: 0; color: var(--text-2); font-size: 14.5px; max-width: 440px; }
+.privacy-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text-2);
+  margin-top: 8px;
+}
+.privacy-chip svg { width: 15px; height: 15px; color: var(--ok); flex: none; }
+.suggestions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 10px; }
+.suggestions button {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.suggestions button:hover { background: var(--surface-2); border-color: var(--accent); color: var(--text); }
+
+.msg { display: flex; flex-direction: column; margin-bottom: 22px; position: relative; }
+.msg.user { align-items: flex-end; }
+.msg.user .bubble {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 16px 16px 4px 16px;
+  padding: 10px 16px;
+  max-width: 85%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.msg.assistant .content { font-size: 15px; overflow-wrap: anywhere; }
+.msg .msg-tools { display: flex; align-items: center; gap: 4px; margin-top: 4px; opacity: 0; transition: opacity .15s ease; }
+.msg:hover .msg-tools, .msg.last .msg-tools { opacity: 1; }
+.msg .msg-tools .icon-btn { width: 27px; height: 27px; }
+.msg .msg-tools .icon-btn svg { width: 14px; height: 14px; }
+.msg .msg-meta { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; margin-right: 4px; }
+.msg .msg-note { font-size: 12px; color: var(--text-3); margin-bottom: 6px; }
+.chat-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 4px 0 22px;
+  padding: 11px 14px;
+  border: 1px solid color-mix(in srgb, var(--err) 30%, var(--border));
+  background: var(--err-soft);
+  color: var(--err);
+  border-radius: 12px;
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+.chat-error svg { flex: none; margin-top: 2px; }
+.chat-error span { flex: 1; }
+.thinking {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.thinking summary {
+  cursor: pointer;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  user-select: none;
+}
+.thinking summary::-webkit-details-marker { display: none; }
+.thinking summary svg { width: 13px; height: 13px; color: var(--accent-3); }
+.thinking summary::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform .15s ease;
+}
+.thinking[open] summary::after { transform: rotate(225deg) translate(-1px, -1px); }
+.thinking[open] summary { border-bottom: 1px solid var(--border); }
+.thinking .t-body {
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* markdown content */
+.content > :first-child { margin-top: 0; }
+.content > :last-child { margin-bottom: 0; }
+.content p { margin: 0 0 12px; }
+.content h1, .content h2, .content h3, .content h4 { margin: 20px 0 10px; line-height: 1.3; }
+.content h1 { font-size: 20px; } .content h2 { font-size: 18px; } .content h3 { font-size: 16px; } .content h4 { font-size: 15px; }
+.content ul, .content ol { margin: 0 0 12px; padding-left: 24px; }
+.content li { margin: 3px 0; }
+.content li > ul, .content li > ol { margin: 3px 0; }
+.content blockquote { margin: 0 0 12px; padding: 6px 14px; border-left: 3px solid var(--accent-3); color: var(--text-2); }
+.content code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: .88em;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.content hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+.code-block { background: var(--code-bg); border: 1px solid var(--border); border-radius: 12px; margin: 0 0 12px; overflow: hidden; }
+.code-block .cb-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px 6px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  letter-spacing: .04em;
+}
+.code-block .cb-actions { display: inline-flex; align-items: center; gap: 6px; }
+.code-block .cb-actions .icon-btn { width: 26px; height: 26px; }
+.code-block .cb-actions .icon-btn svg { width: 13px; height: 13px; }
+.code-block pre { margin: 0; padding: 12px 14px; overflow-x: auto; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; line-height: 1.5; }
+.code-block pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+.svg-preview { display: none; padding: 12px 14px; border-top: 1px solid var(--border); background: var(--surface-2); text-align: center; }
+.svg-preview.open { display: block; }
+.svg-preview img { max-width: 100%; height: auto; background: var(--surface); }
+.table-wrap { overflow-x: auto; margin: 0 0 12px; border: 1px solid var(--border); border-radius: 12px; }
+.content table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+.content th, .content td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.content th { background: var(--surface-2); font-weight: 600; }
+.content tr:last-child td { border-bottom: 0; }
+
+.composer-wrap { flex: none; padding: 8px 20px calc(14px + env(safe-area-inset-bottom)); }
+.composer-column { max-width: 780px; margin: 0 auto; position: relative; }
+#composer {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 10px 12px 8px;
+  transition: border-color .15s ease;
+}
+#composer:focus-within { border-color: var(--accent); }
+#promptInput {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  resize: none;
+  padding: 4px 6px 6px;
+  font-size: 15px;
+  line-height: 1.5;
+  max-height: 200px;
+  outline: none;
+}
+.composer-attach { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 6px 8px; }
+.attach-chip { position: relative; width: 64px; height: 64px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); background: var(--surface-2); }
+.attach-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.attach-chip .attach-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 80%, black);
+  color: var(--text);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+.msg-media { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; justify-content: flex-end; }
+.msg-thumb { max-width: 220px; max-height: 160px; border-radius: 10px; border: 1px solid var(--border); object-fit: cover; }
+.composer-row { display: flex; align-items: center; gap: 6px; }
+.chip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-3);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  max-width: 320px;
+  min-width: 0;
+}
+.chip-toggle svg { width: 13px; height: 13px; flex: none; }
+.chip-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#composerEffortName { color: var(--accent); flex: none; }
+#sendButton, #stopButton {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex: none;
+}
+#sendButton { background: var(--accent); color: var(--on-accent); }
+#sendButton:hover { background: var(--accent-hover); }
+#sendButton svg, #stopButton svg { width: 17px; height: 17px; }
+#stopButton { background: var(--surface-3); color: var(--text); }
+#stopButton:hover { background: var(--border-strong); }
+.composer-note { text-align: center; font-size: 11.5px; color: var(--text-3); margin-top: 8px; }
+.opt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.aside-toggle { position: absolute; top: 10px; z-index: 10; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
+#sidebarToggle { left: 10px; }
+#rightbarToggle { right: 10px; }
+
+/* ============================================================
+   API-key overlay
+   ============================================================ */
+#keyOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  box-shadow: var(--shadow-pop);
+  padding: 34px 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  text-align: center;
+}
+.login-card .mark { width: 56px; height: 56px; margin: 0 auto; border-radius: 14px; }
+.login-card h1 { font-size: 21px; }
+.login-card p { margin: 6px 0 0; color: var(--text-2); font-size: 13.5px; }
+.login-card code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .9em; }
+.login-card form { display: flex; flex-direction: column; gap: 12px; text-align: left; }
+.login-remember { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); }
+.login-remember input { width: auto; }
+#keyError { color: var(--err); font-size: 13px; }
+
+/* ============================================================
+   Toasts & misc
+   ============================================================ */
+#toastHost {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 120;
+  align-items: center;
+  pointer-events: none;
+}
+.toast {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-pop);
+  border-radius: 12px;
+  padding: 10px 18px;
+  font-size: 13.5px;
+  font-weight: 550;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  animation: toast-in .18s ease;
+}
+.toast svg { width: 15px; height: 15px; }
+.toast.ok svg { color: var(--ok); }
+.toast.err svg { color: var(--err); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
+.spin { animation: spin 1s linear infinite; display: inline-flex; }
+@keyframes spin { to { transform: rotate(360deg); } }
+[hidden] { display: none !important; }
+
+/* ============================================================
+   Responsive
+   ============================================================ */
+@media (min-width: 881px) {
+  #chatPanel:not(.left-open) #chatSidebar { margin-left: -272px; visibility: hidden; }
+  #chatPanel:not(.right-open) #chatRightbar { margin-right: -300px; visibility: hidden; }
+}
+@media (max-width: 880px) {
+  #serverDot span.lbl { display: none; }
+  #chatSidebar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 40;
+    box-shadow: var(--shadow-pop);
+    transform: translateX(-105%);
+    transition: transform .2s ease;
+    width: min(300px, 84vw);
+  }
+  #chatPanel.left-open #chatSidebar { transform: translateX(0); }
+  #chatRightbar {
+    position: absolute;
+    inset: 0 0 0 auto;
+    z-index: 40;
+    box-shadow: var(--shadow-pop);
+    transform: translateX(105%);
+    transition: transform .2s ease;
+    width: min(320px, 88vw);
+  }
+  #chatPanel.right-open #chatRightbar { transform: translateX(0); }
+  .chip-toggle { max-width: 180px; }
+}
+@media (max-width: 560px) {
+  .brand .ver { display: none; }
+}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-send" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0-6 6m6-6 6 6"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.5 5 5 10-11"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 2.5v2.4m0 14.2v2.4M2.5 12h2.4m14.2 0h2.4M5 5l1.7 1.7M17.3 17.3 19 19M19 5l-1.7 1.7M6.7 17.3 5 19"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"/></symbol>
+  <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17Z" fill="currentColor"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20 11.5A8 8 0 0 0 6.3 6.3L4 8.5m0-4.5v4.5H8.5M4 12.5a8 8 0 0 0 13.7 5.2l2.3-2.2m0 4.5v-4.5H15.5"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 20h4L20.5 7.5a2.1 2.1 0 0 0-3-3L5 17Zm11-13 3 3"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 2.8 4.5 5.6v6.2c0 4.6 3.2 7.6 7.5 9.4 4.3-1.8 7.5-4.8 7.5-9.4V5.6Z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m8.8 12 2.2 2.2 4.2-4.4"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2.5 13.8 9 20.5 11 13.8 13 12 19.5 10.2 13 3.5 11 10.2 9Z"/></symbol>
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path stroke="currentColor" stroke-width="2" d="M9.5 4.5v15"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9.5" r="1.8" fill="currentColor"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m4.5 17 4.5-4.5 3.5 3.5 3-2.5 4 4"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M21 8.2 12 3 3 8.2v7.6L12 21l9-5.2ZM3.3 8.4 12 13.4l8.7-5M12 13.4V21"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 8h9m5 0h2M4 16h3m5 0h8"/><circle cx="15.5" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="9.5" cy="16" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 12h4l2.5-6 4 12 2.5-6h5"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m11.3 11.7 8.2-8.2m-3 3 2.5 2.5m-5-.5 2 2"/></symbol>
+</svg>
+
+<div id="keyOverlay" hidden>
+  <div class="login-card">
+    <img class="mark" alt="" />
+    <div>
+      <h1>sushi</h1>
+      <p>This server needs its API key, the value it was started with in <code>--api-key</code>.</p>
+    </div>
+    <form id="keyForm">
+      <input id="keyInput" type="password" placeholder="API key" autocomplete="current-password" aria-label="API key" />
+      <label class="login-remember"><input id="keyRemember" type="checkbox" checked /> Remember on this device</label>
+      <div id="keyError" hidden></div>
+      <button type="submit" class="btn primary">Unlock</button>
+    </form>
+  </div>
+</div>
+
+<div id="appShell">
+<header id="appTopbar">
+  <div class="brand">
+    <img class="mark" alt="" />
+    <span class="name">sushi</span>
+    <span class="ver num" id="brandVersion"></span>
+  </div>
+  <span class="spacer"></span>
+  <div class="topbar-actions">
+    <span id="serverDot" title="Server status"><span class="dot" id="serverDotLight"></span><span class="lbl" id="serverDotLabel">Checking…</span></span>
+    <button class="icon-btn" id="forgetKeyButton" title="Forget the API key" aria-label="Forget the API key" hidden><svg><use href="#i-key"/></svg></button>
+    <button class="icon-btn" id="themeToggle" title="Theme" aria-label="Toggle theme"><svg id="themeToggleIcon"><use href="#i-auto"/></svg></button>
+  </div>
+</header>
+
+<main id="appMain">
+<section id="chatPanel">
+  <aside id="chatSidebar">
+    <div class="sidebar-top">
+      <button id="newChatButton" class="btn"><svg width="15" height="15"><use href="#i-plus"/></svg>New chat</button>
+    </div>
+    <div id="conversationList" aria-label="Conversation history"></div>
+    <div class="sidebar-note"><svg><use href="#i-shield"/></svg>Conversations stay in this browser</div>
+  </aside>
+
+  <div class="chat-main">
+    <button class="icon-btn aside-toggle" id="sidebarToggle" aria-label="Toggle conversation list" aria-expanded="true"><svg><use href="#i-sidebar"/></svg></button>
+    <button class="icon-btn aside-toggle" id="rightbarToggle" aria-label="Toggle chat settings" aria-expanded="true"><svg><use href="#i-sliders"/></svg></button>
+    <div id="chatScroll">
+      <div class="chat-column">
+        <div id="chatEmpty">
+          <img class="mark" alt="" />
+          <h2>Chat with sushi</h2>
+          <p>Talk to the model this Mac is serving.</p>
+          <div class="privacy-chip"><svg><use href="#i-shield"/></svg>Runs on this machine. Nothing is sent anywhere else.</div>
+          <div class="suggestions" id="chatSuggestions"></div>
+        </div>
+        <div id="chatMessages" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <div class="composer-wrap">
+      <div class="composer-column">
+        <div id="composer">
+          <div id="composerAttachRow" class="composer-attach" hidden></div>
+          <textarea id="promptInput" rows="1" placeholder="Message sushi…" aria-label="Message"></textarea>
+          <div class="composer-row">
+            <button class="icon-btn" id="attachButton" title="Attach images" aria-label="Attach images" hidden><svg><use href="#i-image"/></svg></button>
+            <input id="attachInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple hidden>
+            <button class="chip-toggle" id="composerModelLabel" title="Choose the model and thinking effort" aria-label="Choose the model and thinking effort"><svg><use href="#i-box"/></svg><span id="composerModelName">no model</span><span>/</span><span id="composerEffortName">default</span></button>
+            <span class="spacer"></span>
+            <button id="stopButton" aria-label="Stop generating" title="Stop" hidden><svg><use href="#i-stop"/></svg></button>
+            <button id="sendButton" aria-label="Send message" title="Send"><svg><use href="#i-send"/></svg></button>
+          </div>
+        </div>
+        <div class="composer-note">Enter sends, Shift+Enter adds a line</div>
+      </div>
+    </div>
+  </div>
+
+  <aside id="chatRightbar" aria-label="Model and chat settings">
+    <details class="side-section" open>
+      <summary><svg><use href="#i-box"/></svg>Model / Thinking</summary>
+      <div class="side-body">
+        <label class="field">Model <select id="modelSelect" aria-label="Model"></select></label>
+        <label class="field">Thinking effort <select id="effortSelect" aria-label="Thinking effort"></select></label>
+        <div class="side-status" id="modelStatus"></div>
+      </div>
+    </details>
+    <details class="side-section" open>
+      <summary><svg><use href="#i-sliders"/></svg>Generation</summary>
+      <div class="side-body">
+        <label class="field">System prompt
+          <textarea id="optSystem" rows="3" placeholder="Optional instructions for the model"></textarea>
+        </label>
+        <div class="opt-grid">
+          <label class="field">Max tokens <input id="optMaxTokens" type="number" min="1" step="1" placeholder="default" /></label>
+          <label class="field">Temperature <input id="optTemperature" type="number" min="0" max="2" step="0.05" placeholder="default" /></label>
+          <label class="field">Top-p <input id="optTopP" type="number" min="0" max="1" step="0.01" placeholder="default" /></label>
+          <label class="field">Top-k <input id="optTopK" type="number" min="0" step="1" placeholder="default" /></label>
+        </div>
+        <button class="btn small ghost" id="chatOptionsReset">Reset to the model's defaults</button>
+      </div>
+    </details>
+    <details class="side-section" open>
+      <summary><svg><use href="#i-pulse"/></svg>Last reply</summary>
+      <div class="side-body">
+        <div class="perf-rows">
+          <div class="perf-row"><span class="k">Status</span><span class="v" id="perfStatus">idle</span></div>
+          <div class="perf-row"><span class="k">First token</span><span class="v" id="perfFirstToken">—</span></div>
+          <div class="perf-row"><span class="k">Prompt</span><span class="v" id="perfPrompt">—</span></div>
+          <div class="perf-row"><span class="k">Prompt processing</span><span class="v" id="perfPrefill">—</span></div>
+          <div class="perf-row"><span class="k">Generation</span><span class="v" id="perfGeneration">—</span></div>
+          <div class="perf-row"><span class="k">Output tokens</span><span class="v" id="perfTokens">—</span></div>
+          <div class="perf-row"><span class="k">Duration</span><span class="v" id="perfDuration">—</span></div>
+        </div>
+      </div>
+    </details>
+  </aside>
+</section>
+</main>
+</div>
+
+<div id="toastHost" aria-live="polite"></div>
+
+<script>
+"use strict";
+/* sushi chat: one self-contained page the engine serves at / and /chat.
+   It talks only to this server's OpenAI-compatible API. */
+
+const LOGO = "data:image/webp;base64,UklGRpYIAABXRUJQVlA4IIoIAADwKACdASqAAIAAPmEskUYkIqGhJpiciIAMCWIA0ihx+gcjnxcYv9l2M71I+YB+k/SX8wH8u/yPre+hj0CP6j1AHoAeWX+5nwb/uN+3Ps7//+tm9EIt5xe0rNd413/c8d2n1aA/bP0b+uEdA5hPVP7t2T6WZvZppbBzhHkZoNY/ywkLAE/3aFyOEXCbBIr6seORae04oBkxReFSd8M5quaE17TGtQ1oNbxPyN0lqgWhZsj1QEpFQ5kYHB/MguVQpmL//C+WbLvWZyNEJD0nLBUgj5LGo6JTuRlmg5WbepXDCFNs5HXvNuQv8fGT1SqOPcfCPFyyHIh+dcDvHfh3kVncL86TBIal/1qpkQpdy45FRO8Iu7UIZ+LQ8Su00zMGOZ9E6Pu88yPog7J2Ip4TNPF2rneDiFjVvmw6oeTY9dExStnmlIDUN6UsUeNNUC42u1gA/v050ABWGA98IDBspRykRytTidElVmZwUxrBFaGZ8hXWj8Se8z3OChW28t2EzNHwdYJfkeIf9PlR0CyNvlFSyCoDYOnDNts/SUgqIbRqfzb/MGuPDTO46dtB4eH2sqC/9X3mQy1uWGN129kd4UgKW4z3lmn+2JYpzhPHepfwif7jfpBHKUQecGTn3chsu/JckBGmWd0pPvpv16lXBEl3+9QW5E6qq+1+WzuCCkJgYxEt+jt1tVlRcAfPxV22kqv6c6WUcV3oO3urrej8iWbbFQS7LBVil/auBD9XYvtabL45Y1YTshUPv1/0b7L+stu80uQkil1dH+zO988i7sCH72LAwbv7eU5hPW55Yb43VzBTOorsLkaEj2SHcF5fo45zzbMEs+d+JmMvG1BjYnRH0upe/cJ96qAJhejqNNfsYXZDjxb5HF/w9OAoGEaB/Q/g+aSI9ONXWEOQYh0P8spZcv++HzgRnnvPr2C1GgF3/8JxLbokY75T0+nrrwv9T58NPKvAhc0De/EE5aNSiY/yT3XmXz/V3/yxZsRZi9PZl6Z8lY1umVTPAx22T8owWBJR6+++uJJ9zHuIWLxL2hqFJT1MqLUUIKqMNbjRpm9YskXA4DYPWbxpZp59Yu6pyWD01QzKeFSB36g2HyPZXvnOh2W1AQZsD9osD7PoCCrmxdJSr+ghNSVtOQCyUXm3y/EiIOngQQXDgrBZNjdz8aM0lVNpLNPhQCstPn1sTPu11mqAfs06vcwR/jlxQgaFDnFdzp2OgGjki4Fc7rlkkf2f/z4i8IOEAE1l7/ge2089Igc7o+7VAYlocsJZeelfEyWkRyqKOUqPagWW67MwBtT97YHoXBuyeAFGXTygV85Xu9eY5pGyL3agty+9Qul5M/zrfwhj3q3NHeLlveIoUpQydeDXKsGnRIRQG2/xVojQECdeE3IOn5hDRAr2tESApzv4P2thxcVIt7BA/TUFuDTJiQkASXYd9mwHJHrfRobaz3v/1gVONz3iqOfhGqLl6Re08Qrlri9O2Pw92aD3f746E9HZdIj06I1fjyEh7iV0YphNsdMqeGgtu7Ay/5dcTI2SBHJfJLd1wy3GA+VlCHC8PJCcskZoHU1ocUBaAoKmGDkqGCn2eNHoBJup9Dq59CSyZEmMryqL9ZkSh6Hgs6Og/mH0NrwaqwdQFh7wJ3ktXp0dVdx2MoiAMOsdO1jXbsfRIp54j8R/P5IIrTIbyEULDrwUVr5tjtxfbJzhrYemTNPLmoOaaRXnI2Y2QLFfurN8Epr0U/6VPbfIcDn/8O9T7l5nl9miRkonoWSEaALMB2UVgO3SGCU6v3rYNPbaOPff3P1ValCaBSmi72IpJC08CELVzb32tqyBpCBPbZ9MBDiq9vfzbCDOKKOMDaz+zLGBPAar3TMISYT3mkFSaBM/H5gdBTUAvPZimUKfgl5q/IuOlMYMrBcLwAAByTbyGAIOlUqJCGkNNgCZ1QaDDckVM0WszkH0yrgg7Q2GLcmyN+i3K7j2dhJghL8hmINSiBZXQULlwa6PPsP0bF8Qa4uTVPqzGydJ/vWAwEoXXhJ+fpknYjnuJLwO63zIXxPfw/S2o/EO9VoUunIZdcDzz7fAAjIntfQ+P0aR4r3G77F6PjbLkgFpzc9IQ7xJNeo8oLTmcl1Bppo9nJfPq59f09aX96iNEngRmUhG8Z0y2XEU7ffO8tY/DokfYnud5seYuJ8GRnJl2Gy3hIq1AiPtAlg6K+EUMU0ur49Lwq3BCZP1nlmKzL8j+xuvmJrmcOiZZPimv/YT8moOyShzChuvll/t/+fNdWmdxRd3ax9tjbLsXO2/pfALt/IjO459oE98iEl9O/hMbq0NJKfZaumSbAsFXGsB3V+dcVj8/+9X736uK03P3ThG6b/pfLufk2p14gLviksc/2knLHaXyN8zWvwPN1rhCtsDOwf6Vp2JXsBRvHdYygvCl7OE/3wHm8nCqS+QhPRi1LNFf25srjWUbLdy4QSNFnlRy5KwgFyGtNe7rT9avPLwbVVyiPBAbVPof/zkUt38BZEBm4FxMs8JDMFqiRXG2EX/D7v2jbZR3rXre1Phv+HqlHSu/Oj8ZgnqvlCWMvJBzTKH8RhswJp78tOhuhLWF9Va23xO5YOlMPjBBK3UZBMNkILYs5fuKj8LhrO5lLdXb6DAbK6vdXFViV4dssvZBLBvew8LNQJ6AjoFu2e5OzIHnapLLmrKmsr3mGPbxhXBWxU1Z6wU8n4HlbEL5C4Xscj5jzkMn4C7QhVqM9PBM3YBIhOCPY6dZDgaufZjY3Hs+j1LhHfdYeP4WO6UdQbD/ZPSn7iGPqUsrXH0m1++/PyIxrRJI5ykwVqQY6L51HpmmiBE46I8WwuTd+XTpCGTMUw3JuY3zQv3l34CZX9sTXvB6tksD8gdc7utK4W1G205Ewal1cxwoghlMsbFbJOBqFkwAAAAAA==";
+const $ = (id) => document.getElementById(id);
+
+/* ------------------------------------------------------------
+   Utilities
+   ------------------------------------------------------------ */
+function fmtInt(value) {
+  const num = Number(value ?? 0);
+  if (!Number.isFinite(num)) return "0";
+  if (Math.abs(num) >= 1_000_000) return `${(num / 1_000_000).toFixed(num % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (Math.abs(num) >= 10_000) return `${(num / 1_000).toFixed(num % 1_000 === 0 ? 0 : 1)}k`;
+  return num.toLocaleString("en-US");
+}
+function relativeTime(epochMs) {
+  if (!epochMs) return "";
+  const delta = (Date.now() - Number(epochMs)) / 1000;
+  if (delta < 60) return "just now";
+  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+  if (delta < 7 * 86400) return `${Math.floor(delta / 86400)}d ago`;
+  return new Date(epochMs).toLocaleDateString();
+}
+function icon(name, size = 16) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.appendChild(use);
+  return svg;
+}
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+async function copyText(text, message = "Copied to clipboard") {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(message, "ok");
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    try {
+      document.execCommand("copy");
+      toast(message, "ok");
+    } catch {
+      toast("Copy failed", "err");
+    }
+    area.remove();
+  }
+}
+function toast(message, tone = "ok") {
+  const node = el("div", `toast ${tone}`);
+  node.appendChild(icon(tone === "err" ? "x" : "check", 15));
+  node.appendChild(document.createTextNode(message));
+  $("toastHost").appendChild(node);
+  setTimeout(() => {
+    node.style.transition = "opacity .25s ease";
+    node.style.opacity = "0";
+    setTimeout(() => node.remove(), 260);
+  }, 2400);
+}
+
+/* Browser storage can throw (private windows, blocked site data), so every access is guarded. */
+function readStore(key) {
+  try {
+    return localStorage.getItem(key) ?? sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function writeStore(key, value, session = false) {
+  try {
+    (session ? sessionStorage : localStorage).setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function dropStore(key) {
+  try {
+    localStorage.removeItem(key);
+    sessionStorage.removeItem(key);
+  } catch {}
+}
+
+/* ------------------------------------------------------------
+   API + key
+   ------------------------------------------------------------ */
+let apiKey = readStore("sushi-api-key") || "";
+async function api(path, options = {}) {
+  const headers = new Headers(options.headers ?? {});
+  if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
+  // "omit": the server's 401 carries a Basic challenge that would open the browser's own login box.
+  const response = await fetch(path, { ...options, headers, credentials: "omit", cache: "no-store" });
+  if (response.status === 401) showKeyOverlay(apiKey ? "That key was not accepted." : "");
+  return response;
+}
+async function apiJson(path, options = {}) {
+  const response = await api(path, options);
+  if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+  return response.json();
+}
+function showKeyOverlay(error) {
+  $("keyError").textContent = error;
+  $("keyError").hidden = !error;
+  const overlay = $("keyOverlay");
+  if (!overlay.hidden) return;
+  overlay.hidden = false;
+  $("keyInput").focus();
+}
+$("keyForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const key = $("keyInput").value.trim();
+  if (!key) return;
+  apiKey = key;
+  dropStore("sushi-api-key");
+  writeStore("sushi-api-key", key, !$("keyRemember").checked);
+  $("keyOverlay").hidden = true;
+  $("forgetKeyButton").hidden = false;
+  await refreshModels().catch(() => {});
+  loadVersion();
+});
+$("forgetKeyButton").onclick = () => {
+  dropStore("sushi-api-key");
+  apiKey = "";
+  window.location.reload();
+};
+
+/* ------------------------------------------------------------
+   Theme
+   ------------------------------------------------------------ */
+const THEME_MODES = ["system", "day", "night"];
+const THEME_LABELS = { system: "System", day: "Light", night: "Dark" };
+const THEME_ICONS = { system: "#i-auto", day: "#i-sun", night: "#i-moon" };
+function applyThemeMode(mode) {
+  const normalized = THEME_MODES.includes(mode) ? mode : "system";
+  document.documentElement.dataset.theme = normalized;
+  writeStore("sushi-theme", normalized);
+  $("themeToggleIcon").firstElementChild?.setAttribute("href", THEME_ICONS[normalized]);
+  $("themeToggle").title = `Theme: ${THEME_LABELS[normalized]}`;
+  $("themeToggle").setAttribute("aria-label", `Theme: ${THEME_LABELS[normalized]}. Select the next theme`);
+  requestAnimationFrame(() => {
+    const themeColor = getComputedStyle(document.documentElement).getPropertyValue("--theme-color").trim();
+    document.querySelector("meta[name='theme-color']")?.setAttribute("content", themeColor || "#f7f5f2");
+  });
+}
+function setupThemeMode() {
+  applyThemeMode(readStore("sushi-theme") || "system");
+  $("themeToggle").onclick = () => {
+    const current = document.documentElement.dataset.theme;
+    applyThemeMode(THEME_MODES[(THEME_MODES.indexOf(current) + 1) % THEME_MODES.length]);
+  };
+  window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener("change", () => {
+    if (document.documentElement.dataset.theme === "system") applyThemeMode("system");
+  });
+}
+
+/* ------------------------------------------------------------
+   Markdown rendering (safe: built from DOM nodes, no innerHTML)
+   ------------------------------------------------------------ */
+function inlineNodes(text) {
+  const fragment = document.createDocumentFragment();
+  const parts = String(text ?? "").split(/(`[^`\n]*`)/g);
+  for (const part of parts) {
+    if (!part) continue;
+    if (part.startsWith("`") && part.endsWith("`") && part.length > 1) {
+      fragment.appendChild(el("code", null, part.slice(1, -1)));
+      continue;
+    }
+    inlineStyled(part, fragment);
+  }
+  return fragment;
+}
+function inlineStyled(text, host) {
+  const linkRe = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  let cursor = 0;
+  let match;
+  while ((match = linkRe.exec(text)) !== null) {
+    if (match.index > cursor) inlineEmphasis(text.slice(cursor, match.index), host);
+    const anchor = el("a", null, match[1]);
+    anchor.href = match[2];
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    host.appendChild(anchor);
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) inlineEmphasis(text.slice(cursor), host);
+}
+function inlineEmphasis(text, host) {
+  const boldRe = /\*\*([^*]+)\*\*/g;
+  let cursor = 0;
+  let match;
+  while ((match = boldRe.exec(text)) !== null) {
+    if (match.index > cursor) inlineItalic(text.slice(cursor, match.index), host);
+    const bold = el("strong");
+    inlineItalic(match[1], bold);
+    host.appendChild(bold);
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) inlineItalic(text.slice(cursor), host);
+}
+function inlineItalic(text, host) {
+  const italicRe = /(^|[^*])\*([^*\n]+)\*/g;
+  let cursor = 0;
+  let match;
+  while ((match = italicRe.exec(text)) !== null) {
+    const start = match.index + match[1].length;
+    if (start > cursor) host.appendChild(document.createTextNode(text.slice(cursor, start)));
+    host.appendChild(el("em", null, match[2]));
+    cursor = start + match[0].length - match[1].length;
+  }
+  if (cursor < text.length) host.appendChild(document.createTextNode(text.slice(cursor)));
+}
+function tableCells(line) {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return null;
+  const bounded = trimmed.startsWith("|") && trimmed.endsWith("|");
+  const source = bounded ? trimmed.slice(1, -1) : trimmed;
+  const cells = source.split("|").map((cell) => cell.trim());
+  return cells.length >= 2 ? cells : null;
+}
+function isTableSeparator(line) {
+  const cells = tableCells(line);
+  return Boolean(cells && cells.every((cell) => /^:?-{3,}:?$/.test(cell)));
+}
+function codeBlockNode(lang, code) {
+  const block = el("div", "code-block");
+  const head = el("div", "cb-head");
+  head.appendChild(el("span", null, lang || "code"));
+  const actions = el("span", "cb-actions");
+  const pre = el("pre");
+  pre.appendChild(el("code", null, code));
+  const copy = el("button", "icon-btn");
+  copy.setAttribute("aria-label", "Copy code");
+  copy.title = "Copy";
+  copy.appendChild(icon("copy", 13));
+  copy.onclick = () => copyText(code);
+  actions.appendChild(copy);
+  let preview = null;
+  if (/^(svg|xml)$/i.test(lang || "") || /^\s*<svg[\s>]/i.test(code)) {
+    preview = el("div", "svg-preview");
+    const img = document.createElement("img");
+    img.alt = "SVG preview";
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`;
+    preview.appendChild(img);
+    const display = el("button", "icon-btn");
+    display.setAttribute("aria-label", "Display SVG");
+    display.title = "Display";
+    display.appendChild(icon("image", 13));
+    display.onclick = () => preview.classList.toggle("open");
+    actions.appendChild(display);
+  }
+  head.appendChild(actions);
+  block.append(head, pre);
+  if (preview) block.appendChild(preview);
+  return block;
+}
+function renderMarkdown(text) {
+  const fragment = document.createDocumentFragment();
+  const lines = String(text ?? "").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    const fence = line.match(/^\s*```(\S*)\s*$/);
+    if (fence) {
+      const code = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      index += 1;
+      fragment.appendChild(codeBlockNode(fence[1], code.join("\n")));
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const node = el(`h${Math.min(4, heading[1].length)}`);
+      node.appendChild(inlineNodes(heading[2]));
+      fragment.appendChild(node);
+      index += 1;
+      continue;
+    }
+    if (/^\s*([-*_])\s*\1\s*\1[\s\-*_]*$/.test(line) && line.trim().length >= 3) {
+      fragment.appendChild(el("hr"));
+      index += 1;
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      const quoted = [];
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoted.push(lines[index].replace(/^>\s?/, ""));
+        index += 1;
+      }
+      const quote = el("blockquote");
+      quote.appendChild(renderMarkdown(quoted.join("\n")));
+      fragment.appendChild(quote);
+      continue;
+    }
+    if (tableCells(line) && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+      const headerCells = tableCells(line);
+      index += 2;
+      const rows = [];
+      while (index < lines.length && tableCells(lines[index])) {
+        rows.push(tableCells(lines[index]));
+        index += 1;
+      }
+      const wrap = el("div", "table-wrap");
+      const table = el("table");
+      const thead = el("thead");
+      const headRow = el("tr");
+      for (const cell of headerCells) {
+        const th = el("th");
+        th.appendChild(inlineNodes(cell));
+        headRow.appendChild(th);
+      }
+      thead.appendChild(headRow);
+      const tbody = el("tbody");
+      for (const cells of rows) {
+        const tr = el("tr");
+        for (let cellIndex = 0; cellIndex < headerCells.length; cellIndex += 1) {
+          const td = el("td");
+          td.appendChild(inlineNodes(cells[cellIndex] ?? ""));
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      }
+      table.append(thead, tbody);
+      wrap.appendChild(table);
+      fragment.appendChild(wrap);
+      continue;
+    }
+    const listMatch = line.match(/^(\s*)([-*+]|\d+[.)])\s+/);
+    if (listMatch) {
+      const ordered = /\d/.test(listMatch[2]);
+      const list = el(ordered ? "ol" : "ul");
+      const start = ordered ? parseInt(listMatch[2], 10) : 1;
+      if (ordered && start > 1) list.start = start;
+      while (index < lines.length) {
+        const itemMatch = lines[index].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+        if (!itemMatch) break;
+        const item = el("li");
+        item.appendChild(inlineNodes(itemMatch[3]));
+        const nested = [];
+        while (index + 1 < lines.length) {
+          const next = lines[index + 1];
+          const nestedMatch = next.match(/^\s{2,}([-*+]|\d+[.)])\s+(.*)$/);
+          if (nestedMatch) {
+            nested.push(nestedMatch[2]);
+            index += 1;
+            continue;
+          }
+          if (/^\s{2,}\S/.test(next) && !next.match(/^(\s*)([-*+]|\d+[.)])\s+/)) {
+            item.appendChild(document.createTextNode(" "));
+            item.appendChild(inlineNodes(next.trim()));
+            index += 1;
+            continue;
+          }
+          break;
+        }
+        if (nested.length > 0) {
+          const sub = el("ul");
+          for (const nestedText of nested) {
+            const subItem = el("li");
+            subItem.appendChild(inlineNodes(nestedText));
+            sub.appendChild(subItem);
+          }
+          item.appendChild(sub);
+        }
+        list.appendChild(item);
+        index += 1;
+      }
+      fragment.appendChild(list);
+      continue;
+    }
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    const paragraph = [];
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !/^\s*```/.test(lines[index]) &&
+      !/^#{1,6}\s/.test(lines[index]) &&
+      !/^>\s?/.test(lines[index]) &&
+      !lines[index].match(/^(\s*)([-*+]|\d+[.)])\s+/) &&
+      !(tableCells(lines[index]) && index + 1 < lines.length && isTableSeparator(lines[index + 1]))
+    ) {
+      paragraph.push(lines[index]);
+      index += 1;
+    }
+    if (paragraph.length > 0) {
+      const node = el("p");
+      node.appendChild(inlineNodes(paragraph.join("\n")));
+      fragment.appendChild(node);
+    } else {
+      index += 1;
+    }
+  }
+  return fragment;
+}
+
+/* ------------------------------------------------------------
+   SSE helper
+   ------------------------------------------------------------ */
+function readSsePayloads(buffer, onPayload) {
+  let cursor = 0;
+  while (true) {
+    const boundary = buffer.indexOf("\n\n", cursor);
+    if (boundary === -1) break;
+    const chunk = buffer.slice(cursor, boundary);
+    cursor = boundary + 2;
+    const data = chunk
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    if (data) onPayload(data);
+  }
+  return buffer.slice(cursor);
+}
+
+/* ------------------------------------------------------------
+   Server status + version
+   ------------------------------------------------------------ */
+async function refreshServerDot() {
+  let ok = false;
+  try {
+    ok = (await fetch("/health", { credentials: "omit", cache: "no-store" })).ok;
+  } catch {}
+  $("serverDotLight").className = `dot ${ok ? "ok" : "err"}`;
+  $("serverDotLabel").textContent = ok ? "Online" : "Offline";
+  $("serverDot").title = ok ? "Server online" : "Server unreachable";
+}
+function loadVersion() {
+  apiJson("/props")
+    .then((props) => {
+      const version = props?.settings?.version;
+      if (version) $("brandVersion").textContent = `v${String(version).replace(/^v/, "")}`;
+    })
+    .catch(() => {});
+}
+
+/* ------------------------------------------------------------
+   Chat options
+   ------------------------------------------------------------ */
+const OPTIONS_KEY = "sushi-chat-options";
+const optionFields = ["optSystem", "optMaxTokens", "optTemperature", "optTopP", "optTopK"];
+function loadChatOptions() {
+  try {
+    const stored = JSON.parse(readStore(OPTIONS_KEY) ?? "{}");
+    for (const id of optionFields) if (typeof stored[id] === "string") $(id).value = stored[id];
+  } catch {}
+}
+function persistChatOptions() {
+  const stored = {};
+  for (const id of optionFields) stored[id] = $(id).value;
+  writeStore(OPTIONS_KEY, JSON.stringify(stored));
+}
+for (const id of optionFields) $(id).addEventListener("change", persistChatOptions);
+$("chatOptionsReset").onclick = () => {
+  for (const id of optionFields) $(id).value = "";
+  persistChatOptions();
+  toast("Chat settings reset", "ok");
+};
+
+/* ------------------------------------------------------------
+   Collapsible sidebars: in-flow on desktop, overlay drawers on phones
+   ------------------------------------------------------------ */
+const chatAsideSides = {
+  left: { class: "left-open", storageKey: "sushi-chat-left", toggleId: "sidebarToggle" },
+  right: { class: "right-open", storageKey: "sushi-chat-right", toggleId: "rightbarToggle" },
+};
+const isMobileViewport = () => window.matchMedia("(max-width: 880px)").matches;
+function setChatAside(side, open) {
+  const aside = chatAsideSides[side];
+  $("chatPanel").classList.toggle(aside.class, open);
+  $(aside.toggleId).setAttribute("aria-expanded", open ? "true" : "false");
+  if (!isMobileViewport()) writeStore(aside.storageKey, open ? "open" : "closed");
+}
+function toggleChatAside(side) {
+  const open = !$("chatPanel").classList.contains(chatAsideSides[side].class);
+  if (open && isMobileViewport()) setChatAside(side === "left" ? "right" : "left", false);
+  setChatAside(side, open);
+}
+function applyChatAsideDefaults() {
+  for (const side of Object.keys(chatAsideSides)) {
+    const open = !isMobileViewport() && readStore(chatAsideSides[side].storageKey) !== "closed";
+    $("chatPanel").classList.toggle(chatAsideSides[side].class, open);
+    $(chatAsideSides[side].toggleId).setAttribute("aria-expanded", open ? "true" : "false");
+  }
+}
+function closeChatDrawersOnMobile() {
+  if (isMobileViewport()) $("chatPanel").classList.remove("left-open", "right-open");
+}
+$("sidebarToggle").onclick = () => toggleChatAside("left");
+$("rightbarToggle").onclick = () => toggleChatAside("right");
+$("composerModelLabel").onclick = () => setChatAside("right", true);
+window.matchMedia("(max-width: 880px)").addEventListener("change", applyChatAsideDefaults);
+
+/* ------------------------------------------------------------
+   Models and thinking effort (from GET /v1/models)
+   ------------------------------------------------------------ */
+let modelCatalog = [];
+function isChatModel(model) {
+  return !Array.isArray(model.capabilities) || model.capabilities.includes("chat");
+}
+function modelSeesImages(model) {
+  return Boolean(model && ((model.capabilities ?? []).includes("vision") || (model.input_modalities ?? []).includes("image")));
+}
+function selectedModel() {
+  return modelCatalog.find((model) => model.id === $("modelSelect").value) ?? null;
+}
+async function refreshModels() {
+  const payload = await apiJson("/v1/models");
+  modelCatalog = (payload.data ?? []).filter(isChatModel);
+  renderModelOptions();
+}
+function renderModelOptions() {
+  const select = $("modelSelect");
+  const current = select.value || readStore("sushi-model");
+  // Rebuild only when the set changed, so a poll does not snap an open dropdown shut.
+  const signature = modelCatalog.map((model) => `${model.id}${model.loaded ? "*" : ""}`).join("|");
+  if (select.dataset.signature !== signature) {
+    select.dataset.signature = signature;
+    select.textContent = "";
+    for (const model of modelCatalog) {
+      const option = el("option", null, model.loaded ? `${model.id} · loaded` : model.id);
+      option.value = model.id;
+      select.appendChild(option);
+    }
+  }
+  const ids = modelCatalog.map((model) => model.id);
+  select.value = (current && ids.includes(current) && current) || ids[0] || "";
+  renderEffortOptions();
+  renderModelStatus();
+}
+function renderEffortOptions() {
+  const select = $("effortSelect");
+  const efforts = selectedModel()?.reasoning_efforts ?? [];
+  const values = ["default", ...efforts];
+  const wanted = select.value || readStore("sushi-effort") || "default";
+  if (select.dataset.signature !== values.join("|")) {
+    select.dataset.signature = values.join("|");
+    select.textContent = "";
+    for (const value of values) {
+      const option = el("option", null, value === "default" ? "model default" : value);
+      option.value = value;
+      select.appendChild(option);
+    }
+  }
+  select.value = values.includes(wanted) ? wanted : "default";
+  select.disabled = efforts.length === 0;
+  $("composerEffortName").textContent = select.value;
+}
+function renderModelStatus() {
+  const model = selectedModel();
+  $("composerModelName").textContent = model?.id ?? "no model";
+  const vision = modelSeesImages(model);
+  $("attachButton").hidden = !vision;
+  if (!vision && pendingImages.length) {
+    pendingImages = [];
+    renderComposerAttachments();
+  }
+  const host = $("modelStatus");
+  host.textContent = "";
+  if (!model) {
+    host.appendChild(el("span", "pill warn", "no chat model found"));
+    return;
+  }
+  host.appendChild(el("span", `pill ${model.loaded ? "ok" : ""}`, model.loaded ? "loaded" : "loads on first message"));
+  const context = Number(model.context_length ?? 0);
+  if (context > 0) host.appendChild(el("span", "pill", `${fmtInt(context)} context`));
+  if (vision) host.appendChild(el("span", "pill", "sees images"));
+}
+$("modelSelect").addEventListener("change", () => {
+  writeStore("sushi-model", $("modelSelect").value);
+  renderEffortOptions();
+  renderModelStatus();
+});
+$("effortSelect").addEventListener("change", () => {
+  writeStore("sushi-effort", $("effortSelect").value);
+  $("composerEffortName").textContent = $("effortSelect").value;
+});
+
+/* ------------------------------------------------------------
+   Conversations (kept in this browser)
+   ------------------------------------------------------------ */
+const CHATS_KEY = "sushi-chats";
+const MAX_SAVED_CHATS = 50;
+const MAX_CHAT_IMAGES = 8;
+const MAX_CHAT_IMAGE_BYTES = 8 * 1024 * 1024;
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"];
+let chats = loadChats();
+let currentChat = null;
+let chatAbort = null;
+let lastTurnError = null;
+let renamingChatId = null;
+let pendingDeleteChatId = null;
+let pendingImages = [];
+
+function loadChats() {
+  try {
+    const parsed = JSON.parse(readStore(CHATS_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((chat) => chat && Array.isArray(chat.messages)) : [];
+  } catch {
+    return [];
+  }
+}
+function saveChats() {
+  // Images stay in memory only: a few photos would fill the browser's small storage quota.
+  const slim = chats.slice(0, MAX_SAVED_CHATS).map((chat) => ({
+    ...chat,
+    messages: chat.messages.map(({ images, ...rest }) => (images?.length ? { ...rest, droppedImages: images.length } : rest)),
+  }));
+  writeStore(CHATS_KEY, JSON.stringify(slim));
+}
+function touchChat(chat) {
+  chat.updated = Date.now();
+  chats = [chat, ...chats.filter((entry) => entry !== chat)];
+  saveChats();
+  renderConversationList();
+}
+function chatTitle(chat) {
+  if (chat.title) return chat.title;
+  const first = chat.messages.find((message) => message.role === "user");
+  if (!first) return "New chat";
+  if (first.content?.trim()) return first.content.trim().slice(0, 60);
+  return first.images?.length || first.droppedImages ? "Image" : "New chat";
+}
+function renderConversationList() {
+  const host = $("conversationList");
+  host.textContent = "";
+  if (chats.length === 0) {
+    host.appendChild(el("div", "conv-empty", "No conversations yet.\nStart one below."));
+    return;
+  }
+  for (const chat of chats) {
+    const item = el("div", `conv-item${chat === currentChat ? " selected" : ""}`);
+    item.setAttribute("role", "button");
+    item.tabIndex = 0;
+    const body = el("div", "c-body");
+    if (renamingChatId === chat.id) {
+      const input = el("input");
+      input.type = "text";
+      input.value = chatTitle(chat);
+      input.onclick = (event) => event.stopPropagation();
+      input.onkeydown = (event) => {
+        if (event.key === "Enter") {
+          chat.title = input.value.trim();
+          renamingChatId = null;
+          saveChats();
+          renderConversationList();
+        } else if (event.key === "Escape") {
+          renamingChatId = null;
+          renderConversationList();
+        }
+      };
+      input.onblur = () => {
+        renamingChatId = null;
+        renderConversationList();
+      };
+      body.appendChild(input);
+      item.appendChild(body);
+      host.appendChild(item);
+      queueMicrotask(() => {
+        input.focus();
+        input.select();
+      });
+      continue;
+    }
+    body.appendChild(el("div", "c-title", chatTitle(chat)));
+    body.appendChild(el("div", "c-sub", relativeTime(chat.updated)));
+    item.appendChild(body);
+
+    const actions = el("div", "c-actions");
+    if (pendingDeleteChatId === chat.id) {
+      const confirm = el("button", "btn small danger", "Delete?");
+      confirm.onclick = (event) => {
+        event.stopPropagation();
+        deleteChat(chat.id);
+      };
+      actions.appendChild(confirm);
+    } else {
+      const rename = el("button", "icon-btn");
+      rename.setAttribute("aria-label", "Rename conversation");
+      rename.appendChild(icon("pencil", 14));
+      rename.onclick = (event) => {
+        event.stopPropagation();
+        renamingChatId = chat.id;
+        pendingDeleteChatId = null;
+        renderConversationList();
+      };
+      const del = el("button", "icon-btn");
+      del.setAttribute("aria-label", "Delete conversation");
+      del.appendChild(icon("trash", 14));
+      del.onclick = (event) => {
+        event.stopPropagation();
+        pendingDeleteChatId = chat.id;
+        renderConversationList();
+        setTimeout(() => {
+          if (pendingDeleteChatId === chat.id) {
+            pendingDeleteChatId = null;
+            renderConversationList();
+          }
+        }, 4000);
+      };
+      actions.append(rename, del);
+    }
+    item.appendChild(actions);
+    item.onclick = () => openChat(chat.id);
+    item.onkeydown = (event) => {
+      if (event.key === "Enter") openChat(chat.id);
+    };
+    host.appendChild(item);
+  }
+}
+function openChat(id) {
+  if (chatAbort) return;
+  currentChat = chats.find((chat) => chat.id === id) ?? null;
+  lastTurnError = null;
+  renderTranscript();
+  renderConversationList();
+  closeChatDrawersOnMobile();
+  $("promptInput").focus();
+}
+function deleteChat(id) {
+  pendingDeleteChatId = null;
+  if (currentChat?.id === id) newChat();
+  chats = chats.filter((chat) => chat.id !== id);
+  saveChats();
+  renderConversationList();
+}
+function newChat() {
+  if (chatAbort) chatAbort.abort();
+  currentChat = null;
+  lastTurnError = null;
+  renderTranscript();
+  renderConversationList();
+  closeChatDrawersOnMobile();
+  $("promptInput").focus();
+  refreshModels().catch(() => {});
+}
+$("newChatButton").onclick = newChat;
+
+/* ------------------------------------------------------------
+   Transcript
+   ------------------------------------------------------------ */
+function messageTools(message, extras = []) {
+  const tools = el("div", "msg-tools");
+  for (const extra of extras) tools.appendChild(extra);
+  const copy = el("button", "icon-btn");
+  copy.setAttribute("aria-label", "Copy message");
+  copy.title = "Copy";
+  copy.appendChild(icon("copy", 14));
+  copy.onclick = () => copyText(message.content ?? "");
+  tools.appendChild(copy);
+  return tools;
+}
+function regenerateButton() {
+  const regen = el("button", "icon-btn");
+  regen.setAttribute("aria-label", "Regenerate the reply");
+  regen.title = "Regenerate";
+  regen.appendChild(icon("refresh", 14));
+  regen.onclick = regenerateLast;
+  return regen;
+}
+function appendMessageNode(message, { last = false } = {}) {
+  $("chatEmpty").hidden = true;
+  const node = el("div", `msg ${message.role}${last ? " last" : ""}`);
+  if (message.role === "user") {
+    if (message.images?.length) {
+      const media = el("div", "msg-media");
+      for (const url of message.images) {
+        const img = document.createElement("img");
+        img.className = "msg-thumb";
+        img.src = url;
+        img.alt = "attached image";
+        media.appendChild(img);
+      }
+      node.appendChild(media);
+    }
+    if (message.droppedImages) {
+      const count = message.droppedImages;
+      node.appendChild(el("div", "msg-note", `${count} image${count === 1 ? " was" : "s were"} not kept after reload`));
+    }
+    if (message.content) node.appendChild(el("div", "bubble", message.content));
+    node.appendChild(messageTools(message));
+  } else {
+    if (message.reasoning) {
+      const thinking = el("details", "thinking");
+      const summary = el("summary");
+      summary.append(icon("spark", 13), document.createTextNode("Thought process"));
+      thinking.append(summary, el("div", "t-body", message.reasoning));
+      node.appendChild(thinking);
+    }
+    const content = el("div", "content");
+    content.appendChild(renderMarkdown(message.content));
+    node.appendChild(content);
+    const extras = [];
+    if (message.meta) extras.push(el("span", "msg-meta", message.meta));
+    if (last && !chatAbort) extras.push(regenerateButton());
+    node.appendChild(messageTools(message, extras));
+  }
+  $("chatMessages").appendChild(node);
+  return node;
+}
+function renderTranscript() {
+  const messages = currentChat?.messages ?? [];
+  $("chatMessages").textContent = "";
+  $("chatEmpty").hidden = messages.length > 0 || Boolean(lastTurnError);
+  const lastAssistantIndex = messages.map((message) => message.role).lastIndexOf("assistant");
+  messages.forEach((message, index) => appendMessageNode(message, { last: index === lastAssistantIndex }));
+  if (lastTurnError) {
+    const notice = el("div", "chat-error");
+    notice.append(icon("x", 15), el("span", null, lastTurnError));
+    const retry = el("button", "btn small", "Retry");
+    retry.onclick = regenerateLast;
+    notice.appendChild(retry);
+    $("chatMessages").appendChild(notice);
+  }
+  scrollChat(true);
+}
+function scrollChat(force = false) {
+  const scroller = $("chatScroll");
+  const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
+  if (force || nearBottom) scroller.scrollTop = scroller.scrollHeight;
+}
+
+/* ------------------------------------------------------------
+   Last-reply readout: live counts while streaming, then the server's own usage + timings
+   ------------------------------------------------------------ */
+const perfMon = {
+  startedAt: 0,
+  firstAt: 0,
+  deltas: 0,
+  timer: 0,
+  set(id, text, unit) {
+    const host = $(id);
+    host.textContent = text;
+    if (unit) host.appendChild(el("em", null, unit));
+  },
+  begin() {
+    this.startedAt = performance.now();
+    this.firstAt = 0;
+    this.deltas = 0;
+    this.set("perfStatus", "streaming");
+    $("perfStatus").style.color = "var(--accent)";
+    for (const id of ["perfFirstToken", "perfPrompt", "perfPrefill", "perfGeneration"]) this.set(id, "…");
+    this.set("perfTokens", "0");
+    clearInterval(this.timer);
+    this.timer = setInterval(() => this.renderLive(), 250);
+  },
+  delta() {
+    if (!this.firstAt) {
+      this.firstAt = performance.now();
+      this.set("perfFirstToken", `${Math.round(this.firstAt - this.startedAt)}`, "ms");
+    }
+    this.deltas += 1;
+  },
+  renderLive() {
+    if (!this.startedAt) return;
+    this.set("perfDuration", ((performance.now() - this.startedAt) / 1000).toFixed(1), "s");
+    if (this.firstAt && this.deltas > 1) {
+      const perSecond = this.deltas / ((performance.now() - this.firstAt) / 1000);
+      if (Number.isFinite(perSecond) && perSecond > 0) this.set("perfGeneration", perSecond.toFixed(1), "tok/s");
+      this.set("perfTokens", fmtInt(this.deltas), "streamed");
+    }
+  },
+  finish(usage, timings) {
+    clearInterval(this.timer);
+    this.timer = 0;
+    if (!this.startedAt) return;
+    const now = performance.now();
+    this.set("perfStatus", "idle");
+    $("perfStatus").style.color = "";
+    this.set("perfDuration", ((now - this.startedAt) / 1000).toFixed(1), "s");
+    if (!this.firstAt) this.set("perfFirstToken", "—");
+    const promptTokens = Number(usage?.prompt_tokens ?? 0);
+    const cached = Number(usage?.prompt_tokens_details?.cached_tokens ?? 0);
+    if (promptTokens > 0) this.set("perfPrompt", fmtInt(promptTokens), cached > 0 ? `tok, ${fmtInt(cached)} cached` : "tok");
+    else this.set("perfPrompt", "—");
+    const prefillRate = Number(timings?.prompt_per_second ?? 0);
+    if (prefillRate > 0) this.set("perfPrefill", prefillRate.toFixed(1), "tok/s");
+    else this.set("perfPrefill", "—");
+    const outputTokens = Number(usage?.completion_tokens ?? 0) || this.deltas;
+    const clientSeconds = this.firstAt ? (now - this.firstAt) / 1000 : 0;
+    const decodeRate = Number(timings?.predicted_per_second ?? 0) || (outputTokens > 1 && clientSeconds > 0.05 ? outputTokens / clientSeconds : 0);
+    if (decodeRate > 0) this.set("perfGeneration", decodeRate.toFixed(1), "tok/s");
+    else this.set("perfGeneration", "—");
+    this.set("perfTokens", fmtInt(outputTokens), usage?.completion_tokens ? "tok" : "streamed");
+    this.startedAt = 0;
+  },
+};
+
+/* ------------------------------------------------------------
+   Attachments
+   ------------------------------------------------------------ */
+function renderComposerAttachments() {
+  const host = $("composerAttachRow");
+  host.textContent = "";
+  host.hidden = pendingImages.length === 0;
+  pendingImages.forEach((url, index) => {
+    const chip = el("div", "attach-chip");
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = "image to send";
+    chip.appendChild(img);
+    const remove = el("button", "attach-remove");
+    remove.type = "button";
+    remove.setAttribute("aria-label", "Remove image");
+    remove.appendChild(icon("x", 10));
+    remove.onclick = () => {
+      pendingImages.splice(index, 1);
+      renderComposerAttachments();
+    };
+    chip.appendChild(remove);
+    host.appendChild(chip);
+  });
+}
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Could not read that file"));
+    reader.readAsDataURL(file);
+  });
+}
+async function addComposerFiles(fileList) {
+  if (!modelSeesImages(selectedModel())) {
+    toast("This model does not accept images", "err");
+    return;
+  }
+  for (const file of [...fileList]) {
+    if (!IMAGE_TYPES.includes(file.type)) {
+      toast("Attach PNG, JPEG, WebP, GIF or BMP images", "err");
+      continue;
+    }
+    if (pendingImages.length >= MAX_CHAT_IMAGES) {
+      toast(`At most ${MAX_CHAT_IMAGES} images per message`, "err");
+      break;
+    }
+    if (file.size > MAX_CHAT_IMAGE_BYTES) {
+      toast("That image is larger than 8 MB", "err");
+      continue;
+    }
+    try {
+      pendingImages.push(await readFileAsDataUrl(file));
+    } catch (error) {
+      toast(String(error.message ?? error), "err");
+    }
+  }
+  renderComposerAttachments();
+}
+
+/* ------------------------------------------------------------
+   Streaming: POST /v1/chat/completions with stream: true
+   ------------------------------------------------------------ */
+function wireMessages(history) {
+  const out = [];
+  const system = $("optSystem").value.trim();
+  if (system) out.push({ role: "system", content: system });
+  for (const message of history) {
+    if (message.role === "user") {
+      const images = message.images ?? [];
+      if (!images.length) {
+        out.push({ role: "user", content: message.content });
+        continue;
+      }
+      const parts = images.map((url) => ({ type: "image_url", image_url: { url } }));
+      if (message.content) parts.push({ type: "text", text: message.content });
+      out.push({ role: "user", content: parts });
+    } else if (message.role === "assistant" && message.content) {
+      out.push({ role: "assistant", content: message.content });
+    }
+  }
+  return out;
+}
+function buildRequest(model, history) {
+  const body = { model, messages: wireMessages(history), stream: true, stream_options: { include_usage: true } };
+  const effort = $("effortSelect").value;
+  if (effort && effort !== "default") body.reasoning_effort = effort;
+  const numeric = [
+    ["optMaxTokens", "max_tokens", parseInt],
+    ["optTemperature", "temperature", parseFloat],
+    ["optTopP", "top_p", parseFloat],
+    ["optTopK", "top_k", parseInt],
+  ];
+  for (const [fieldId, key, parse] of numeric) {
+    const raw = $(fieldId).value.trim();
+    if (raw === "") continue;
+    const value = parse(raw, 10);
+    if (Number.isFinite(value)) body[key] = value;
+  }
+  return body;
+}
+function createStreamingView() {
+  $("chatEmpty").hidden = true;
+  const node = el("div", "msg assistant last");
+  const state = { node, text: "", reasoning: "", thinkingEl: null, thinkingBody: null, contentEl: null, raf: 0 };
+  const flush = () => {
+    state.raf = 0;
+    if (state.reasoning && !state.thinkingEl) {
+      state.thinkingEl = el("details", "thinking streaming");
+      const summary = el("summary");
+      summary.setAttribute("aria-label", "Thinking; expand to watch the thought process");
+      const spinner = el("span", "spin");
+      spinner.setAttribute("aria-hidden", "true");
+      spinner.appendChild(icon("spark", 13));
+      summary.append(spinner, document.createTextNode("Thinking…"));
+      state.thinkingBody = el("div", "t-body");
+      state.thinkingEl.append(summary, state.thinkingBody);
+      node.prepend(state.thinkingEl);
+    }
+    if (state.thinkingBody) {
+      state.thinkingBody.textContent = state.reasoning;
+      state.thinkingBody.scrollTop = state.thinkingBody.scrollHeight;
+    }
+    if (state.text) {
+      if (!state.contentEl) {
+        state.contentEl = el("div", "content");
+        node.appendChild(state.contentEl);
+      }
+      state.contentEl.replaceChildren(renderMarkdown(state.text));
+    }
+    scrollChat();
+  };
+  state.schedule = () => {
+    if (!state.raf) state.raf = requestAnimationFrame(flush);
+  };
+  state.finalize = () => {
+    if (state.raf) cancelAnimationFrame(state.raf);
+    node.remove();
+  };
+  $("chatMessages").appendChild(node);
+  scrollChat(true);
+  return state;
+}
+function replyMeta(usage, timings, finishReason, aborted, clientRate) {
+  const parts = [];
+  const tokens = Number(usage?.completion_tokens ?? 0);
+  if (tokens > 0) parts.push(`${fmtInt(tokens)} tokens`);
+  const rate = Number(timings?.predicted_per_second ?? 0) || clientRate;
+  if (rate > 0) parts.push(`${rate.toFixed(1)} tok/s`);
+  if (aborted) parts.push("stopped");
+  else if (finishReason === "length") parts.push("hit the token limit");
+  return parts.join(" · ") || null;
+}
+async function streamReply(model, history, signal) {
+  const view = createStreamingView();
+  perfMon.begin();
+  let usage = null;
+  let timings = null;
+  let finishReason = null;
+  let streamError = null;
+  let firstAt = 0;
+  let deltas = 0;
+  try {
+    const response = await api("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal,
+      body: JSON.stringify(buildRequest(model, history)),
+    });
+    if (!response.ok) {
+      let detail = await response.text();
+      try {
+        detail = JSON.parse(detail).error?.message ?? detail;
+      } catch {}
+      throw new Error(`${response.status}: ${String(detail).slice(0, 240)}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let done = false;
+    while (!done) {
+      const chunk = await reader.read();
+      done = chunk.done;
+      buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !done });
+      buffer = readSsePayloads(buffer, (payload) => {
+        if (payload === "[DONE]") return;
+        let json;
+        try {
+          json = JSON.parse(payload);
+        } catch {
+          return;
+        }
+        if (json.error) {
+          streamError = json.error.message ?? JSON.stringify(json.error);
+          return;
+        }
+        if (json.usage) usage = json.usage;
+        if (json.timings) timings = json.timings;
+        const choice = json.choices?.[0];
+        if (!choice) return;
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+        const delta = choice.delta ?? {};
+        for (const [key, field] of [["reasoning_content", "reasoning"], ["content", "text"]]) {
+          if (typeof delta[key] !== "string" || !delta[key]) continue;
+          view[field] += delta[key];
+          if (!firstAt) firstAt = performance.now();
+          deltas += 1;
+          view.schedule();
+          perfMon.delta();
+        }
+      });
+    }
+  } catch (error) {
+    if (!(signal.aborted && error.name === "AbortError")) {
+      view.finalize();
+      perfMon.finish(null, null);
+      throw error;
+    }
+  }
+  perfMon.finish(usage, timings);
+  view.finalize();
+  if (streamError) throw new Error(streamError);
+  const seconds = firstAt ? (performance.now() - firstAt) / 1000 : 0;
+  const clientRate = deltas > 1 && seconds > 0.05 ? deltas / seconds : 0;
+  return {
+    text: view.text,
+    reasoning: view.reasoning,
+    aborted: signal.aborted,
+    meta: replyMeta(usage, timings, finishReason, signal.aborted, clientRate),
+  };
+}
+function setChatBusy(busy) {
+  $("sendButton").hidden = busy;
+  $("stopButton").hidden = !busy;
+}
+async function runTurn(chat) {
+  const model = $("modelSelect").value;
+  if (!model) {
+    toast("No chat model is available yet", "err");
+    return;
+  }
+  chatAbort = new AbortController();
+  lastTurnError = null;
+  setChatBusy(true);
+  renderTranscript();
+  try {
+    const result = await streamReply(model, chat.messages, chatAbort.signal);
+    if (result.text || result.reasoning) {
+      chat.messages.push({ role: "assistant", content: result.text, reasoning: result.reasoning || null, meta: result.meta });
+    }
+    if (result.aborted) toast("Stopped", "ok");
+  } catch (error) {
+    lastTurnError = String(error.message ?? error).slice(0, 300);
+    toast("The reply failed", "err");
+  } finally {
+    chatAbort = null;
+    setChatBusy(false);
+    touchChat(chat);
+    if (chat === currentChat) renderTranscript();
+    refreshModels().catch(() => {});
+  }
+}
+async function sendChat(text) {
+  const content = text.trim();
+  const images = pendingImages.slice();
+  if (!content && !images.length) return;
+  if (!$("modelSelect").value) {
+    toast("No chat model is available yet", "err");
+    return;
+  }
+  if (!currentChat) currentChat = { id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, title: "", messages: [] };
+  pendingImages = [];
+  renderComposerAttachments();
+  currentChat.messages.push({ role: "user", content, images });
+  await runTurn(currentChat);
+}
+async function regenerateLast() {
+  if (chatAbort || !currentChat) return;
+  const messages = currentChat.messages;
+  const lastUser = messages.map((message) => message.role).lastIndexOf("user");
+  if (lastUser === -1) return;
+  messages.splice(lastUser + 1);
+  await runTurn(currentChat);
+}
+
+/* ------------------------------------------------------------
+   Composer
+   ------------------------------------------------------------ */
+function autosizePrompt() {
+  const input = $("promptInput");
+  input.style.height = "auto";
+  input.style.height = `${Math.min(200, input.scrollHeight)}px`;
+}
+$("sendButton").onclick = () => {
+  const text = $("promptInput").value;
+  if ((!text.trim() && !pendingImages.length) || chatAbort) return;
+  $("promptInput").value = "";
+  autosizePrompt();
+  sendChat(text);
+};
+$("stopButton").onclick = () => chatAbort?.abort();
+$("attachButton").onclick = () => $("attachInput").click();
+$("attachInput").addEventListener("change", (event) => {
+  addComposerFiles(event.target.files ?? []).catch(() => toast("Could not read that file", "err"));
+  event.target.value = "";
+});
+$("promptInput").addEventListener("paste", (event) => {
+  const files = [...(event.clipboardData?.files ?? [])];
+  if (!files.length || !modelSeesImages(selectedModel())) return;
+  event.preventDefault();
+  addComposerFiles(files).catch(() => toast("Could not read that file", "err"));
+});
+$("composer").addEventListener("dragover", (event) => {
+  if (modelSeesImages(selectedModel())) event.preventDefault();
+});
+$("composer").addEventListener("drop", (event) => {
+  if (!modelSeesImages(selectedModel())) return;
+  event.preventDefault();
+  addComposerFiles(event.dataTransfer?.files ?? []).catch(() => toast("Could not read that file", "err"));
+});
+$("promptInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    $("sendButton").click();
+  }
+});
+$("promptInput").addEventListener("input", autosizePrompt);
+for (const suggestion of [
+  "Explain how attention works in transformers",
+  "Write a haiku about Apple Silicon",
+  "What should I check before quantizing a model?",
+]) {
+  const button = el("button", null, suggestion);
+  button.onclick = () => {
+    $("promptInput").value = suggestion;
+    autosizePrompt();
+    $("promptInput").focus();
+  };
+  $("chatSuggestions").appendChild(button);
+}
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeChatDrawersOnMobile();
+});
+
+/* ------------------------------------------------------------
+   Start
+   ------------------------------------------------------------ */
+async function init() {
+  for (const img of document.querySelectorAll("img.mark")) img.src = LOGO;
+  $("favicon").href = LOGO;
+  setupThemeMode();
+  loadChatOptions();
+  applyChatAsideDefaults();
+  $("forgetKeyButton").hidden = !apiKey;
+  renderConversationList();
+  renderTranscript();
+  refreshServerDot();
+  setInterval(refreshServerDot, 10_000);
+  await refreshModels().catch(() => {});
+  loadVersion();
+  setInterval(() => {
+    if (!document.hidden && !chatAbort) refreshModels().catch(() => {});
+  }, 30_000);
+  $("promptInput").focus();
+}
+init();
+</script>
+</body>
+</html>

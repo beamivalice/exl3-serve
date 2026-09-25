@@ -274,8 +274,7 @@ fn printUsage(io: std.Io) void {
         \\  --idle-evict-secs <n>
         \\                      Evict .ready entries with refcount==0 if
         \\                        idle for this many seconds. Default: off.
-        \\  --metrics           Enable Prometheus metrics at GET /metrics and a
-        \\                        live metrics panel on the index page (opt-in;
+        \\  --metrics           Enable Prometheus metrics at GET /metrics (opt-in;
         \\                        zero cost when off). Also GET /metrics.json.
         \\  --no-tool-autocorrect
         \\                      Disable tool-call ARGUMENT auto-correct — the

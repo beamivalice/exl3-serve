@@ -1226,8 +1226,7 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
         try w.print("{s}\n", .{line});
     } else |_| {}
     const vision = if (models_info) |m| m.vision else false;
-    try w.writeAll("\n>>> chat is live — /bye to exit, /tool on for web search and file tools");
-    try w.writeAll(if (vision) ", /image <path> to show an image\n" else "\n");
+    try writeReadyBanner(w, vision, port);
     try w.flush();
 
     // File tools are confined to the folder `sushi run` started in.
@@ -1302,6 +1301,13 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
         try w.writeAll("\n");
         try w.flush();
     }
+}
+
+/// The lines `sushi run` prints once the model answers.
+pub fn writeReadyBanner(w: *std.Io.Writer, vision: bool, port: u16) !void {
+    try w.writeAll("\n>>> chat is live — /bye to exit, /tool on for web search and file tools");
+    try w.writeAll(if (vision) ", /image <path> to show an image\n" else "\n");
+    try w.print(">>> chat in your browser: http://127.0.0.1:{d}/\n", .{port});
 }
 
 fn attachImage(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, vision: bool, arg: []const u8, pending: *std.ArrayList([]const u8)) !void {
@@ -1754,6 +1760,17 @@ test "cli: tools are off by default; --tool, /tool and /image parse" {
         const got = try unquotePath(allocator, c[0]);
         defer allocator.free(got);
         try testing.expectEqualStrings(c[1], got);
+    }
+}
+
+test "cli: the ready banner points at the browser chat page" {
+    for ([_]bool{ false, true }) |vision| {
+        var buf: [512]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        try writeReadyBanner(&w, vision, 18800);
+        const text = w.buffered();
+        try testing.expect(std.mem.indexOf(u8, text, "chat in your browser: http://127.0.0.1:18800/\n") != null);
+        try testing.expectEqual(vision, std.mem.indexOf(u8, text, "/image <path>") != null);
     }
 }
 
