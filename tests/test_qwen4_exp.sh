@@ -5,7 +5,7 @@
 # budget (2048 tokens) — asserted through the server's own
 # `[qsa] sparse attention engaged` line, since a dense fallback answers
 # plausibly too. [7] sends an image (tower + M-RoPE engagement lines) and
-# SKIPs when the pack ships no `model-vision.safetensors`. [11] reboots
+# SKIPs when the pack's index names no tower tensor (`vision_tower.` or `model.visual.`). [11] reboots
 # `--no-vision` (tower absent, text works, media 400s by name). SKIPs without the pack.
 #   QWEN4_MODEL=<pack dir> ./tests/test_qwen4_exp.sh [port]
 set -u
@@ -113,7 +113,7 @@ if [ -f "$IMAGE" ]; then
 import json,sys
 print(json.dumps({'messages':[{'role':'user','content':[{'type':'text','text':'What is the main subject of this image? One word.'},{'type':'image_url','image_url':{'url':'data:image/jpeg;base64,'+sys.argv[1]}}]}],'max_tokens':48,'temperature':0,'enable_thinking':False}))" "$B64")
 fi
-if [ -f "$MODEL/model-vision.safetensors" ] && [ -f "$IMAGE" ]; then
+if grep -qE '"(vision_tower|model\.visual)\.' "$MODEL/model.safetensors.index.json" 2>/dev/null && [ -f "$IMAGE" ]; then
   resp=$(echo "$img" | curl -s -m 600 -w '\n%{http_code}' "$U/v1/chat/completions" -H 'content-type: application/json' -d @-)
   code=$(echo "$resp" | tail -1)
   ians=$(echo "$resp" | sed '$d' | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null)
@@ -132,7 +132,7 @@ if [ -f "$MODEL/model-vision.safetensors" ] && [ -f "$IMAGE" ]; then
   # Sampled AFTER an image turn: tower weights are lazy until first use.
   vis_bytes=$(curl -s "$U/props" | python3 -c "import sys,json; print(json.load(sys.stdin)['memory']['active_bytes'])")
 else
-  echo "  SKIP: pack has no model-vision.safetensors"
+  echo "  SKIP: pack has no vision tower"
 fi
 echo "[8] two concurrent plain requests batch-decode (one forward for both slots)"
 nb0=$(grep -c 'gdn batched decode engaged' "$LOG")

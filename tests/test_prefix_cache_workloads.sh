@@ -49,7 +49,8 @@ SERVER_PID=$!
 cleanup() {
     kill $SERVER_PID 2>/dev/null || true
     wait $SERVER_PID 2>/dev/null || true
-    cp "$LOGFILE" "$HOME/.sushi/runs/pc378/server.log" 2>/dev/null; rm -f "$LOGFILE"
+    mkdir -p "$HOME/.sushi/runs/pc378" && cp "$LOGFILE" "$HOME/.sushi/runs/pc378/server.log" 2>/dev/null || true
+    rm -f "$LOGFILE"
 }
 trap cleanup EXIT
 
