@@ -62,6 +62,8 @@ with either pack). Numbers: [docs/quality-kld.md](docs/quality-kld.md).
 
 Sushi-3bpw on an M5 Max 128 GB: `--ctx-size 1048576 --kv-quant 8 --mtp`, llmprobe `--bench-only`, quiet box.
 
+<p align="center"><img src="docs/assets/perf-sushi3bpw-1m.png" alt="decode, first token and prefill vs context" width="100%"></p>
+
 | context | decode tok/s | prefill tok/s | first token | tokens per step |
 |---|---|---|---|---|
 | 4k | 96.1 | 1702 | 2.5 s | 3.37 |
