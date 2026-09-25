@@ -64,7 +64,7 @@ pub const NgramHash = struct {
     /// one we support). Fallible: every bound writes a fixed array.
     pub fn init(unigram_vocab: u32, ngram_size: u32, heads_per_ngram: u32, vocab_base: u64, divisor: u64, seed: u64, ple_layer_index: u32, eos: u32) !NgramHash {
         if (ngram_size < 2 or ngram_size > MAX_NGRAM_SIZE) return error.InvalidQwen4NgramSize;
-        if (heads_per_ngram == 0 or (ngram_size - 1) * heads_per_ngram > MAX_HEADS) {
+        if (heads_per_ngram == 0 or heads_per_ngram > MAX_HEADS / (ngram_size - 1)) {
             return error.InvalidQwen4NgramHeads;
         }
         if (divisor == 0 or vocab_base < 2) return error.InvalidQwen4NgramVocab;
@@ -1581,6 +1581,10 @@ test "NgramHash.init refuses a config past its fixed arrays instead of asserting
     try testing.expectError(error.InvalidQwen4NgramVocab, NgramHash.init(248320, 3, 8, 20_000_000, 0, 1234, 0, 248044));
     const wide = try NgramHash.init(248320, 5, 8, 20_000_000, 128, 1234, 0, 248044);
     try testing.expectEqual(@as(u32, 32), wide.n_heads);
+}
+
+test "n-gram head count overflow is refused by the hash" {
+    try testing.expectError(error.InvalidQwen4NgramHeads, NgramHash.init(248320, 3, 2147483656, 20_000_000, 128, 1234, 0, 248044));
 }
 
 test "WarmProgress emits on the byte step, on the silence timeout, and never twice for one step" {

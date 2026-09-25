@@ -1760,7 +1760,7 @@ fn validateQwen4Config(config: *const ModelConfig) !void {
     }
     // `vocab`/`offsets` are [MAX_HEADS]i64, written n_heads deep.
     if (config.heads_per_ngram == 0) return error.InvalidQwen4NgramHeads;
-    if ((config.ngram_size - 1) * config.heads_per_ngram > qwen4_exp.MAX_HEADS) {
+    if (config.heads_per_ngram > qwen4_exp.MAX_HEADS / (config.ngram_size - 1)) {
         return error.InvalidQwen4NgramHeads;
     }
     if (config.ngram_vocab_divisor == 0 or config.ngram_vocab_base < 2) {
@@ -8003,6 +8003,13 @@ test "qwen4_exp config: an n-gram bound past the fixed arrays is a named load er
     try testing.expectError(error.InvalidQwen4NgramVocab, parseConfigFromJson(
         testing.allocator,
         qwen4CaseJson("\"ple_layer_ids\":[2],\"make_ngram_vocab_size_divisible_by\":0"),
+    ));
+}
+
+test "n-gram head count overflow is refused by the config" {
+    try testing.expectError(error.InvalidQwen4NgramHeads, parseConfigFromJson(
+        testing.allocator,
+        qwen4CaseJson("\"ple_layer_ids\":[2],\"ngram_size\":3,\"heads_per_ngram\":2147483656"),
     ));
 }
 
