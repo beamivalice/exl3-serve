@@ -38,8 +38,9 @@ pub const PixelBounds = struct { min: u32, max: u32, clamped: bool };
 /// The bounds the resize actually uses: the checkpoint's when sane, the
 /// processor defaults otherwise, and never above ENGINE_MAX_PIXELS.
 pub fn effectivePixelBounds(cfg_min: u32, cfg_max: u32) PixelBounds {
-    const min = if (cfg_min > 0) cfg_min else MIN_PIXELS;
-    const declared = if (cfg_max >= min) cfg_max else @max(MAX_PIXELS, min);
+    const requested_min = if (cfg_min > 0) cfg_min else MIN_PIXELS;
+    const min = @min(requested_min, ENGINE_MAX_PIXELS);
+    const declared = if (cfg_max >= requested_min) cfg_max else @max(MAX_PIXELS, requested_min);
     const max = @max(min, @min(declared, ENGINE_MAX_PIXELS));
     return .{ .min = min, .max = max, .clamped = max < declared };
 }
@@ -1279,6 +1280,17 @@ test "qwen smart_resize honors checkpoint processor pixel bounds" {
     try std.testing.expectEqual(@as(u32, 960), r.h);
     try std.testing.expectEqual(@as(u32, 1632), r.w);
     try std.testing.expectEqual(@as(u32, 1530), imageTokenCount(r, 16, 2));
+}
+
+test "qwen pixel minimum cannot raise the engine ceiling" {
+    for ([_]u32{ 0, 16777216 }) |max| {
+        const bounds = effectivePixelBounds(16777216, max);
+        try std.testing.expectEqual(ENGINE_MAX_PIXELS, bounds.max);
+        try std.testing.expect(bounds.min <= bounds.max);
+        try std.testing.expect(bounds.clamped);
+        const resized = smartResizeImage(512, 512, FACTOR, bounds.min, bounds.max);
+        try std.testing.expect(@as(u64, resized.h) * resized.w <= ENGINE_MAX_PIXELS);
+    }
 }
 
 test "qwen bicubic RGB preprocessing preserves colors and interpolates" {
