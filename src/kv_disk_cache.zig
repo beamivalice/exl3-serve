@@ -51,6 +51,7 @@ const mlx = @import("mlx.zig");
 const kv_quant = @import("kv_quant.zig");
 const transformer_mod = @import("transformer.zig");
 const model = @import("model.zig");
+const model_discovery = @import("model_discovery.zig");
 const io_util = @import("io_util.zig");
 const disk_writer = @import("kv_disk_writer.zig");
 const log = @import("log.zig");
@@ -3290,6 +3291,19 @@ fn deleteTreeAbsolute(io: std.Io, dir_abs: []const u8) void {
     pd.deleteTree(io, name) catch {};
 }
 
+fn fingerprintFile(h: *std.hash.XxHash64, io: std.Io, dir: std.Io.Dir, name: []const u8) void {
+    h.update(name);
+    h.update(&[_]u8{0});
+    const st = dir.statFile(io, name, .{}) catch {
+        h.update(&[_]u8{0});
+        return;
+    };
+    h.update(&[_]u8{1});
+    h.update(std.mem.asBytes(&st.size));
+    const mt: i128 = st.mtime.nanoseconds;
+    h.update(std.mem.asBytes(&mt));
+}
+
 pub fn modelFingerprint(allocator: std.mem.Allocator, io: std.Io, model_dir: []const u8) ![]u8 {
     if (model_dir.len == 0 or !std.fs.path.isAbsolute(model_dir)) return error.BadModelDir;
     var h = std.hash.XxHash64.init(0x6b76_6361_6368_6531);
@@ -3301,6 +3315,39 @@ pub fn modelFingerprint(allocator: std.mem.Allocator, io: std.Io, model_dir: []c
         const mt: i128 = st.mtime.nanoseconds;
         h.update(std.mem.asBytes(&mt));
     }
+    var dir = try std.Io.Dir.openDirAbsolute(io, model_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var referenced = model_discovery.indexShardSet(io, dir);
+    defer if (referenced) |*r| model_discovery.freeShardSet(r);
+    var names = std.ArrayList([]const u8).empty;
+    defer {
+        for (names.items) |name| allocator.free(name);
+        names.deinit(allocator);
+    }
+    if (referenced) |r| {
+        var it = r.keyIterator();
+        while (it.next()) |name| {
+            const owned = try allocator.dupe(u8, name.*);
+            errdefer allocator.free(owned);
+            try names.append(allocator, owned);
+        }
+    } else {
+        var it = dir.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".safetensors")) continue;
+            const owned = try allocator.dupe(u8, entry.name);
+            errdefer allocator.free(owned);
+            try names.append(allocator, owned);
+        }
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.less);
+    for (names.items) |name| fingerprintFile(&h, io, dir, name);
+    fingerprintFile(&h, io, dir, "ngram_table.bin");
     if (model.getConfigOverrides()) |raw| h.update(raw);
     return std.fmt.allocPrint(allocator, "{x:0>16}", .{h.final()});
 }
@@ -7373,4 +7420,51 @@ test "DiskTier hybrid lookup leaves a prompt token to compute logits" {
     try testing.expectEqual(@as(u32, 512), tier.bestHybridMatch(&tokens, false, quant, 512).?.cp);
     try testing.expect(tier.bestHybridMatch(tokens[0..256], false, quant, 256) == null);
     try testing.expect(tier.bestHybridMatch(&.{}, false, quant, 0) == null);
+}
+
+fn testFingerprintPayloadChange(indexed: bool, mtime_only: bool) !void {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [512]u8 = undefined;
+    const base = try tmpRoot(&tmp, io, &buf);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{}" });
+    const files: []const []const u8 = if (indexed) &.{ "trunk.safetensors", "experts.safetensors", "ngram_table.bin" } else &.{ "model.safetensors", "ngram_table.bin" };
+    if (indexed) try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"trunk.safetensors\",\"b\":\"experts.safetensors\",\"c\":\"trunk.safetensors\"}}" });
+    for (files) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "old" });
+    for (files) |name| {
+        const before = try modelFingerprint(testing.allocator, io, base);
+        defer testing.allocator.free(before);
+        const unchanged = try modelFingerprint(testing.allocator, io, base);
+        defer testing.allocator.free(unchanged);
+        try testing.expectEqualStrings(before, unchanged);
+        const f = try tmp.dir.openFile(io, name, .{ .mode = .read_write });
+        defer f.close(io);
+        const st = try f.stat(io);
+        if (mtime_only) {
+            try f.setTimestamps(io, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = st.mtime.nanoseconds + 2_000_000_000 } } });
+        } else {
+            try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "replacement" });
+            try f.setTimestamps(io, .{ .modify_timestamp = .{ .new = st.mtime } });
+        }
+        const changed = try modelFingerprint(testing.allocator, io, base);
+        defer testing.allocator.free(changed);
+        try testing.expect(!std.mem.eql(u8, before, changed));
+    }
+}
+
+test "fingerprint indexed shards and ngram size" {
+    try testFingerprintPayloadChange(true, false);
+}
+
+test "fingerprint indexed shards and ngram mtime" {
+    try testFingerprintPayloadChange(true, true);
+}
+
+test "fingerprint single shard and ngram size" {
+    try testFingerprintPayloadChange(false, false);
+}
+
+test "fingerprint single shard and ngram mtime" {
+    try testFingerprintPayloadChange(false, true);
 }
