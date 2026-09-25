@@ -1190,6 +1190,33 @@ pub const HotPrefixCache = struct {
             // a restored row there must come from the vision splice, never
             // from a text prefix.
             const disk_limit: u32 = if (media_start) |ms| @intCast(@min(ms, prompt_ids.len)) else @intCast(prompt_ids.len);
+            // A ringed cache restores only at a ring file: the chunks hold its other layers alone.
+            if (target_cache.swa_ring_window > 0) {
+                const ram_eff: usize = if (match) |m| blk: {
+                    const rr = ringRestore(&self.entries.items[m.idx], m.shared, prompt_ids.len) orelse break :blk 0;
+                    break :blk rr.len;
+                } else 0;
+                const rm = d.bestRingMatch(prompt_ids, has_tools, target_cache.config, disk_limit, target_cache.swa_ring_window) orelse break :disk;
+                if (@as(usize, rm.at) < ram_eff + kv_disk_cache.MIN_DISK_ADVANTAGE_TOKENS) break :disk;
+                const full_match = rm.at == prompt_ids.len;
+                const final_len: u32 = if (full_match and rm.at > 1) rm.at - 1 else rm.at;
+                const sw = io_util.Stopwatch.init(d.io);
+                d.restoreIntoRinged(target_cache, rm.idx, rm.pos, final_len, s) catch |err| {
+                    log.warn("  [disk-cache] ring restore failed: {s} — falling back to RAM/cold path\n", .{@errorName(err)});
+                    target_cache.truncate(0, s) catch {};
+                    break :disk;
+                };
+                target_moe_seq_offset.* = final_len;
+                self.last_restored_disk_id = d.entries.items[rm.idx].id;
+                log.info("  [disk-cache] restored {d}/{d} tokens from SSD in {d}ms (ring@{d})\n", .{ final_len, prompt_ids.len, sw.read() / std.time.ns_per_ms, rm.pos });
+                const disk_mtp = diskRestoreSpec(d, rm.idx, mtp_target, final_len, s, .mtp);
+                return .{
+                    .matched = final_len,
+                    .full_match = full_match,
+                    .dflash_base = diskRestoreSpec(d, rm.idx, dflash_target, final_len, s, .dflash),
+                    .mtp_base = disk_mtp,
+                };
+            }
             const dm = d.bestMatch(prompt_ids, has_tools, target_cache.config) orelse {
                 // Silent no-entry misses are why a 40 GB disk tier looked
                 // dead in a live post-mortem (2026-09-07): nothing in the
@@ -1757,7 +1784,7 @@ pub const HotPrefixCache = struct {
                     {
                         // The resident entry already covers the trim target;
                         // the candidate's EXTRA tokens still belong on disk.
-                        if (eff_vision_key == 0) self.spillDeclinedToDisk(&new_snap, tokens, has_tools, eff_cps);
+                        if (eff_vision_key == 0) self.spillDeclinedToDisk(&new_snap, tokens, has_tools, eff_cps, new_rings);
                         var discarded = new_snap;
                         discarded.deinit();
                         if (new_dflash) |*d| d.deinit();
@@ -1865,7 +1892,7 @@ pub const HotPrefixCache = struct {
             if (!trimmed_ok) {
                 // RAM decline is not a value verdict: offer the candidate to
                 // the SSD tier before discarding it.
-                if (eff_vision_key == 0) self.spillDeclinedToDisk(&new_snap, tokens, has_tools, eff_cps);
+                if (eff_vision_key == 0) self.spillDeclinedToDisk(&new_snap, tokens, has_tools, eff_cps, new_rings);
                 var discarded_snap = new_snap;
                 discarded_snap.deinit();
                 if (new_dflash) |*d| d.deinit();
@@ -2190,6 +2217,7 @@ pub const HotPrefixCache = struct {
         tokens: []const u32,
         has_tools: bool,
         cps: ?[]SSMCheckpoint,
+        ring_cps: ?[]const KVCacheSnapshot,
     ) void {
         const d = if (self.disk) |*dd| dd else return;
         // SSD-first captured the live state as `pending_disk` before the trim; the
@@ -2208,7 +2236,7 @@ pub const HotPrefixCache = struct {
         const saved_cap = d.max_flush_bytes;
         d.max_flush_bytes = @max(saved_cap, kv_disk_cache.DECLINE_SPILL_FLUSH_FLOOR);
         defer d.max_flush_bytes = saved_cap;
-        const outcome = d.appendCommit(snap.entries, snap.step, snap.config, tokens, has_tools, cps, mlx.gpuStream()) catch |err| {
+        const outcome = d.appendCommitWithRing(snap.entries, snap.step, snap.config, tokens, has_tools, cps, null, null, ringCommitOf(snap, ring_cps), mlx.gpuStream()) catch |err| {
             log.warn("  [disk-cache] declined-candidate spill failed: {s}\n", .{@errorName(err)});
             return;
         };
@@ -2267,6 +2295,12 @@ pub const HotPrefixCache = struct {
             } else |_| {}
         }
         self.pending_disk = rec;
+    }
+
+    /// A ringed snapshot's restore points for the disk tier; null for a cache that does not ring.
+    fn ringCommitOf(snap: *const KVCacheSnapshot, cps: ?[]const KVCacheSnapshot) ?kv_disk_cache.RingCommit {
+        if (snap.swa_ring_window == 0) return null;
+        return .{ .window = snap.swa_ring_window, .cps = cps orelse &.{} };
     }
 
     const EntrySpecs = struct {
@@ -2483,7 +2517,7 @@ pub const HotPrefixCache = struct {
         const specs = entrySpecCommits(newest);
         const dflash_spec = specs.dflash;
         const mtp_spec = specs.mtp;
-        const complete = d.appendCommitWithSpec(
+        const complete = d.appendCommitWithRing(
             newest.snapshot.entries,
             newest.snapshot.step,
             newest.snapshot.config,
@@ -2492,6 +2526,7 @@ pub const HotPrefixCache = struct {
             newest.ssm_checkpoints,
             dflash_spec,
             mtp_spec,
+            ringCommitOf(&newest.snapshot, newest.ring_cps),
             s,
         ) catch |err| {
             log.warn("  [disk-cache] persist failed: {s}\n", .{@errorName(err)});
@@ -3956,22 +3991,199 @@ test "a fork entry keeps its donor's ring checkpoint, so evicting the donor stil
     restored.setSwaRing(window);
     const hit = try hc.lookupAndRestore(&restored, &moe_off, null, s, &next, false, 0, null, null);
     try testing.expectEqual(@as(usize, prompt), hit.matched);
+    try expectRingContinuesCold(&restored, s, n_layers, window, prompt, next.len);
+}
 
+/// Feed `restored` from `from` to `to`, then one more row: every layer must read exactly what
+/// a cache fed from row 0 reads.
+fn expectRingContinuesCold(restored: *KVCache, s: mlx.mlx_stream, n_layers: u32, window: u32, from: u32, to: u32) !void {
     var ref = try KVCache.init(testing.allocator, n_layers);
     defer ref.deinit();
     ref.setSwaRing(window);
-    try ringFill(&ref, s, n_layers, window, 0, next.len, 64);
-    try ringFill(&restored, s, n_layers, window, prompt, next.len, 40);
+    try ringFill(&ref, s, n_layers, window, 0, to, 64);
+    try ringFill(restored, s, n_layers, window, from, to, 40);
     var li: u32 = 0;
     while (li < n_layers) : (li += 1) {
-        var rv = try ringWriteLayer(&ref, s, li, next.len, 1, window);
+        var rv = try ringWriteLayer(&ref, s, li, to, 1, window);
         defer rv.deinit();
-        var sv = try ringWriteLayer(&restored, s, li, next.len, 1, window);
+        var sv = try ringWriteLayer(restored, s, li, to, 1, window);
         defer sv.deinit();
         try testing.expectEqual(@as(f32, 0), try transformer_mod.maxAbsDiffF32(rv.k, sv.k, s));
         try testing.expectEqual(@as(f32, 0), try transformer_mod.maxAbsDiffF32(rv.v, sv.v, s));
         try testing.expectEqual(ref.absSeqLen(li), restored.absSeqLen(li));
     }
+}
+
+test "a ringed entry persists to the SSD tier and restores only at a ring checkpoint after a restart" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const io = std.testing.io;
+    const s = mlx.gpuStream();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var buf: [512]u8 = undefined;
+    const base = buf[0..try tmp.dir.realPath(io, &buf)];
+    const window: u32 = 8;
+    const n_layers: u32 = 4;
+    const prompt: u32 = 700;
+    const reply: u32 = 600;
+
+    var toks: [prompt + reply]u32 = undefined;
+    for (&toks, 0..) |*t, i| t.* = @intCast(i + 1);
+    try persistRingTurn(io, base, "fp-ring", &toks, prompt, window, n_layers);
+
+    var hc2 = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+    hc2.disk = try kv_disk_cache.DiskTier.init(testing.allocator, io, base, "fp-ring", 0, 128);
+    defer hc2.deinit();
+    var moe_off: usize = 0;
+
+    // The next turn diverges right after the prompt: the prompt-end checkpoint serves it.
+    var next: [prompt + 40]u32 = undefined;
+    @memcpy(next[0 .. prompt + 1], toks[0 .. prompt + 1]);
+    for (next[prompt + 1 ..], 0..) |*t, i| t.* = @intCast(900_000 + i);
+    var a = try KVCache.init(testing.allocator, n_layers);
+    defer a.deinit();
+    a.setSwaRing(window);
+    const hit = try hc2.lookupAndRestore(&a, &moe_off, null, s, &next, false, 0, null, null);
+    try testing.expectEqual(@as(usize, prompt), hit.matched);
+    try expectRingContinuesCold(&a, s, n_layers, window, prompt, next.len);
+
+    // A verbatim re-send restores at its last token off the ring the entry ended with.
+    var b = try KVCache.init(testing.allocator, n_layers);
+    defer b.deinit();
+    b.setSwaRing(window);
+    const full = try hc2.lookupAndRestore(&b, &moe_off, null, s, &toks, false, 0, null, null);
+    try testing.expect(full.full_match);
+    try testing.expectEqual(@as(usize, toks.len - 1), full.matched);
+    try expectRingContinuesCold(&b, s, n_layers, window, toks.len - 1, toks.len);
+
+    // A divergence no ring checkpoint reaches cold-prefills.
+    var early: [prompt]u32 = undefined;
+    @memcpy(early[0..400], toks[0..400]);
+    for (early[400..], 0..) |*t, i| t.* = @intCast(800_000 + i);
+    var c = try KVCache.init(testing.allocator, n_layers);
+    defer c.deinit();
+    c.setSwaRing(window);
+    const miss = try hc2.lookupAndRestore(&c, &moe_off, null, s, &early, false, 0, null, null);
+    try testing.expectEqual(@as(usize, 0), miss.matched);
+}
+
+/// One MiMo-shaped turn (`ringTurn`) committed and flushed to a fresh SSD tier at `base/fp`.
+fn persistRingTurn(io: std.Io, base: []const u8, fp: []const u8, toks: []const u32, prompt: u32, window: u32, n_layers: u32) !void {
+    const s = mlx.gpuStream();
+    var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+    hc.disk = try kv_disk_cache.DiskTier.init(testing.allocator, io, base, fp, 0, 128);
+    defer hc.deinit();
+    var live = try KVCache.init(testing.allocator, n_layers);
+    defer live.deinit();
+    const cp = try ringTurn(&live, s, n_layers, window, prompt, @intCast(toks.len - prompt));
+    // Without its restore points a ringed cache is not persistable.
+    try testing.expectEqual(kv_disk_cache.PersistOutcome.skipped, try hc.disk.?.appendCommit(live.entries, live.step, live.config, toks, false, null, s));
+    _ = try hc.commitWithRing(&live, toks, false, 0, 0, null, null, null, null, prompt, cp);
+    hc.flushPendingDisk(s);
+    try testing.expectEqual(@as(usize, 1), hc.disk.?.entryCount());
+}
+
+test "a ringed SSD entry bills its ring files, and a truncated one is salvaged away at scan" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const io = std.testing.io;
+    const s = mlx.gpuStream();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var buf: [512]u8 = undefined;
+    const base = buf[0..try tmp.dir.realPath(io, &buf)];
+    const window: u32 = 8;
+    const n_layers: u32 = 4;
+    const prompt: u32 = 700;
+
+    var toks: [prompt + 600]u32 = undefined;
+    for (&toks, 0..) |*t, i| t.* = @intCast(i + 1);
+    try persistRingTurn(io, base, "fp-ring-salvage", &toks, prompt, window, n_layers);
+
+    {
+        // The tier bills exactly the files it wrote: chunks, the token record and both ring files.
+        var d = try kv_disk_cache.DiskTier.init(testing.allocator, io, base, "fp-ring-salvage", 0, 128);
+        defer d.deinit();
+        const e = &d.entries.items[0];
+        try testing.expectEqual(@as(usize, 2), e.rings.len);
+        try testing.expectEqual(@as(u32, prompt), e.rings[0].pos);
+        try testing.expectEqual(@as(u32, toks.len), e.rings[1].pos);
+        var on_disk: u64 = 0;
+        var dir = try tmp.dir.openDir(io, "fp-ring-salvage/e1", .{ .iterate = true });
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |f| {
+            if (std.mem.eql(u8, f.name, "meta.json")) continue;
+            on_disk += (try dir.statFile(io, f.name, .{})).size;
+        }
+        try testing.expectEqual(on_disk, d.total_bytes);
+    }
+
+    // kill -9 mid-write: the prompt-end file no longer matches its record.
+    try tmp.dir.writeFile(io, .{ .sub_path = "fp-ring-salvage/e1/r0000700.safetensors", .data = "trunc" });
+    {
+        var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+        hc.disk = try kv_disk_cache.DiskTier.init(testing.allocator, io, base, "fp-ring-salvage", 0, 128);
+        defer hc.deinit();
+        try testing.expectEqual(@as(usize, 1), hc.disk.?.entries.items[0].rings.len);
+        var next: [prompt + 40]u32 = undefined;
+        @memcpy(next[0 .. prompt + 1], toks[0 .. prompt + 1]);
+        for (next[prompt + 1 ..], 0..) |*t, i| t.* = @intCast(900_000 + i);
+        var a = try KVCache.init(testing.allocator, n_layers);
+        defer a.deinit();
+        a.setSwaRing(window);
+        var moe_off: usize = 0;
+        try testing.expectEqual(@as(usize, 0), (try hc.lookupAndRestore(&a, &moe_off, null, s, &next, false, 0, null, null)).matched);
+        var b = try KVCache.init(testing.allocator, n_layers);
+        defer b.deinit();
+        b.setSwaRing(window);
+        try testing.expectEqual(@as(usize, toks.len - 1), (try hc.lookupAndRestore(&b, &moe_off, null, s, &toks, false, 0, null, null)).matched);
+    }
+
+    // With no ring file left the chunks restore nothing: the entry goes.
+    try tmp.dir.writeFile(io, .{ .sub_path = "fp-ring-salvage/e1/r0001300.safetensors", .data = "trunc" });
+    var d = try kv_disk_cache.DiskTier.init(testing.allocator, io, base, "fp-ring-salvage", 0, 128);
+    defer d.deinit();
+    try testing.expectEqual(@as(usize, 0), d.entryCount());
+}
+
+test "an SSD entry without ring rows is never restored into a ringed cache" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const io = std.testing.io;
+    const s = mlx.gpuStream();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var buf: [512]u8 = undefined;
+    const base = buf[0..try tmp.dir.realPath(io, &buf)];
+    const window: u32 = 8;
+    const n_layers: u32 = 4;
+
+    var toks: [700]u32 = undefined;
+    for (&toks, 0..) |*t, i| t.* = @intCast(i + 1);
+    {
+        // Every layer holds the whole prefix (no ring), as a pre-ring manifest describes it.
+        var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+        hc.disk = try kv_disk_cache.DiskTier.init(testing.allocator, io, base, "fp-ring-old", 0, 128);
+        defer hc.deinit();
+        var plain = try KVCache.init(testing.allocator, n_layers);
+        defer plain.deinit();
+        try testFillCache(&plain, s, n_layers, toks.len);
+        _ = try hc.commit(&plain, &toks, false);
+        hc.flushPendingDisk(s);
+        try testing.expectEqual(@as(usize, 1), hc.disk.?.entryCount());
+    }
+    var hc2 = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+    hc2.disk = try kv_disk_cache.DiskTier.init(testing.allocator, io, base, "fp-ring-old", 0, 128);
+    defer hc2.deinit();
+    var next: [800]u32 = undefined;
+    @memcpy(next[0..toks.len], &toks);
+    for (next[toks.len..], 0..) |*t, i| t.* = @intCast(900_000 + i);
+    var ringed = try KVCache.init(testing.allocator, n_layers);
+    defer ringed.deinit();
+    ringed.setSwaRing(window);
+    var moe_off: usize = 0;
+    const miss = try hc2.lookupAndRestore(&ringed, &moe_off, null, s, &next, false, 0, null, null);
+    try testing.expectEqual(@as(usize, 0), miss.matched);
+    for (ringed.entries) |*e| try testing.expect(!e.initialized);
 }
 
 test "HotPrefixCache: disk tier restores across a fresh cache instance (restart shape)" {

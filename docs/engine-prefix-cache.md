@@ -39,8 +39,11 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
   go under the ringed layers (`restoreRing`) and the usual clamp follows.
   A checkpoint restore of fewer than `RING_RESTORE_MIN_TOKENS` (64) cold-prefills: on MiMo kv8 one costs +6 to
   +41 ms over the cold prefill at 16-32 tokens, breaks even at 64, and saves ~180 ms at 256.
-  Below both, `SlidingRingRewindPastWindow` → cold prefill. The SSD tier skips ringed entries; persisting the global
-  prefix plus the checkpoint would lift that ([arch-mimo-v2](arch-mimo-v2.md#sliding-layers-the-ring)).
+  Below both, `SlidingRingRewindPastWindow` → cold prefill.
+- **The SSD tier restores a ringed entry only at a ring file** (`bestRingMatch`, `restoreIntoRinged`): chunks hold the
+  global layers, `r{pos}.safetensors` each restore point's ringed rows (the RAM entry's checkpoints plus its end,
+  the highest `RING_DISK_MAX_PER_ENTRY` = 8 kept, salvaged per file at scan; manifest v9, which an older reader
+  drops) ([arch-mimo-v2](arch-mimo-v2.md#sliding-layers-the-ring)).
 - **A commit that forked off another entry inherits that entry's ring checkpoints below the fork** (`bestRingDonor`,
   refcount-shared and billed per entry like SSM checkpoints): a request appending to the conversation (a client's
   side request: the chat + a reminder) otherwise holds only its own prompt end, and once the count cap evicts the
@@ -92,4 +95,4 @@ SSD tier (`spec.safetensors`). An adopted spec cache has ONE owner at a time (`r
 ## Guards
 
 `tests/test_prefix_cache_*.sh` (budget revisit, disk, hot, mem, workloads), `tests/test_hybrid_reuse_equivalence.sh`,
-`tests/test_mimo_ring_reuse.sh`, `tests/test_qwen4_mtp_head_persist.sh`. Grep the log for `[cache]`, `[hot-cache]`, `[disk-cache]`.
+`tests/test_mimo_ring_reuse.sh`, `tests/test_mimo_ring_fork_ssd.sh`, `tests/test_qwen4_mtp_head_persist.sh`. Grep the log for `[cache]`, `[hot-cache]`, `[disk-cache]`.
