@@ -9,6 +9,7 @@ const expert_stream_mod = @import("expert_stream.zig");
 const scheduler_mod = @import("scheduler.zig");
 const model_settings_mod = @import("model_settings.zig");
 const server_mod = @import("server.zig");
+const hidden_capture = @import("hidden_capture.zig");
 const testing = std.testing;
 
 pub const SCHEMA = "mlx-serve-kld-baseline-v1";
@@ -37,6 +38,8 @@ pub const Options = struct {
     ssd_budget_bytes: u64 = 0,
     enable_mtp: bool = false,
     mtp_explicit: bool = false,
+    /// `SUSHI_HIDDEN_OUT`: capture appends each prompt forward's block boundaries here.
+    hidden_out: []const u8 = "",
 };
 
 pub const ArgError = error{
@@ -159,7 +162,11 @@ pub const USAGE =
     \\
     \\  <src> is a captured fixture dir (its prompts are reused), a directory of
     \\  *.txt files (one prompt each, sorted by name), or a .jsonl of
-    \\  {"id":...,"prompt":...} lines.
+    \\  {"id":...,"prompt":...} lines; a line may give "prompt_ids":[...]
+    \\  (token ids, used as given) instead of "prompt".
+    \\
+    \\  SUSHI_HIDDEN_OUT=<dir> makes capture append each prompt forward's
+    \\  residual at every block boundary to <dir> (boundary-XX.bin, tokens.bin).
     \\
     \\options:
     \\  --tokens <n>          greedy tokens per prompt to capture (default 64)
@@ -254,7 +261,8 @@ fn argmaxOf(row: []const f32) u32 {
     return @intCast(best);
 }
 
-pub const Prompt = struct { id: []u8, text: []u8 };
+/// `ids` set: the prompt is these token ids as given (no template, no tokenizer).
+pub const Prompt = struct { id: []u8, text: []u8, ids: ?[]u32 = null };
 
 pub const PromptList = struct {
     allocator: std.mem.Allocator,
@@ -264,6 +272,7 @@ pub const PromptList = struct {
         for (self.items) |p| {
             self.allocator.free(p.id);
             self.allocator.free(p.text);
+            if (p.ids) |ids| self.allocator.free(ids);
         }
         self.allocator.free(self.items);
         self.items = &.{};
@@ -286,6 +295,8 @@ pub fn classifySource(io: std.Io, path: []const u8) !SourceKind {
 }
 
 const MAX_PROMPT_BYTES = 8 * 1024 * 1024;
+/// A jsonl of token-id windows runs to several MiB per thousand windows.
+const MAX_JSONL_BYTES = 256 * 1024 * 1024;
 
 pub fn loadPrompts(allocator: std.mem.Allocator, io: std.Io, path: []const u8, limit: u32) !PromptList {
     var list = PromptList{ .allocator = allocator };
@@ -294,6 +305,7 @@ pub fn loadPrompts(allocator: std.mem.Allocator, io: std.Io, path: []const u8, l
         for (items.items) |p| {
             allocator.free(p.id);
             allocator.free(p.text);
+            if (p.ids) |ids| allocator.free(ids);
         }
         items.deinit(allocator);
     }
@@ -343,7 +355,7 @@ pub fn loadPrompts(allocator: std.mem.Allocator, io: std.Io, path: []const u8, l
             }
         },
         .jsonl => {
-            const body = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(MAX_PROMPT_BYTES)) catch return error.PromptSourceUnreadable;
+            const body = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(MAX_JSONL_BYTES)) catch return error.PromptSourceUnreadable;
             defer allocator.free(body);
             var lines = std.mem.splitScalar(u8, body, '\n');
             var seq: usize = 0;
@@ -357,12 +369,15 @@ pub fn loadPrompts(allocator: std.mem.Allocator, io: std.Io, path: []const u8, l
                     .object => |o| o,
                     else => return error.BadPromptJsonl,
                 };
-                const text_value = obj.get("prompt") orelse return error.BadPromptJsonl;
-                const text_str = switch (text_value) {
-                    .string => |s| s,
-                    else => return error.BadPromptJsonl,
+                const ids = if (obj.get("prompt_ids")) |v| try tokenIdsField(allocator, v) else null;
+                errdefer if (ids) |i| allocator.free(i);
+                const text = if (ids != null) try allocator.dupe(u8, "") else blk: {
+                    const text_value = obj.get("prompt") orelse return error.BadPromptJsonl;
+                    break :blk switch (text_value) {
+                        .string => |s| try allocator.dupe(u8, s),
+                        else => return error.BadPromptJsonl,
+                    };
                 };
-                const text = try allocator.dupe(u8, text_str);
                 errdefer allocator.free(text);
                 const id = if (obj.get("id")) |v| switch (v) {
                     .string => |s| try allocator.dupe(u8, s),
@@ -370,13 +385,28 @@ pub fn loadPrompts(allocator: std.mem.Allocator, io: std.Io, path: []const u8, l
                     else => try std.fmt.allocPrint(allocator, "prompt-{d:0>2}", .{seq}),
                 } else try std.fmt.allocPrint(allocator, "prompt-{d:0>2}", .{seq});
                 errdefer allocator.free(id);
-                try items.append(allocator, .{ .id = id, .text = text });
+                try items.append(allocator, .{ .id = id, .text = text, .ids = ids });
                 seq += 1;
             }
         },
     }
     list.items = try items.toOwnedSlice(allocator);
     return list;
+}
+
+fn tokenIdsField(allocator: std.mem.Allocator, v: std.json.Value) ![]u32 {
+    const arr = switch (v) {
+        .array => |a| a,
+        else => return error.BadPromptJsonl,
+    };
+    if (arr.items.len == 0) return error.BadPromptJsonl;
+    const ids = try allocator.alloc(u32, arr.items.len);
+    errdefer allocator.free(ids);
+    for (arr.items, ids) |item, *id| id.* = switch (item) {
+        .integer => |n| std.math.cast(u32, n) orelse return error.BadPromptJsonl,
+        else => return error.BadPromptJsonl,
+    };
+    return ids;
 }
 
 pub const PromptRecord = struct {
@@ -920,21 +950,27 @@ fn readLastRow(xfm: *transformer_mod.Transformer, logits: mlx.mlx_array, dst: []
 }
 
 const Out = struct {
+    silent: bool = false,
+
     fn print(self: *Out, comptime fmt: []const u8, args: anytype) void {
-        _ = self;
+        if (self.silent) return;
         var buf: [32 * 1024]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, fmt, args) catch return;
         writeAllFd(1, line) catch return;
     }
 };
 
-fn promptIds(allocator: std.mem.Allocator, l: *Loaded, opts: Options, text: []const u8) ![]u32 {
+fn promptIds(allocator: std.mem.Allocator, l: *Loaded, opts: Options, p: Prompt) ![]u32 {
+    if (p.ids) |ids| return allocator.dupe(u32, ids);
+    const text = p.text;
     if (opts.no_template) return l.tok.encode(allocator, text);
     const messages = [_]chat_mod.Message{.{ .role = "user", .content = text }};
     return chat_mod.formatChat(allocator, &l.tok, &messages, &l.chat_config, null, null, false, null, false);
 }
 
-fn renderPrompt(allocator: std.mem.Allocator, l: *Loaded, opts: Options, text: []const u8) ![]const u8 {
+fn renderPrompt(allocator: std.mem.Allocator, l: *Loaded, opts: Options, p: Prompt) ![]const u8 {
+    if (p.ids) |ids| return l.tok.decode(allocator, ids, false);
+    const text = p.text;
     if (opts.no_template) return allocator.dupe(u8, text);
     const messages = [_]chat_mod.Message{.{ .role = "user", .content = text }};
     return chat_mod.renderChatTemplate(allocator, &messages, &l.chat_config, null, null, false, null, false);
@@ -947,6 +983,28 @@ fn forwardPrompt(allocator: std.mem.Allocator, l: *Loaded, ctx: *transformer_mod
     const prompt_array = mlx.mlx_array_new_data(prompt_i32.ptr, &[_]c_int{ 1, @intCast(prompt_i32.len) }, 2, .int32);
     defer _ = mlx.mlx_array_free(prompt_array);
     return l.xfm.forwardWith(ctx, prompt_array);
+}
+
+/// The prompt forward; with `hidden`, every block boundary of it is appended there.
+fn forwardPromptCapture(allocator: std.mem.Allocator, l: *Loaded, ctx: *transformer_mod.ForwardCtx, ids: []const u32, hidden: ?*hidden_capture.Writer) !mlx.mlx_array {
+    const w = hidden orelse return forwardPrompt(allocator, l, ctx, ids);
+    const layers = l.config.num_hidden_layers;
+    const layer_ids = try allocator.alloc(u32, layers);
+    defer allocator.free(layer_ids);
+    for (layer_ids, 0..) |*id, i| id.* = @intCast(i);
+    const rows = try allocator.alloc(mlx.mlx_array, layers + 1);
+    defer allocator.free(rows);
+    for (rows) |*r| r.* = mlx.mlx_array_new();
+    defer for (rows) |r| {
+        _ = mlx.mlx_array_free(r);
+    };
+    var cl: transformer_mod.CaptureLayers = .{ .ids = layer_ids, .out = rows[1..], .input = &rows[0] };
+    ctx.capture_layers = &cl;
+    defer ctx.capture_layers = null;
+    const logits = try forwardPrompt(allocator, l, ctx, ids);
+    errdefer _ = mlx.mlx_array_free(logits);
+    try w.append(l.xfm.s, ids, rows);
+    return logits;
 }
 
 fn forwardOne(l: *Loaded, ctx: *transformer_mod.ForwardCtx, token: u32) !mlx.mlx_array {
@@ -967,6 +1025,11 @@ pub fn runCapture(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
     defer prompts.deinit();
     if (prompts.items.len == 0) return error.NoPromptsFound;
     try std.Io.Dir.cwd().createDirPath(io, opts.out_dir);
+    const hidden = if (opts.hidden_out.len > 0)
+        try hidden_capture.Writer.open(allocator, io, opts.hidden_out, l.config.num_hidden_layers, l.config.hidden_size)
+    else
+        null;
+    defer if (hidden) |w| w.close();
 
     var records: std.ArrayList(PromptRecord) = .empty;
     defer {
@@ -976,9 +1039,9 @@ pub fn runCapture(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
     const started = std.Io.Timestamp.now(io, .awake);
     for (prompts.items, 0..) |p, index| {
         try l.xfm.resetCache();
-        const rendered = try renderPrompt(allocator, l, opts, p.text);
+        const rendered = try renderPrompt(allocator, l, opts, p);
         defer allocator.free(rendered);
-        const ids = try promptIds(allocator, l, opts, p.text);
+        const ids = try promptIds(allocator, l, opts, p);
         defer allocator.free(ids);
         if (ids.len == 0) return error.EmptyPrompt;
 
@@ -988,7 +1051,7 @@ pub fn runCapture(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
         defer generated.deinit(allocator);
 
         var ctx = l.xfm.defaultCtx();
-        var logits = try forwardPrompt(allocator, l, &ctx, ids);
+        var logits = try forwardPromptCapture(allocator, l, &ctx, ids, hidden);
         defer _ = mlx.mlx_array_free(logits);
         const vocab = try logitsVocab(logits);
         const row = try allocator.alloc(f32, vocab);
@@ -1372,7 +1435,7 @@ pub fn runCompare(io: std.Io, allocator: std.mem.Allocator, l: *Loaded, opts: Op
 
 pub fn cmdKld(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
     var out: Out = .{};
-    const opts = parseArgs(args) catch |err| {
+    var opts = parseArgs(args) catch |err| {
         out.print("sushi kld: {s}\n\n{s}", .{ @errorName(err), USAGE });
         return err;
     };
@@ -1380,6 +1443,10 @@ pub fn cmdKld(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8
         out.print("{s}", .{USAGE});
         return;
     }
+    if (opts.command == .capture) if (hidden_capture.envPath()) |dir| {
+        opts.hidden_out = dir;
+        log.info("[kld] {s}: appending every prompt forward's block boundaries to {s}\n", .{ hidden_capture.ENV_VAR, dir });
+    };
     const loaded = try loadModel(io, allocator, opts);
     defer loaded.deinit();
     switch (opts.command) {
@@ -1712,6 +1779,7 @@ test "kld: prompt sources parse from a fixture dir, a text dir and a jsonl file"
             \\{"id":"one","prompt":"prompt one"}
             \\
             \\{"id":"two","prompt":"prompt two"}
+            \\{"id":"ids","prompt_ids":[3,1,2]}
         );
         try w.interface.flush();
     }
@@ -1731,9 +1799,13 @@ test "kld: prompt sources parse from a fixture dir, a text dir and a jsonl file"
     try testing.expectEqual(SourceKind.jsonl, try classifySource(io, jsonl));
     var from_jsonl = try loadPrompts(allocator, io, jsonl, 0);
     defer from_jsonl.deinit();
-    try testing.expectEqual(@as(usize, 2), from_jsonl.items.len);
+    try testing.expectEqual(@as(usize, 3), from_jsonl.items.len);
     try testing.expectEqualStrings("one", from_jsonl.items[0].id);
     try testing.expectEqualStrings("prompt two", from_jsonl.items[1].text);
+    try testing.expect(from_jsonl.items[1].ids == null);
+    // Token ids are taken as given: no template, no tokenizer.
+    try testing.expectEqualSlices(u32, &.{ 3, 1, 2 }, from_jsonl.items[2].ids.?);
+    try testing.expectEqualStrings("", from_jsonl.items[2].text);
 
     var limited = try loadPrompts(allocator, io, jsonl, 1);
     defer limited.deinit();
@@ -2196,6 +2268,137 @@ test "kld: an imatrix capture records every mimo_v2 o_proj input and the lm_head
         var want: f32 = 0;
         for (0..ids.len) |r| want += h[r * TinyMimo.hidden + c] * h[r * TinyMimo.hidden + c];
         try testing.expectApproxEqRel(want, acc[c], 1e-5);
+    }
+}
+
+fn bf16HostBytes(a: std.mem.Allocator, s: mlx.mlx_stream, arr: mlx.mlx_array) ![]u8 {
+    try testing.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(arr));
+    var c = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(c);
+    try mlx.check(mlx.mlx_contiguous(&c, arr, false, s));
+    try mlx.check(mlx.mlx_array_eval(c));
+    const p = mlx.mlx_array_data_bfloat16(c) orelse return error.KldLogitsUnreadable;
+    return a.dupe(u8, std.mem.sliceAsBytes(p[0..mlx.mlx_array_size(c)]));
+}
+
+fn bf16At(bytes: []const u8, i: usize) f32 {
+    return @bitCast(@as(u32, std.mem.readInt(u16, bytes[i * 2 ..][0..2], .little)) << 16);
+}
+
+test "kld: a hidden capture appends every block boundary of each prompt and leaves the teacher bit-identical" {
+    const allocator = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var metal: bool = false;
+    mlx.check(mlx.mlx_metal_is_available(&metal)) catch return error.SkipZigTest;
+    if (!metal) return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try tmp.dir.createDirPath(io, "pack");
+    {
+        var dir = try tmp.dir.openDir(io, "pack", .{});
+        defer dir.close(io);
+        try writeTinyMimoResidentPack(io, arena, dir, 1);
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try arena.dupe(u8, path_buf[0..try tmp.dir.realPath(io, &path_buf)]);
+    try tmp.dir.writeFile(io, .{ .sub_path = "windows.jsonl", .data =
+        \\{"id":"w0","prompt_ids":[1,3,5,2,7,0]}
+        \\{"id":"w1","prompt_ids":[4,4,6,1,2]}
+    });
+    const windows = [_][]const u32{ &.{ 1, 3, 5, 2, 7, 0 }, &.{ 4, 4, 6, 1, 2 } };
+    const total = windows[0].len + windows[1].len;
+
+    const pack = try std.fmt.allocPrint(arena, "{s}/pack", .{root});
+    const loaded = try loadModel(io, allocator, .{ .model_dir = pack });
+    defer loaded.deinit();
+    var quiet: Out = .{ .silent = true };
+    const base: Options = .{
+        .model_dir = pack,
+        .prompts = try std.fmt.allocPrint(arena, "{s}/windows.jsonl", .{root}),
+        .tokens = 3,
+        .no_template = true,
+    };
+    var plain = base;
+    plain.out_dir = try std.fmt.allocPrint(arena, "{s}/plain", .{root});
+    try runCapture(io, allocator, loaded, plain, &quiet);
+    // Off: nothing is written.
+    if (tmp.dir.statFile(io, "hidden", .{})) |_| return error.TestUnexpectedResult else |_| {}
+
+    var armed = base;
+    armed.out_dir = try std.fmt.allocPrint(arena, "{s}/armed", .{root});
+    armed.hidden_out = try std.fmt.allocPrint(arena, "{s}/hidden", .{root});
+    try runCapture(io, allocator, loaded, armed, &quiet);
+
+    // The teacher is untouched: every logits row and greedy token, byte for byte.
+    for ([_][]const u8{ "prompts/00_w0", "prompts/01_w1" }) |sub| {
+        for ([_][]const u8{ "logits.f32", "generated_tokens.txt" }) |name| {
+            const a = try tmp.dir.readFileAlloc(io, try std.fmt.allocPrint(arena, "plain/{s}/{s}", .{ sub, name }), arena, .limited(1 << 20));
+            const b = try tmp.dir.readFileAlloc(io, try std.fmt.allocPrint(arena, "armed/{s}/{s}", .{ sub, name }), arena, .limited(1 << 20));
+            try testing.expect(a.len > 0);
+            try testing.expectEqualSlices(u8, a, b);
+        }
+    }
+
+    const H = TinyMimo.hidden;
+    const toks = try tmp.dir.readFileAlloc(io, "hidden/tokens.bin", arena, .limited(1 << 20));
+    try testing.expectEqual(total * 4, toks.len);
+    var files: [TinyMimo.layers + 1][]u8 = undefined;
+    for (&files, 0..) |*f, b| {
+        f.* = try tmp.dir.readFileAlloc(io, try std.fmt.allocPrint(arena, "hidden/boundary-{d:0>2}.bin", .{b}), arena, .limited(1 << 20));
+        try testing.expectEqual(total * H * 2, f.len);
+    }
+
+    const embed = try tinyBf16(arena, TinyMimo.vocab * H, 11);
+    const norm_w = try tinyBf16(arena, H, 13);
+    const s = loaded.xfm.s;
+    var row: usize = 0;
+    for (windows) |w| {
+        for (w, row..) |t, r| {
+            try testing.expectEqual(t, std.mem.readInt(u32, toks[r * 4 ..][0..4], .little));
+            // Boundary 0 is the token's own embedding row.
+            try testing.expectEqualSlices(u8, embed[t * H * 2 ..][0 .. H * 2], files[0][r * H * 2 ..][0 .. H * 2]);
+        }
+
+        // Every boundary holds the forward's own residual at that depth.
+        try loaded.xfm.resetCache();
+        const layer_ids = [_]u32{ 0, 1 };
+        var outs = [_]mlx.mlx_array{ mlx.mlx_array_new(), mlx.mlx_array_new() };
+        defer for (outs) |o| {
+            _ = mlx.mlx_array_free(o);
+        };
+        var input = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(input);
+        var final = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(final);
+        var cl: transformer_mod.CaptureLayers = .{ .ids = &layer_ids, .out = &outs, .input = &input };
+        var ctx = loaded.xfm.defaultCtx();
+        ctx.capture_layers = &cl;
+        ctx.capture_hidden_all = &final;
+        const logits = try forwardPrompt(allocator, loaded, &ctx, w);
+        defer _ = mlx.mlx_array_free(logits);
+        try mlx.check(mlx.mlx_array_eval(logits));
+        for ([_]mlx.mlx_array{ input, outs[0], outs[1] }, 0..) |arr, b| {
+            const got = try bf16HostBytes(arena, s, arr);
+            try testing.expectEqualSlices(u8, got, files[b][row * H * 2 ..][0 .. w.len * H * 2]);
+        }
+
+        // The last boundary is the residual the final norm reads.
+        const fin = try bf16HostBytes(arena, s, final);
+        const last = files[TinyMimo.layers][row * H * 2 ..][0 .. w.len * H * 2];
+        for (0..w.len) |r| {
+            var ms: f64 = 0;
+            for (0..H) |c| ms += @as(f64, bf16At(last, r * H + c)) * bf16At(last, r * H + c);
+            const inv = 1.0 / @sqrt(ms / @as(f64, H) + loaded.config.rms_norm_eps);
+            for (0..H) |c| {
+                const want: f64 = bf16At(last, r * H + c) * inv * bf16At(norm_w, c);
+                try testing.expectApproxEqAbs(want, @as(f64, bf16At(fin, r * H + c)), 1e-2 + 1e-2 * @abs(want));
+            }
+        }
+        row += w.len;
     }
 }
 

@@ -17,6 +17,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [perf-baselines](perf-base
 - `kld` takes the SERVED weight loader (`model.loadWeightsForConfig`); a second loader once bound a MiMo pack's raw FP8
   QKV and made every pack score the same.
 - Teacher captures run the KV cache dense (`--kv-quant off`); students are scored at kv8 unless the row says so.
+- A `--prompts` jsonl line may carry `prompt_ids` (token ids, used as given, no template) instead of `prompt`.
 
 ## The standard reading
 

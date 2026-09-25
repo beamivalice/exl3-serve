@@ -16,6 +16,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 | `src/expert_io.zig` | SSD→Metal I/O: F_NOCACHE positioned-read `FillPool`, `PageSlab` epoch leases, verified zero-copy `importSlab` |
 | `src/expert_bf16_kernels.zig` | bf16 selected-expert kernels over a slab |
 | `src/imatrix.zig` | imatrix capture on the streamed forward |
+| `src/hidden_capture.zig` | block-boundary residual capture under `kld capture` |
 
 ## What streams
 
@@ -87,6 +88,12 @@ remapped), in the collector's contract the converter reads; the flush runs on th
 file as per-channel mean squares under their source weight names ([arch-mimo-v2](arch-mimo-v2.md)). The drivers that feed it a corpus live in the private
 converter repo. Routed counts reconcile to
 tokens x top-k exactly on every layer; the two load-time warmup forwards add a few tokens.
+
+- **Hidden capture** (`SUSHI_HIDDEN_OUT=<abs dir>`): `sushi kld capture` (no prefix cache, no warmup) appends every
+  prompt token's residual at each block boundary (`boundary-XX.bin`, raw bf16 [tokens, hidden]; 00 = layer 0's input,
+  b = layer b-1's output), then its ids (`tokens.bin`, u32); `forwardMoeWith` only; logits bit-identical.
+- Its output files are private: each is created exclusively without following a link, and an existing one is appended
+  to only when it is a regular file with one link (a hard-linked or symlinked output is refused, its target untouched).
 
 ## Discovery
 

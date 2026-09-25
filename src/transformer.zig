@@ -14388,6 +14388,9 @@ pub const CaptureLayers = struct {
     /// `[B, L, H]`, refcount-shared with the live graph. Caller owns the
     /// handles (init with `mlx_array_new`, free after use).
     out: []mlx.mlx_array,
+    /// The residual entering the first layer (`hidden_states[0]`), same
+    /// ownership as `out`. Honored by `forwardMoeWith` only.
+    input: ?*mlx.mlx_array = null,
 };
 
 pub const ForwardCtx = struct {
@@ -24480,6 +24483,9 @@ pub const Transformer = struct {
             // Splice vision embeddings at image_token_id positions (prefill only)
             h = try self.applyVisionEmbeddingsWith(ctx, h, token_ids);
         }
+        if (ctx.capture_layers) |cl| if (cl.input) |slot| {
+            _ = mlx.mlx_array_set(slot, h);
+        };
 
         const x_shape = mlx.getShape(h);
         const batch: c_int = x_shape[0];
