@@ -95,18 +95,19 @@ Comparison packs, all on binary b64c5a0e (weights in GPU memory, n-gram table ex
 Sushi-4bpw 0.06319 reproduce on it): affine packs = routed experts N-bit g64, dense 8-bit, bf16 n-gram table; oQe =
 oMLX packs as published, restacked for sushi with their 4/5-bit n-gram table unchanged (oQ4e ships the table divided
 by a `weight_scale` tensor, folded into its scales by the restack); mlx-serve packs as published, both sharing one 4-bit
-n-gram table.
+n-gram table. Sizes are GiB of the weight files the engine loads (the Sushi packs once shipped the vision tower twice,
+0.84 GiB, and no longer do).
 
-| pack | GB | KLD | top-1 |
+| pack | GiB | KLD | top-1 |
 |---|---|---|---|
-| affine q5 | 89.8 | 0.0433 | 93.86% |
-| oMLX oQ5e (GBP-DE) | 90.2 | 0.0625 | 92.40% |
-| mlx-serve mixed-4-8bit (ddalcu; the control above) | 75.3 | 0.0818 | 91.39% |
-| oMLX oQ4e (Jundot) | 74.3 | 0.1370 | 88.87% |
-| affine q3 | 59.0 | 0.1444 | 88.05% |
-| mlx-serve iQ-MLX 3.3bpw (ddalcu; imatrix-weighted affine) | 54.3 | 0.1987 | 86.28% |
-| Sushi-3bpw with mixed-4-8bit's 4-bit g32 n-gram table (the published Sushi-3bpw) | 53.9 | 0.1047 | 90.34% |
-| Sushi-4bpw with the same 4-bit g32 table | 69.3 | 0.0666 | 92.35% |
+| affine q5 | 83.67 | 0.0433 | 93.86% |
+| oMLX oQ5e (GBP-DE) | 83.97 | 0.0625 | 92.40% |
+| mlx-serve mixed-4-8bit (ddalcu; the control above) | 70.13 | 0.0818 | 91.39% |
+| oMLX oQ4e (Jundot) | 69.21 | 0.1370 | 88.87% |
+| affine q3 | 54.94 | 0.1444 | 88.05% |
+| mlx-serve iQ-MLX 3.3bpw (ddalcu; imatrix-weighted affine) | 50.60 | 0.1987 | 86.28% |
+| Sushi-3bpw with mixed-4-8bit's 4-bit g32 n-gram table (the published Sushi-3bpw) | 49.33 | 0.1047 | 90.34% |
+| Sushi-4bpw with the same 4-bit g32 table | 63.68 | 0.0666 | 92.35% |
 | MCG K2 w15, pin pass 64 (Sushi-3bpw dense) | 36.0 active | 0.2244 | 85.42% |
 
 w12 -> w15 bought 2.8% of KLD on MCG; the remaining gap to turboderp's MUL1 w16 (0.0946) is not mostly the window.

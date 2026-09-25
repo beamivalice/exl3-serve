@@ -30,6 +30,7 @@ The model's own MTP draft head and the 8-bit KV cache are on by default.
 
 ```bash
 hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw
+sudo sysctl iogpu.wired_limit_mb=58000   # let the GPU use 58000 MB of the 64 GB, until the next reboot
 ./sushi-macos-arm64/sushi serve --model ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw \
   --kv-quant 8 --mtp-head-kv-quant --prefill-chunk 2048 --prefix-cache-disk 10GB
 ```
@@ -38,7 +39,8 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Q
 
 ```bash
 hf download beamster/Qwen3.8-Flash-Next-Sushi-4bpw --local-dir ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-4bpw
-./sushi-macos-arm64/sushi serve --model ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-4bpw
+sudo sysctl iogpu.wired_limit_mb=88000   # let the GPU use 88000 MB of the 96 GB, until the next reboot
+./sushi-macos-arm64/sushi serve --model ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-4bpw --mtp-head-kv-quant
 ```
 
 - `--mtp-head-kv-quant` stores the MTP head's own KV at 8 bits too.
@@ -47,8 +49,25 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-4bpw --local-dir ~/.sushi/models/Q
   restarts too.
 - `--mtp-typical 0.2` makes sampled decoding 15-20% faster (Sushi-4bpw, temperature 1.0) with no measurable change in
   the NLL of the generated text; greedy output is unchanged.
-- If a load is refused for the GPU memory limit, the message names the `sudo sysctl iogpu.wired_limit_mb=<n>` that
-  admits the pack.
+
+## Memory
+
+GPU memory in GiB (what `sushi run` reports); the n-gram table stays on the SSD.
+
+| | Sushi-3bpw | Sushi-4bpw |
+|---|---|---|
+| model weights | 47.51 | 61.58 |
+| MTP head | 0.98 | 1.27 |
+| vision tower | 0.84 | 0.84 |
+| **weights loaded** | **49.33** | **63.68** |
+| KV cache, 256k tokens | 4.06 | 4.06 |
+| KV cache, 512k tokens | 8.12 | 8.12 |
+| KV cache, 1M tokens | 16.25 | 16.25 |
+| **total at 256k / 512k / 1M** | **53.4 / 57.5 / 65.6** | **67.7 / 71.8 / 79.9** |
+
+The KV cache is for one request at 8 bits with MTP on and `--mtp-head-kv-quant`: 16,640 bytes per token of context.
+Each concurrent request adds its own. Leave room for the hot prefix cache (`--prefix-cache-mem`, 2 GiB by default) and
+the prefill buffers.
 
 ## Quality
 
