@@ -105,6 +105,8 @@ n-gram table.
 | oMLX oQ4e (Jundot) | 74.3 | 0.1370 | 88.87% |
 | affine q3 | 59.0 | 0.1444 | 88.05% |
 | mlx-serve iQ-MLX 3.3bpw (ddalcu; imatrix-weighted affine) | 54.3 | 0.1987 | 86.28% |
+| Sushi-3bpw with mixed-4-8bit's 4-bit g32 n-gram table (the published Sushi-3bpw) | 53.9 | 0.1047 | 90.34% |
+| Sushi-4bpw with the same 4-bit g32 table | 69.3 | 0.0666 | 92.35% |
 | MCG K2 w15, pin pass 64 (Sushi-3bpw dense) | 36.0 active | 0.2244 | 85.42% |
 
 w12 -> w15 bought 2.8% of KLD on MCG; the remaining gap to turboderp's MUL1 w16 (0.0946) is not mostly the window.
