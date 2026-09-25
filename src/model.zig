@@ -1470,6 +1470,7 @@ pub fn parseConfig(io: std.Io, allocator: std.mem.Allocator, model_dir: []const 
     defer allocator.free(content);
 
     var config = try parseConfigFromJson(allocator, content);
+    errdefer config.deinit(allocator);
     if (config.isQwen4()) {
         config.ngram_table_path = try std.fmt.allocPrint(allocator, "{s}/ngram_table.bin", .{model_dir});
         if (std.c.getenv("SUSHI_NGRAM_BF16_DIR")) |raw| {
@@ -8549,4 +8550,31 @@ test "the loader refuses a model_type this build does not serve, by name, before
             return error.TestUnexpectedResult;
         } else |err| try std.testing.expect(err != error.ArchitectureUnsupported);
     }
+}
+
+test "parseConfig releases owned paths when an EXL3 pack is refused" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "config.json",
+        .data = qwen4CaseJson(QWEN4_GOOD_FIELDS),
+    });
+    var index: std.ArrayList(u8) = .empty;
+    defer index.deinit(testing.allocator);
+    try index.appendSlice(testing.allocator, "{\"weight_map\":{");
+    for (0..48) |layer| {
+        for ([_][]const u8{ "gate", "up", "down" }) |projection| {
+            for ([_][]const u8{ "trellis", "suh", "svh" }) |part| {
+                if (index.items[index.items.len - 1] != '{') try index.append(testing.allocator, ',');
+                const item = try std.fmt.allocPrint(testing.allocator, "\"language_model.model.layers.{d}.mlp.switch_mlp.{s}_proj.{s}\":\"experts.safetensors\"", .{ layer, projection, part });
+                defer testing.allocator.free(item);
+                try index.appendSlice(testing.allocator, item);
+            }
+        }
+    }
+    try index.appendSlice(testing.allocator, "}}");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
+    var path: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(testing.io, &path);
+    try testing.expectError(error.ExpertLayoutUnsupported, parseConfig(testing.io, testing.allocator, path[0..len]));
 }
