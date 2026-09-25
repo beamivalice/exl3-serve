@@ -13436,8 +13436,9 @@ pub fn sliceQsaHistoryOntoCheckpoint(dst: *SSMCheckpoint, src: *const SSMCheckpo
         if (d.conv_state.ctx != null and mlx.mlx_array_size(d.conv_state) > 0) continue;
         const ratio = @max(s_l.qsa_ratio, 1);
         if (s_l.qsa_pooled.ctx != null) {
+            const pooled = try materializedOwnedCopy(s, s_l.qsa_pooled);
             if (d.qsa_pooled.ctx != null) _ = mlx.mlx_array_free(d.qsa_pooled);
-            d.qsa_pooled = try materializedOwnedCopy(s, s_l.qsa_pooled);
+            d.qsa_pooled = pooled;
             try truncatePooled(&d.qsa_pooled, keep, ratio, s, true);
         }
         const src_hist: c_int = if (s_l.qsa_rows > 0) s_l.qsa_rows else keep;
@@ -69668,4 +69669,33 @@ test "mimo v2 mixed-precision streamed and resident forwards agree" {
             offset += width;
         }
     }
+}
+
+test "QSA checkpoint copy failure preserves the destination pooled bank" {
+    const s = mlx.mlx_default_cpu_stream_new();
+    defer _ = mlx.mlx_stream_free(s);
+    const data = [_]f32{ 1, 2, 3, 4 };
+    const shape = [_]c_int{ 1, 4, 1 };
+    const layers = try testing.allocator.alloc(SSMCacheEntrySnapshot, 1);
+    layers[0] = .{
+        .conv_state = .{ .ctx = null },
+        .ssm_state = .{ .ctx = null },
+        .initialized = true,
+        .qsa_pooled = mlx.mlx_array_new_data(&data, &shape, 3, .float32),
+        .qsa_ratio = 4,
+        .qsa_rows = 16,
+    };
+    var dst: SSMCheckpoint = .{ .pos = 8, .layers = layers };
+    defer dst.deinit(testing.allocator);
+    var src_layers = [_]SSMCacheEntrySnapshot{layers[0]};
+    src_layers[0].qsa_pooled = mlx.mlx_array_new_data(&data, &shape, 3, .float32);
+    defer _ = mlx.mlx_array_free(src_layers[0].qsa_pooled);
+    const src: SSMCheckpoint = .{ .pos = 16, .layers = &src_layers };
+    const original = dst.layers[0].qsa_pooled.ctx;
+    mlx.fault.arm(1);
+    defer mlx.fault.disarm();
+    try testing.expectError(error.MlxError, sliceQsaHistoryOntoCheckpoint(&dst, &src, 8, s));
+    try testing.expect(mlx.fault.didFire());
+    try testing.expectEqual(original, dst.layers[0].qsa_pooled.ctx);
+    try testing.expectEqualSlices(c_int, &shape, mlx.getShape(dst.layers[0].qsa_pooled));
 }
