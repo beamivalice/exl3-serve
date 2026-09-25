@@ -4,6 +4,15 @@ sushi began as a fork of [mlx-serve](https://github.com/ddalcu/mlx-serve) and wa
 mlx-serve commit `ef5e667` (two commits after mlx-serve v26.9.4). This file covers sushi's own changes since then;
 earlier history is mlx-serve's, in that project's changelog.
 
+## v1.0.1 — Hotfixes
+
+- **Tool calls and streaming**: streamed tool calls are always valid JSON, the reasoning budget applies to tool replies
+  and Anthropic streams, and a disconnected Responses request is no longer stored as completed.
+- **Prefix cache and loading**: fixes for SSD cache restores and failed cache writes, and malformed pack configs are
+  refused by name.
+
+---
+
 ## v1.0.0 — Qwen3.8-Flash-Next, sushi-packed
 
 ![Sushi-3bpw decode and prefill from 4k to 1M tokens on an M5 Max](https://raw.githubusercontent.com/beamivalice/sushi/main/docs/assets/perf-sushi3bpw-1m.png)
