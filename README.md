@@ -2,8 +2,7 @@
 
 # SUSHI
 
-A detached fork of [ddalcu's mlx-serve](https://github.com/ddalcu/mlx-serve) masterpiece, focused only on serving selected models on Apple Silicon with custom sushi
-quants. Sushi mixes EXL3 and affine formats tailored for M5 Max-class chips; other chips still run well.
+A detached fork of [ddalcu's mlx-serve](https://github.com/ddalcu/mlx-serve) masterpiece, focused only on serving selected models on Apple Silicon with custom sushi quants. Sushi mixes EXL3 and affine formats tailored for M5 Max-class chips; other chips still run well. While Sushi works as a stand alone engine, it aims to stay within mlx-serve as a guest engine.
 
 ## Model support list
 
