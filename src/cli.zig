@@ -1292,7 +1292,7 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
             continue;
         }
         if (parseImageCommand(trimmed)) |arg| {
-            try attachImage(allocator, io, w, vision, arg, &pending_images);
+            try attachImage(allocator, w, driver.tools, arg, &pending_images);
             continue;
         }
 
@@ -1334,13 +1334,16 @@ fn changeToolFolder(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer,
     try w.print("file tools read under {s}\n", .{tools.root});
 }
 
-fn attachImage(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, vision: bool, arg: []const u8, pending: *std.ArrayList([]const u8)) !void {
+/// `/image <path>`: reads in the tools' folder, under the file tools' refusals.
+fn attachImage(allocator: std.mem.Allocator, w: *std.Io.Writer, tools: repl_tools.Context, arg: []const u8, pending: *std.ArrayList([]const u8)) !void {
     if (arg.len == 0) return w.writeAll("usage: /image <path>\n");
-    if (!vision) return w.writeAll("this model cannot see images\n");
+    if (!tools.vision) return w.writeAll("this model cannot see images\n");
     const path = try unquotePath(allocator, arg);
     defer allocator.free(path);
-    const url = try repl_tools.loadImageFile(allocator, io, path) orelse
-        return w.print("cannot attach {s}: not a readable PNG, JPEG, WebP, GIF or BMP image under {d} MB\n", .{ path, repl_tools.max_image_bytes / (1024 * 1024) });
+    const url = switch (try repl_tools.loadUserImage(allocator, tools.io, tools.root, path)) {
+        .ok => |u| u,
+        .refused => |msg| return w.print("cannot attach {s}: {s}\n", .{ path, msg }),
+    };
     errdefer allocator.free(url);
     try pending.append(allocator, url);
     try w.print("attached {s}; it goes with your next message\n", .{path});
@@ -1831,6 +1834,37 @@ test "cli: /cd moves the file tools' folder, and a refused /cd keeps it" {
     const text = w.buffered();
     try testing.expect(std.mem.indexOf(u8, text, "cannot /cd to missing: no such folder\n") != null);
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, text, "file tools read under "));
+}
+
+test "cli: /image follows /cd, and is refused outside the folder" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "proj/shots");
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/shots/pic.png", .data = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" });
+    var tools: repl_tools.Context = .{ .allocator = allocator, .io = io, .root = try tmp.dir.realPathFileAlloc(io, "proj", allocator), .vision = true };
+    defer allocator.free(tools.root);
+    var pending = std.ArrayList([]const u8).empty;
+    defer {
+        for (pending.items) |i| allocator.free(i);
+        pending.deinit(allocator);
+    }
+
+    var buf: [2048]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try attachImage(allocator, &w, tools, "pic.png", &pending);
+    try testing.expectEqual(@as(usize, 0), pending.items.len);
+    try changeToolFolder(allocator, io, &w, &tools, "shots");
+    try attachImage(allocator, &w, tools, "pic.png", &pending);
+    try testing.expectEqual(@as(usize, 1), pending.items.len);
+    try attachImage(allocator, &w, tools, "../../proj/shots/pic.png", &pending);
+    try testing.expectEqual(@as(usize, 1), pending.items.len);
+
+    const text = w.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "cannot attach pic.png: no such file") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "attached pic.png; it goes with your next message\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "cannot attach ../../proj/shots/pic.png: ") != null);
 }
 
 test "cli: the chat body carries tools only while they are on, plus tool turns and image parts" {

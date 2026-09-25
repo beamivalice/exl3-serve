@@ -69,8 +69,8 @@ fn printUsage(io: std.Io) void {
         \\                      web, fetch pages and read files in the current
         \\                      folder, read-only (off by default); /cd <folder>
         \\                      moves that folder; /image <path> shows a vision
-        \\                      model an image. The same chat opens in a browser
-        \\                      at the URL it prints.
+        \\                      model an image from it. The same chat opens in a
+        \\                      browser at the URL it prints.
         \\  pull <model>        Download a model into ~/.sushi/models
         \\  list                Show downloaded models
         \\  serve               Start the server over ~/.sushi/models

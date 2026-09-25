@@ -1126,11 +1126,25 @@ fn imageOutput(allocator: std.mem.Allocator, bytes: []const u8, src: []const u8)
     };
 }
 
-/// Reads an image file for the user's own `/image`, which is not confined.
-pub fn loadImageFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?[]u8 {
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_image_bytes)) catch return null;
+pub const ImageLoad = union(enum) { ok: []u8, refused: []const u8 };
+
+/// The user's `/image <path>` as a data URL, confined like `view_image`: a
+/// relative path resolves in the tools' folder. `refused` is worded for the user.
+pub fn loadUserImage(allocator: std.mem.Allocator, io: std.Io, root: []const u8, path: []const u8) !ImageLoad {
+    const real = switch (try confinePath(allocator, io, root, path)) {
+        .ok => |p| p,
+        .refused => |msg| return .{ .refused = if (std.mem.eql(u8, msg, refuse_outside))
+            "that path is outside the folder; /cd to its folder first"
+        else if (std.mem.startsWith(u8, msg, "refused: ")) msg["refused: ".len..] else msg },
+    };
+    defer allocator.free(real);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, real, allocator, .limited(max_image_bytes)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.StreamTooLong => return .{ .refused = std.fmt.comptimePrint("the image is larger than {d} MB", .{max_image_bytes / (1024 * 1024)}) },
+        else => return .{ .refused = "cannot read it" },
+    };
     defer allocator.free(bytes);
-    return imageDataUrl(allocator, bytes);
+    return .{ .ok = try imageDataUrl(allocator, bytes) orelse return .{ .refused = "not a PNG, JPEG, WebP, GIF or BMP image" } };
 }
 
 fn viewImage(ctx: Context, src: []const u8) !Output {
@@ -1535,6 +1549,57 @@ test "repl tools: after /cd the file tools are confined to the new folder, just 
         try expectStartsWith(c.prefix, text);
         for (c.has) |h| try expectContains(h, text, true);
         for (c.lacks) |h| try expectContains(h, text, false);
+    }
+}
+
+test "repl tools: the user's /image reads inside the tools' folder under the file tools' refusals" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR";
+    try tmp.dir.createDirPath(io, "proj/shots");
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/shots/pic.png", .data = png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/.hidden.png", .data = png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/id_card.png", .data = png });
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/notes.txt", .data = "not an image\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside.png", .data = png });
+    try tmp.dir.symLink(io, "../outside.png", "proj/link.png", .{});
+    const root = try tmp.dir.realPathFileAlloc(io, "proj", allocator);
+    defer allocator.free(root);
+    const outside_abs = try std.fmt.allocPrint(allocator, "{s}/../outside.png", .{root});
+    defer allocator.free(outside_abs);
+
+    const Case = struct { path: []const u8, ok: bool, says: []const u8 = "" };
+    for ([_]Case{
+        .{ .path = "shots/pic.png", .ok = true },
+        .{ .path = "./shots/pic.png", .ok = true },
+        .{ .path = "shots/../shots/pic.png", .ok = false, .says = "/cd" },
+        .{ .path = "../outside.png", .ok = false, .says = "/cd" },
+        .{ .path = outside_abs, .ok = false, .says = "/cd" },
+        .{ .path = "link.png", .ok = false, .says = "/cd" },
+        .{ .path = ".hidden.png", .ok = false, .says = "hidden" },
+        .{ .path = "id_card.png", .ok = false, .says = "secrets" },
+        .{ .path = "notes.txt", .ok = false, .says = "not a PNG" },
+        .{ .path = "missing.png", .ok = false, .says = "no such file" },
+    }) |c| {
+        switch (try loadUserImage(allocator, io, root, c.path)) {
+            .ok => |url| {
+                defer allocator.free(url);
+                testing.expect(c.ok) catch |err| {
+                    std.debug.print("/image {s} attached\n", .{c.path});
+                    return err;
+                };
+                try expectStartsWith("data:image/png;base64,", url);
+            },
+            .refused => |msg| {
+                testing.expect(!c.ok and !std.mem.startsWith(u8, msg, "refused:")) catch |err| {
+                    std.debug.print("/image {s} refused: {s}\n", .{ c.path, msg });
+                    return err;
+                };
+                try expectContains(c.says, msg, true);
+            },
+        }
     }
 }
 
