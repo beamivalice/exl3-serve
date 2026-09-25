@@ -32,6 +32,7 @@
 //! plus a cv broadcast.
 
 const std = @import("std");
+var slot_vision_free_test_hook: ?*const fn (mlx.mlx_array) void = null;
 const mlx = @import("mlx.zig");
 const transformer_mod = @import("transformer.zig");
 const tokenizer_mod = @import("tokenizer.zig");
@@ -730,7 +731,13 @@ pub const Slot = struct {
             }
             self.allocator.free(entries);
         }
-        if (self.vision_embeddings) |ve| _ = mlx.mlx_array_free(ve);
+        if (self.vision_embeddings) |ve| {
+            if (@import("builtin").is_test and slot_vision_free_test_hook != null) {
+                slot_vision_free_test_hook.?(ve);
+            } else {
+                _ = mlx.mlx_array_free(ve);
+            }
+        }
         if (self.mrope_pos) |mp| self.allocator.free(mp);
         self.allocator.free(self.prompt_ids);
         self.allocator.free(self.full_prompt);
@@ -1574,6 +1581,7 @@ pub const Scheduler = struct {
         }
         if (self.shutdown.load(.acquire)) return error.Shutdown;
 
+        try self.cleanup_queue.ensureUnusedCapacity(self.allocator, self.in_flight + 1);
         try self.pending.append(self.allocator, slot);
         self.in_flight += 1;
         self.queue_cond.broadcast(self.io);
@@ -2289,8 +2297,8 @@ pub const MemoryBill = struct { needed: u64, available: u64 };
 /// How many of one tick's admits (queue order) go on to prefill. Each connection-thread bill
 /// ran before any sibling allocated, so an ungated arch is re-billed here: an admit that does
 /// not fit beside live requests plus this tick's earlier admits stays pending, and so does
-/// every admit after it. Alone it proceeds: nobody would ever free memory for it. A null bill
-/// (the gated arch) is billed against live memory inside `runPrefill` instead.
+/// every admit after it. Alone it proceeds: nobody would ever free memory for it. The gated arch
+/// is billed here too, so a Qwen and a MiMo admit see each other, and again inside `runPrefill`.
 pub fn admitsWithinMemory(bills: []const ?MemoryBill, live_company: bool) usize {
     var promised: u64 = 0;
     for (bills, 0..) |bill, i| {
@@ -2316,7 +2324,7 @@ fn memoryAdmitCount(sch: *Scheduler, admit_idx: []const usize) usize {
         bills[i] = null;
         const s = sch.pending.items[idx];
         const cfg = s.model.config orelse continue;
-        if (cfg.longCtxGated() or s.model.transformer == null) continue;
+        if (s.model.transformer == null) continue;
         const nums = numbers_fn(cfg, s.full_prompt.len, s.max_tokens, s.cache.config, generate_mod.visionPrefillUnchunked(s.vision_embeddings != null), s.enable_mtp);
         bills[i] = .{ .needed = nums[0], .available = nums[1] };
     }
@@ -6830,7 +6838,7 @@ fn plannerShape(slots: []const *Slot, widths: []const u8) group_cost_mod.GroupSh
         const gen = &slot.legacy_gen.?;
         const kv: u8 = @intCast(xfm.round_cost.bucketOf(@intCast(slot.moe_seq_offset)));
         if (width == 0) {
-            shape.rows[i] = group_cost_mod.GroupShape.row(0, 0, 0, kv, 0, 0, group_cost_mod.GroupShape.samplingMode(false, false, false, gen.sampling.temperature > 0.01));
+            shape.rows[i] = group_cost_mod.GroupShape.row(0, 0, 0, kv, 0, 0, group_cost_mod.GroupShape.samplingMode(false, false, false, !generate_mod.isGreedyTemperature(gen.sampling.temperature)));
         } else {
             const off = Generator.mtpRoundOff0(gen.mtp_hist_stash, gen.mtp_cache.?.step());
             const history = 1 + if (gen.mtp_hist_stash) |stash| stash.n else @as(usize, 0);
@@ -7643,7 +7651,7 @@ fn observeGroupRound(live: []*Slot, states: []const Generator.MtpRoundState, exp
     for (live, states, 0..) |slot, st, i| {
         const chain = st.chain;
         if (chain.m > round_cost_mod.MAX_WIDTH or chain.n_drafted > round_cost_mod.MAX_WIDTH or chain.head_input_rows > round_cost_mod.MAX_WIDTH + 2) return;
-        const mode = group_cost_mod.GroupShape.samplingMode(slot.legacy_gen.?.mtp.?.canRerankDrafts(), chain.conf_arrs != null, chain.q_probs != null, slot.legacy_gen.?.sampling.temperature > 0.01);
+        const mode = group_cost_mod.GroupShape.samplingMode(slot.legacy_gen.?.mtp.?.canRerankDrafts(), chain.conf_arrs != null, chain.q_probs != null, !generate_mod.isGreedyTemperature(slot.legacy_gen.?.sampling.temperature));
         key.rows[i] = group_cost_mod.GroupShape.row(@intCast(chain.m), @intCast(chain.n_drafted), @intCast(@min(chain.plan.m_lo, chain.n_drafted)), @intCast(xfm.round_cost.bucketOf(@intCast(st.moe_seq_offset_snap))), @intCast(xfm.round_cost.bucketOf(@intCast(chain.off0))), @intCast(chain.head_input_rows), mode);
         key.padding += @intCast(st.verify_len - (1 + chain.m));
     }
@@ -9357,4 +9365,111 @@ test "the ssd budget leaves a positive expert cache on the real quantized pack" 
     const ledger = resolved.ledger orelse return error.MissingLedger;
     try t.expect(ledger.slots_per_layer > 1);
     try t.expect(ledger.cache_bytes > 0);
+}
+
+test "a cleanup allocation failure never frees MLX on the connection thread" {
+    const Probe = struct {
+        var inference_id: std.Thread.Id = undefined;
+        var frees: usize = 0;
+        var off_thread_frees: usize = 0;
+        fn free(_: mlx.mlx_array) void {
+            frees += 1;
+            if (std.Thread.getCurrentId() != inference_id) off_thread_frees += 1;
+        }
+        fn complete(sch: *Scheduler, slots: []const *Slot) void {
+            for (slots) |slot| sch.complete(slot);
+        }
+    };
+    Probe.inference_id = std.Thread.getCurrentId();
+    Probe.frees = 0;
+    Probe.off_thread_frees = 0;
+    slot_vision_free_test_hook = Probe.free;
+    defer slot_vision_free_test_hook = null;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    const allocator = failing.allocator();
+    var cfg = ModelConfig{ .num_hidden_layers = 0 };
+    var model: LoadedModel = undefined;
+    model.config = &cfg;
+    model.transformer = null;
+    var sch: Scheduler = undefined;
+    sch.allocator = allocator;
+    sch.io = testing.io;
+    sch.kv_quant_config = .dense;
+    sch.kv_quant_explicit = false;
+    sch.queue_mu = .init;
+    sch.queue_cond = .init;
+    sch.submit_cond = .init;
+    sch.shutdown = .init(false);
+    sch.queue_cap = 2;
+    sch.in_flight = 0;
+    sch.pending = .empty;
+    sch.decoding = .empty;
+    sch.cleanup_queue = .empty;
+    defer sch.pending.deinit(allocator);
+    defer sch.decoding.deinit(allocator);
+    defer sch.cleanup_queue.deinit(allocator);
+    defer for (sch.cleanup_queue.items) |slot| slot.deinit();
+    for (0..12) |_| {
+        failing.fail_index = std.math.maxInt(usize);
+        failing.resize_fail_index = std.math.maxInt(usize);
+        var slots: [2]*Slot = undefined;
+        for (&slots) |*slot| slot.* = try sch.submit(.{
+            .model = &model,
+            .prompt_ids = &.{1},
+            .sampling = .{},
+            .eos_token_ids = &.{},
+            .max_tokens = 1,
+            .vision_embeddings = .{ .ctx = @ptrFromInt(1) },
+        });
+        failing.fail_index = failing.alloc_index;
+        failing.resize_fail_index = failing.resize_index;
+        const conn = try std.Thread.spawn(.{}, Probe.complete, .{ &sch, &slots });
+        conn.join();
+        try testing.expectEqual(@as(usize, 0), Probe.off_thread_frees);
+        try testing.expectEqual(@as(usize, 0), Probe.frees);
+        try testing.expectEqual(@as(usize, 0), sch.in_flight);
+    }
+    try testing.expectEqual(@as(usize, 24), sch.cleanup_queue.items.len);
+    while (sch.cleanup_queue.items.len > 0) sch.cleanup_queue.orderedRemove(0).deinit();
+    try testing.expectEqual(@as(usize, 24), Probe.frees);
+    try testing.expectEqual(@as(usize, 0), Probe.off_thread_frees);
+}
+
+test "admission combines Qwen and MiMo reservations in either order" {
+    const Probe = struct {
+        fn numbers(cfg: *const ModelConfig, _: usize, _: u32, _: transformer_mod.KVQuantConfig, _: bool, _: bool) [2]u64 {
+            return .{ if (cfg.longCtxGated()) 8 else 7, 10 };
+        }
+    };
+    const saved = prefill_admission_numbers;
+    prefill_admission_numbers = Probe.numbers;
+    defer prefill_admission_numbers = saved;
+    var qwen_cfg = ModelConfig{ .model_type = "qwen4_exp" };
+    var mimo_cfg = ModelConfig{ .model_type = "mimo_v2" };
+    var xfm: Transformer = undefined;
+    var qwen: LoadedModel = undefined;
+    qwen.config = &qwen_cfg;
+    qwen.transformer = &xfm;
+    var mimo: LoadedModel = undefined;
+    mimo.config = &mimo_cfg;
+    mimo.transformer = &xfm;
+    var a: Slot = undefined;
+    a.model = &qwen;
+    a.full_prompt = &.{};
+    a.max_tokens = 1;
+    a.cache.config = .dense;
+    a.vision_embeddings = null;
+    a.enable_mtp = false;
+    a.memory_hold_logged = true;
+    var b = a;
+    b.model = &mimo;
+    var sch: Scheduler = undefined;
+    sch.pending = .empty;
+    sch.decoding = .empty;
+    defer sch.pending.deinit(testing.allocator);
+    try sch.pending.appendSlice(testing.allocator, &.{ &a, &b });
+    try testing.expectEqual(@as(usize, 1), memoryAdmitCount(&sch, &.{ 0, 1 }));
+    try testing.expectEqual(@as(usize, 1), memoryAdmitCount(&sch, &.{ 1, 0 }));
+    try testing.expectEqual(@as(usize, 1), memoryAdmitCount(&sch, &.{0}));
+    try testing.expectEqual(@as(usize, 1), memoryAdmitCount(&sch, &.{1}));
 }
