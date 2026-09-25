@@ -2641,7 +2641,8 @@ pub const HotPrefixCache = struct {
                 if (spent + cost > b) break;
             }
             spent += cost;
-            try out.append(allocator, try transformer_mod.shareSsmCheckpoint(allocator, cp));
+            try out.ensureUnusedCapacity(allocator, 1);
+            out.appendAssumeCapacity(try transformer_mod.shareSsmCheckpoint(allocator, cp));
         }
         if (out.items.len == 0) {
             out.deinit(allocator);
@@ -9186,4 +9187,19 @@ test "HotPrefixCache: eviction picks the LRU of the key holding the most entries
     // One workload = plain LRU: C goes first.
     for (cache.entries.items) |*e| e.cache_key = 0;
     try testing.expectEqual(@as(?usize, 0), cache.lruIndexExcluding(null, 0));
+}
+
+test "HotPrefixCache: checkpoint clone allocation failure releases owned layers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var accounting = testing.FailingAllocator.init(arena.allocator(), .{ .fail_index = 1 });
+    var layers = [_]transformer_mod.SSMCacheEntrySnapshot{.{
+        .conv_state = .{ .ctx = null },
+        .ssm_state = .{ .ctx = null },
+        .initialized = false,
+    }};
+    const checkpoints = [_]SSMCheckpoint{.{ .pos = 512, .layers = &layers }};
+
+    try testing.expectError(error.OutOfMemory, HotPrefixCache.cloneCheckpointsUpTo(accounting.allocator(), &checkpoints, 512, null));
+    try testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
 }
