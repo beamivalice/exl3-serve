@@ -409,6 +409,108 @@ pub extern "c" fn mlx_device_info_free(info: mlx_device_info) c_int;
 pub extern "c" fn mlx_device_info_get_size(res: *usize, info: mlx_device_info, key: [*:0]const u8) c_int;
 pub extern "c" fn mlx_device_info_get_string(res: *[*:0]const u8, info: mlx_device_info, key: [*:0]const u8) c_int;
 
+// ── NAX device gate ──
+// Lives beside the device queries it reads, so code shared with another build
+// (the EXL3 engine) can ask through this module instead of reaching a host file.
+// MLX's own is_nax_available() is not exported by the C API, so this mirrors it:
+// an M5-class GPU (gen >= 17, 18 on phones) on macOS >= 26.2.
+
+/// Case-insensitive prefix match on the M5-class GPU family identifier.
+/// Prefix (not equality) is MTPLX's shipping behavior — device variants
+/// report suffixed forms ("applegpu_g17s", "applegpu_g17d").
+pub fn naxArchGeneration(arch: []const u8) struct { gen: u32, phone: bool } {
+    if (arch.len < 3) return .{ .gen = 0, .phone = false };
+    var buf: [128]u8 = undefined;
+    const n = @min(arch.len, buf.len);
+    for (arch[0..n], 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    const a = buf[0..n];
+    // Generic compiler targets such as air64_v27 do not name a GPU generation.
+    const suffix = if (std.mem.startsWith(u8, a, "applegpu_g")) a[10..] else if (a[0] == 'g') a[1..] else return .{ .gen = 0, .phone = false };
+    var digits: usize = 0;
+    while (digits < suffix.len and std.ascii.isDigit(suffix[digits])) digits += 1;
+    if (digits == 0 or suffix.len - digits > 1) return .{ .gen = 0, .phone = false };
+    if (digits < suffix.len and !std.ascii.isAlphabetic(suffix[digits])) return .{ .gen = 0, .phone = false };
+    return .{
+        .gen = std.fmt.parseInt(u32, suffix[0..digits], 10) catch 0,
+        .phone = digits < suffix.len and suffix[digits] == 'p',
+    };
+}
+
+pub fn naxArchSupportedFrom(arch: []const u8) bool {
+    const parsed = naxArchGeneration(arch);
+    const floor: u32 = if (parsed.phone) 18 else 17;
+    return parsed.gen >= floor;
+}
+
+pub fn naxArchIsG17(arch: []const u8) bool {
+    return naxArchSupportedFrom(arch);
+}
+
+/// "26.4"/"26.4.1"-style product version at least req_major.req_minor.
+/// Unparseable components read as 0 (mirrors MTPLX: int() failures fall
+/// back to 0, so garbage can never satisfy the floor).
+pub fn macosVersionAtLeast(ver: []const u8, req_major: u32, req_minor: u32) bool {
+    var it = std.mem.splitScalar(u8, ver, '.');
+    const major = std.fmt.parseInt(u32, it.first(), 10) catch 0;
+    const minor: u32 = if (it.next()) |mn| (std.fmt.parseInt(u32, mn, 10) catch 0) else 0;
+    return major > req_major or (major == req_major and minor >= req_minor);
+}
+
+/// The whole availability gate, pure over its inputs (mirror of MTPLX's
+/// nax_available()): not force-fallback, G17-class GPU, macOS >= 26.2 (the
+/// MetalPerformancePrimitives floor).
+pub fn naxAvailableFrom(force_fallback: bool, arch: []const u8, os_ver: []const u8) bool {
+    if (force_fallback) return false;
+    if (!naxArchIsG17(arch)) return false;
+    return macosVersionAtLeast(os_ver, 26, 2);
+}
+
+extern "c" fn sysctlbyname(name: [*:0]const u8, oldp: ?*anyopaque, oldlenp: ?*usize, newp: ?*const anyopaque, newlen: usize) c_int;
+
+/// "kern.osproductversion" → "26.4"-style string (the sysctl mirror of
+/// Python's platform.mac_ver()[0]).
+pub fn macosProductVersion(buf: []u8) ?[]const u8 {
+    var len: usize = buf.len;
+    if (sysctlbyname("kern.osproductversion", buf.ptr, &len, null, 0) != 0) return null;
+    var n = @min(len, buf.len);
+    while (n > 0 and buf[n - 1] == 0) n -= 1;
+    if (n == 0) return null;
+    return buf[0..n];
+}
+
+/// GPU architecture identifier off mlx device info ("applegpu_g16" on the
+/// M4 Max). The returned pointer from mlx is borrowed from the info object,
+/// so the string is copied into the caller's buffer before the info frees.
+pub fn gpuArchitecture(buf: []u8) ?[]const u8 {
+    var dev = mlx_device{ .ctx = null };
+    if (mlx_get_default_device(&dev) != 0) return null;
+    var info = mlx_device_info_new();
+    defer _ = mlx_device_info_free(info);
+    if (mlx_device_info_get(&info, dev) != 0) return null;
+    var cstr: [*:0]const u8 = undefined;
+    if (mlx_device_info_get_string(&cstr, info, "architecture") != 0) return null;
+    const arch = std.mem.span(cstr);
+    if (arch.len == 0 or arch.len > buf.len) return null;
+    @memcpy(buf[0..arch.len], arch);
+    return buf[0..arch.len];
+}
+
+/// M5-class NAX units on this machine, uncached.
+/// SUSHI_FORCE_GPU_FAMILY_FALLBACK=1 pretends the units are absent so an M5
+/// can rehearse the exact M1-M4 plain-SIMD path (QA switch, mirrored from MTPLX).
+pub fn naxAvailable() bool {
+    var force = false;
+    if (std.c.getenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK")) |p| {
+        const v = std.mem.span(p);
+        force = v.len > 0 and v[0] == '1';
+    }
+    var arch_buf: [128]u8 = undefined;
+    const arch = gpuArchitecture(&arch_buf) orelse "";
+    var ver_buf: [64]u8 = undefined;
+    const ver = macosProductVersion(&ver_buf) orelse "";
+    return naxAvailableFrom(force, arch, ver);
+}
+
 // ── Error handler ──
 pub const mlx_error_handler_func = ?*const fn ([*:0]const u8, ?*anyopaque) callconv(.c) void;
 pub extern "c" fn mlx_set_error_handler(handler: mlx_error_handler_func, data: ?*anyopaque, dtor: ?*const fn (?*anyopaque) callconv(.c) void) void;

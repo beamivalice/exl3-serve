@@ -4524,7 +4524,7 @@ test "exl3 a NAX GEMM source the Metal toolchain rejects is declined at the prob
     try t.expect(!mlx.errorPending());
     try t.expect(buildNaxGemmKernel("this is not metal;", "", "sushi_exl3_probe_bad") == null);
     try t.expect(!mlx.errorPending());
-    if (!@import("transformer.zig").verifyQmmNaxAvailable()) return; // the real NAX kernel needs M5-class hardware
+    if (!mlx.naxAvailable()) return; // the real NAX kernel needs M5-class hardware
     const real = buildNaxGemmKernel(GEMM_NAX_SOURCE, naxHeader(.mul1, .w16), "sushi_exl3_k4_gemm_nax") orelse return error.TestUnexpectedResult;
     _ = mlx.mlx_fast_metal_kernel_free(real);
     try t.expect(!mlx.errorPending());

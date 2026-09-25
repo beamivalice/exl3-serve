@@ -1528,55 +1528,16 @@ fn runVerifyQmmMsg(
 // ── NAX m16 verify tile (M5-class matrix units; see the section comment
 // above for provenance, gating, and the never-build-off-probe rule) ──
 
-/// Case-insensitive prefix match on the M5-class GPU family identifier.
-/// Prefix (not equality) is MTPLX's shipping behavior — device variants
-/// report suffixed forms ("applegpu_g17s", "applegpu_g17d").
-pub fn naxArchGeneration(arch: []const u8) struct { gen: u32, phone: bool } {
-    if (arch.len < 3) return .{ .gen = 0, .phone = false };
-    var buf: [128]u8 = undefined;
-    const n = @min(arch.len, buf.len);
-    for (arch[0..n], 0..) |c, i| buf[i] = std.ascii.toLower(c);
-    const a = buf[0..n];
-    // Generic compiler targets such as air64_v27 do not name a GPU generation.
-    const suffix = if (std.mem.startsWith(u8, a, "applegpu_g")) a[10..] else if (a[0] == 'g') a[1..] else return .{ .gen = 0, .phone = false };
-    var digits: usize = 0;
-    while (digits < suffix.len and std.ascii.isDigit(suffix[digits])) digits += 1;
-    if (digits == 0 or suffix.len - digits > 1) return .{ .gen = 0, .phone = false };
-    if (digits < suffix.len and !std.ascii.isAlphabetic(suffix[digits])) return .{ .gen = 0, .phone = false };
-    return .{
-        .gen = std.fmt.parseInt(u32, suffix[0..digits], 10) catch 0,
-        .phone = digits < suffix.len and suffix[digits] == 'p',
-    };
-}
-
-pub fn naxArchSupportedFrom(arch: []const u8) bool {
-    const parsed = naxArchGeneration(arch);
-    const floor: u32 = if (parsed.phone) 18 else 17;
-    return parsed.gen >= floor;
-}
-
-pub fn naxArchIsG17(arch: []const u8) bool {
-    return naxArchSupportedFrom(arch);
-}
-
-/// "26.4"/"26.4.1"-style product version at least req_major.req_minor.
-/// Unparseable components read as 0 (mirrors MTPLX: int() failures fall
-/// back to 0, so garbage can never satisfy the floor).
-pub fn macosVersionAtLeast(ver: []const u8, req_major: u32, req_minor: u32) bool {
-    var it = std.mem.splitScalar(u8, ver, '.');
-    const major = std.fmt.parseInt(u32, it.first(), 10) catch 0;
-    const minor: u32 = if (it.next()) |mn| (std.fmt.parseInt(u32, mn, 10) catch 0) else 0;
-    return major > req_major or (major == req_major and minor >= req_minor);
-}
-
-/// The whole availability gate, pure over its inputs (mirror of MTPLX's
-/// nax_available()): not force-fallback, G17-class GPU, macOS >= 26.2 (the
-/// MetalPerformancePrimitives floor).
-pub fn naxAvailableFrom(force_fallback: bool, arch: []const u8, os_ver: []const u8) bool {
-    if (force_fallback) return false;
-    if (!naxArchIsG17(arch)) return false;
-    return macosVersionAtLeast(os_ver, 26, 2);
-}
+// The NAX device gate is mlx's (see the "NAX device gate" section there): the
+// EXL3 engine asks the shared `mlx` module for it, so it cannot live behind a
+// host file. Re-exported under the same names, so every call site and test here
+// is unchanged.
+pub const naxArchGeneration = mlx.naxArchGeneration;
+pub const naxArchSupportedFrom = mlx.naxArchSupportedFrom;
+pub const naxArchIsG17 = mlx.naxArchIsG17;
+pub const macosVersionAtLeast = mlx.macosVersionAtLeast;
+pub const naxAvailableFrom = mlx.naxAvailableFrom;
+pub const macosProductVersion = mlx.macosProductVersion;
 
 /// Human-readable NAX status for `--version` / the app's Settings ("nax"
 /// line, first token on/off, remainder the reason). Hardware + OS is the
@@ -1602,35 +1563,9 @@ pub fn naxStatus() []const u8 {
     return naxStatusFrom(arch, ver);
 }
 
-extern "c" fn sysctlbyname(name: [*:0]const u8, oldp: ?*anyopaque, oldlenp: ?*usize, newp: ?*const anyopaque, newlen: usize) c_int;
-
-/// "kern.osproductversion" → "26.4"-style string (the sysctl mirror of
-/// Python's platform.mac_ver()[0]).
-pub fn macosProductVersion(buf: []u8) ?[]const u8 {
-    var len: usize = buf.len;
-    if (sysctlbyname("kern.osproductversion", buf.ptr, &len, null, 0) != 0) return null;
-    var n = @min(len, buf.len);
-    while (n > 0 and buf[n - 1] == 0) n -= 1;
-    if (n == 0) return null;
-    return buf[0..n];
-}
-
 /// GPU architecture identifier off mlx device info ("applegpu_g16" on the
-/// M4 Max). The returned pointer from mlx is borrowed from the info object,
-/// so the string is copied into the caller's buffer before the info frees.
-fn gpuArchitecture(buf: []u8) ?[]const u8 {
-    var dev = mlx.mlx_device{ .ctx = null };
-    if (mlx.mlx_get_default_device(&dev) != 0) return null;
-    var info = mlx.mlx_device_info_new();
-    defer _ = mlx.mlx_device_info_free(info);
-    if (mlx.mlx_device_info_get(&info, dev) != 0) return null;
-    var cstr: [*:0]const u8 = undefined;
-    if (mlx.mlx_device_info_get_string(&cstr, info, "architecture") != 0) return null;
-    const arch = std.mem.span(cstr);
-    if (arch.len == 0 or arch.len > buf.len) return null;
-    @memcpy(buf[0..arch.len], arch);
-    return buf[0..arch.len];
-}
+/// M4 Max).
+const gpuArchitecture = mlx.gpuArchitecture;
 
 /// Test seam: force the NAX availability probe (null = real probe). Only
 /// ever force FALSE on non-G17 machines — forcing true would let dispatch
@@ -1648,22 +1583,9 @@ var vqmm_nax_avail_cache: ?bool = null;
 pub fn verifyQmmNaxAvailable() bool {
     if (vqmm_nax_probe_override) |v| return v;
     if (vqmm_nax_avail_cache) |v| return v;
-    const ok = computeNaxAvailable();
+    const ok = mlx.naxAvailable();
     vqmm_nax_avail_cache = ok;
     return ok;
-}
-
-fn computeNaxAvailable() bool {
-    var force = false;
-    if (std.c.getenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK")) |p| {
-        const v = std.mem.span(p);
-        force = v.len > 0 and v[0] == '1';
-    }
-    var arch_buf: [128]u8 = undefined;
-    const arch = gpuArchitecture(&arch_buf) orelse "";
-    var ver_buf: [64]u8 = undefined;
-    const ver = macosProductVersion(&ver_buf) orelse "";
-    return naxAvailableFrom(force, arch, ver);
 }
 
 var nax_sdpa_avail_cache: ?bool = null;
@@ -1683,7 +1605,7 @@ pub fn naxSdpaPreferredFrom(nax_available: bool, raw: ?[]const u8) bool {
 pub fn naxSdpaPreferred() bool {
     if (nax_sdpa_override) |v| return v;
     if (nax_sdpa_env) |v| return v;
-    if (nax_sdpa_avail_cache == null) nax_sdpa_avail_cache = computeNaxAvailable();
+    if (nax_sdpa_avail_cache == null) nax_sdpa_avail_cache = mlx.naxAvailable();
     const raw = std.c.getenv("SUSHI_NAX_SDPA");
     const on = naxSdpaPreferredFrom(nax_sdpa_avail_cache.?, if (raw) |v| std.mem.sliceTo(v, 0) else null);
     nax_sdpa_env = on;
