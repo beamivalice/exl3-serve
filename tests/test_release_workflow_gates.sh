@@ -86,6 +86,12 @@ check("steps.signing.outputs.enabled" in step_if("Notarize CLI"),
       "notarization runs only when the Apple secrets exist")
 check("SIGNING_IDENTITY=-" in str(steps.get("Package CLI binary", {}).get("run", "")),
       "packaging ad-hoc signs when there is no Developer ID")
+# The hardened runtime enforces library validation, which rejects ad-hoc libraries (no Team ID): an ad-hoc binary
+# signed with it cannot load its own libmlxc. Only the Developer ID arm may pass --options runtime.
+pkg = str(steps.get("Package CLI binary", {}).get("run", ""))
+sign_lines = [l for l in pkg.splitlines() if "codesign --force" in l]
+check(sign_lines and all("RUNTIME_FLAG" in l and "--options runtime" not in l for l in sign_lines)
+      and "RUNTIME_FLAG=()" in pkg, "the hardened runtime is applied only with a Developer ID")
 
 sushi_builds = [s for s in job["steps"]
                     if s.get("name") == "Build sushi (Zig)"]

@@ -237,11 +237,13 @@ jobs:
               "$STAGING/lib/libwebp.dylib" 2>/dev/null || true
           fi
 
-          if [ "${{ steps.signing.outputs.enabled }}" != "true" ]; then SIGNING_IDENTITY=-; fi
+          # The hardened runtime rejects libraries without a Team ID, so an ad-hoc build must go without it.
+          RUNTIME_FLAG=(--options runtime)
+          if [ "${{ steps.signing.outputs.enabled }}" != "true" ]; then SIGNING_IDENTITY=-; RUNTIME_FLAG=(); fi
           for lib in "$STAGING/lib/"*.dylib; do
-            [ -f "$lib" ] && codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$lib"
+            [ -f "$lib" ] && codesign --force "${RUNTIME_FLAG[@]}" --sign "$SIGNING_IDENTITY" "$lib"
           done
-          codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$STAGING/sushi"
+          codesign --force "${RUNTIME_FLAG[@]}" --sign "$SIGNING_IDENTITY" "$STAGING/sushi"
 
           codesign --verify --deep --strict --verbose=2 "$STAGING/sushi"
 
