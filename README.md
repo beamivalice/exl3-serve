@@ -1,18 +1,17 @@
 <p align="center"><img src="docs/assets/sushi-logo.png" alt="sushi" width="256"></p>
 
-# sushi
+# SUSHI
 
-A fork from ddalcu's MLX-serve, focus only to support selected EXL3 models in Apple Silicon.
+A detached fork from ddalcu's MLX-serve masterpiece, focus only to support selected models in Apple Silicon using custom sushi quant. Sushi uses both EXL3 and affine mixed format tailored for M5+ Max class, other chips can still run well.
 
 ## Model support list
 
-* Qwen3.8-Flash-Next (EXL3 packs, loaded resident)
-
-Any other `model_type` or checkpoint format is refused at load by name.
+* Qwen3.8-Flash-Next-sushi-3bpw (Require 64GB+)
+* Qwen3.8-Flash-Next-sushi-4bpw (Require 96GB+)
 
 ## Streaming
 
-SSD expert streaming serves the bf16 Qwen3.8-Flash-Next checkpoint. EXL3 packs do not stream: they load resident.
+SSD expert streaming serves the bf16 Qwen3.8-Flash-Next checkpoint.
 
 ## Install
 
@@ -21,5 +20,4 @@ curl -L https://github.com/beamivalice/sushi/releases/latest/download/sushi-bin-
 ./sushi-macos-arm64/sushi --version
 ```
 
-The binary is ad-hoc signed, not notarized. A copy downloaded with a browser is quarantined by macOS; clear it with
-`xattr -dr com.apple.quarantine sushi-macos-arm64`. The server listens on `127.0.0.1:12345` by default.
+The server listens on `127.0.0.1:12345` by default.
