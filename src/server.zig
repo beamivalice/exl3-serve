@@ -9970,7 +9970,7 @@ fn handleStreamingGeneration(
                         // after it: everything buffered so far was reasoning,
                         // and leaving it pending hands it to the NEXT chunk
                         // (measured: 42 entries on a 1-char delta).
-                        if (split.content.len > 0) lps.skipToContent(buf, split.content) else lps.dropPending();
+                        if (split.content.len > 0) lps.skipToContent(buf, split.content, utf8_carry_len) else lps.dropPending();
                         for (token_texts.items) |tt| allocator.free(tt);
                         token_texts.clearRetainingCapacity();
                         text_buf.clearRetainingCapacity();
@@ -10225,7 +10225,7 @@ fn handleStreamingGeneration(
                 if (content_after.len > 0) {
                     // The reasoning above this point never reaches the client,
                     // so its entries stop here rather than riding the answer.
-                    lps.skipToContent(think_buf.items, content_after);
+                    lps.skipToContent(think_buf.items, content_after, utf8_carry_len);
                     const vis_content_after = chat_mod.streamContentLead(content_after, content_started);
                     if (vis_content_after.len > 0) {
                         content_started = true;
@@ -10433,7 +10433,7 @@ fn handleStreamingGeneration(
                     // normalized rewrite. If the content cannot be found there
                     // (normalization moved it) nothing is skipped, which is the
                     // old behaviour rather than a wrong boundary.
-                    lps.skipToContent(full_text.items, think_split.content);
+                    lps.skipToContent(full_text.items, think_split.content, utf8_carry_len);
                     try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = think_split.content }, null, null, null, .{ .logprobs_json = try lps.take() });
                 } else {
                     // All reasoning, no content: those entries describe text the
@@ -10560,7 +10560,7 @@ const StreamLogprobs = struct {
     /// Indexes `ids`/`lens`, which are complete, rather than the pending
     /// window — a token whose logprob has not been published yet still has a
     /// length, so a lagging publisher cannot skew the boundary.
-    fn skipToContent(self: *StreamLogprobs, tail: []const u8, content: []const u8) void {
+    fn skipToContent(self: *StreamLogprobs, tail: []const u8, content: []const u8, carry: usize) void {
         if (!self.enabled or content.len == 0) return;
         const base = @intFromPtr(tail.ptr);
         const cptr = @intFromPtr(content.ptr);
@@ -10568,8 +10568,9 @@ const StreamLogprobs = struct {
             cptr - base
         else
             std.mem.indexOf(u8, tail, content) orelse return;
-        if (self.bytes_noted < tail.len) return;
-        const abs = self.bytes_noted - tail.len + off_in_tail;
+        const noted = self.bytes_noted -| carry;
+        if (noted < tail.len) return;
+        const abs = noted - tail.len + off_in_tail;
 
         var off: usize = 0;
         for (self.lens.items, 0..) |len, i| {
@@ -21140,6 +21141,40 @@ test "a tool-call reply delivers the budget-capped thought" {
     try std.testing.expectEqualStrings("short", deliveredReasoning("short", "short and the rest the budget withholds").?);
     try std.testing.expectEqualStrings("full", deliveredReasoning(null, "full").?);
     try std.testing.expect(deliveredReasoning(null, null) == null);
+}
+
+test "skipToContent keeps the content token when a multi-byte character splits across tokens" {
+    const a = std.testing.allocator;
+    var tok = Tokenizer.initEmptyForTests(a, .byte_level_bpe);
+    defer tok.vocab.deinit();
+    defer tok.id_to_token.deinit();
+    defer tok.merge_ranks.deinit();
+    defer tok.special_tokens.deinit();
+    defer tok.unicode_to_byte.deinit();
+    try tok.unicode_to_byte.put('L', 0xc3);
+    try tok.unicode_to_byte.put('T', 0xa9);
+    try tok.id_to_token.put(1, "R");
+    try tok.id_to_token.put(2, "C");
+    try tok.id_to_token.put(3, "L");
+    try tok.id_to_token.put(4, "T");
+    const lead = try tok.decode(a, &.{3}, false);
+    defer a.free(lead);
+    const cont = try tok.decode(a, &.{4}, false);
+    defer a.free(cont);
+    var joined = try a.alloc(u8, lead.len + cont.len);
+    defer a.free(joined);
+    @memcpy(joined[0..lead.len], lead);
+    @memcpy(joined[lead.len..], cont);
+    try std.testing.expectEqualStrings("é", joined);
+
+    var lps = StreamLogprobs{ .allocator = a, .tok = &tok, .slot = null, .enabled = true };
+    defer lps.deinit();
+    try lps.note(1);
+    try lps.note(2);
+    try lps.note(3);
+    const tail = "RC";
+    lps.skipToContent(tail, tail[1..], lead.len);
+    try std.testing.expectEqual(@as(usize, 1), lps.emitted);
 }
 
 test "a responses disconnect is never stored" {
