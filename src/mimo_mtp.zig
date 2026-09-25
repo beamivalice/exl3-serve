@@ -160,6 +160,19 @@ pub const State = struct {
     drafts: [MAX_HEADS]mlx.mlx_array = @splat(.{ .ctx = null }),
     n_drafts: usize = 0,
 
+    pub fn billedBytes(config: *const ModelConfig) u64 {
+        if (!std.mem.eql(u8, config.model_type, "mimo_v2") or config.sliding_window == 0) return 0;
+        const layer = Head.slidingLayer(config) orelse return 0;
+        const window: u64 = config.sliding_window;
+        const kv_row: u64 = @as(u64, config.layerKVHeads(layer)) *
+            (config.layerHeadDim(layer) + config.layerVHeadDim(layer)) * @sizeOf(u16);
+        const hidden_row: u64 = @as(u64, config.hidden_size) * @sizeOf(u16);
+        const kv = MAX_HEADS * (2 * window - 1) * kv_row;
+        const hiddens = RING_ROWS * hidden_row;
+        const catchup = MAX_HEADS * window * hidden_row;
+        return 2 * (kv + hiddens) + catchup;
+    }
+
     pub fn deinit(self: *State) void {
         for (&self.rows) |*r| r.reset(0);
         if (self.hid.ctx != null) _ = mlx.mlx_array_free(self.hid);

@@ -57,6 +57,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
   company waits in `pending` (`[admission] held`); alone it proceeds.
 - The hot-cache budget is clamped at load and follows residency ([engine-prefix-cache](engine-prefix-cache.md#budget)).
 - Context-overflow 400s name BOTH counts.
+- MiMo MTP adds a constant per-request and load-time reserve (`mimo_mtp.State.billedBytes`) for all three sliding head KVs, retained hiddens, and catch-up/concatenation buffers; it is zero with MTP off and never scales with context.
 - **A vision encode is billed before it runs** (`towerFitFault`, `server.visionEncodeBill`): the largest block's tower
   scratch (`qwen_vision.encodeScratchBytes`, fitted >= 25% over the measured peak) plus every block's float32 pixels
   and three bf16 copies of its soft-token rows (group outputs, video concatenation, request concatenation); past what

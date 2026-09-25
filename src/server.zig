@@ -5,6 +5,7 @@ const kv_quant_mod = @import("kv_quant.zig");
 const tokenizer_mod = @import("tokenizer.zig");
 const generate_mod = @import("generate.zig");
 const mtp_mod = @import("mtp.zig");
+const mimo_mtp = @import("mimo_mtp.zig");
 const mtp_acceptance_mod = @import("mtp_acceptance.zig");
 const drafter_mod = @import("drafter.zig");
 const chat_mod = @import("chat.zig");
@@ -2895,6 +2896,7 @@ pub fn prefillTransientReserveAtKv(
         prefillStreamBytesPerToken(config),
         prefillDequantWeightBytes(config),
         .{
+            .state_bytes = if (mtpHeadDefaultOn(config)) mimo_mtp.State.billedBytes(config) else 0,
             .qsa_ring_bytes = slotRingBytes(config, kv_bits),
             .dequant_scratch_bytes = kvDequantScratchBytes(config, seq, @min(chunk, seq)),
         },
@@ -5138,7 +5140,8 @@ pub fn prefillRequestTerms(config: *const model_mod.ModelConfig, seq: u64, max_t
     const credited = warm.creditedRows(reserved);
     return .{
         .reserved_kv_bytes = (reserved -| seq) * kv_per_tok,
-        .state_bytes = reserved * (statePerTokenBilled(config) +| head_state_per_tok),
+        .state_bytes = reserved * (statePerTokenBilled(config) +| head_state_per_tok) +|
+            (if (mtp_on) mimo_mtp.State.billedBytes(config) else 0),
         // The warm span, not the prompt; read regardless of `will_donate` (a shared restore skips the same rows).
         .checkpoint_bytes = retainedSsmCheckpointBytes(config, seq, warm.matched_tokens, chunk),
         .shared_resident_bytes = credited *| kv_per_tok,
@@ -23646,4 +23649,37 @@ test "model quantization label K4 loaded and unloaded" {
 test "model quantization label affine unchanged" {
     try testQuantizationModelRow(null, "8-bit", true);
     try testQuantizationModelRow(null, "8-bit", false);
+}
+
+test "MiMo MTP state bill is constant and follows retained storage" {
+    const t = std.testing;
+    const saved = server_config.default_force_mtp;
+    defer server_config.default_force_mtp = saved;
+    server_config.default_force_mtp = false;
+    var cfg = mimoV2BillConfig();
+    cfg.hidden_size = 4096;
+    cfg.num_key_value_heads = 8;
+    cfg.mtp_override = false;
+    const kv_row: u64 = 8 * (192 + 128) * 2;
+    const kv: u64 = 3 * (2 * 128 - 1) * kv_row;
+    const hiddens: u64 = 256 * 4096 * 2;
+    const catchup: u64 = 3 * 128 * 4096 * 2;
+    const expected: u64 = 2 * (kv + hiddens) + catchup;
+    for ([_]u64{ 1024, 131072 }) |seq| {
+        const off = prefillRequestTerms(&cfg, seq, 2048, 8, 512, .{});
+        const on = prefillRequestTerms(&cfg, seq, 2048, 8, 512, .{ .mtp_on = true });
+        try t.expectEqual(@as(u64, 0), off.state_bytes);
+        try t.expectEqual(expected, on.state_bytes);
+        try t.expectEqual(@as(u64, 0), on.mtp_head_kv_bytes);
+    }
+    const off_reserve = prefillTransientReserve(&cfg, 8, 512);
+    const off_per_token = sessionBytesPerToken(&cfg, 8);
+    cfg.mtp_override = true;
+    try t.expectEqual(expected * 5 / 4, prefillTransientReserve(&cfg, 8, 512) - off_reserve);
+    try t.expectEqual(off_per_token, sessionBytesPerToken(&cfg, 8));
+    cfg.hidden_size = 2048;
+    cfg.num_key_value_heads = 4;
+    cfg.sliding_window = 64;
+    const smaller: u64 = 2 * (3 * (2 * 64 - 1) * 4 * (192 + 128) * 2 + 256 * 2048 * 2) + 3 * 64 * 2048 * 2;
+    try t.expectEqual(smaller, prefillRequestTerms(&cfg, 1024, 2048, 4, 512, .{}).state_bytes);
 }
