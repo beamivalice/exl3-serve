@@ -2068,25 +2068,7 @@ pub const HotPrefixCache = struct {
             return .{ .ok = eff_tokens.len };
         }
 
-        while (self.entries.items.len >= self.max_entries) {
-            if (!self.evictOneLruProgress("count cap", cache_key)) break;
-        }
-        if (self.max_kv_bytes > 0) {
-            while (self.current_kv_bytes + new_bytes > self.max_kv_bytes and self.entries.items.len > 0) {
-                if (!self.evictOneLruProgress("byte budget", cache_key)) break;
-            }
-        }
-
-        if (eff_cps) |cps| {
-            if (self.takeCpsIfQsaBank(cps)) |kept| {
-                eff_cps = kept;
-            } else {
-                new_bytes -= new_ssm_bytes;
-                new_ssm_bytes = 0;
-                eff_cps = null;
-            }
-        }
-        self.entries.append(self.allocator, .{
+        const incoming: Entry = .{
             .tokens = tokens_owned,
             .has_tools = has_tools,
             .vision_key = eff_vision_key,
@@ -2103,25 +2085,46 @@ pub const HotPrefixCache = struct {
             .mtp = new_mtp,
             .mtp_bytes = new_mtp_bytes,
             .ring_cp = new_ring,
-        }) catch |err| {
-            self.allocator.free(tokens_owned);
-            var snap = new_snap;
-            snap.deinit();
-            if (new_dflash) |*d| d.deinit();
-            if (new_mtp) |*m5| m5.deinit();
-            if (eff_cps) |cps| {
-                for (cps) |*cp| cp.deinit(self.allocator);
-                self.allocator.free(cps);
-            }
-            return err;
         };
         new_ring = null;
-        self.current_kv_bytes += new_bytes;
+        if (!try self.retainNewEntry(incoming)) return .declined;
         // The trim prices a prefix against the checkpoints that survive a shed, so the shed runs here too.
         if (self.max_kv_bytes > 0) self.shedCheckpointsToFit();
         if (self.disk != null) self.disk_dirty = true;
         self.logResident();
         return .{ .ok = eff_tokens.len };
+    }
+
+    fn retainNewEntry(self: *HotPrefixCache, entry: Entry) !bool {
+        var incoming = entry;
+        errdefer freeEntryOwnedState(self.allocator, &incoming);
+        while (self.entries.items.len >= self.max_entries) {
+            if (!self.evictOneLruProgress("count cap", incoming.cache_key)) break;
+        }
+        if (self.max_kv_bytes > 0) {
+            while (self.current_kv_bytes + incoming.kv_bytes > self.max_kv_bytes and self.entries.items.len > 0) {
+                if (!self.evictOneLruProgress("byte budget", incoming.cache_key)) break;
+            }
+        }
+        const count_full = self.entries.items.len >= self.max_entries;
+        const bytes_full = self.max_kv_bytes > 0 and incoming.kv_bytes > self.max_kv_bytes -| self.current_kv_bytes;
+        if (count_full or bytes_full) {
+            freeEntryOwnedState(self.allocator, &incoming);
+            log.info("  [hot-cache] skipped incoming snapshot: {s} full; checked-out entries prevent eviction\n", .{if (count_full) @as([]const u8, "count cap") else "byte budget"});
+            return false;
+        }
+        if (incoming.ssm_checkpoints) |cps| {
+            if (self.takeCpsIfQsaBank(cps)) |kept| {
+                incoming.ssm_checkpoints = kept;
+            } else {
+                incoming.kv_bytes -= incoming.ssm_bytes;
+                incoming.ssm_bytes = 0;
+                incoming.ssm_checkpoints = null;
+            }
+        }
+        try self.entries.append(self.allocator, incoming);
+        self.current_kv_bytes += incoming.kv_bytes;
+        return true;
     }
 
     /// Offer a budget-declined candidate to the SSD tier before discarding
@@ -9202,4 +9205,32 @@ test "HotPrefixCache: checkpoint clone allocation failure releases owned layers"
 
     try testing.expectError(error.OutOfMemory, HotPrefixCache.cloneCheckpointsUpTo(accounting.allocator(), &checkpoints, 512, null));
     try testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+}
+
+test "hot cache declines when checked out entries fill count cap" {
+    try testCheckedOutRetentionCap(1, 0);
+}
+
+test "hot cache declines when checked out entries fill byte cap" {
+    try testCheckedOutRetentionCap(8, 4096);
+}
+
+fn testCheckedOutRetentionCap(max_entries: u32, max_bytes: u64) !void {
+    var hc = HotPrefixCache.initWithMem(testing.allocator, max_entries, max_bytes);
+    defer hc.deinit();
+    try pcAppendCheckedOut(&hc, &.{ 1, 2 }, max_bytes, 1);
+    const retained = try hc.retainNewEntry(.{
+        .tokens = try testing.allocator.dupe(u32, &.{ 90, 91, 92, 93 }),
+        .has_tools = false,
+        .snapshot = .{ .entries = try testing.allocator.alloc(transformer_mod.KVCacheEntry, 0), .step = 4, .allocator = testing.allocator, .config = kv_quant.KVQuantConfig.dense },
+        .last_used = 2,
+        .quant_config = kv_quant.KVQuantConfig.dense,
+        .kv_bytes = 128,
+        .ssm_checkpoints = try testing.allocator.alloc(SSMCheckpoint, 0),
+        .ssm_bytes = 0,
+    });
+    try testing.expect(!retained);
+    try testing.expectEqual(@as(usize, 1), hc.entries.items.len);
+    try testing.expectEqual(max_bytes, hc.current_kv_bytes);
+    try testing.expect(hc.entries.items[0].checked_out_by != null);
 }

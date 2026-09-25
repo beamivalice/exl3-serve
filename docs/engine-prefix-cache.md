@@ -53,6 +53,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
 
 ## Budget
 
+- A commit declines and frees its incoming snapshot when checked-out residents prevent satisfying either the entry-count or byte cap; the request continues and one `[hot-cache]` line names the limiting cap.
+
 - **The hot-cache budget is CLAMPED at load** to what the weights leave under the GPU ceiling and is a HARD cap; it
   FOLLOWS residency (`reviseHotCacheBudgets` after every load/unload, repeated for 10 s because the OS returns pages
   lazily).
@@ -60,6 +62,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
   `lruIndexExcluding`).
 
 ## SSD-first
+
+- Disk fingerprints include the model path, config size/mtime and overrides, plus sorted indexed weight-shard (or unindexed safetensors) names and size/mtime and `ngram_table.bin` size/mtime; payloads are statted through symlinks, never content-hashed.
 
 - `prefix_cache.ssdFirstActive` = capable arch AND a disk tier, mirrored onto `HotPrefixCache.ssd_first` +
   `DiskTier.ssd_first`: RAM floors at ONE session, `--prefix-cache-mem` = the IDLE allowance.
