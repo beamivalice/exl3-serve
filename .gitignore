@@ -64,3 +64,6 @@ tests/soak_log.csv
 
 # bf16 expert-io SSD microbench output
 ssd-fill-bench/
+
+# Local measurement dumps
+measurements/
