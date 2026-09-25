@@ -1507,11 +1507,26 @@ fn thinkCloseIsToolCallPayload(text: []const u8, pos: usize) bool {
         }
     }
     const o = open orelse return false;
-    if (std.mem.indexOfPos(u8, text, o, "</tool_call")) |c| {
-        if (c < pos) return false; // that call already closed — a real block close
-        return true;
+    var from = o;
+    while (std.mem.indexOfPos(u8, text, from, "</tool_call")) |c| {
+        if (c >= pos) return true;
+        // A close spelled inside the argument is not the call's own end.
+        if (valueStillOpen(text, o, c, "<arg_value", "</arg_value>") or
+            valueStillOpen(text, o, c, "<parameter", "</parameter>"))
+        {
+            from = c + "</tool_call".len;
+            continue;
+        }
+        return false; // that call already closed — a real block close
     }
     return false; // never closes — treat as leaked markup, not payload
+}
+
+fn valueStillOpen(text: []const u8, from: usize, at: usize, open_tag: []const u8, close_tag: []const u8) bool {
+    const rel = std.mem.lastIndexOf(u8, text[from..at], open_tag) orelse return false;
+    const open_at = from + rel;
+    if (std.mem.indexOfPos(u8, text, open_at + open_tag.len, close_tag)) |end| return end > at;
+    return true;
 }
 
 /// Length of the trailing bytes of `buf` that could still GROW into a think
@@ -6997,6 +7012,13 @@ test "split content: think tags never reach content" {
 
 test "split content: empty for open think tag (truncated thought is never content)" {
     try testing.expectEqualStrings("", splitThinkBlock("<think>still thinking...", true, false).content);
+}
+
+test "indexOfThinkCloseTag: a literal tool close inside the argument does not end the call" {
+    const literal_close = "<tool_call>write<arg_value>see </tool_call> and </think> here</arg_value></tool_call>";
+    try testing.expect(indexOfThinkCloseTag(literal_close, 0) == null);
+    const hermes = "<tool_call><function=write><parameter=content>see </tool_call> and </think> here</parameter></function></tool_call>";
+    try testing.expect(indexOfThinkCloseTag(hermes, 0) == null);
 }
 
 test "indexOfThinkCloseTag: a close inside an OPEN tool call is argument payload, not a block close" {
