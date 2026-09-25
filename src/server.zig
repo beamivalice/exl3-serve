@@ -8666,6 +8666,20 @@ fn deliveredReasoning(capped: ?[]const u8, raw: ?[]const u8) ?[]const u8 {
     return capped orelse raw;
 }
 
+const BudgetedReasoning = struct {
+    text: []const u8,
+    owned: bool,
+};
+
+fn reasoningWithinBudget(allocator: std.mem.Allocator, tok: *const Tokenizer, reasoning: []const u8, budget: i32) !BudgetedReasoning {
+    if (budget < 0) return .{ .text = reasoning, .owned = false };
+    const ids = try tok.encode(allocator, reasoning);
+    defer allocator.free(ids);
+    const n: usize = @intCast(budget);
+    if (ids.len <= n) return .{ .text = reasoning, .owned = false };
+    return .{ .text = try tok.decode(allocator, ids[0..n], false), .owned = true };
+}
+
 /// Run a non-streaming generation through the scheduler. Returns the same
 /// shape as `generate.generate` so the calling handler's response builder
 /// is unchanged.
@@ -10363,21 +10377,9 @@ fn handleStreamingGeneration(
                 // `budget_exhausted` means the cap was already streamed in full.
                 if (chat_mod.unstreamedReasoning(if (budget_exhausted) "" else think_split.reasoning_content orelse "", reasoning_streamed)) |reasoning| {
                     // Apply reasoning budget truncation if set
-                    const final_reasoning = if (reasoning_budget >= 0) blk: {
-                        const r_ids = try tok.encode(allocator, reasoning);
-                        defer allocator.free(r_ids);
-                        const budget_usize: usize = @intCast(reasoning_budget);
-                        if (r_ids.len > budget_usize) {
-                            const truncated = try tok.decode(allocator, r_ids[0..budget_usize], false);
-                            defer allocator.free(truncated);
-                            try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null, .reasoning_content = truncated }, null, null, null, .{});
-                            break :blk @as(?[]const u8, null);
-                        }
-                        break :blk @as(?[]const u8, reasoning);
-                    } else @as(?[]const u8, reasoning);
-                    if (final_reasoning) |r| {
-                        try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null, .reasoning_content = r }, null, null, null, .{});
-                    }
+                    const capped = try reasoningWithinBudget(allocator, tok, reasoning, reasoning_budget);
+                    defer if (capped.owned) allocator.free(capped.text);
+                    try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null, .reasoning_content = capped.text }, null, null, null, .{});
                 }
             }
 
@@ -10416,21 +10418,9 @@ fn handleStreamingGeneration(
                 // `budget_exhausted` means the cap was already streamed in full.
                 if (chat_mod.unstreamedReasoning(if (budget_exhausted) "" else think_split.reasoning_content orelse "", reasoning_streamed)) |reasoning| {
                     // Apply reasoning budget truncation if set
-                    const final_reasoning = if (reasoning_budget >= 0) blk: {
-                        const r_ids = try tok.encode(allocator, reasoning);
-                        defer allocator.free(r_ids);
-                        const budget_usize: usize = @intCast(reasoning_budget);
-                        if (r_ids.len > budget_usize) {
-                            const truncated = try tok.decode(allocator, r_ids[0..budget_usize], false);
-                            defer allocator.free(truncated);
-                            try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null, .reasoning_content = truncated }, null, null, null, .{});
-                            break :blk @as(?[]const u8, null);
-                        }
-                        break :blk @as(?[]const u8, reasoning);
-                    } else @as(?[]const u8, reasoning);
-                    if (final_reasoning) |r| {
-                        try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null, .reasoning_content = r }, null, null, null, .{});
-                    }
+                    const capped = try reasoningWithinBudget(allocator, tok, reasoning, reasoning_budget);
+                    defer if (capped.owned) allocator.free(capped.text);
+                    try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null, .reasoning_content = capped.text }, null, null, null, .{});
                 }
                 if (think_split.content.len > 0) {
                     // Locate against the RAW concatenation: it is always a true
@@ -15087,12 +15077,14 @@ fn handleAnthropicStreaming(
                         // ships regardless of the request's thinking flag.
                         const split = chat_mod.splitThinkBlock(buf, true, opens_think);
                         if (split.reasoning_content) |rc| {
+                            const capped = try reasoningWithinBudget(allocator, tok, rc, reasoning_budget);
+                            defer if (capped.owned) allocator.free(capped.text);
                             const sd = try std.fmt.allocPrint(allocator,
                                 \\{{"type":"content_block_start","index":{d},"content_block":{{"type":"thinking","thinking":"","signature":""}}}}
                             , .{block_index});
                             defer allocator.free(sd);
                             try sendAnthropicEvent(stream, "content_block_start", sd);
-                            try emitAnthropicThinkingDelta(allocator, stream, block_index, rc);
+                            try emitAnthropicThinkingDelta(allocator, stream, block_index, capped.text);
                             try closeAnthropicThinkingBlock(allocator, stream, block_index);
                             block_index += 1;
                         }
@@ -15495,12 +15487,14 @@ fn handleAnthropicStreaming(
             {
                 const think_split = chat_mod.splitThinkBlock(gen_text, true, opens_think and !think_closed);
                 if (think_split.reasoning_content) |reasoning| {
+                    const capped = try reasoningWithinBudget(allocator, tok, reasoning, reasoning_budget);
+                    defer if (capped.owned) allocator.free(capped.text);
                     const sd = try std.fmt.allocPrint(allocator,
                         \\{{"type":"content_block_start","index":{d},"content_block":{{"type":"thinking","thinking":"","signature":""}}}}
                     , .{block_index});
                     defer allocator.free(sd);
                     try sendAnthropicEvent(stream, "content_block_start", sd);
-                    try emitAnthropicThinkingDelta(allocator, stream, block_index, reasoning);
+                    try emitAnthropicThinkingDelta(allocator, stream, block_index, capped.text);
                     try closeAnthropicThinkingBlock(allocator, stream, block_index);
                     block_index += 1;
                 }
@@ -15550,12 +15544,14 @@ fn handleAnthropicStreaming(
                 const flush_text: []const u8 = flush_norm orelse full_text.items;
                 const think_split = chat_mod.splitThinkBlock(flush_text, true, opens_think and !think_closed);
                 if (think_split.reasoning_content) |reasoning| {
+                    const capped = try reasoningWithinBudget(allocator, tok, reasoning, reasoning_budget);
+                    defer if (capped.owned) allocator.free(capped.text);
                     const sd = try std.fmt.allocPrint(allocator,
                         \\{{"type":"content_block_start","index":{d},"content_block":{{"type":"thinking","thinking":"","signature":""}}}}
                     , .{block_index});
                     defer allocator.free(sd);
                     try sendAnthropicEvent(stream, "content_block_start", sd);
-                    try emitAnthropicThinkingDelta(allocator, stream, block_index, reasoning);
+                    try emitAnthropicThinkingDelta(allocator, stream, block_index, capped.text);
                     try closeAnthropicThinkingBlock(allocator, stream, block_index);
                     block_index += 1;
                 }
@@ -21134,6 +21130,30 @@ test "a tool-call reply delivers the budget-capped thought" {
     try std.testing.expectEqualStrings("short", deliveredReasoning("short", "short and the rest the budget withholds").?);
     try std.testing.expectEqualStrings("full", deliveredReasoning(null, "full").?);
     try std.testing.expect(deliveredReasoning(null, null) == null);
+}
+
+test "reasoningWithinBudget cuts a thought at the budget and keeps a shorter one whole" {
+    const a = std.testing.allocator;
+    var tok = Tokenizer.initEmptyForTests(a, .byte_level_bpe);
+    defer tok.vocab.deinit();
+    defer tok.id_to_token.deinit();
+    defer tok.merge_ranks.deinit();
+    defer tok.special_tokens.deinit();
+    defer tok.unicode_to_byte.deinit();
+    try tok.special_tokens.put("aa", 1);
+    try tok.special_tokens.put("bb", 2);
+    try tok.special_tokens.put("cc", 3);
+    try tok.id_to_token.put(1, "aa");
+    try tok.id_to_token.put(2, "bb");
+    try tok.id_to_token.put(3, "cc");
+    const thought = "aabbcc";
+    const under = try reasoningWithinBudget(a, &tok, thought, 3);
+    defer if (under.owned) a.free(under.text);
+    try std.testing.expect(!under.owned);
+    try std.testing.expectEqualStrings(thought, under.text);
+    const over = try reasoningWithinBudget(a, &tok, thought, 2);
+    defer if (over.owned) a.free(over.text);
+    try std.testing.expectEqualStrings("aabb", over.text);
 }
 
 test "formatChatUsage: prompt_tokens_details.cached_tokens always present (llmprobe chat caching)" {
