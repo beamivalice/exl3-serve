@@ -87,7 +87,7 @@ fn printUsage(io: std.Io) void {
         \\  --serve             Start HTTP server mode
         \\  --host <ip>         Bind address (default: 127.0.0.1 — this Mac only;
         \\                      0.0.0.0 opens it to the local network)
-        \\  --port <n>          Bind port (default: 11234)
+        \\  --port <n>          Bind port (default: 12345)
         \\  --ctx-size <n>      Maximum context length (default: model max)
         \\  --config-overrides <json>   JSON object deep-merged into EVERY
         \\                      model's config.json this process loads or

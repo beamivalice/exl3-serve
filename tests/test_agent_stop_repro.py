@@ -26,7 +26,7 @@ That's the exact shape from the user's report: hundreds of tokens generated
 but only ~120 chars of visible content and no tool to execute.
 
 Usage:
-    python3 tests/test_agent_stop_repro.py [--port 11234] [--max-tokens 4096]
+    python3 tests/test_agent_stop_repro.py [--port 12345] [--max-tokens 4096]
                                            [--max-turns 15] [--task ...]
                                            [--runs 1] [--out repro.json]
 
@@ -493,7 +493,7 @@ def run_once(args, run_idx):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "11234")))
+    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "12345")))
     p.add_argument("--max-tokens", type=int, default=int(os.environ.get("MAX_TOKENS", "4096")))
     p.add_argument("--max-turns", type=int, default=20)
     p.add_argument("--runs", type=int, default=1, help="repeat the full run N times")

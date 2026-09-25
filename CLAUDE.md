@@ -1,8 +1,8 @@
 # Sushi — project context for AI
 
 A native Zig inference engine for Apple Silicon serving exactly two models: Qwen3.8-Flash-Next (`qwen4_exp`, EXL3
-routed experts, resident or SSD-streamed) and MiMo-V2.6-Flash (`mimo_v2`, experimental, text-only, MCG EXL3 or
-streamed MXFP4). OpenAI/Anthropic-compatible HTTP, no Python at serve time. Fork of ddalcu's mlx-serve.
+routed experts resident; the bf16 checkpoint can SSD-stream) and MiMo-V2.6-Flash (`mimo_v2`, experimental, text-only,
+MCG EXL3 or streamed MXFP4; public from v1.1). OpenAI/Anthropic-compatible HTTP, no Python at serve time. Fork of ddalcu's mlx-serve.
 
 - **sushi** is this engine's new name (runtime, to be opened to the public): a scripted rename changes the binary
   name, the env prefix and the home dir everywhere; until it lands, write today's names. Treat every change as future

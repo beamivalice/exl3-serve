@@ -305,8 +305,8 @@ test "setLevel changes current level" {
 
 test "defaultLogPath is per-port under ~/.sushi/logs" {
     var buf: [256]u8 = undefined;
-    const p = try defaultLogPath(&buf, "/Users/x", 11234);
-    try testing.expectEqualStrings("/Users/x/.sushi/logs/sushi-11234.log", p);
+    const p = try defaultLogPath(&buf, "/Users/x", 12345);
+    try testing.expectEqualStrings("/Users/x/.sushi/logs/sushi-12345.log", p);
     // Per-port: the app's server and a test server never share a file.
     const q = try defaultLogPath(&buf, "/Users/x", 8098);
     try testing.expectEqualStrings("/Users/x/.sushi/logs/sushi-8098.log", q);

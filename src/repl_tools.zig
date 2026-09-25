@@ -1400,7 +1400,7 @@ test "repl tools: web tools refuse local, private and non-http targets before co
         "https://printer.local/",
         "http://10.0.0.1/",
         "http://169.254.169.254/latest/meta-data/",
-        "http://[::1]:11234/v1/models",
+        "http://[::1]:12345/v1/models",
         "http://[fe80::1]/",
         "http://100.100.100.100/",
         "http://user:pw@example.com/",

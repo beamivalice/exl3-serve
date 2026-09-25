@@ -49,9 +49,9 @@ class Exl3LauncherTests(unittest.TestCase):
                         args = result.stdout.decode().rstrip("\0").split("\0")
                         self.assertEqual(args, [
                             "serve",
-                            "--model", str(models / f"Qwen3.8-Flash-Next-EXL3-K{k}"),
+                            "--model", str(models / f"Qwen3.8-Flash-Next-Sushi-{k}bpw"),
                             "--host", "127.0.0.1",
-                            "--port", "11234",
+                            "--port", "12345",
                             "--ctx-size", "1048576",
                             "--prefill-chunk", "8192",
                             "--max-concurrent", "1",

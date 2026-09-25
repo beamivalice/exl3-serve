@@ -5,53 +5,67 @@ description: sushi pre-release validation checklist, SemVer versioning, release 
 
 ## Pre-release validation — ALWAYS run this, same process every time
 
-Timings measured 2026-07-16 on the M4 Max 128 GB, AFTER the `stop_all_engines` port-wait fix (before it, everything below was ~2.2× slower — see the gotcha in Benchmarking).
+On the Apple M5 Max 128 GB (the only machine that records numbers), on the FINAL release tree, with a fresh
+`zig build -Doptimize=ReleaseFast`. Every step that loads a model takes the GPU lock and follows the thermal protocol
+in CLAUDE.md (Team process); nothing else runs during step 3.
 
-| # | Step | Command | Time |
+| # | Step | Command | Pass |
 |---|---|---|---|
-| 1 | Hermetic suite | `zig build test` (**must** be 6/6 steps, 0 fail) | ~1 min |
-| 2 | ReleaseFast binary | `zig build -Doptimize=ReleaseFast` → `du -h zig-out/bin/sushi` ≈ **7 MB** (Debug ≈ 2× = fake regression) | ~10 s |
-| 3 | **Perf gate** (did WE regress?) | `./tests/bench.sh` (sushi only, llmprobe) → diff vs the previous column in `benchmarks.md` → append this release's column | ~15 min |
-| 4 | Tool-call correctness | `zig build test -Dtest-filter="format corpus"` + `-Dtest-filter="tool traffic"`; live: `./tests/test_format_matrix.sh` | ~3 min |
-| 5 | API conformance | `npx llmprobe@latest http://127.0.0.1:<port>/v1 --quick` → expect **100%** engine conformance | ~10 s/model |
-| 6 | Regression scripts | `integration_test.sh`, `test_anthropic_api.sh`, `test_stream_keepalive.sh`, `test_disconnect_cancel.sh`, `test_pld_equivalence.sh`, `test_mtp_equivalence.sh` | ~15 min |
-| 7 | Soak (bigger releases) | `SOAK_DURATION_HOURS=1 ./tests/test_soak_24h.sh` — RSS drift < 10% | 1 h |
-| 8 | **Cross-engine check** (only before a public claim) | start each engine yourself, `./tests/bench.sh --url <host:port> -m <id> --full` per engine; record in `~/.sushi/runs/bench-<tag>/`, name the engine in every win — `benchmarks.md` carries sushi only | ~90 min |
+| 1 | Hermetic suite | `zig build test -Doptimize=ReleaseFast` | 0 fail |
+| 2 | Binary | `zig build -Doptimize=ReleaseFast`; `sushi --version` | names `build.zig.zon`'s version; ≈ 10 MB (Debug is 2–4× slower = fake regression) |
+| 3 | **Perf gate** | `./tests/bench.sh --tag v<ver>` (Sushi-4bpw only) | within noise of the previous column in `benchmarks.md`, mode suffix present; append this release's column |
+| 4 | **KLD gate** | `sushi kld compare` 16x512 to first EOS for every published pack | within ~1% of its row in `docs/quality-kld.md` (the noise floor) |
+| 5 | Tool-call correctness | `zig build test -Dtest-filter="format corpus"`, `-Dtest-filter="tool traffic"`; live `./tests/test_format_matrix.sh` | all pass |
+| 6 | API conformance | `npx llmprobe@latest http://127.0.0.1:<port>/v1 --quick` | 100% engine conformance |
+| 7 | Live regressions | `test_qwen4_exp.sh`, `test_mtp_equivalence.sh`, `test_prefix_cache_*.sh`, `test_smoke_matrix.sh`, `test_anthropic_api.sh`, `test_stream_keepalive.sh`, `test_disconnect_cancel.sh` | all pass |
+| 8 | Soak (bigger releases) | `SOAK_DURATION_HOURS=1 ./tests/test_soak_24h.sh` | RSS drift < 10% |
+| 9 | CI | `gh workflow run ci.yml --ref main` on the release commit | green (the macOS 26.2 build gate) |
+| 10 | Packs | each HF pack repo holds the shards, `ngram_table.bin` and its model card | card numbers match `docs/quality-kld.md` |
+| 11 | Cross-engine (only before a public claim) | start each engine yourself, `./tests/bench.sh --url <host:port> -m <id> --full` | recorded in `~/.sushi/runs/bench-<tag>/`, engine named beside every win |
 
 **Rules:**
-- **Steps 3 and 8 are different questions.** 3 = "did our code regress" — sushi only, the ONLY one needed every release. 8 = the public comparison; LM Studio/oMLX/MTPLX numbers cannot move when only OUR code changes, so re-run 8 only when an engine version bumps.
-- **Diff step 3 against llmprobe columns only.** Columns through 26.7.12 are the pre-2026-08 hand-rolled bench, a DIFFERENT methodology — frozen history, never a diff target. See /bench.
-- **`--only <substr>`** runs a single model row for tight dev loops.
-- **Depth**: default `--bench-only` is one run per ladder rung to 16k. `--full` takes median-of-3 per rung and climbs to 32k/64k — that's the release artifact depth (step 8). For a regression CLAIM on a spec-decode cell, sample across runs and boot orders regardless of depth: "reproducible ≠ not variance".
-- **Never quote a win without naming the engine it is over** — vs LM-GGUF a row reads +33%; vs oMLX it is +1.6%.
-- **`benchmarks.md` gets one new COLUMN per release, from the rows step 3 prints**. Obey the file's own header rules: results into the tables only, no text; **Apple M4 Max 128 GB only** — skip the update entirely when releasing from any other machine (the M4 mini), a mixed column poisons the history.
+- **Steps 3 and 11 are different questions.** 3 = "did our code regress", sushi only, every release. 11 = the public
+  comparison; re-run it only when another engine's version bumps.
+- **The perf gate is Sushi-4bpw alone** (`tests/bench.sh` TARGETS). A cell that lost its mode suffix means MTP stopped
+  engaging: chase it before shipping. For a regression claim on a spec cell, sample across runs and boot orders.
+- **`--full`** takes median-of-3 per rung and climbs to 32k/64k; the default is one run per rung to 16k.
+- **Never quote a win without naming the engine it is over.**
+- **`benchmarks.md` gets one new column per release**, from the rows step 3 prints. Obey its header rules: tables
+  only, M5 Max only.
 
-## Release benchmark artifacts
+## Release artifacts
 
-The release record is `benchmarks.md` plus the saved llmprobe reports under `~/.sushi/runs/bench-<tag>/`; no CSVs or charts land in `docs/`. The working baselines agents inherit between releases live in `docs/perf-baselines.md` (a release column is also added there as a cited row). Run the gate on the FINAL release tree (a number taken mid-cycle is stale the moment another perf round lands):
-
-```
-./tests/bench.sh --tag <ver>
-```
-
-Rules:
-- **Paste the printed rows into the `Decode tok/s by release` table**, one new column, mode suffix included. A cell that lost its mode suffix is the signal that speculation stopped engaging — chase it before shipping.
-- **`--full`** takes median-of-3 per rung and climbs to 32k/64k; the default is one run per rung to 16k. For a regression CLAIM on a spec cell, sample across runs and boot orders regardless of depth.
-- **The one chart left is `docs/perf-vs-engines.png`**, frozen at the release it was rendered for and named as such in the README caption. There is no longer a script that regenerates it, and `benchmarks.md` no longer carries a cross-engine table (dropped 26.9.2).
+The release record is `benchmarks.md` plus the llmprobe reports (JSON and HTML) under `~/.sushi/runs/bench-<tag>/`;
+no CSVs or charts land in `docs/`. The working baselines agents inherit between releases live in
+`docs/perf-baselines.md` (the release column is also added there as a cited row). A number taken mid-cycle is stale the
+moment another perf round lands: run the gate on the final tree.
 
 ## Versioning & Releases
 
-SemVer `MAJOR.MINOR.PATCH`, tagged `v1.0.0`. MAJOR breaks a public contract (HTTP API, flags, the pack format); MINOR adds a model, a feature or a flag; PATCH fixes without adding.
+SemVer `MAJOR.MINOR.PATCH`, tagged `v1.0.0`. MAJOR breaks a public contract (HTTP API, flags, the pack format); MINOR
+adds a model, a feature or a flag; PATCH fixes without adding.
 
-**The version source is `build.zig.zon`'s `.version`**: a plain `zig build` stamps it into `sushi --version`, and `-Dversion` (CI) must be SemVer or the build stops. `release.sh` dispatches only when the FIRST `## ` heading of `CHANGELOG.md` names that same version and no GitHub release or tag carries it yet; the workflow's "Extract version" step sources `release.sh` and applies the same checks (a pushed tag must be `v<zon>` or `v<zon>-pre-release.<n>`). Nothing is computed from the date.
+**The version source is `build.zig.zon`'s `.version`**: a plain `zig build` stamps it into `sushi --version`, and
+`-Dversion` (CI) must be SemVer or the build stops. `release.sh` dispatches only when the FIRST `## ` heading of
+`CHANGELOG.md` names that same version and no GitHub release or tag carries it yet; the workflow's "Extract version"
+step sources `release.sh` and applies the same checks (a pushed tag must be `v<zon>` or `v<zon>-pre-release.<n>`).
+Nothing is computed from the date.
+
+**Signing**: there is no Apple Developer ID, so the release binary ships ad-hoc signed and not notarized. The
+workflow signs with a Developer ID and notarizes only when the `APPLE_*` repo secrets exist
+(`tests/test_release_workflow_gates.sh`).
 
 **Release**:
-1. Set `build.zig.zon`'s `.version` to the next version and rename the top `## Unreleased` entry to `## v<version> — Headline` (check `gh release list --limit 1` first — never reuse an existing tag)
+1. Set `build.zig.zon`'s `.version` to the next version and rename the top `## Unreleased` entry to
+   `## v<version> — Headline` (check `gh release list --limit 1` first — never reuse an existing tag)
 2. Dont commit or push
 
 ### CHANGELOG style
 
-**One entry per shipped release. No new entries for unshipped work — fold it into the next pending entry.** Always run `gh release list --limit 1` first; if the topmost CHANGELOG entry is newer than the latest GitHub release, that entry is unshipped and any new bullets get merged into it. Unshipped work lives under `## Unreleased`; the version heading is written in the release step.
+**One entry per shipped release. No new entries for unshipped work — fold it into the next pending entry.** Always run
+`gh release list --limit 1` first; if the topmost CHANGELOG entry is newer than the latest GitHub release, that entry is
+unshipped and any new bullets get merged into it. Unshipped work lives under `## Unreleased`; the version heading is
+written in the release step. A model that is not public yet (MiMo-V2.6-Flash until v1.1) stays out of the entry.
 
 Tone: high-level executive bullets, marketing-style. The audience is users/integrators, not contributors reading the diff.
 

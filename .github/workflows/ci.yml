@@ -91,4 +91,4 @@ jobs:
         run: bash tests/test_mlx_staged_nax.sh
 
       - name: Run Zig tests
-        run: zig build test --summary all
+        run: zig build test -Doptimize=ReleaseFast --summary all

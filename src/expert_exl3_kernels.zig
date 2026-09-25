@@ -3376,6 +3376,7 @@ test "exl3 512-row production-shape sorted gemm vs affine gather_qmm" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    if (mlx.maxRecommendedWorkingSet() < 16 << 30) return error.SkipZigTest; // production-shape banks: GBs a CI runner lacks
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -5296,6 +5297,7 @@ test "exl3 512-row E=512 topk=10 layer within 2x affine" {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    if (mlx.maxRecommendedWorkingSet() < 16 << 30) return error.SkipZigTest; // production-shape banks: GBs a CI runner lacks
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();

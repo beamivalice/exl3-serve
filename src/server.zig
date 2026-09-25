@@ -84,7 +84,7 @@ pub var g_api_key_strict: bool = false;
 pub var g_tool_autocorrect: bool = true;
 
 pub const default_host: []const u8 = "127.0.0.1";
-pub const default_port: u16 = 11234;
+pub const default_port: u16 = 12345;
 
 pub const BindConfig = struct {
     host: []const u8,
@@ -23141,10 +23141,10 @@ test "generated think tags require an unambiguous literal template opener" {
     try std.testing.expect(templateThinkOpener("assistant") == null);
 }
 
-test "resolveBind: no flags bind 127.0.0.1:11234" {
+test "resolveBind: no flags bind 127.0.0.1:12345" {
     const d = resolveBind(null, null);
     try std.testing.expectEqualStrings("127.0.0.1", d.host);
-    try std.testing.expectEqual(@as(u16, 11234), d.port);
+    try std.testing.expectEqual(@as(u16, 12345), d.port);
     const e = resolveBind("0.0.0.0", 23817);
     try std.testing.expectEqualStrings("0.0.0.0", e.host);
     try std.testing.expectEqual(@as(u16, 23817), e.port);
@@ -23153,27 +23153,27 @@ test "resolveBind: no flags bind 127.0.0.1:11234" {
     try std.testing.expectEqual(@as(u16, 23817), p.port);
     const h = resolveBind("192.168.7.9", null);
     try std.testing.expectEqualStrings("192.168.7.9", h.host);
-    try std.testing.expectEqual(@as(u16, 11234), h.port);
+    try std.testing.expectEqual(@as(u16, 12345), h.port);
 }
 
 test "startupRefusal: AddressInUse refuses naming the port" {
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("port 11234 is already in use", startupRefusal(error.AddressInUse, "127.0.0.1", 11234, &buf).?);
+    try std.testing.expectEqualStrings("port 12345 is already in use", startupRefusal(error.AddressInUse, "127.0.0.1", 12345, &buf).?);
     try std.testing.expectEqualStrings("port 23817 is already in use", startupRefusal(error.AddressInUse, "127.0.0.1", 23817, &buf).?);
     try std.testing.expect(startupRefusal(error.AccessDenied, "127.0.0.1", 23817, &buf) == null);
     try std.testing.expect(startupRefusal(error.SystemResources, "127.0.0.1", 23817, &buf) == null);
 }
 
 test "bindAddress: localhost is loopback; wildcards stay" {
-    const l = try bindAddress("localhost", 11234);
+    const l = try bindAddress("localhost", 12345);
     try std.testing.expect(std.mem.eql(u8, &l.ip4.bytes, &.{ 127, 0, 0, 1 }));
-    try std.testing.expectEqual(@as(u16, 11234), l.ip4.port);
+    try std.testing.expectEqual(@as(u16, 12345), l.ip4.port);
     const e = try bindAddress("127.0.0.1", 23817);
     try std.testing.expect(std.mem.eql(u8, &e.ip4.bytes, &.{ 127, 0, 0, 1 }));
     try std.testing.expectEqual(@as(u16, 23817), e.ip4.port);
-    const w = try bindAddress("0.0.0.0", 11234);
+    const w = try bindAddress("0.0.0.0", 12345);
     try std.testing.expect(std.mem.eql(u8, &w.ip4.bytes, &.{ 0, 0, 0, 0 }));
-    try std.testing.expectEqual(@as(u16, 11234), w.ip4.port);
+    try std.testing.expectEqual(@as(u16, 12345), w.ip4.port);
 }
 
 test "bindAddress: garbage is refused by name" {

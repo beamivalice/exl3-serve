@@ -5,13 +5,13 @@
 # medians AND the context ladder. The numbers go into benchmarks.md by hand —
 # there is no CSV, no chart pipeline and no engine matrix here any more.
 #
-#   ./tests/bench.sh                                # every model
-#   ./tests/bench.sh --only qwen38-flash-next       # one row
+#   ./tests/bench.sh                                # the perf gate (Sushi-4bpw)
+#   ./tests/bench.sh --only sushi-4bpw              # one row
 #   ./tests/bench.sh --url 127.0.0.1:1234 -m <id>   # a server someone else started
 #   ./tests/bench.sh --full                         # median of 3 per rung, to 64k
 #
-# Each cell is sushi at its FASTEST: speculation is forced on where the
-# checkpoint carries an MTP head (it is default-off on MoE targets). The mode
+# Each cell is sushi at its FASTEST: MTP is forced on where the checkpoint
+# carries a head, so a model-settings.json cannot turn it off. The mode
 # that actually engaged is printed beside the number, from the server's own
 # log — a mode that silently stops engaging shows up as a bare cell.
 #
@@ -59,18 +59,18 @@ mkdir -p "$OUT"
 # ── Model matrix: logical|path ──
 # A missing path skips the row silently — a bench you can't run on this box
 # isn't an error on the box that can.
-MD="$HOME/.sushi/models"
+MD="${SUSHI_MODELS_DIR:-$HOME/.sushi/models}"
 # ANE=1 adds --ane-prefill to every boot
 # (a named refusal on non-qwen3_5-dense models, so it is safe matrix-wide);
 # ane-on cells are their own column, never diffed against ane-off ones.
 TARGETS=(
-    "qwen38-flash-next|$MD/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
+    "sushi-4bpw|$MD/Qwen3.8-Flash-Next-Sushi-4bpw"
 )
 
 # Only ever called on the path that STARTED a server: --url may be pointed at
 # a local sushi someone else is using, and a bench must not kill it.
 stop_server() {
-    pkill -f "sushi --serve" 2>/dev/null
+    [[ -n "${pid:-}" ]] && kill "$pid" 2>/dev/null
     for _ in $(seq 1 30); do
         lsof -ti tcp:"$PORT" >/dev/null 2>&1 || return 0
         sleep 1
@@ -86,9 +86,8 @@ probe() { # logical host model_id
         || echo "  llmprobe failed for $1" >&2
 }
 
-# --mtp is forced wherever the checkpoint ships a head: it is default-OFF on
-# MoE targets, which is exactly where it pays most (35B-A3B reads 157 without
-# and 191 with). On a dense MTP checkpoint it restates the default.
+# --mtp restates the default wherever the checkpoint ships a head, so the
+# cell never depends on a model-settings.json.
 spec_flags() { # model_path
     local f=""
     if ls "$1"/*mtp*.safetensors >/dev/null 2>&1 || [ -d "$1/mtp" ] \

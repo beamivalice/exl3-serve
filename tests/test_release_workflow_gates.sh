@@ -78,6 +78,15 @@ check("prerelease" not in rel_with,
 check("pull_request" not in step_if("Notarize CLI"),
       "Notarize CLI not excluded on pull_request")
 
+# Without the Apple secrets the release ships ad-hoc signed: every Developer ID step is gated on the
+# secrets being present, and packaging falls back to an ad-hoc signature instead of failing.
+check("steps.signing.outputs.enabled" in step_if("Import signing certificate"),
+      "certificate import runs only when the Apple secrets exist")
+check("steps.signing.outputs.enabled" in step_if("Notarize CLI"),
+      "notarization runs only when the Apple secrets exist")
+check("SIGNING_IDENTITY=-" in str(steps.get("Package CLI binary", {}).get("run", "")),
+      "packaging ad-hoc signs when there is no Developer ID")
+
 sushi_builds = [s for s in job["steps"]
                     if s.get("name") == "Build sushi (Zig)"]
 check(len(sushi_builds) == 1, "exactly one sushi release-artifact build")

@@ -660,7 +660,7 @@ const LaunchArgs = struct {
     kind: AgentKind,
     model: ?[]const u8 = null,
     url: ?[]const u8 = null,
-    port: u16 = 11234,
+    port: u16 = 12345,
     print_only: bool = false,
     extras: []const []const u8 = &.{},
 };
@@ -709,7 +709,7 @@ fn printLaunchUsage() void {
         \\options:
         \\  --model <id>   Serve this model (default: the server's default model)
         \\  --url <base>   Server base URL (default: http://127.0.0.1:<port>)
-        \\  --port <n>     Server port for the default URL (default: 11234)
+        \\  --port <n>     Server port for the default URL (default: 12345)
         \\  --print        Write the config files and print the launch script
         \\                 instead of running the agent
         \\
@@ -842,10 +842,10 @@ test "omp models.yml: static per-model entries, no discovery, pi-compat vocabula
         .{ .id = "m1", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true },
         .{ .id = "m2", .budget = .{ .context = 262144, .output = 65536 }, .vision = true, .loaded = false },
     };
-    const yml = try ompModelsYml(t.allocator, "http://127.0.0.1:11234", &entries);
+    const yml = try ompModelsYml(t.allocator, "http://127.0.0.1:12345", &entries);
     defer t.allocator.free(yml);
     try t.expect(std.mem.indexOf(u8, yml, "discovery") == null);
-    try t.expect(std.mem.indexOf(u8, yml, "baseUrl: http://127.0.0.1:11234/v1") != null);
+    try t.expect(std.mem.indexOf(u8, yml, "baseUrl: http://127.0.0.1:12345/v1") != null);
     try t.expect(std.mem.indexOf(u8, yml, "contextWindow: 4096") != null);
     try t.expect(std.mem.indexOf(u8, yml, "contextWindow: 262144") != null);
     try t.expect(std.mem.indexOf(u8, yml, "input: [text, image]") != null);
@@ -853,11 +853,11 @@ test "omp models.yml: static per-model entries, no discovery, pi-compat vocabula
 }
 
 test "codex config: responses wire API, keyless, context at the root" {
-    const toml = try codexConfigToml(t.allocator, "http://127.0.0.1:11234", "m1", .{ .context = 90112, .output = 22528 });
+    const toml = try codexConfigToml(t.allocator, "http://127.0.0.1:12345", "m1", .{ .context = 90112, .output = 22528 });
     defer t.allocator.free(toml);
     try t.expect(std.mem.indexOf(u8, toml, "wire_api = \"responses\"") != null);
     try t.expect(std.mem.indexOf(u8, toml, "model_context_window = 90112") != null);
-    try t.expect(std.mem.indexOf(u8, toml, "base_url = \"http://127.0.0.1:11234/v1\"") != null);
+    try t.expect(std.mem.indexOf(u8, toml, "base_url = \"http://127.0.0.1:12345/v1\"") != null);
     try t.expect(std.mem.indexOf(u8, toml, "env_key") == null);
 }
 
@@ -866,9 +866,9 @@ test "pi models.json and opencode config parse as JSON and stay single-quote-fre
         .{ .id = "m1", .budget = .{ .context = 4096, .output = 1024 }, .vision = true, .loaded = true },
         .{ .id = "m2", .budget = .{ .context = 8192, .output = 2048 }, .vision = false, .loaded = false },
     };
-    const pi_json = try piModelsJson(t.allocator, "http://127.0.0.1:11234", &entries);
+    const pi_json = try piModelsJson(t.allocator, "http://127.0.0.1:12345", &entries);
     defer t.allocator.free(pi_json);
-    const oc_json = try opencodeJson(t.allocator, "http://127.0.0.1:11234", &entries);
+    const oc_json = try opencodeJson(t.allocator, "http://127.0.0.1:12345", &entries);
     defer t.allocator.free(oc_json);
     for ([_][]const u8{ pi_json, oc_json }) |json| {
         const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, json, .{});
@@ -902,7 +902,7 @@ test "pi models.json sends each thinking level as reasoning_effort the model acc
         .{ .id = "mimo", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true, .efforts = &mimo_efforts },
         .{ .id = "old", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true },
     };
-    const json = try piModelsJson(t.allocator, "http://127.0.0.1:11234", &entries);
+    const json = try piModelsJson(t.allocator, "http://127.0.0.1:12345", &entries);
     defer t.allocator.free(json);
     const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, json, .{});
     defer parsed.deinit();
@@ -928,7 +928,7 @@ test "omp models.yml: off rides enable_thinking, every other level an accepted r
         .{ .id = "mimo", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true, .efforts = &mimo_efforts },
         .{ .id = "old", .budget = .{ .context = 4096, .output = 1024 }, .vision = false, .loaded = true },
     };
-    const yml = try ompModelsYml(t.allocator, "http://127.0.0.1:11234", &entries);
+    const yml = try ompModelsYml(t.allocator, "http://127.0.0.1:12345", &entries);
     defer t.allocator.free(yml);
     try t.expect(std.mem.indexOf(u8, yml, "      qwenTemplateReasoningEffort: false\n      whenThinking:\n        thinkingFormat: openai\n") != null);
     const qwen_block = "      - id: \"qwen\"\n        name: \"qwen (sushi)\"\n        reasoning: true\n        thinking:\n" ++
@@ -994,7 +994,7 @@ test "opencode config: limit.output is the compaction reserve" {
     const entries = [_]Entry{
         .{ .id = "m1", .budget = budgetForContext(24576), .vision = false, .loaded = true },
     };
-    const v1 = try opencodeJson(t.allocator, "http://127.0.0.1:11234", &entries);
+    const v1 = try opencodeJson(t.allocator, "http://127.0.0.1:12345", &entries);
     defer t.allocator.free(v1);
     const p1 = try std.json.parseFromSlice(std.json.Value, t.allocator, v1, .{});
     defer p1.deinit();
@@ -1027,6 +1027,10 @@ test "launch args: passthrough after --, unknown agent named, url trailing slash
     try t.expectError(error.UnknownAgent, parseLaunchArgs(&.{"cursor"}));
     // The rebrand alias from issue #188's own wording.
     try t.expectEqual(AgentKind.codex, (try parseLaunchArgs(&.{"chatgpt"})).kind);
+}
+
+test "launch args: the default port is sushi's own, clear of mlx-serve's 11234" {
+    try t.expectEqual(@as(u16, 12345), (try parseLaunchArgs(&.{"opencode"})).port);
 }
 
 test "script assembly: extras are shell-quoted onto the invocation line" {

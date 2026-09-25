@@ -84,7 +84,15 @@ jobs:
             || sudo xcodebuild -downloadComponent MetalToolchain
           bash scripts/build-mlx.sh
 
+      # Without a Developer ID in the repo secrets the binary ships ad-hoc signed and not notarized.
+      - name: Detect signing identity
+        id: signing
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+        run: echo "enabled=$([ -n "$APPLE_CERTIFICATE_BASE64" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - name: Import signing certificate
+        if: steps.signing.outputs.enabled == 'true'
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -173,7 +181,7 @@ jobs:
         # PR commits already run the identical suite in ci.yml — don't pay for
         # it twice; releases keep the belt-and-braces run.
         if: github.event_name != 'pull_request'
-        run: zig build test --summary all
+        run: zig build test -Doptimize=ReleaseFast --summary all
 
       # ── CLI tarball (standalone binary + libs) ──
       - name: Package CLI binary
@@ -229,6 +237,7 @@ jobs:
               "$STAGING/lib/libwebp.dylib" 2>/dev/null || true
           fi
 
+          if [ "${{ steps.signing.outputs.enabled }}" != "true" ]; then SIGNING_IDENTITY=-; fi
           for lib in "$STAGING/lib/"*.dylib; do
             [ -f "$lib" ] && codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$lib"
           done
@@ -248,7 +257,7 @@ jobs:
           ditto -c -k --keepParent "$STAGING" "sushi-cli.zip"
 
       - name: Notarize CLI
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.signing.outputs.enabled == 'true' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}

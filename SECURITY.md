@@ -34,7 +34,7 @@ deployment or untrusted network exposure.
 - Loopback requests are trusted unless **`--api-key-strict`** is also given.
 
 ### Recommendations
-- The default bind is `127.0.0.1:11234` (this Mac only). `--host 0.0.0.0` opens the server to the network; set
+- The default bind is `127.0.0.1:12345` (this Mac only). `--host 0.0.0.0` opens the server to the network; set
   `--api-key` if you do. A port already in use is refused at startup, never shared.
 - Only load models from trusted sources
 - Do not run the server as root
