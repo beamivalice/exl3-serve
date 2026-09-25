@@ -12,7 +12,7 @@ Search first, then write. Check the open AND closed issues, the open PRs, and `g
 
 Open an issue with:
 - What you expected vs what happened
-- Model pack (e.g. `Qwen3.8-Flash-Next-Sushi-3bpw`, `MiMo-V2.6-Flash-Sushi-2.5bpw`)
+- Model pack (e.g. `Qwen3.8-Flash-Next-Sushi-3bpw`) and the launch flags
 - macOS version and chip (e.g. macOS 26.6, M4 Max)
 - Server log output (`--log-level debug`, `~/.sushi/logs/sushi-<port>.log`)
 
@@ -24,7 +24,6 @@ Open an issue with:
 4. **Draft while working, publish when ready.** Open as draft early so nobody duplicates you. Move to ready for review only when 1-3 are done.
 5. **Keep it simple.** One fix or feature per PR, smallest change that does the job, match surrounding style, no new plumbing to make something testable, no comments that restate code, no new dependencies. Read `CLAUDE.md` and the doc its docs index names for that subsystem (MLX traps: `docs/engine-mlx-gotchas.md`) before touching it. Read "Diff hygiene" below; a PR that fails it gets sent back before anyone reads the code.
 6. **Numbers name what they beat.** A perf claim is an llmprobe cell (`./tests/bench.sh`) against a named arm, same session, with the engagement line from the log. See `.claude/skills/bench/SKILL.md`.
-7. **Agents: use Claude Fable 5** if you can. Any model is welcome, but the PR meets 1-6 regardless of who wrote it.
 
 ## Diff hygiene
 
