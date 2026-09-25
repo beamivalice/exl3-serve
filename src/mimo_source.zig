@@ -465,10 +465,12 @@ fn validateShardStamps(source: *const SourceIndex, config: *const model.ModelCon
             // a layer packs and bills it, so a shard at or below it is
             // over-billed rather than wrong, and only a wider one refuses.
             const k = std.fmt.parseFloat(f64, text) catch return error.Exl3ShardStampMismatch;
+            if (!std.math.isFinite(k)) return error.Exl3ShardStampMismatch;
             const scaled = @round(k * 16.0);
             if (@abs(k * 16.0 - scaled) > 1e-6) return error.Exl3ShardStampMismatch;
-            if (scaled < 0 or scaled > 1024) return error.Exl3ShardStampMismatch;
-            if (@as(u32, @intFromFloat(scaled)) > config.expert_quant_rate.n)
+            if (scaled < expert_exl3.Rate.min_n or scaled > expert_exl3.Rate.max_n) return error.Exl3ShardStampMismatch;
+            const rate = expert_exl3.kFromPackedDim(@intFromFloat(scaled)) orelse return error.Exl3ShardStampMismatch;
+            if (rate.n > config.expert_quant_rate.n)
                 return error.Exl3ShardStampMismatch;
         }
     }
@@ -1742,4 +1744,21 @@ test "mimo source loads the MTP heads apart from the trunk and bills what it upl
     try std.testing.expectEqual(@as(u32, 1), heads.count());
     try std.testing.expect(heads.get("model.mtp.layers.0.fake.weight") != null);
     try std.testing.expectEqual(@as(u64, 2), try mtpResidentBytes(io, std.testing.allocator, fixture.path));
+}
+
+test "EXL3 shard stamp rejects invalid and nonfinite rates" {
+    var source: SourceIndex = undefined;
+    source.stamps = std.StringHashMap(ShardStamp).init(std.testing.allocator);
+    defer source.stamps.deinit();
+    var config: model.ModelConfig = undefined;
+    config.expert_layout = .exl3_k4;
+    config.expert_quant_rate = .{ .n = 64 };
+    for ([_][]const u8{ "0", "1.5", "2.0625", "nan", "inf", "-inf" }) |k| {
+        try source.stamps.put("expert.safetensors", .{ .k = k });
+        try std.testing.expectError(error.Exl3ShardStampMismatch, validateShardStamps(&source, &config));
+    }
+    for ([_][]const u8{ "2", "2.125", "2.5", "3", "4" }) |k| {
+        try source.stamps.put("expert.safetensors", .{ .k = k });
+        try validateShardStamps(&source, &config);
+    }
 }
