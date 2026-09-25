@@ -12,6 +12,9 @@
 #     match the same prompt prefilled cold within 0.5 nats up to any flip.
 #  3. Both warm prefills are faster than the cold one.
 #
+# Both cold arms start from a cache holding nothing they share: turn 1's whole prompt is a
+# prefix of turn 2's rendering, so an unrelated raw completion evicts turn 2's entry first.
+#
 # Env: SUSHI_MODELS_DIR (default $HOME/.sushi/models), PORT (default 19078), BINARY.
 
 set -uo pipefail
@@ -61,6 +64,8 @@ turn2() {
     jq -nc --arg q "$Q1" --arg r "$REPLY" --arg q2 "$Q2" \
         '{messages:[{role:"user",content:$q},{role:"assistant",content:$r},{role:"user",content:$q2}],max_tokens:300,temperature:0,stream:false,logprobs:true,top_logprobs:1}'
 }
+# A raw completion shares no token with the chat template, so its entry restores nothing below.
+unrelated() { jq -nc '{prompt:"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor.",max_tokens:8,temperature:0,stream:false}'; }
 text() { echo "$1" | jq -r '(.choices[0].message.reasoning_content // "") + "\u0001" + (.choices[0].message.content // "")'; }
 field() { echo "$1" | jq -r "$2"; }
 ring_hits() { grep -c '\[hot-cache\] ring checkpoint @' "$LOG"; }
@@ -70,7 +75,9 @@ fail() { echo "FAIL: $*"; EC=1; }
 
 # Turn 2 first, while nothing is cached: its cold answer is the reference.
 T2_COLD=$(ask "$(turn2)") || { echo "fail: cold turn 2"; tail -20 "$LOG"; exit 1; }
-# Turn 1 twice. With one entry the second commit evicts the turn-2 reference entry.
+# With one entry this commit evicts the turn-2 entry, so turn 1 starts cold too.
+curl -sf --max-time 600 -X POST "$BASE/v1/completions" -H 'Content-Type: application/json' -d "$(unrelated)" >/dev/null \
+    || { echo "fail: unrelated completion"; tail -20 "$LOG"; exit 1; }
 T1_COLD=$(ask "$(turn1)") || { echo "fail: cold turn 1"; tail -20 "$LOG"; exit 1; }
 GEN=$(field "$T1_COLD" '.usage.completion_tokens')
 if [ "$GEN" -lt 600 ]; then
@@ -89,6 +96,8 @@ echo "turn1 warm: cached_n=$(field "$T1_WARM" .timings.cached_n) prompt_ms=$(fie
 echo "turn2 cold: cached_n=$(field "$T2_COLD" .timings.cached_n) prompt_ms=$(field "$T2_COLD" .timings.prompt_ms)"
 echo "turn2 warm: cached_n=$(field "$T2_WARM" .timings.cached_n) prompt_ms=$(field "$T2_WARM" .timings.prompt_ms)"
 
+[ "$(field "$T2_COLD" .timings.cached_n)" = 0 ] || fail "cold turn 2 restored a prefix"
+[ "$(field "$T1_COLD" .timings.cached_n)" = 0 ] || fail "cold turn 1 restored a prefix"
 [ "$(text "$T1_COLD")" = "$(text "$T1_WARM")" ] || fail "identical re-issue diverged from its cold run"
 [ "$HITS1" -gt "$HITS0" ] || fail "identical re-issue did not restore from the ring checkpoint"
 [ "$(field "$T1_WARM" .timings.cached_n)" -gt 0 ] || fail "identical re-issue cold-prefilled"
