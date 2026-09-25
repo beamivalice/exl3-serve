@@ -688,7 +688,8 @@ pub const DiskTier = struct {
             var shared: usize = 0;
             while (shared < max_shared and e.tokens[shared] == prompt_ids[shared]) shared += 1;
             const usable: u32 = @intCast(@min(@min(shared, e.kv_len), @as(usize, limit)));
-            const cp = self.highestSsmPosAtOrBelow(i, usable) orelse continue;
+            const cp_limit: u32 = @intCast(@min(usable, prompt_ids.len -| 1));
+            const cp = self.highestSsmPosAtOrBelow(i, cp_limit) orelse continue;
             if (best == null or cp > best.?.cp) best = .{ .idx = i, .usable = usable, .cp = cp };
         }
         return best;
@@ -7259,6 +7260,10 @@ test "DiskTier: a fresh tier over the same root ranks by the HIGHEST restorable 
     const N = 8;
     var tokens: [N * 128]u32 = undefined;
     for (&tokens, 0..) |*t, i| t.* = @intCast(i + 7);
+    // One token past the stored prefix, so the full-length checkpoint still leaves a token to compute logits.
+    var prompt: [N * 128 + 1]u32 = undefined;
+    @memcpy(prompt[0 .. N * 128], &tokens);
+    prompt[N * 128] = 1;
 
     {
         var tier = try DiskTier.init(testing.allocator, io, base, "fp-coldrank", 0, 128);
@@ -7274,7 +7279,7 @@ test "DiskTier: a fresh tier over the same root ranks by the HIGHEST restorable 
         defer for (&cps) |*cp| cp.deinit(testing.allocator);
         _ = try tier.appendCommit(cache.entries, cache.step, cache.config, &tokens, false, &cps, s);
         try testing.expectEqual(@as(usize, N), tier.entries.items[0].ssm_positions.len);
-        const warm = tier.bestHybridMatch(&tokens, false, cache.config, tokens.len).?;
+        const warm = tier.bestHybridMatch(&prompt, false, cache.config, prompt.len).?;
         try testing.expectEqual(@as(u32, N * 128), warm.cp);
     }
 
@@ -7282,8 +7287,45 @@ test "DiskTier: a fresh tier over the same root ranks by the HIGHEST restorable 
     defer tier2.deinit();
     try testing.expectEqual(@as(usize, 1), tier2.entryCount());
     try testing.expectEqual(@as(usize, N), tier2.entries.items[0].ssm_positions.len);
-    const cold = tier2.bestHybridMatch(&tokens, false, kv_quant.KVQuantConfig.dense, tokens.len).?;
+    const cold = tier2.bestHybridMatch(&prompt, false, kv_quant.KVQuantConfig.dense, prompt.len).?;
     try testing.expectEqual(@as(u32, N * 128), cold.cp);
     try testing.expectEqual(@as(u32, N * 128), cold.usable);
 }
 
+test "DiskTier hybrid lookup leaves a prompt token to compute logits" {
+    var tokens: [513]u32 = undefined;
+    for (&tokens, 0..) |*tok, i| tok.* = @intCast(i);
+    var positions = [_]u32{ 256, 512 };
+    var entries = [_]IndexEntry{.{
+        .id = 1,
+        .tokens = &tokens,
+        .kv_len = tokens.len,
+        .has_tools = false,
+        .quant = kv_quant.KVQuantConfig.dense,
+        .bytes = 0,
+        .chunk_bytes = &.{},
+        .ssm_positions = &positions,
+        .ssm_bytes = &.{},
+        .last_used = 0,
+    }};
+    var entry_list: std.ArrayList(IndexEntry) = .empty;
+    defer entry_list.deinit(testing.allocator);
+    try entry_list.appendSlice(testing.allocator, &entries);
+    const tier = DiskTier{
+        .allocator = testing.allocator,
+        .io = testing.io,
+        .root = &.{},
+        .max_bytes = 0,
+        .chunk_tokens = 128,
+        .entries = entry_list,
+        .next_id = 2,
+        .total_bytes = 0,
+        .counter = 0,
+    };
+    const quant = kv_quant.KVQuantConfig.dense;
+    try testing.expectEqual(@as(u32, 256), tier.bestHybridMatch(tokens[0..512], false, quant, 512).?.cp);
+    try testing.expectEqual(@as(u32, 512), tier.bestHybridMatch(&tokens, false, quant, 513).?.cp);
+    try testing.expectEqual(@as(u32, 512), tier.bestHybridMatch(&tokens, false, quant, 512).?.cp);
+    try testing.expect(tier.bestHybridMatch(tokens[0..256], false, quant, 256) == null);
+    try testing.expect(tier.bestHybridMatch(&.{}, false, quant, 0) == null);
+}
