@@ -4,47 +4,23 @@ sushi began as a fork of [mlx-serve](https://github.com/ddalcu/mlx-serve) and wa
 mlx-serve commit `ef5e667` (two commits after mlx-serve v26.9.4). This file covers sushi's own changes since then;
 earlier history is mlx-serve's, in that project's changelog.
 
-## Unreleased
+## v1.0.0 — Qwen3.8-Flash-Next, sushi-packed
 
-![Sushi-3bpw decode, first token and prefill from 4k to 1M tokens on an M5 Max](https://raw.githubusercontent.com/beamivalice/sushi/main/docs/assets/perf-sushi3bpw-1m.png)
+![Sushi-3bpw decode and prefill from 4k to 1M tokens on an M5 Max](https://raw.githubusercontent.com/beamivalice/sushi/main/docs/assets/perf-sushi3bpw-1m.png)
 
-- **Loading a model right after unloading one no longer fails for lack of memory**: the unload now answers once the freed memory is back.
-- **`/v1/models` reports the real `bytes_resident` of the model loaded at launch** (it read about 2 MB for a 64 GB pack), and loading a second model now counts the first one's weights against the resident-memory cap.
-- **MTP is on by default for both served models**: a request that does not send `enable_mtp` drafts with the model's own head, without `--mtp`; `--no-mtp`, `"mtp": false` in `model-settings.json` or `enable_mtp:false` turn it off, and an SSD-streamed pack keeps it off unless `--mtp`.
-- **`sushi launch omp` passes omp's thinking level to the server** the same way, with off still turning thinking off.
-- **`sushi launch pi` passes pi's thinking level to the server**: each level (off, minimal, low, medium, high, xhigh) arrives as an effort word the model accepts, where pi used to send only thinking on or off.
-- **`/v1/responses` enforces the reasoning budget** (`reasoning.effort` or `reasoning_budget_tokens`) as chat does: a capped thought is closed at its budget instead of running to `max_output_tokens`.
-- **Reported logprobs are exact**: they are computed in f32, where bf16 rounded a logprob near -20 by up to 0.06.
-- **A model larger than the GPU working-set limit is refused by name at load** when `iogpu.wired_limit_mb` is set below free RAM, instead of failing warmup and then every request.
-- **Several long MiMo-V2.6-Flash prompts arriving together no longer overrun GPU memory**: one that does not fit beside the requests already running waits for one of them to finish.
-- **A `system` turn in the middle of a `/v1/chat/completions` conversation reaches Qwen3.8 Flash Next through its own template**, folded into the leading system prompt; MiMo-V2.6-Flash, whose template renders it in place, is unchanged.
-- **A `system` or `developer` turn in the middle of a `/v1/responses` input joins the leading system prompt**, so Qwen3.8 Flash Next renders it with its own template instead of a fallback that repeated the tool schemas and dropped the stop token.
-- **Stopping a request while another stream decodes with MTP no longer crashes the server.**
-- **Large images need about half the free GPU memory they did**: the Qwen3.8 Flash Next vision tower now runs one block at a time, and a request is billed by its measured peak, so a 1536x1536 image is admitted with about 8 GB free instead of about 17 GB.
-- **MiMo-V2.6-Flash prefills faster at every context length**: its prefill attention walks the causal band in lockstep with branch-free loads and larger dispatches, with output unchanged byte for byte.
-- **`sushi run` can research**: `--tool on` (or `/tool on` in the chat) lets the model search the web, read public pages and read files in the current folder, read-only and without prompts, and `/image <path>` shows a vision model an image.
-- **Every image in a conversation reaches the model where it was sent**: earlier user turns, OpenAI `tool` messages, Anthropic `tool_result` blocks and Responses `input_image` parts (tool outputs included) each render at their own placeholder, so an agent's screenshots are seen; an undecodable image, an `input_audio` part, more than 64 images or an encode that does not fit in memory is a 400 naming the message and the reason, and a failed encode a 500, never a text-only answer.
-- **sushi binds `127.0.0.1:12345` by default, clear of mlx-serve's 11234, and refuses a port that is already in use**: `sushi run` and `sushi serve` need no `--host`/`--port`, `--host localhost` means loopback, and a second server on a busy port exits with `port N is already in use` before loading a model.
-- **MiMo-V2.6-Flash's prompt lookup decoding no longer slows long contexts**: a draft verify reads the 8-bit KV cache in place, row by row like a decode step, and rolls back without copying the cache. Greedy output is unchanged, and live decode at 244k tokens rises from 10 to 25 tok/s.
-- **Every load logs `[pld] <on|off> (<source>)`**, and `/props` reports `settings.pld.source`; Qwen3.8 Flash Next reads `off (module spec wiring)`, since it never runs prompt lookup decoding.
-- **One thinking-effort vocabulary, `off low medium high xhigh max`**: each model lists the words it accepts as `reasoning_efforts` in `/v1/models` and answers any other with a 400 naming them (Qwen3.8 Flash Next: off, low, medium, xhigh). MiMo-V2.6-Flash now thinks by default, and `sushi run <model> --think [effort]` plus the chat's `/think <effort>` set it, with the thought shown dimmed before the answer.
-- **The engine is renamed sushi**: the binary is `sushi`, environment variables take the `SUSHI_` prefix, settings, logs and caches live under `~/.sushi`, and `/v1/models` reports `owned_by: sushi`.
-- **sushi serves two models: Qwen3.8 Flash Next and MiMo-V2.6-Flash.** Any other `model_type` and any `.gguf` is refused by name at load.
-- **MiMo-V2.6-Flash serves from an MCG EXL3 pack**: routed experts in EXL3, the FP8 attention trunk read as the checkpoint stores it, and `o_proj`, `lm_head` and `embed_tokens` as 8-bit affine stored in the pack.
-- **MiMo-V2.6-Flash drafts with its three trained MTP heads** under `--mtp`; greedy output stays byte-identical to decoding without them.
-- **MiMo-V2.6-Flash verifies MTP drafts faster**: draft rows routed to the same expert share its weight reads, with each row's output unchanged.
-- **Qwen3.8 Flash Next serves EXL3 expert packs** (K2 to K4), resident; an SSD budget or expert cache set for an EXL3 pack is ignored with a warning instead of refusing the load.
-- **EXL3 expert decode is faster on both models**, with bit-identical output.
-- **MiMo-V2.6-Flash decodes long contexts from its 8-bit KV cache in place**, on the matrix units on M5-class Macs and through a split-K kernel elsewhere, choosing per step by cache length.
-- **MiMo-V2.6-Flash prefills its sliding-window layers in one fused attention kernel** instead of building a full score sheet, and picks its prefill chunk per request.
-- **`sushi run` shows prefill tok/s and the cached prefix after each turn.**
-- **The original bf16 Qwen3.8 Flash Next serves from a 128 GB Mac by streaming experts from SSD.** Point `--model` at the HF checkpoint and set `--ssd-budget-gb <GiB>` (the total resident target), `--expert-cache-gb`, or the per-model `ssd_budget_gb` in `model-settings.json`. Speculative decoding is refused by name on a streamed model.
-- **Two EXL3 packs on different codebooks can be loaded at once**; each model's forward now decodes with its own codebook instead of the one the most recent load installed.
-- **An EXL3 pack whose routed-expert trellis disagrees with its `config.json` is refused by name at load**, rather than serving under a memory plan that under-counts the expert bytes.
-- **An EXL3 pack can name the codeword window its search hashed** (`expert_quant.window`, 8 to 16, absent means 16): every decode arm masks the sliding window to the model's own width, and a width this build cannot decode is refused by name at load.
-- **MiMo-V2.6-Flash serves long context at a fraction of the KV.** Its 39 sliding-window layers now keep a short ring instead of a full-length cache, so a token costs only the 9 global layers' keys and values; a prefix whose match falls below the retained window cold-prefills instead of restoring.
-- **The KV cache is 8-bit by default.** `--kv-quant off` (or `4`), the per-model `kv_quant` setting and the per-request `kv_quant` field still choose another scheme; every load logs its choice as `[kv-cache] <scheme> (<source>)`, and `/props` and `/v1/models` report it as `kv_cache`.
-- **An explicit launch flag now outranks `model-settings.json`**: `--mtp`/`--no-mtp`, `--kv-quant`, `--ctx-size` and `--mtp-typical`/`--mtp-tokenv3` win over the model's `mtp`, `kv_quant`, `ctx_size` and `mtp_acceptance`; each load logs `[mtp] <on|off> (<source>)` and `/props` reports `settings.mtp.source`.
-- **`sushi kld` scores a resident MiMo pack through the model the server serves.** It loads the source FP8 trunk like every other path, so two packs that differ only in their routed experts no longer compare identical.
-- **MiMo-V2.6-Flash prefills long prompts faster on M5-class Macs**: its global and sliding attention run on the GPU's matrix units (`SUSHI_ATTN_PD_NAX=0` restores the previous kernel), and the previous kernel itself is faster on every Mac.
-- **Qwen3.8 Flash Next attends 16 or more query rows on an 8-bit KV cache without rebuilding the whole cache where that is slower**: a prompt's final span, short follow-up turns and wide verify blocks read the packed cache directly, and prefill chunks below 8k keys gather instead of taking the dense-mask path.
+- **Two Qwen3.8-Flash-Next packs, EXL3 experts**: Sushi-3bpw (49.3 GiB, for 64 GB Macs) and Sushi-4bpw (63.7 GiB, for
+  96 GB and up). At about 50 GiB, Sushi-3bpw has half the KLD of mlx-serve's iQ-MLX 3.3bpw; Sushi-4bpw matches oMLX
+  oQ5e's quality in 20 GiB less memory.
+- **Up to 1M tokens of context on one Mac**: 94 tok/s decode and about 1,900 tok/s prefill on an M5 Max, still 57 tok/s
+  at 1M, with the 8-bit KV cache and the model's own MTP draft head on by default. `--mtp-typical 0.2` makes sampled
+  decoding 15-20% faster.
+- **Images in every API**: OpenAI chat and Responses, Anthropic messages and tool results all carry images to the
+  vision tower, each where it was sent, and a large image needs about half the memory it did.
+- **A drop-in local server**: OpenAI- and Anthropic-compatible HTTP on `127.0.0.1:12345`, clear of mlx-serve's 11234.
+  `sushi run` chats in the terminal with read-only web and file tools, `sushi launch` sets up Claude Code, pi, omp,
+  opencode and codex, and one thinking-effort vocabulary (off to max) works across every API.
+- **Memory you can plan**: a load that would not fit is refused by name, concurrent long prompts wait instead of
+  crashing, an unload answers once its memory is free, and `/v1/models` reports the real resident size.
+- **Install with curl**: one ad-hoc signed binary for Apple Silicon on macOS 26.2 or later, with no Python at serve time.
+
+---
