@@ -8657,6 +8657,11 @@ fn nonStreamFinishReason(client_gone: bool, slot_reason: []const u8) []const u8 
     return if (client_gone) "client_disconnect" else slot_reason;
 }
 
+fn responsesStoresFinish(finish_reason: []const u8, requested: bool) bool {
+    if (std.mem.eql(u8, finish_reason, "client_disconnect")) return false;
+    return requested;
+}
+
 /// The text the model said before the tool markup, byte for byte as the stream flushes it.
 fn visibleToolPreamble(content: []const u8) []const u8 {
     return if (std.mem.trim(u8, content, " \t\r\n").len > 0) content else "";
@@ -16758,6 +16763,11 @@ fn handleResponsesInner(
         }
     }
 
+    if (!responsesStoresFinish(finish_reason, true)) {
+        log.info("  <- {d}+{d} tokens [client_disconnect]\n", .{ result.prompt_tokens, result.completion_tokens });
+        return;
+    }
+
     const status_str: []const u8 = if (std.mem.eql(u8, finish_reason, "length")) "incomplete" else "completed";
 
     // Merge re-opened mid-text thought channels into the leading block so the
@@ -16909,7 +16919,7 @@ fn handleResponsesInner(
     defer allocator.free(envelope);
 
     // ── store response ──
-    if (should_store) {
+    if (responsesStoresFinish(finish_reason, should_store)) {
         const stored_tool_calls: ?[]const chat_mod.ToolCall = if (emitted_tool_calls.items.len > 0) emitted_tool_calls.items else null;
         storeResponse(stream.io, allocator, resp_id, model_name, status_str, envelope, pi.messages.items, visible_text, reasoning_text, stored_tool_calls, result.finish_details) catch |err| {
             log.warn("[responses] store failed: {s}\n", .{@errorName(err)});
@@ -21130,6 +21140,13 @@ test "a tool-call reply delivers the budget-capped thought" {
     try std.testing.expectEqualStrings("short", deliveredReasoning("short", "short and the rest the budget withholds").?);
     try std.testing.expectEqualStrings("full", deliveredReasoning(null, "full").?);
     try std.testing.expect(deliveredReasoning(null, null) == null);
+}
+
+test "a responses disconnect is never stored" {
+    try std.testing.expect(!responsesStoresFinish("client_disconnect", true));
+    try std.testing.expect(!responsesStoresFinish("client_disconnect", false));
+    try std.testing.expect(responsesStoresFinish("stop", true));
+    try std.testing.expect(!responsesStoresFinish("length", false));
 }
 
 test "reasoningWithinBudget cuts a thought at the budget and keeps a shorter one whole" {
