@@ -15824,6 +15824,60 @@ fn mimoVerifyRowsAttn(
 /// to `fp8_block.gemv_direct_max_rows` rows.
 pub const MIMO_VERIFY_ROWS_MAX: c_int = 4;
 
+const MimoAttnArm = enum { verify_rows, decode, prefill_global, prefill_sliding };
+
+/// The widest verify the trunk still serves row for row: the FP8 GEMV keeps a
+/// single decode row's arithmetic only to `fp8_block.gemv_direct_max_rows` rows,
+/// so the budget is read from the kernel rather than restated beside it. Two
+/// equal literals drift apart silently, and a verify past the kernel's arm loses
+/// byte identity without losing the decode-shaped attention.
+fn mimoVerifyRowsBudget() c_int {
+    return @min(MIMO_VERIFY_ROWS_MAX, fp8_block.gemv_direct_max_rows);
+}
+
+/// Which attention arm a MiMo forward runs. A verify is DECODE-shaped at every
+/// width: past the row budget the row arithmetic is gone, so the width is
+/// refused by name instead of served by the causal prefill arm.
+fn mimoAttnArm(verify_rows: bool, is_prefill: bool, is_global: bool, seq_len: c_int) error{MimoVerifyRowsTooWide}!MimoAttnArm {
+    if (verify_rows) {
+        if (seq_len > mimoVerifyRowsBudget()) return error.MimoVerifyRowsTooWide;
+        return if (seq_len > 1) .verify_rows else .decode;
+    }
+    if (!is_prefill) return .decode;
+    return if (is_global) .prefill_global else .prefill_sliding;
+}
+
+test "mimoAttnArm: the verify budget follows the FP8 GEMV's direct-row arm" {
+    // Byte identity for an accepted row needs the trunk GEMV to keep a single
+    // row's arithmetic, so the budget is that row count and not a second literal.
+    const design = MIMO_VERIFY_ROWS_MAX;
+    const armed = fp8_block.gemv_direct_max_rows;
+    defer fp8_block.gemv_direct_max_rows = armed;
+    fp8_block.gemv_direct_max_rows = design - 1;
+    try testing.expectEqual(MimoAttnArm.verify_rows, try mimoAttnArm(true, true, false, design - 1));
+    // A width the trunk would serve by reassociating is refused, not re-armed.
+    try testing.expectError(error.MimoVerifyRowsTooWide, mimoAttnArm(true, true, false, design));
+}
+
+test "mimoAttnArm: a verify wider than the decode row budget is refused, not re-armed" {
+    // A verify is decode-shaped at every width it serves...
+    try testing.expectEqual(MimoAttnArm.decode, try mimoAttnArm(true, false, false, 1));
+    var rows: c_int = 2;
+    while (rows <= MIMO_VERIFY_ROWS_MAX) : (rows += 1) {
+        try testing.expectEqual(MimoAttnArm.verify_rows, try mimoAttnArm(true, true, false, rows));
+        try testing.expectEqual(MimoAttnArm.verify_rows, try mimoAttnArm(true, true, true, rows));
+    }
+    // ...and past it there is no other correct arm.
+    while (rows < 2 * MIMO_VERIFY_ROWS_MAX) : (rows += 1) {
+        try testing.expectError(error.MimoVerifyRowsTooWide, mimoAttnArm(true, true, false, rows));
+        try testing.expectError(error.MimoVerifyRowsTooWide, mimoAttnArm(true, true, true, rows));
+    }
+    // A plain forward keeps the arms it had.
+    try testing.expectEqual(MimoAttnArm.decode, try mimoAttnArm(false, false, false, 1));
+    try testing.expectEqual(MimoAttnArm.prefill_global, try mimoAttnArm(false, true, true, 512));
+    try testing.expectEqual(MimoAttnArm.prefill_sliding, try mimoAttnArm(false, true, false, 512));
+}
+
 var kv_attn_fused_engaged: bool = false; // one-shot log guard
 fn logKvAttnFusedEngaged(view: *const DenseKVView, q: mlx.mlx_array, t_q: c_int) void {
     if (kv_attn_fused_engaged) return;
@@ -27346,40 +27400,45 @@ pub const Transformer = struct {
 
         var attn_out = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(attn_out);
-        if (ctx.verify_rows and seq_len > 1 and seq_len <= MIMO_VERIFY_ROWS_MAX) {
-            _ = mlx.mlx_array_free(attn_out);
-            attn_out = try mimoVerifyRowsAttn(self.s, @intCast(cfg.sliding_window), q_rope, &kv_view, fa.sinks, is_global, offset, seq_len, attn_scale, local_decode_mask);
-        } else if (!is_prefill) {
-            _ = mlx.mlx_array_free(attn_out);
-            attn_out = try mimoDecodeAttn(self.s, @intCast(cfg.sliding_window), q_rope, &kv_view, fa.sinks, is_global, offset + seq_len, attn_scale, local_decode_mask);
-        } else if (is_global) {
-            // MLX has no fused prefill kernel at qk 192 (steel_attention ships
-            // bd 64/96/128 and a 256 dsplit), so the composed arm materializes
-            // [heads, chunk, total_kv] — 32 GiB at a 512k prompt. A global layer
-            // that carries sinks keeps it: only the band arm's sink is proven.
-            const pd: ?mlx.mlx_array = if (fa.sinks.ctx == null)
-                try fusedSdpaPrefillKv(self.s, q_rope, &kv_view, attn_scale, 0, .{ .ctx = null })
-            else
-                null;
-            if (pd) |fused| {
+        switch (try mimoAttnArm(ctx.verify_rows, is_prefill, is_global, seq_len)) {
+            .verify_rows => {
                 _ = mlx.mlx_array_free(attn_out);
-                attn_out = fused;
-            } else {
-                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&attn_out, q_rope, kv_view.k, kv_view.v, attn_scale, "causal", none_mask, fa.sinks, false, self.s));
-            }
-        } else {
-            const sw: c_int = @intCast(cfg.sliding_window);
-            if (try slidingPrefillAttn(self.s, cfg, q_rope, &kv_view, attn_scale, fa.sinks)) |out| {
+                attn_out = try mimoVerifyRowsAttn(self.s, @intCast(cfg.sliding_window), q_rope, &kv_view, fa.sinks, is_global, offset, seq_len, attn_scale, local_decode_mask);
+            },
+            .decode => {
                 _ = mlx.mlx_array_free(attn_out);
-                attn_out = out;
-            } else if (offset + seq_len <= sw) {
-                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&attn_out, q_rope, kv_view.k, kv_view.v, attn_scale, "causal", none_mask, fa.sinks, false, self.s));
-            } else {
-                if (local_prefill_mask.ctx == null) {
-                    local_prefill_mask.* = try self.createSlidingWindowMask(seq_len, sliding.kv_len, sw);
+                attn_out = try mimoDecodeAttn(self.s, @intCast(cfg.sliding_window), q_rope, &kv_view, fa.sinks, is_global, offset + seq_len, attn_scale, local_decode_mask);
+            },
+            .prefill_global => {
+                // MLX has no fused prefill kernel at qk 192 (steel_attention ships
+                // bd 64/96/128 and a 256 dsplit), so the composed arm materializes
+                // [heads, chunk, total_kv] — 32 GiB at a 512k prompt. A global layer
+                // that carries sinks keeps it: only the band arm's sink is proven.
+                const pd: ?mlx.mlx_array = if (fa.sinks.ctx == null)
+                    try fusedSdpaPrefillKv(self.s, q_rope, &kv_view, attn_scale, 0, .{ .ctx = null })
+                else
+                    null;
+                if (pd) |fused| {
+                    _ = mlx.mlx_array_free(attn_out);
+                    attn_out = fused;
+                } else {
+                    try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&attn_out, q_rope, kv_view.k, kv_view.v, attn_scale, "causal", none_mask, fa.sinks, false, self.s));
                 }
-                try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&attn_out, q_rope, kv_view.k, kv_view.v, attn_scale, "array", local_prefill_mask.*, fa.sinks, false, self.s));
-            }
+            },
+            .prefill_sliding => {
+                const sw: c_int = @intCast(cfg.sliding_window);
+                if (try slidingPrefillAttn(self.s, cfg, q_rope, &kv_view, attn_scale, fa.sinks)) |out| {
+                    _ = mlx.mlx_array_free(attn_out);
+                    attn_out = out;
+                } else if (offset + seq_len <= sw) {
+                    try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&attn_out, q_rope, kv_view.k, kv_view.v, attn_scale, "causal", none_mask, fa.sinks, false, self.s));
+                } else {
+                    if (local_prefill_mask.ctx == null) {
+                        local_prefill_mask.* = try self.createSlidingWindowMask(seq_len, sliding.kv_len, sw);
+                    }
+                    try mlx.check(mlx.mlx_fast_scaled_dot_product_attention(&attn_out, q_rope, kv_view.k, kv_view.v, attn_scale, "array", local_prefill_mask.*, fa.sinks, false, self.s));
+                }
+            },
         }
 
         var attn_t = mlx.mlx_array_new();
@@ -46195,6 +46254,105 @@ test "fused MoE router reproduces the hy3 sigmoid+bias routing chain" {
         }
     }
     // Both round to bf16 at the end, so the bar is "no worse", not "better".
+    try testing.expect(fused_err <= chain_err * 1.0001 + 1e-6);
+}
+
+test "fused MoE router reproduces the mimo_v2 sigmoid+bias routing chain in f32" {
+    // The pairing mimo_v2 SHIPS: ungrouped `.sigmoid_bias` with an f32 output and
+    // f32 router inputs (the router is widened once at load). hy3's arm above
+    // proves the same kernel at a bf16 output, which absorbs a last-ulp
+    // difference between the kernel's `w / (tot + 1e-20f)` and MLX's divide
+    // chain; MiMo keeps the weights in f32 into the expert sum, so nothing
+    // absorbs it and the bar stays BIT equality.
+    const s = mlx.gpuStream();
+    const allocator = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2113_0F32);
+    const rnd = prng.random();
+    moe_router_fused_override = true;
+    defer moe_router_fused_override = null;
+
+    const ROWS: c_int = 256;
+    const E: c_int = 256;
+    const K: c_int = 8;
+    const ROUTE_SCALE: f32 = 2.5;
+    const n: usize = @intCast(ROWS * E);
+
+    const buf = try allocator.alloc(f32, n);
+    defer allocator.free(buf);
+    for (buf, 0..) |*v, i| v.* = (rnd.float(f32) - 0.5) * 6.0 + @as(f32, @floatFromInt(i % 5)) * 0.013;
+    const lsh = [_]c_int{ ROWS, E };
+    const l32 = mlx.mlx_array_new_data(buf.ptr, &lsh, 2, .float32);
+    defer _ = mlx.mlx_array_free(l32);
+
+    const bbuf = try allocator.alloc(f32, @intCast(E));
+    defer allocator.free(bbuf);
+    for (bbuf) |*v| v.* = (rnd.float(f32) - 0.5) * 0.2;
+    const bsh = [_]c_int{E};
+    const bias = mlx.mlx_array_new_data(bbuf.ptr, &bsh, 1, .float32);
+    defer _ = mlx.mlx_array_free(bias);
+
+    const fused = (try moeRouterTopK(s, l32, bias, K, .sigmoid_bias, true, ROUTE_SCALE, .float32, 0, 0)) orelse
+        return error.FusedRouterDeclined;
+    defer _ = mlx.mlx_array_free(fused.inds);
+    defer _ = mlx.mlx_array_free(fused.norm_scores);
+    const chain = try mimoRoutingChain(l32, bias, K, true, ROUTE_SCALE, s);
+    defer _ = mlx.mlx_array_free(chain.inds);
+    defer _ = mlx.mlx_array_free(chain.norm_scores);
+
+    const kn: usize = @intCast(ROWS * K);
+    const f_ids = try allocator.alloc(f32, kn);
+    defer allocator.free(f_ids);
+    const c_ids = try allocator.alloc(f32, kn);
+    defer allocator.free(c_ids);
+    const f_w = try allocator.alloc(f32, kn);
+    defer allocator.free(f_w);
+    const c_w = try allocator.alloc(f32, kn);
+    defer allocator.free(c_w);
+    try testReadF32(fused.inds, f_ids, s);
+    try testReadF32(chain.inds, c_ids, s);
+    try testReadF32(fused.norm_scores, f_w, s);
+    try testReadF32(chain.norm_scores, c_w, s);
+
+    const keys = try allocator.alloc(f64, @intCast(E));
+    defer allocator.free(keys);
+    const sig = try allocator.alloc(f64, @intCast(E));
+    defer allocator.free(sig);
+    var ref_ids: [8]usize = undefined;
+    var fused_err: f64 = 0;
+    var chain_err: f64 = 0;
+    for (0..@intCast(ROWS)) |r| {
+        const row = buf[r * @as(usize, @intCast(E)) ..][0..@intCast(E)];
+        for (row, 0..) |v, i| {
+            sig[i] = 1.0 / (1.0 + @exp(-@as(f64, v)));
+            keys[i] = sig[i] + @as(f64, bbuf[i]);
+        }
+        routerRefRow(keys, @intCast(K), &ref_ids);
+        for (0..@intCast(K)) |j| {
+            try testing.expectEqual(ref_ids[j], @as(usize, @intFromFloat(f_ids[r * @as(usize, @intCast(K)) + j])));
+        }
+        var chain_set: [8]usize = undefined;
+        for (0..@intCast(K)) |j| chain_set[j] = @intFromFloat(c_ids[r * @as(usize, @intCast(K)) + j]);
+        std.mem.sort(usize, &chain_set, {}, std.sort.asc(usize));
+        var ref_sorted = ref_ids;
+        std.mem.sort(usize, &ref_sorted, {}, std.sort.asc(usize));
+        try testing.expectEqualSlices(usize, &ref_sorted, &chain_set);
+
+        var denom: f64 = 1e-20;
+        for (0..@intCast(K)) |j| denom += sig[ref_ids[j]];
+        for (0..@intCast(K)) |j| {
+            const want = sig[ref_ids[j]] / denom * @as(f64, ROUTE_SCALE);
+            const got = f_w[r * @as(usize, @intCast(K)) + j];
+            fused_err = @max(fused_err, @abs(want - @as(f64, got)));
+            var slot: usize = 0;
+            while (slot < @as(usize, @intCast(K))) : (slot += 1) {
+                if (@as(usize, @intFromFloat(c_ids[r * @as(usize, @intCast(K)) + slot])) == ref_ids[j]) break;
+            }
+            const chain_got = c_w[r * @as(usize, @intCast(K)) + slot];
+            chain_err = @max(chain_err, @abs(want - @as(f64, chain_got)));
+            try testing.expectEqual(@as(u32, @bitCast(chain_got)), @as(u32, @bitCast(got)));
+        }
+    }
+    // f32 weights, so the fused arm is the chain's arithmetic, not a cleaner one.
     try testing.expect(fused_err <= chain_err * 1.0001 + 1e-6);
 }
 

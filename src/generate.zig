@@ -9688,6 +9688,21 @@ pub const Generator = struct {
         return v;
     }
 
+    /// Drafts per round whose verify rows stay byte-identical to serial decode.
+    /// MiMo's verify is decode-shaped row by row and the FP8 trunk GEMV keeps a
+    /// decode row's arithmetic only to `MIMO_VERIFY_ROWS_MAX` rows, so a MiMo
+    /// round never plans past the budget; another arch's rows are row-identical
+    /// at any width up to `MAX_DEPTH`.
+    pub fn mtpVerifyDraftsMax(is_mimo: bool) u32 {
+        return if (is_mimo) @intCast(transformer_mod.MIMO_VERIFY_ROWS_MAX - 1) else mtp_mod.MAX_DEPTH;
+    }
+
+    /// The width a forced round drafts. The lever may exceed the launch depth
+    /// (it pins a width for the byte bar), but not the verify row budget.
+    pub fn mtpForcedWidth(forced: u32, verify_max: u32) u32 {
+        return @min(forced, verify_max);
+    }
+
     // Adaptive serial: the EV controller picks the best depth but never compares a round with
     // the serial step it replaces, and the acceptance floor is a model fitted where a verify
     // row costs ~0.1 of a forward. On qwen4_exp a verify row is bytes (62.7k prose: 47-58 tok/s
@@ -10196,8 +10211,9 @@ pub const Generator = struct {
 
     fn mtpRoundPlanInner(self: *Generator) MtpRoundPlan {
         if (mtpForcedDepth()) |d| {
-            self.mtp_ev_m_lo_prev = d;
-            return .{ .m_lo = d, .m_hi = d, .tau_ln = 0.0 };
+            const forced = mtpForcedWidth(d, mtpVerifyDraftsMax(self.xfm.config.isMimo()));
+            self.mtp_ev_m_lo_prev = forced;
+            return .{ .m_lo = forced, .m_hi = forced, .tau_ln = 0.0 };
         }
         const cap_row: u32 = @min(@max(@as(u32, 1), self.mtp_depth), mtp_mod.MAX_DEPTH);
         const cap_free: u32 = @min(@max(cap_row, self.mtp_depth_free), mtp_mod.MAX_DEPTH);
@@ -15805,6 +15821,20 @@ test "the qwen4 rerank draft feeds the MIXER output, never the pre-mixer stream"
 
     // And the owned mixer vector is freed by the chain, not leaked per step.
     try testing.expect(std.mem.indexOf(u8, body, "mlx_array_free(step_out.rerank_x)") != null);
+}
+
+test "mtpForcedWidth: a forced MiMo round never plans past the verify row budget" {
+    // A 5..8 forced depth would hand the forward 6..9 rows, which the decode-shaped
+    // verify cannot serve: the forward would silently take the prefill arm.
+    for ([_]u32{ 1, 3, 5, 6, 8 }) |forced| {
+        const mimo_max = Generator.mtpVerifyDraftsMax(true);
+        try testing.expectEqual(@min(forced, mimo_max), Generator.mtpForcedWidth(forced, mimo_max));
+    }
+    // Another arch's rows are row-identical at any width the lever can name.
+    for ([_]u32{ 1, 4, 5, 8 }) |forced| {
+        const max = Generator.mtpVerifyDraftsMax(false);
+        try testing.expectEqual(forced, Generator.mtpForcedWidth(forced, max));
+    }
 }
 
 test "mtpEvExpectedTokens: 1 + sum of acceptance chain products" {
