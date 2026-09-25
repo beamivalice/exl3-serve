@@ -994,56 +994,60 @@ function setupThemeMode() {
    ------------------------------------------------------------ */
 function inlineNodes(text) {
   const fragment = document.createDocumentFragment();
-  const parts = String(text ?? "").split(/(`[^`\n]*`)/g);
-  for (const part of parts) {
-    if (!part) continue;
-    if (part.startsWith("`") && part.endsWith("`") && part.length > 1) {
-      fragment.appendChild(el("code", null, part.slice(1, -1)));
-      continue;
-    }
-    inlineStyled(part, fragment);
-  }
+  // Code spans become placeholders first, so emphasis can wrap them (**`x`**).
+  const codes = [];
+  const masked = String(text ?? "").replace(/`([^`\n]+)`/g, (_, code) => `${codes.push(code) - 1}`);
+  inlineStyled(masked, fragment, codes);
   return fragment;
 }
-function inlineStyled(text, host) {
+function inlineText(text, host, codes) {
+  text.split(/(\d+)/).forEach((part, index) => {
+    if (index % 2 === 1) host.appendChild(el("code", null, codes[Number(part)]));
+    else if (part) host.appendChild(document.createTextNode(part));
+  });
+}
+function inlineStyled(text, host, codes) {
   const linkRe = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
   let cursor = 0;
   let match;
   while ((match = linkRe.exec(text)) !== null) {
-    if (match.index > cursor) inlineEmphasis(text.slice(cursor, match.index), host);
-    const anchor = el("a", null, match[1]);
+    if (match.index > cursor) inlineEmphasis(text.slice(cursor, match.index), host, codes);
+    const anchor = el("a");
+    inlineText(match[1], anchor, codes);
     anchor.href = match[2];
     anchor.target = "_blank";
     anchor.rel = "noopener noreferrer";
     host.appendChild(anchor);
     cursor = match.index + match[0].length;
   }
-  if (cursor < text.length) inlineEmphasis(text.slice(cursor), host);
+  if (cursor < text.length) inlineEmphasis(text.slice(cursor), host, codes);
 }
-function inlineEmphasis(text, host) {
+function inlineEmphasis(text, host, codes) {
   const boldRe = /\*\*([^*]+)\*\*/g;
   let cursor = 0;
   let match;
   while ((match = boldRe.exec(text)) !== null) {
-    if (match.index > cursor) inlineItalic(text.slice(cursor, match.index), host);
+    if (match.index > cursor) inlineItalic(text.slice(cursor, match.index), host, codes);
     const bold = el("strong");
-    inlineItalic(match[1], bold);
+    inlineItalic(match[1], bold, codes);
     host.appendChild(bold);
     cursor = match.index + match[0].length;
   }
-  if (cursor < text.length) inlineItalic(text.slice(cursor), host);
+  if (cursor < text.length) inlineItalic(text.slice(cursor), host, codes);
 }
-function inlineItalic(text, host) {
+function inlineItalic(text, host, codes) {
   const italicRe = /(^|[^*])\*([^*\n]+)\*/g;
   let cursor = 0;
   let match;
   while ((match = italicRe.exec(text)) !== null) {
     const start = match.index + match[1].length;
-    if (start > cursor) host.appendChild(document.createTextNode(text.slice(cursor, start)));
-    host.appendChild(el("em", null, match[2]));
+    if (start > cursor) inlineText(text.slice(cursor, start), host, codes);
+    const em = el("em");
+    inlineText(match[2], em, codes);
+    host.appendChild(em);
     cursor = start + match[0].length - match[1].length;
   }
-  if (cursor < text.length) host.appendChild(document.createTextNode(text.slice(cursor)));
+  if (cursor < text.length) inlineText(text.slice(cursor), host, codes);
 }
 function tableCells(line) {
   const trimmed = line.trim();
