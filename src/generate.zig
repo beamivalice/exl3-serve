@@ -856,6 +856,10 @@ pub const ThinkBound = struct {
     }
 };
 
+pub fn isGreedyTemperature(temperature: f32) bool {
+    return temperature < 0.01;
+}
+
 /// Sampling parameters for token generation.
 pub const SamplingParams = struct {
     temperature: f32 = 1.0,
@@ -2334,7 +2338,7 @@ pub const Generator = struct {
             sampling.constraint == null and
             logprobs_n == 0;
         if (!clean) return .off;
-        const greedy = sampling.temperature < 0.01 or sampling.top_k == 1;
+        const greedy = isGreedyTemperature(sampling.temperature) or sampling.top_k == 1;
         if (greedy) return .greedy;
         return if (stoch_enabled) .stochastic else .off;
     }
@@ -2434,7 +2438,7 @@ pub const Generator = struct {
         // logit-modifying penalties, no per-token logprobs and no grammar
         // mask. Mirrors the `logprobs>0 + grammar disable spec` precedent:
         // no request gets slower, some get faster.
-        ctx.argmax_only = (sampling.temperature < 0.01 or sampling.top_k == 1) and
+        ctx.argmax_only = (isGreedyTemperature(sampling.temperature) or sampling.top_k == 1) and
             sampling.repeat_penalty == 1.0 and
             sampling.presence_penalty == 0.0 and
             sampling.constraint == null and
@@ -4192,7 +4196,7 @@ pub const Generator = struct {
             if (d.len == 0) draft_slice = null;
         }
 
-        const stochastic = self.sampling.temperature > 0.01;
+        const stochastic = !isGreedyTemperature(self.sampling.temperature);
 
         // ── Phase 2: Cold path (no n-gram match) ──
         // Forward([t1]) length 1: cache.step += 1, produces logits at that
@@ -4729,7 +4733,7 @@ pub const Generator = struct {
         // / accept-prob path needs per-position logits, so it slices below.
         // Either way, we collapse all per-step syncs into ONE eval at the
         // end of this round.
-        const stochastic = self.sampling.temperature > 0.01;
+        const stochastic = !isGreedyTemperature(self.sampling.temperature);
         const vl_shape = mlx.getShape(verify_logits);
 
         // Stochastic path needs per-position logits to compute target probs
@@ -5131,7 +5135,7 @@ pub const Generator = struct {
         // track p and keeps acceptance flat across temperature. Greedy
         // requests keep the argmax path untouched, so the byte-equality
         // guard is unaffected.
-        const stochastic = self.sampling.temperature > 0.01;
+        const stochastic = !isGreedyTemperature(self.sampling.temperature);
         // DFlash2 path selector: when the sidecar ships one, drafts come from
         // the pairwise-scored path trace instead of per-position argmax /
         // block sampling. Greedy requests keep the byte-equality bar (a
@@ -5718,7 +5722,7 @@ pub const Generator = struct {
     /// Allocate an empty draft chain for `plan` (nothing built yet).
     fn mtpChainInit(self: *Generator, allocator: std.mem.Allocator, plan: MtpRoundPlan, t1: u32) !MtpPreDraft {
         const consider_ext = plan.m_hi > plan.m_lo;
-        const sharp_drafts = self.mtpDraftSampling().temperature > 0.01;
+        const sharp_drafts = !isGreedyTemperature(self.mtpDraftSampling().temperature);
         const drafts = try allocator.alloc(u32, plan.m_hi);
         errdefer allocator.free(drafts);
         const draft_arrs = try allocator.alloc(mlx.mlx_array, plan.m_hi);
@@ -7401,7 +7405,7 @@ pub const Generator = struct {
             for (st.chain.draft_arrs[0..st.chain.m]) |arr| _ = mlx.mlx_vector_array_append_value(eval_vec, arr);
             _ = mlx.mlx_vector_array_append_value(eval_vec, st.new_hidden);
             _ = mlx.mlx_vector_array_append_value(eval_vec, st.verify_hidden_all);
-            if (gen.sampling.temperature > 0.01) continue;
+            if (!isGreedyTemperature(gen.sampling.temperature)) continue;
             st.verify_argmax = try verifyArgmax(st.verify_logits, gen.sampling.suppress_mask, s);
             _ = mlx.mlx_vector_array_append_value(eval_vec, st.verify_argmax.lazy());
         }
@@ -7434,7 +7438,7 @@ pub const Generator = struct {
         var params: [MTP_GROUP_ROWS_MAX]SamplingParams = undefined;
         var k: usize = 0;
         for (gens, states, 0..) |gen, st, i| {
-            if (gen.sampling.temperature <= 0.01) continue;
+            if (isGreedyTemperature(gen.sampling.temperature)) continue;
             if (st.chain.m == 0 or st.verify_len != 1 + st.chain.m) return;
             rows[k] = i;
             params[k] = gen.sampling;
@@ -7556,7 +7560,7 @@ pub const Generator = struct {
         // realizes the whole round. The old per-draft probAt()/sampleResidual()
         // calls cost one GPU round-trip sync EACH — 3-5 syncs per round that
         // stalled the pipeline for milliseconds while the GPU sat idle.
-        const stochastic = self.sampling.temperature > 0.01;
+        const stochastic = !isGreedyTemperature(self.sampling.temperature);
         const vl_shape = mlx.getShape(verify_logits);
 
         var per_pos_probs: ?[]mlx.mlx_array = null;
@@ -8167,7 +8171,7 @@ pub const Generator = struct {
     /// acceptance was flat at 49.7-56.9% — no arm beat 0.6.
     pub fn mtpDraftSamplingFor(target: SamplingParams, force_greedy: bool, draft_temp: f32) SamplingParams {
         var d = target;
-        if (force_greedy or target.temperature <= 0.01) {
+        if (force_greedy or isGreedyTemperature(target.temperature)) {
             d.temperature = 0.0;
             return d;
         }
@@ -10122,8 +10126,8 @@ pub const Generator = struct {
     /// One debug line per planned round with every input the planner read.
     pub fn mtpPlannerMode(self: *const Generator) u8 {
         const head = self.mtp orelse return 0;
-        const sharp = self.mtpDraftSampling().temperature > 0.01;
-        return group_cost.GroupShape.samplingMode(head.canRerankDrafts(), false, sharp, self.sampling.temperature > 0.01);
+        const sharp = !isGreedyTemperature(self.mtpDraftSampling().temperature);
+        return group_cost.GroupShape.samplingMode(head.canRerankDrafts(), false, sharp, !isGreedyTemperature(self.sampling.temperature));
     }
 
     fn mtpPlannerObserve(self: *Generator, observed: u32, accepted: u32) void {
@@ -11628,7 +11632,7 @@ pub fn sampleTokenLazy(logits_in: mlx.mlx_array, sampling: SamplingParams, s: ml
     // which downstream (resolvePendingToken / lazyForward / async_eval vector)
     // treats identically to `[1]`. Skipping the otherwise-needed reshape +
     // argmax-on-2D combo cuts ~one FFI call per decode step.
-    if (seq_len == 1 and sampling.temperature < 0.01) {
+    if (seq_len == 1 and isGreedyTemperature(sampling.temperature)) {
         var result = mlx.mlx_array_new();
         _ = mlx.mlx_argmax_axis(&result, logits, -1, false, s);
         return result;
@@ -11654,7 +11658,7 @@ pub fn sampleTokenLazy(logits_in: mlx.mlx_array, sampling: SamplingParams, s: ml
     }
 
     // Greedy: argmax (no temperature)
-    if (sampling.temperature < 0.01) {
+    if (isGreedyTemperature(sampling.temperature)) {
         var result = mlx.mlx_array_new();
         _ = mlx.mlx_argmax_axis(&result, current, -1, false, s);
         _ = mlx.mlx_array_free(current);
@@ -11731,7 +11735,7 @@ fn sampleRowsHomogeneous(params: []const SamplingParams) bool {
 
 fn sampleRowsAllGreedy(params: []const SamplingParams) bool {
     for (params) |p| {
-        if (p.temperature >= 0.01) return false;
+        if (!isGreedyTemperature(p.temperature)) return false;
     }
     return true;
 }
@@ -12934,7 +12938,7 @@ const SampleResult = struct {
 };
 
 /// Sample a token from the last position's logits.
-/// temperature <= 0.01: greedy argmax. Otherwise: scale logits, apply top_p, and sample.
+/// temperature < 0.01 (`isGreedyTemperature`): greedy argmax. Otherwise: scale logits, apply top_p, and sample.
 /// If logprobs_n > 0, also computes logprobs for the sampled token and top N alternatives.
 fn sampleToken(allocator: std.mem.Allocator, logits: mlx.mlx_array, sampling: SamplingParams, generated_ids: ?[]const u32, logprobs_n: u32, s: mlx.mlx_stream) !SampleResult {
     const shape = mlx.getShape(logits);
@@ -12996,7 +13000,7 @@ fn sampleToken(allocator: std.mem.Allocator, logits: mlx.mlx_array, sampling: Sa
     }
 
     // Greedy if temperature is ~0
-    if (sampling.temperature < 0.01) {
+    if (isGreedyTemperature(sampling.temperature)) {
         const token_id = try argmax(current, s);
         var logprob_result: ?LogprobResult = null;
         if (logprobs_n > 0) {
@@ -20077,4 +20081,17 @@ fn suppressedArgmaxCase(allocator: std.mem.Allocator, s: mlx.mlx_stream, v: usiz
     const ids = try samplerTestReadFlat(allocator, masked.lazy(), rows, s);
     defer allocator.free(ids);
     for (ids, 0..) |id, r| try testing.expectEqual(@as(f32, @floatFromInt(100 + r)), id);
+}
+
+test "serial and MTP agree at the greedy temperature cutoff" {
+    const cutoff: f32 = 0.01;
+    const bits: u32 = @bitCast(cutoff);
+    for ([_]f32{ 0.0, 0.005, @bitCast(bits - 1), cutoff, @bitCast(bits + 1), 0.6 }) |temperature| {
+        const sampling = SamplingParams{ .temperature = temperature };
+        const serial_greedy = sampleRowsAllGreedy(&.{sampling});
+        const mtp_greedy = Generator.mtpDraftSamplingFor(sampling, false, 0.6).temperature == 0.0;
+        try testing.expectEqual(temperature < cutoff, serial_greedy);
+        try testing.expectEqual(serial_greedy, mtp_greedy);
+        try testing.expectEqual(serial_greedy, Generator.dsparkArmFor(sampling, 0, true) == .greedy);
+    }
 }

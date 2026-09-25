@@ -140,7 +140,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
   either way, `mtpHeadKvBytesPerToken`); a spec sidecar under another scheme is declined at restore and rewritten
   on the next commit. Head persistence with its QSA half: `tests/test_qwen4_mtp_head_persist.sh`.
 - Acceptance modes `exact|typical|tokenv3` (`mtp_acceptance.zig`, per-model `mtp_acceptance`).
-  Only sampled decoding reads the mode: temperature ≤ 0.01 always takes the argmax check (`mtpAcceptRowGreedy`), so
+  Only sampled decoding reads the mode: temperature < 0.01 (`isGreedyTemperature`, shared with serial sampling) always takes the argmax check (`mtpAcceptRowGreedy`), so
   greedy output is identical under every mode. Sushi-4bpw at T=1.0 / top_k 20 / top_p 0.95, 16 fixture prompts x 512,
   2 seeds, binary b64c5a0e: typical 0.2 decoded 80.0 / 76.6 tok/s vs exact 69.2 / 63.3 (2.4-2.6 vs 2.1-2.2 tokens per
   round); target NLL of the emitted text 0.7819 vs 0.7805 nats, a paired difference inside the seed noise (~0.1 nats).
