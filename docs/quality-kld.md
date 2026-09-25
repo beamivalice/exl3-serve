@@ -44,7 +44,7 @@ Under the models root, `${SUSHI_MODELS_DIR:-$HOME/.sushi/models}`:
 | `kld-teacher/mlx-serve-bf16-16x512-raw` | Flash-Next | bf16 stream, 16x512, raw; the standard |
 | `kld-teacher/mlx-serve-bf16-f32stream-16x512-raw` | Flash-Next | f32 residual stream variant |
 | `kld-teacher/mlx-serve-bf16-60x64` | Flash-Next | the 60x64 screen |
-| `kld-teacher/mimo-bf16trunk-16x512-raw` | MiMo | original checkpoint, FP8 trunk dequantized to bf16, dense KV; mean strict NLL 0.278; 741 s capture |
+| `kld-teacher/mimo-bf16trunk-16x512-raw` | MiMo | original checkpoint as stored (FP8 trunk: bf16 weights in prefill, FP8 code x f32 block scale in decode), dense KV; recaptured 2026-09-25 by 35a854c7 (its forward is unchanged at 2c4dd91e); mean strict NLL 0.2665; 623 s capture |
 
 Commands (MiMo; Flash-Next drops `--ssd-budget-gb` when the source fits):
 
@@ -121,7 +121,7 @@ EXL3 K4 (turboderp), 60x64 screen: the f32 SwiGLU widening moved mean KLD 0.0187
 96.07% (a wash; the widening stands on MiMo's magnitudes).
 
 <a id="mimo"></a>
-## MiMo (16x512, first EOS, 8037 positions, student kv8)
+## MiMo (16x512, first EOS, student kv8)
 
 | pack | expert bpw | KLD | top-1 | cosine loss | all positions | binary |
 |---|---|---|---|---|---|---|
@@ -131,12 +131,17 @@ EXL3 K4 (turboderp), 60x64 screen: the f32 SwiGLU widening moved mean KLD 0.0187
 | MCG K2.5 w12, stored imatrix affine-8 o_proj + lm_head + embed | 2.5 | 0.07793 | 92.14% | 1.97% | 0.07944 | 28d8a4b |
 | MCG K2.5 w12, stored round-to-nearest affine-8 o_proj + lm_head + embed (served) | 2.5 | 0.07783 | 91.92% | 1.97% | 0.07937 | 8341222 |
 | the served pack, prefill attention with f16 P (`sushi_attn_pd_nax`) | 2.5 | 0.07768 | 92.12% | 1.96% | 0.07935 | 79a4cb4 + f16 P |
+| the served pack, against the 2026-09-25 teacher (8099 positions) | 2.5 | 0.0851 | 91.54% | 2.05% | 0.0863 | 35a854c7 |
 
 An imatrix-weighted search of the three affine-8 tensors lowers their weighted weight error ~45% against MLX's
 round-to-nearest packer (most of it from the error-minimizing search with scale/bias rounded to bf16 before the codes,
 which the same search unweighted also gets; the imatrix weighting adds 4-7%), yet scores 0.07793 against
 round-to-nearest's 0.07783, inside the rounding-flip floor: at 8 bits these tensors sit below the pack's noise floor,
 which the K2.5 experts set. The served pack stores them round-to-nearest (exactly `mx.quantize`'s bytes).
+
+The rows above the last one scored against the 2026-09-23 teacher (8037 positions), which the 2026-09-25 capture
+replaced. The two teachers generate different continuations (mean strict NLL 0.278 against 0.2665), so the sets are
+not comparable: a new MiMo row compares against 0.0851.
 
 f16 P in the NAX prefill attention: 0.07768 / top-1 92.12% / NLL 0.3471 against the served row's 0.07783 / 91.92% /
 0.3492 on the same binary (-0.19%, inside the rounding-flip floor).
