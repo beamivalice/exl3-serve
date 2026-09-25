@@ -1500,7 +1500,9 @@ pub const DiskTier = struct {
     ) !PersistOutcome {
         const dir_rel = try std.fmt.allocPrint(self.allocator, "{s}/e{d}", .{ self.root, self.entries.items[idx].id });
         defer self.allocator.free(dir_rel);
-        const e = &self.entries.items[idx];
+        const live = &self.entries.items[idx];
+        var updated = live.*;
+        const e = &updated;
         var written_bytes: u64 = 0;
         // Write-ahead bound: the token record, not the flushed kv_len — a
         // checkpoint beyond the current chunks is position-keyed and becomes
@@ -1531,8 +1533,6 @@ pub const DiskTier = struct {
         const new_qsa_billed: u64 = if (qsa_res.inherited) 0 else qsa_res.bytes;
         delta += @as(i64, @intCast(new_qsa_billed)) - @as(i64, @intCast(old_qsa_billed));
 
-        self.allocator.free(e.ssm_positions);
-        self.allocator.free(e.ssm_bytes);
         e.ssm_positions = ssm_res.positions;
         e.ssm_bytes = ssm_res.bytes;
         if (qsa_res.inherited) {
@@ -1543,9 +1543,12 @@ pub const DiskTier = struct {
             e.inherited_qsa = false;
         }
         e.bytes = clampAdd(e.bytes, delta);
-        self.total_bytes = clampAdd(self.total_bytes, delta);
         e.last_used = self.bump();
         try self.writeMeta(e.*);
+        self.allocator.free(live.ssm_positions);
+        self.allocator.free(live.ssm_bytes);
+        live.* = updated;
+        self.total_bytes = clampAdd(self.total_bytes, delta);
         self.gcToBudget();
         return if (ssm_res.complete) .persisted else .partial;
     }
@@ -3516,6 +3519,48 @@ fn cacheBufValueAt(cache: *KVCache, layer: u32, pos: u32, d: u32, s: mlx.mlx_str
 fn tmpRoot(tmp: *std.testing.TmpDir, io: std.Io, buf: []u8) ![]const u8 {
     const n = try tmp.dir.realPath(io, buf);
     return buf[0..n];
+}
+
+test "DiskTier: failed checkpoint manifest keeps index ownership" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [512]u8 = undefined;
+    const base = try tmpRoot(&tmp, io, &buf);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var accounting = testing.FailingAllocator.init(arena.allocator(), .{});
+    const allocator = accounting.allocator();
+    var tier = try DiskTier.init(allocator, io, base, "fp-owned", 0, 128);
+    defer tier.deinit();
+    try tmp.dir.createDirPath(io, "fp-owned/e1/meta.json.tmp");
+    const tokens = try allocator.alloc(u32, 600);
+    @memset(tokens, 7);
+    const positions = try allocator.dupe(u32, &.{512});
+    const sizes = try allocator.dupe(u64, &.{64});
+    try tier.entries.append(allocator, .{
+        .id = 1,
+        .tokens = tokens,
+        .kv_len = 600,
+        .has_tools = false,
+        .quant = kv_quant.KVQuantConfig.dense,
+        .bytes = 2464,
+        .chunk_bytes = try allocator.alloc(u64, 0),
+        .ssm_positions = positions,
+        .ssm_bytes = sizes,
+        .last_used = 1,
+    });
+    tier.total_bytes = 2464;
+    const owned_before = accounting.allocated_bytes - accounting.freed_bytes;
+
+    if (tier.appendSsmOnly(0, null, null, null, .{ .ctx = null })) |_| {
+        return error.TestExpectedError;
+    } else |_| {}
+
+    try testing.expectEqual(owned_before, accounting.allocated_bytes - accounting.freed_bytes);
+    try testing.expect(tier.entries.items[0].ssm_positions.ptr == positions.ptr);
+    try testing.expect(tier.entries.items[0].ssm_bytes.ptr == sizes.ptr);
+    try testing.expectEqual(@as(u64, 2464), tier.total_bytes);
 }
 
 test "DiskTier: chunked commit + restore round-trips exact KV, step, offsets" {
