@@ -26,6 +26,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-tool-calling](serv
   message (`foldSystemMessages`, also run by `responses.parseInput`, since Codex sends a mid-input `developer` turn);
   `developer` reads as `system` (`canonicalRole`).
 - `/v1/models` rows carry `context_length` + `max_model_len` at TOP level. Context-overflow 400s name BOTH counts.
+- `/v1/models` `meta.quantization` reports EXL3’s configured expert rate and dense width (e.g. `EXL3 3bpw experts, 8-bit dense`) for loaded and unloaded packs; affine labels remain `{bits}-bit`, and `/props` numeric quantization fields retain their dense-trunk meaning.
 - Endpoint EXISTENCE never depends on model state and the 404 is answered BEFORE the model resolves (`ROUTE_PATHS`);
   a status route never reaches `ensureLoaded` (`handlePropsNoModel`). Removed upstream routes answer named 404s.
 - A content array's text parts JOIN in order (`joinedTextParts`); its media parts render at the offset they sat at.

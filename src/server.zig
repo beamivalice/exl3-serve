@@ -6031,6 +6031,14 @@ fn modelEngineName(path: []const u8, arch_hint: []const u8) []const u8 {
     return "mlx";
 }
 
+fn modelQuantizationLabel(allocator: std.mem.Allocator, config: *const model_mod.ModelConfig) ![]u8 {
+    if (config.expert_layout == .exl3_k4) {
+        var rate_buf: [8]u8 = undefined;
+        return std.fmt.allocPrint(allocator, "EXL3 {s}bpw experts, {d}-bit dense", .{ config.expert_quant_rate.kText(&rate_buf), config.quant_bits });
+    }
+    return std.fmt.allocPrint(allocator, "{d}-bit", .{config.quant_bits});
+}
+
 /// pulls full capabilities/dimensions off the resident config/chat_config;
 /// for non-ready entries renders a lightweight stub with state +
 /// bytes_on_disk only. Returns an allocator-owned string; caller frees.
@@ -6044,6 +6052,8 @@ fn renderModelEntry(
     if (entry.state == .ready and entry.config != null and entry.chat_config != null) {
         const config = entry.config.?;
         const chat_config = entry.chat_config.?;
+        const quantization = try modelQuantizationLabel(allocator, config);
+        defer allocator.free(quantization);
         const ctx_len = getEffectiveContextLength(config);
         const ctx_str = if (ctx_len > 0)
             try std.fmt.allocPrint(allocator, "{d}", .{ctx_len})
@@ -6116,7 +6126,7 @@ fn renderModelEntry(
         );
 
         return std.fmt.allocPrint(allocator,
-            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"sushi","loaded":true,"state":"ready","bytes_resident":{d},"bytes_on_disk":{s},"context_length":{s},"max_model_len":{s}{s},"batched_decode":{s},"capabilities":{s}{s},"input_modalities":{s},"meta":{{"architecture":"{s}","engine":"{s}","vocab_size":{d},"hidden_size":{d},"num_layers":{d},"quantization":"{d}-bit","context_length":{s},"model_max_tokens":{d},"embedding_max_length":{s},"is_moe":{s},"drafter_loaded":{s},"drafter_path":{s},"mtp_loaded":{s},"mtp_available":{s},"kv_quant":"{s}","kv_cache":{{"scheme":"{s}","source":"{s}"}},"gen_temperature":{s},"gen_top_p":{s},"gen_top_k":{s}}}}}
+            \\{{"id":"{s}","object":"model","created":{d},"owned_by":"sushi","loaded":true,"state":"ready","bytes_resident":{d},"bytes_on_disk":{s},"context_length":{s},"max_model_len":{s}{s},"batched_decode":{s},"capabilities":{s}{s},"input_modalities":{s},"meta":{{"architecture":"{s}","engine":"{s}","vocab_size":{d},"hidden_size":{d},"num_layers":{d},"quantization":"{s}","context_length":{s},"model_max_tokens":{d},"embedding_max_length":{s},"is_moe":{s},"drafter_loaded":{s},"drafter_path":{s},"mtp_loaded":{s},"mtp_available":{s},"kv_quant":"{s}","kv_cache":{{"scheme":"{s}","source":"{s}"}},"gen_temperature":{s},"gen_top_p":{s},"gen_top_k":{s}}}}}
         , .{
             model_id,
             nowSecs(io),
@@ -6138,7 +6148,7 @@ fn renderModelEntry(
             config.vocab_size,
             config.hidden_size,
             config.num_hidden_layers,
-            config.quant_bits,
+            quantization,
             ctx_str,
             config.max_position_embeddings,
             embed_limit_str,
@@ -6285,11 +6295,17 @@ fn renderModelEntry(
 
     // Dimensions/context/quant/MoE — emitted only when config.json was readable.
     const dims_part: []const u8 = if (sm.found) blk: {
-        break :blk try std.fmt.allocPrint(allocator, "\"vocab_size\":{d},\"hidden_size\":{d},\"num_layers\":{d},\"quantization\":\"{d}-bit\",\"context_length\":{d},\"model_max_tokens\":{d},\"is_moe\":{s},\"mtp_available\":{s},", .{
+        const quantization = try modelQuantizationLabel(allocator, &.{
+            .quant_bits = sm.quant_bits,
+            .expert_layout = if (sm.expert_quant_rate != null) .exl3_k4 else .bf16_fused,
+            .expert_quant_rate = sm.expert_quant_rate orelse .{ .n = 64 },
+        });
+        defer allocator.free(quantization);
+        break :blk try std.fmt.allocPrint(allocator, "\"vocab_size\":{d},\"hidden_size\":{d},\"num_layers\":{d},\"quantization\":\"{s}\",\"context_length\":{d},\"model_max_tokens\":{d},\"is_moe\":{s},\"mtp_available\":{s},", .{
             sm.vocab_size,
             sm.hidden_size,
             sm.num_hidden_layers,
-            sm.quant_bits,
+            quantization,
             sm.max_position_embeddings,
             sm.max_position_embeddings,
             if (sm.is_moe) "true" else "false",
