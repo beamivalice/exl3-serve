@@ -8084,13 +8084,13 @@ pub const KVCache = struct {
         }
     }
 
-    /// The restore point a ringed cache keeps at its prompt end: each ringed layer's rows
-    /// `[pos - n, pos)` as owned copies, n = window + `SWA_RING_CHECKPOINT_BACKOFF` (all of
-    /// them on a shorter prompt). The global layers stay empty: they hold a prefix and
-    /// clamp anywhere. Null when no layer rings.
+    /// A restore point of a ringed cache: each ringed layer's rows `[pos - n, pos)` as owned
+    /// copies, n = window + `SWA_RING_CHECKPOINT_BACKOFF`, or as many as the ring holds down to
+    /// the window (a ring restored off a checkpoint holds no more). The global layers stay
+    /// empty: they hold a prefix and clamp anywhere. Null when no layer rings.
     pub fn ringCheckpoint(self: *const KVCache, pos: usize, s: mlx.mlx_stream) !?KVCacheSnapshot {
         if (self.swa_ring_window == 0) return null;
-        const rows: usize = @min(pos, @as(usize, self.swa_ring_window) + ModelConfig.SWA_RING_CHECKPOINT_BACKOFF);
+        const want: usize = @as(usize, self.swa_ring_window) + ModelConfig.SWA_RING_CHECKPOINT_BACKOFF;
         const out = try self.allocator.alloc(KVCacheEntry, self.entries.len);
         for (out) |*e| e.* = newEmptyKVEntry();
         var cp: KVCacheSnapshot = .{ .entries = out, .step = pos, .allocator = self.allocator, .config = self.config, .swa_ring_window = self.swa_ring_window };
@@ -8099,7 +8099,9 @@ pub const KVCache = struct {
         defer _ = mlx.mlx_vector_array_free(vec);
         for (self.entries, out) |*src, *dst| {
             if (!src.initialized or !src.ringed) continue;
-            if (pos < src.base + rows or pos > src.base + src.offset) return error.SlidingRingRewindPastWindow;
+            if (pos < src.base or pos > src.base + src.offset) return error.SlidingRingRewindPastWindow;
+            const rows = @min(pos - src.base, want);
+            if (rows < @min(pos, @as(usize, self.swa_ring_window))) return error.SlidingRingRewindPastWindow;
             const from = pos - rows - src.base;
             dst.initialized = true;
             dst.ringed = true;
@@ -50219,6 +50221,51 @@ test "a ring checkpoint serves the clamp the ring's end state declines" {
     if (mlx.noGpuBackend()) return error.SkipZigTest;
     try ringCheckpointRestore(KVQuantConfig.dense);
     try ringCheckpointRestore(.{ .scheme = .affine, .bits = 8, .group_size = 32 });
+}
+
+test "a ring restored from a checkpoint below its position still checkpoints a short tail's end" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    const prompt: usize = 700;
+    const backoff: usize = ModelConfig.SWA_RING_CHECKPOINT_BACKOFF;
+
+    var live = try KVCache.init(alloc, 2);
+    defer live.deinit();
+    live.setSwaRing(window);
+    var plain = try KVCache.init(alloc, 2);
+    defer plain.deinit();
+    try ringCheckpointFeed(&live, &plain, window, 0, prompt, 250);
+    var cp = (try live.ringCheckpoint(prompt, s)) orelse return error.TestExpectedRingCheckpoint;
+    defer cp.deinit();
+    var entry = try live.snapshotRetained(s);
+    defer entry.deinit();
+
+    // The next turn restores 20 rows below the checkpoint and forwards a 10-token tail: the
+    // ring then holds fewer than window + backoff rows below the new prompt end.
+    var restored = try KVCache.init(alloc, 2);
+    defer restored.deinit();
+    restored.setSwaRing(window);
+    try restored.restore(&entry);
+    try restored.restoreRing(&cp);
+    try restored.truncate(prompt - 20, s);
+    try plain.truncate(prompt - 20, s);
+    try ringCheckpointFeed(&restored, &plain, window, prompt - 20, prompt - 10, 10);
+
+    var tail_cp = (try restored.ringCheckpoint(prompt - 10, s)) orelse return error.TestExpectedRingCheckpoint;
+    defer tail_cp.deinit();
+    const low = prompt - window - backoff;
+    try std.testing.expect(tail_cp.ringServes(prompt - 10) and tail_cp.ringServes(low + window));
+    try std.testing.expect(!tail_cp.ringServes(low + window - 1));
+
+    // Fewer rows than the window below the position is still no checkpoint.
+    var short = try KVCache.init(alloc, 2);
+    defer short.deinit();
+    short.setSwaRing(window);
+    try short.restore(&entry);
+    try short.restoreRing(&cp);
+    try std.testing.expectError(error.SlidingRingRewindPastWindow, short.ringCheckpoint(low + window - 1, s));
 }
 
 /// Max |a-b| between two same-shaped float arrays, with a NaN guard (a NaN

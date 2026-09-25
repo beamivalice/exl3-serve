@@ -10,6 +10,8 @@ earlier history is mlx-serve's, in that project's changelog.
   replies, shows the model's thinking, takes images for vision models and keeps your conversations in the browser.
 - **`/cd <folder>` in `sushi run`**: moves the folder the file tools and relative `/image` paths read from, the prompt
   always shows that folder and whether tools are on, and a model that asks for a file outside it now suggests `/cd`.
+- **MiMo prompt cache**: a conversation keeps its cached prefix when a client's side requests (a status line, a title)
+  push it out of the cache, and `--prefix-cache-disk` now stores MiMo prompts, so they survive a restart.
 
 ---
 

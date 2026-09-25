@@ -34,7 +34,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
   span (`ssmSnapshotBackoff`). Guard: `tests/test_hybrid_reuse_equivalence.sh`.
 - **A ringed (sliding-window) entry restores at its end or at one of its ring checkpoints**
   (`KVCache.ringCheckpoint`, `Entry.ring_cps`, the highest `RING_CHECKPOINT_MAX` = 4 kept): each ringed layer's
-  window + 30 rows at a position; its own is the prompt end, taken right after prefill. A reply longer than the
+  window + 30 rows at a position (down to the window when the ring holds no more, as one restored off a checkpoint
+  does); the slot's own are its restore point and its prompt end (`SlotRingCps`). A reply longer than the
   ring's slack compacts it past where the next turn diverges (the previous reply re-renders); the checkpoint's rows
   go under the ringed layers (`restoreRing`) and the usual clamp follows.
   A checkpoint restore of fewer than `RING_RESTORE_MIN_TOKENS` (64) cold-prefills: on MiMo kv8 one costs +6 to
@@ -47,7 +48,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
 - **A commit that forked off another entry inherits that entry's ring checkpoints below the fork** (`bestRingDonor`,
   refcount-shared and billed per entry like SSM checkpoints): a request appending to the conversation (a client's
   side request: the chat + a reminder) otherwise holds only its own prompt end, and once the count cap evicts the
-  main entry the next main turn, diverging where the reminder was appended, cold-prefilled every turn.
+  main entry the next main turn, diverging where the reminder was appended, cold-prefilled every turn. The slot's
+  own checkpoint at its restore covers a donor that another slot's commit evicts before this one commits.
 
 ## Candidate ranking and trimming
 

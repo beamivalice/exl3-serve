@@ -141,6 +141,11 @@ pub const LookupResult = struct {
     checked_out: bool = false,
 };
 
+/// A ringed slot's restore points (`KVCache.ringCheckpoint`), handed to the commit that owns
+/// them from then on: where the request restored to, taken before its tail was forwarded (the
+/// fork off another entry, which may be evicted before this commit), and its prompt end.
+pub const SlotRingCps = struct { fork: ?KVCacheSnapshot = null, prompt_end: ?KVCacheSnapshot = null };
+
 /// One media block of a prompt: where its placeholder rows start, and a key
 /// over that block and every block before it (pixels and positions).
 pub const MediaSpan = struct { start: usize, key: u64 };
@@ -1635,11 +1640,11 @@ pub const HotPrefixCache = struct {
         mtp: ?DflashCommit,
         prompt_len: usize,
     ) !CommitStatus {
-        return self.commitWithRing(source_cache, tokens, has_tools, vision_key, cache_key, media_start, ssm_cps, dflash, mtp, prompt_len, null);
+        return self.commitWithRing(source_cache, tokens, has_tools, vision_key, cache_key, media_start, ssm_cps, dflash, mtp, prompt_len, .{});
     }
 
-    /// `ring_cp` is the prompt-end restore point of a ringed cache (`KVCache.ringCheckpoint`);
-    /// ownership transfers to the cache like `ssm_cps`.
+    /// `ring_cps` are a ringed slot's restore points (`SlotRingCps`); ownership transfers to
+    /// the cache like `ssm_cps`.
     pub fn commitWithRing(
         self: *HotPrefixCache,
         source_cache: *const KVCache,
@@ -1652,20 +1657,11 @@ pub const HotPrefixCache = struct {
         dflash: ?DflashCommit,
         mtp: ?DflashCommit,
         prompt_len: usize,
-        ring_cp: ?KVCacheSnapshot,
+        ring_cps: SlotRingCps,
     ) !CommitStatus {
-        // Freed on every path that does not move it into an entry. Best effort, like its capture.
-        var new_rings: ?[]KVCacheSnapshot = null;
+        // Freed on every path that does not move it into an entry.
+        var new_rings = ownRingCps(self.allocator, ring_cps);
         defer if (new_rings) |r| freeRingCps(self.allocator, r);
-        if (ring_cp) |cp| {
-            if (self.allocator.alloc(KVCacheSnapshot, 1)) |one| {
-                one[0] = cp;
-                new_rings = one;
-            } else |_| {
-                var dropped = cp;
-                dropped.deinit();
-            }
-        }
         var new_ring_bytes = ringCpsBytes(new_rings);
         const quant_config = source_cache.config;
 
@@ -1871,13 +1867,10 @@ pub const HotPrefixCache = struct {
                 if (eff_cps) |cps| {
                     for (cps) |*cp| new_ssm_bytes += ssmCheckpointBytes(cp);
                 }
-                // Only this turn's prompt-end checkpoint so far; inheritance runs below.
+                // Only this slot's own checkpoints so far; inheritance runs below.
                 if (new_rings) |r| {
-                    if (r[0].step > tl) {
-                        freeRingCps(self.allocator, r);
-                        new_rings = null;
-                        new_ring_bytes = 0;
-                    }
+                    new_rings = ringCpsUpTo(self.allocator, r, tl);
+                    new_ring_bytes = ringCpsBytes(new_rings);
                 }
                 new_bytes = new_kv_bytes + new_ssm_bytes + new_ring_bytes;
                 log.info("  [hot-cache] trimmed oversized entry to {d}/{d} tokens ({d:.2} MB before checkpoint shedding; {d:.2} MB budget)\n", .{
@@ -2804,6 +2797,40 @@ pub const HotPrefixCache = struct {
         return out;
     }
 
+    /// The slot's own checkpoints as an ascending owned list; best effort, like their capture.
+    fn ownRingCps(allocator: std.mem.Allocator, cps: SlotRingCps) ?[]KVCacheSnapshot {
+        var fork = cps.fork;
+        var end = cps.prompt_end;
+        if (fork != null and end != null and fork.?.step >= end.?.step) {
+            fork.?.deinit();
+            fork = null;
+        }
+        const n = @as(usize, @intFromBool(fork != null)) + @intFromBool(end != null);
+        if (n == 0) return null;
+        const out = allocator.alloc(KVCacheSnapshot, n) catch {
+            if (fork) |*f| f.deinit();
+            if (end) |*e| e.deinit();
+            return null;
+        };
+        if (fork) |f| out[0] = f;
+        if (end) |e| out[n - 1] = e;
+        return out;
+    }
+
+    /// The checkpoints at or below `limit`, as an owned list; consumes `cps`.
+    fn ringCpsUpTo(allocator: std.mem.Allocator, cps: []KVCacheSnapshot, limit: usize) ?[]KVCacheSnapshot {
+        var kept: usize = 0;
+        while (kept < cps.len and cps[kept].step <= limit) kept += 1;
+        if (kept == cps.len) return cps;
+        for (cps[kept..]) |*c| c.deinit();
+        defer allocator.free(cps);
+        if (kept == 0) return null;
+        return allocator.dupe(KVCacheSnapshot, cps[0..kept]) catch {
+            for (cps[0..kept]) |*c| c.deinit();
+            return null;
+        };
+    }
+
     fn freeRingCps(allocator: std.mem.Allocator, cps: []KVCacheSnapshot) void {
         for (cps) |*c| c.deinit();
         allocator.free(cps);
@@ -3727,7 +3754,7 @@ test "a ringed entry restores at its prompt-end checkpoint when the next turn di
     end.deinit();
     var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
     defer hc.deinit();
-    _ = try hc.commitWithRing(&live, &toks, false, 0, 0, null, null, null, null, prompt, cp);
+    _ = try hc.commitWithRing(&live, &toks, false, 0, 0, null, null, null, null, prompt, .{ .prompt_end = cp });
     // The bill: the window plus the backoff, per sliding layer, at the entry's KV width.
     var cp_bytes: u64 = 0;
     for (live.entries) |*e| {
@@ -3793,7 +3820,7 @@ test "a ring checkpoint restore below the floor cold-prefills" {
         const cp = try ringTurn(&live, s, n_layers, window, c.prompt, reply);
         var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
         defer hc.deinit();
-        _ = try hc.commitWithRing(&live, toks[0 .. c.prompt + reply], false, 0, 0, null, null, null, null, c.prompt, cp);
+        _ = try hc.commitWithRing(&live, toks[0 .. c.prompt + reply], false, 0, 0, null, null, null, null, c.prompt, .{ .prompt_end = cp });
 
         var next: [RING_RESTORE_MIN_TOKENS + 60]u32 = undefined;
         @memcpy(next[0..c.shared], toks[0..c.shared]);
@@ -3891,7 +3918,7 @@ test "an entry extended in place keeps its older ring checkpoints" {
     var live = try KVCache.init(testing.allocator, n_layers);
     defer live.deinit();
     const cp = try ringTurn(&live, s, n_layers, window, prompt, reply);
-    _ = try hc.commitWithRing(&live, toks[0 .. prompt + reply], false, 0, 0, null, null, null, null, prompt, cp);
+    _ = try hc.commitWithRing(&live, toks[0 .. prompt + reply], false, 0, 0, null, null, null, null, prompt, .{ .prompt_end = cp });
 
     // A client that sends the whole reply back extends the entry, which the commit replaces.
     var ext = try KVCache.init(testing.allocator, n_layers);
@@ -3906,7 +3933,7 @@ test "an entry extended in place keeps its older ring checkpoints" {
     try ringFill(&ext, s, n_layers, window, turn2, toks.len, 16);
     const moved = cp2;
     cp2 = null;
-    _ = try hc.commitWithRing(&ext, &toks, false, 0, 0, null, null, null, null, turn2, moved);
+    _ = try hc.commitWithRing(&ext, &toks, false, 0, 0, null, null, null, null, turn2, .{ .prompt_end = moved });
     try testing.expectEqual(@as(usize, 1), hc.entries.items.len);
     try testing.expectEqual(@as(usize, 2), hc.entries.items[0].ring_cps.?.len);
 
@@ -3919,6 +3946,66 @@ test "an entry extended in place keeps its older ring checkpoints" {
     restored.setSwaRing(window);
     const again = try hc.lookupAndRestore(&restored, &moe_off, null, s, &next, false, 0, null, null);
     try testing.expectEqual(@as(usize, prompt), again.matched);
+}
+
+test "a ring checkpoint taken at the restore keeps the fork when the donor is evicted before the commit" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    const n_layers: u32 = 4;
+    const prompt: u32 = 700;
+    const reply: u32 = 600;
+    const fork_prompt = prompt + 100 + 330;
+
+    var toks: [fork_prompt + reply]u32 = undefined;
+    for (&toks, 0..) |*t, i| t.* = @intCast(i + 1);
+    var hc = HotPrefixCache.initWithMem(testing.allocator, 1, 0);
+    defer hc.deinit();
+    var donor = try KVCache.init(testing.allocator, n_layers);
+    defer donor.deinit();
+    const donor_cp = try ringTurn(&donor, s, n_layers, window, prompt, reply);
+    var donor_toks: [prompt + reply]u32 = undefined;
+    @memcpy(donor_toks[0..prompt], toks[0..prompt]);
+    for (donor_toks[prompt..], 0..) |*t, i| t.* = @intCast(700_000 + i);
+    _ = try hc.commitWithRing(&donor, &donor_toks, false, 0, 0, null, null, null, null, prompt, .{ .prompt_end = donor_cp });
+
+    var fork = try KVCache.init(testing.allocator, n_layers);
+    defer fork.deinit();
+    fork.setSwaRing(window);
+    var moe_off: usize = 0;
+    const fork_hit = try hc.lookupAndRestore(&fork, &moe_off, null, s, toks[0..fork_prompt], false, 0, null, null);
+    try testing.expectEqual(@as(usize, prompt), fork_hit.matched);
+    var at_restore = try fork.ringCheckpoint(fork_hit.matched, s);
+    errdefer if (at_restore) |*c| c.deinit();
+    try ringFill(&fork, s, n_layers, window, prompt, fork_prompt, 64);
+    var at_end = try fork.ringCheckpoint(fork_prompt, s);
+    errdefer if (at_end) |*c| c.deinit();
+    try ringFill(&fork, s, n_layers, window, fork_prompt, fork_prompt + reply, 16);
+
+    // Another slot commits first and the count cap evicts the donor: nothing is left to inherit.
+    var other = try KVCache.init(testing.allocator, n_layers);
+    defer other.deinit();
+    other.setSwaRing(window);
+    try ringFill(&other, s, n_layers, window, 0, 300, 64);
+    var other_toks: [300]u32 = undefined;
+    for (&other_toks, 0..) |*t, i| t.* = @intCast(500_000 + i);
+    _ = try hc.commitWithState(&other, &other_toks, false, 0, null, null, null);
+    const cps: SlotRingCps = .{ .fork = at_restore, .prompt_end = at_end };
+    at_restore = null;
+    at_end = null;
+    _ = try hc.commitWithRing(&fork, &toks, false, 0, 0, null, null, null, null, fork_prompt, cps);
+    try testing.expectEqual(@as(usize, 1), hc.entries.items.len);
+    try testing.expectEqual(@as(usize, 2), hc.entries.items[0].ring_cps.?.len);
+
+    var next: [prompt + 100 + 40]u32 = undefined;
+    @memcpy(next[0 .. prompt + 100], toks[0 .. prompt + 100]);
+    for (next[prompt + 100 ..], 0..) |*t, i| t.* = @intCast(900_000 + i);
+    var restored = try KVCache.init(testing.allocator, n_layers);
+    defer restored.deinit();
+    restored.setSwaRing(window);
+    const hit = try hc.lookupAndRestore(&restored, &moe_off, null, s, &next, false, 0, null, null);
+    try testing.expectEqual(@as(usize, prompt), hit.matched);
+    try expectRingContinuesCold(&restored, s, n_layers, window, prompt, next.len);
 }
 
 test "a fork entry keeps its donor's ring checkpoint, so evicting the donor still restores at the fork" {
@@ -3943,7 +4030,7 @@ test "a fork entry keeps its donor's ring checkpoint, so evicting the donor stil
     var donor_toks: [prompt + reply]u32 = undefined;
     @memcpy(donor_toks[0..prompt], toks[0..prompt]);
     for (donor_toks[prompt..], 0..) |*t, i| t.* = @intCast(700_000 + i);
-    _ = try hc.commitWithRing(&donor, &donor_toks, false, 0, 0, null, null, null, null, prompt, donor_cp);
+    _ = try hc.commitWithRing(&donor, &donor_toks, false, 0, 0, null, null, null, null, prompt, .{ .prompt_end = donor_cp });
 
     // The side request: the conversation plus an appended reminder, restored off the donor.
     var fork = try KVCache.init(testing.allocator, n_layers);
@@ -3958,7 +4045,7 @@ test "a fork entry keeps its donor's ring checkpoint, so evicting the donor stil
     try ringFill(&fork, s, n_layers, window, fork_prompt, fork_prompt + reply, 16);
     const moved_cp = fork_cp;
     fork_cp = null;
-    _ = try hc.commitWithRing(&fork, &toks, false, 0, 0, null, null, null, null, fork_prompt, moved_cp);
+    _ = try hc.commitWithRing(&fork, &toks, false, 0, 0, null, null, null, null, fork_prompt, .{ .prompt_end = moved_cp });
 
     // The fork entry bills its own end, its own checkpoint and the inherited one.
     var end = try fork.snapshotRetained(s);
@@ -4078,7 +4165,7 @@ fn persistRingTurn(io: std.Io, base: []const u8, fp: []const u8, toks: []const u
     const cp = try ringTurn(&live, s, n_layers, window, prompt, @intCast(toks.len - prompt));
     // Without its restore points a ringed cache is not persistable.
     try testing.expectEqual(kv_disk_cache.PersistOutcome.skipped, try hc.disk.?.appendCommit(live.entries, live.step, live.config, toks, false, null, s));
-    _ = try hc.commitWithRing(&live, toks, false, 0, 0, null, null, null, null, prompt, cp);
+    _ = try hc.commitWithRing(&live, toks, false, 0, 0, null, null, null, null, prompt, .{ .prompt_end = cp });
     hc.flushPendingDisk(s);
     try testing.expectEqual(@as(usize, 1), hc.disk.?.entryCount());
 }

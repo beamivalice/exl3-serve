@@ -400,9 +400,10 @@ pub const Slot = struct {
     /// (ownership transfers into the hot-cache entry); freed by `deinit`
     /// when never consumed.
     cancelled_prefill: Generator.CancelledCheckpointSink = .{},
-    /// A ringed cache's prompt-end restore point (`KVCache.ringCheckpoint`), taken right after
-    /// prefill while the ring still holds it; the commit takes ownership, `deinit` frees it otherwise.
-    ring_cp: ?transformer_mod.KVCacheSnapshot = null,
+    /// A ringed cache's restore points (`KVCache.ringCheckpoint`): `.fork` right after a
+    /// restore, `.prompt_end` right after prefill while the ring still holds it. The commit takes
+    /// ownership, `deinit` frees them otherwise.
+    ring_cps: prefix_cache_mod.SlotRingCps = .{},
     vision_embeddings: ?mlx.mlx_array,
     vision_key: u64,
     cache_key: u64 = 0,
@@ -720,7 +721,8 @@ pub const Slot = struct {
         }
         // Salvaged-but-never-consumed cancelled-prefill checkpoints.
         self.cancelled_prefill.deinit();
-        if (self.ring_cp) |*r| r.deinit();
+        if (self.ring_cps.fork) |*r| r.deinit();
+        if (self.ring_cps.prompt_end) |*r| r.deinit();
         self.cache.deinit();
         if (self.ssm_entries) |entries| {
             if (self.model.transformer) |xfm| xfm.ssmGroupDrop(entries);
@@ -4905,9 +4907,9 @@ fn commitSlotIfApplicable(sch: *Scheduler, slot: *Slot) void {
         };
     };
     // Ownership transfers to the cache on every outcome, like the checkpoints.
-    const ring_cp = slot.ring_cp;
-    slot.ring_cp = null;
-    const finish_st = hc.commitWithRing(&slot.cache, total_tokens, slot.has_tools, slot.vision_key, slot.cache_key, slot.media_start, ssm_cps_opt, dflash_commit, mtp_commit, slot.full_prompt.len, ring_cp) catch |err| {
+    const ring_cps = slot.ring_cps;
+    slot.ring_cps = .{};
+    const finish_st = hc.commitWithRing(&slot.cache, total_tokens, slot.has_tools, slot.vision_key, slot.cache_key, slot.media_start, ssm_cps_opt, dflash_commit, mtp_commit, slot.full_prompt.len, ring_cps) catch |err| {
         // Ownership of the checkpoints transferred to the cache regardless of
         // the outcome — its error paths free them (#330 adjacent: freeing
         // here too was a double free, with a different allocator).
@@ -5643,6 +5645,14 @@ fn runPrefill(sch: *Scheduler, slot: *Slot) !void {
                 prefill_tokens = slot.full_prompt[hot_matched..];
                 hot_checked_out = lookup.checked_out;
             }
+            // The entry this request restored off may be evicted before it commits, so the fork
+            // keeps its own restore point; a full reuse is covered by the prompt end.
+            if (hot_matched >= prefix_cache_mod.RING_RESTORE_MIN_TOKENS and !lookup.full_match and slot.ring_cps.fork == null) {
+                slot.ring_cps.fork = slot.cache.ringCheckpoint(hot_matched, xfm_ptr.s) catch |err| blk: {
+                    log.warn("[hot-cache] ring checkpoint at the restore failed: {s}\n", .{@errorName(err)});
+                    break :blk null;
+                };
+            }
             if (dfl_target) |*dc| {
                 // Adopt only a context that lines up EXACTLY with the trunk
                 // cursor — `nextDflash` asserts `absLen() == cache.step`, and
@@ -5888,8 +5898,8 @@ fn runPrefill(sch: *Scheduler, slot: *Slot) !void {
 
     slot.legacy_gen = gen;
     // A long reply compacts the ring past the prompt end, where the next turn diverges.
-    if (slot.model.prefix_cache != null and slot.ring_cp == null) {
-        slot.ring_cp = slot.cache.ringCheckpoint(slot.full_prompt.len, xfm_ptr.s) catch |err| blk: {
+    if (slot.model.prefix_cache != null and slot.ring_cps.prompt_end == null) {
+        slot.ring_cps.prompt_end = slot.cache.ringCheckpoint(slot.full_prompt.len, xfm_ptr.s) catch |err| blk: {
             log.warn("[hot-cache] ring checkpoint failed: {s}; the entry restores at its end only\n", .{@errorName(err)});
             break :blk null;
         };
