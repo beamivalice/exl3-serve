@@ -96,18 +96,6 @@ Sushi-3bpw on an M5 Max 128 GB, sushi v1.0.0 release candidate (build 725b76ca):
 
 <p align="center"><img src="docs/assets/perf-sushi3bpw-1m.png" alt="decode and prefill vs context" width="100%"></p>
 
-| context | decode tok/s | prefill tok/s | first token | tokens per step |
-|---|---|---|---|---|
-| 4k | 96.1 | 1702 | 2.5 s | 3.37 |
-| 8k | 92.5 | 1940 | 4.2 s | 3.31 |
-| 16k | 93.2 | 1949 | 8.4 s | 3.20 |
-| 33k | 96.2 | 1961 | 16.8 s | 3.00 |
-| 66k | 80.7 | 1945 | 33.7 s | 2.56 |
-| 131k | 80.9 | 1900 | 69.0 s | 2.63 |
-| 262k | 73.4 | 1826 | 143.7 s | 3.20 |
-| 524k | 55.1 | 1686 | 311.1 s | 3.37 |
-| 1004k | 56.6 | 1465 | 685.2 s | 3.31 |
-
 Smaller Macs have less memory bandwidth, so expect lower numbers.
 
 ## License
