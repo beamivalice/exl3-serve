@@ -8662,6 +8662,10 @@ fn visibleToolPreamble(content: []const u8) []const u8 {
     return if (std.mem.trim(u8, content, " \t\r\n").len > 0) content else "";
 }
 
+fn deliveredReasoning(capped: ?[]const u8, raw: ?[]const u8) ?[]const u8 {
+    return capped orelse raw;
+}
+
 /// Run a non-streaming generation through the scheduler. Returns the same
 /// shape as `generate.generate` so the calling handler's response builder
 /// is unchanged.
@@ -9078,7 +9082,7 @@ fn handleNonStreamingGeneration(
             var tc_reasoning_json: []const u8 = "";
             var tc_reasoning_allocated = false;
             {
-                if (tc_think_split.reasoning_content) |reasoning| {
+                if (deliveredReasoning(budget_truncated_reasoning, tc_think_split.reasoning_content)) |reasoning| {
                     const escaped_reasoning = try jsonEscape(allocator, reasoning);
                     tc_reasoning_json = try std.fmt.allocPrint(allocator, ",\"reasoning_content\":{s}", .{escaped_reasoning});
                     allocator.free(escaped_reasoning);
@@ -9165,7 +9169,7 @@ fn handleNonStreamingGeneration(
     var usage_details_allocated = false;
     {
         // Use budget-truncated reasoning if available, otherwise use full reasoning
-        const reasoning_text = if (budget_truncated_reasoning) |tr| tr else think_split.reasoning_content;
+        const reasoning_text = deliveredReasoning(budget_truncated_reasoning, think_split.reasoning_content);
         if (reasoning_text) |reasoning| {
             const escaped_reasoning = try jsonEscape(allocator, reasoning);
             reasoning_json = try std.fmt.allocPrint(allocator, ",\"reasoning_content\":{s}", .{escaped_reasoning});
@@ -10383,18 +10387,9 @@ fn handleStreamingGeneration(
                 defer allocator.free(tc_id);
 
                 // Escape the full arguments string for embedding in JSON
-                const escaped_args = try jsonEscape(allocator, tc.arguments);
-                defer allocator.free(escaped_args);
                 // Strip outer quotes from jsonEscape result (it wraps in "...")
-                const args_inner = if (escaped_args.len >= 2 and escaped_args[0] == '"')
-                    escaped_args[1 .. escaped_args.len - 1]
-                else
-                    escaped_args;
-
                 // First delta: name + id + full arguments (clients accumulate these)
-                const first_delta = try std.fmt.allocPrint(allocator,
-                    \\[{{"index":{d},"id":"{s}","type":"function","function":{{"name":"{s}","arguments":"{s}"}}}}]
-                , .{ i, tc_id, tc.name, args_inner });
+                const first_delta = try formatChatStreamToolCall(allocator, i, tc_id, tc.name, tc.arguments);
                 defer allocator.free(first_delta);
                 try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null, .tool_calls_json = first_delta }, null, null, null, .{ .logprobs_json = try lps.take() });
             }
@@ -11800,6 +11795,21 @@ fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
     const clean = try chat_mod.utf8Sanitize(allocator, input);
     defer allocator.free(clean);
     return jsonEscapeValid(allocator, clean);
+}
+
+fn quotedJsonInner(escaped: []const u8) []const u8 {
+    if (escaped.len >= 2 and escaped[0] == '"' and escaped[escaped.len - 1] == '"') return escaped[1 .. escaped.len - 1];
+    return escaped;
+}
+
+fn formatChatStreamToolCall(allocator: std.mem.Allocator, index: usize, id: []const u8, name: []const u8, arguments: []const u8) ![]u8 {
+    const escaped_name = try jsonEscape(allocator, name);
+    defer allocator.free(escaped_name);
+    const escaped_args = try jsonEscape(allocator, arguments);
+    defer allocator.free(escaped_args);
+    return std.fmt.allocPrint(allocator,
+        \\[{{"index":{d},"id":"{s}","type":"function","function":{{"name":"{s}","arguments":"{s}"}}}}]
+    , .{ index, id, quotedJsonInner(escaped_name), quotedJsonInner(escaped_args) });
 }
 
 fn jsonEscapeValid(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
@@ -21106,6 +21116,24 @@ test "the load-time bill prices the MTP head a served pack runs by default" {
     var streamed = cfg;
     streamed.expert_streaming = true;
     try t.expect(!mtpHeadDefaultOn(&streamed));
+}
+
+test "chat stream tool-call delta escapes the function name" {
+    const a = std.testing.allocator;
+    const delta = try formatChatStreamToolCall(a, 0, "call_1", "say\"hi", "{\"x\":1}");
+    defer a.free(delta);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, delta, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .array);
+    const fn_obj = parsed.value.array.items[0].object.get("function").?.object;
+    try std.testing.expectEqualStrings("say\"hi", fn_obj.get("name").?.string);
+    try std.testing.expectEqualStrings("{\"x\":1}", fn_obj.get("arguments").?.string);
+}
+
+test "a tool-call reply delivers the budget-capped thought" {
+    try std.testing.expectEqualStrings("short", deliveredReasoning("short", "short and the rest the budget withholds").?);
+    try std.testing.expectEqualStrings("full", deliveredReasoning(null, "full").?);
+    try std.testing.expect(deliveredReasoning(null, null) == null);
 }
 
 test "formatChatUsage: prompt_tokens_details.cached_tokens always present (llmprobe chat caching)" {
