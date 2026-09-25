@@ -33,7 +33,7 @@
 
 const std = @import("std");
 var slot_vision_free_test_hook: ?*const fn (mlx.mlx_array) void = null;
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 const transformer_mod = @import("transformer.zig");
 const tokenizer_mod = @import("tokenizer.zig");
 const generate_mod = @import("generate.zig");
@@ -55,8 +55,8 @@ const model_registry_mod = @import("model_registry.zig");
 const model_settings = @import("model_settings.zig");
 const mtp_acceptance_mod = @import("mtp_acceptance.zig");
 const model_discovery = @import("model_discovery.zig");
-const log = @import("log.zig");
-const io_util = @import("io_util.zig");
+const log = @import("log");
+const io_util = @import("io_util");
 const status = @import("status.zig");
 const sleep_inhibit = @import("sleep_inhibit.zig");
 
@@ -3380,7 +3380,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     if (std.c.getenv("SUSHI_DECODE_FWD_UBENCH")) |raw| {
         const n = std.fmt.parseInt(usize, std.mem.sliceTo(raw, 0), 10) catch 0;
         if (n > 0) {
-            const io_u = @import("io_util.zig");
+            const io_u = @import("io_util");
             const tio = std.Io.Threaded.global_single_threaded.io();
             var ctx = xfm_ptr.defaultCtx();
             // SUSHI_DECODE_FWD_UBENCH_S=<rows>[,<rows>...]: verify-width forwards
@@ -9360,7 +9360,7 @@ test "firstMediaPlaceholder: a placeholder id in ORDINARY TEXT is not a media bo
 test "the ssd budget leaves a positive expert cache on the real quantized pack" {
     const t = std.testing;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
+    const path = try @import("test_models").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
     var probe = std.Io.Dir.openDirAbsolute(t.io, path, .{}) catch return error.SkipZigTest;
     probe.close(t.io);
     var config = model_mod.parseConfig(t.io, t.allocator, path) catch return error.SkipZigTest;

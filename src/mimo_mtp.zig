@@ -14,12 +14,12 @@
 //! history ever appended), so only differences reach the rope.
 
 const std = @import("std");
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 const model_mod = @import("model.zig");
 const transformer_mod = @import("transformer.zig");
 const mtp_mod = @import("mtp.zig");
 const fp8_block = @import("fp8_block.zig");
-const log = @import("log.zig");
+const log = @import("log");
 
 const Transformer = transformer_mod.Transformer;
 const Weights = model_mod.Weights;

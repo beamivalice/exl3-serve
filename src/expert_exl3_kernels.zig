@@ -1,8 +1,8 @@
 const std = @import("std");
-const mlx = @import("mlx.zig");
-const log = @import("log.zig");
+const mlx = @import("mlx");
+const log = @import("log");
 const exl3 = @import("expert_exl3.zig");
-const io_util = @import("io_util.zig");
+const io_util = @import("io_util");
 
 var ubench_mute: bool = false;
 var ubench_env: ?bool = null;

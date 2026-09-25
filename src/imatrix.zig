@@ -28,8 +28,8 @@
 //! and nothing is allocated.
 
 const std = @import("std");
-const mlx = @import("mlx.zig");
-const log = @import("log.zig");
+const mlx = @import("mlx");
+const log = @import("log");
 
 pub const ENV_VAR = "SUSHI_IMATRIX_OUT";
 

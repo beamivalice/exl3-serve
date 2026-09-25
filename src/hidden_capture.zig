@@ -10,7 +10,7 @@
 //! Opt-in through `SUSHI_HIDDEN_OUT=<abs dir>`; absent or empty = off.
 
 const std = @import("std");
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 
 pub const ENV_VAR = "SUSHI_HIDDEN_OUT";
 

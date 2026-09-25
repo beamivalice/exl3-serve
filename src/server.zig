@@ -1,5 +1,5 @@
 const std = @import("std");
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 const transformer_mod = @import("transformer.zig");
 const kv_quant_mod = @import("kv_quant.zig");
 const tokenizer_mod = @import("tokenizer.zig");
@@ -21,7 +21,7 @@ const lfm2_vision = @import("lfm2_vision.zig");
 const mimo_vision = @import("mimo_vision.zig");
 const mrope_mod = @import("mrope.zig");
 const vision_mod = @import("vision.zig");
-const log = @import("log.zig");
+const log = @import("log");
 const responses_mod = @import("responses.zig");
 const pld_index = @import("pld_index.zig");
 const prefix_cache_mod = @import("prefix_cache.zig");
@@ -207,7 +207,7 @@ test "textGenTargetOf: reads config unless the entry is mid-load" {
     try std.testing.expect(textGenRejectReason(textGenTargetOf(e)) == null);
 }
 
-const io_util = @import("io_util.zig");
+const io_util = @import("io_util");
 const ws_mod = @import("ws.zig");
 const build_options = @import("build_options");
 const nowSecs = io_util.nowSecs;

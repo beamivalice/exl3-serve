@@ -1,5 +1,5 @@
 const std = @import("std");
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 
 pub var override: ?bool = null;
 var env_enabled: ?bool = null;
@@ -125,7 +125,7 @@ pub fn matmul(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array) !?mlx.mlx_a
     calls[which] += 1;
     if (!@import("builtin").is_test and !logged[which]) {
         logged[which] = true;
-        @import("log.zig").info("[mtp-dense-rows] {s} engaged K=2560 N={d} rows={d}\n", .{ if (which == 0) "router" else "gate", n, rows });
+        @import("log").info("[mtp-dense-rows] {s} engaged K=2560 N={d} rows={d}\n", .{ if (which == 0) "router" else "gate", n, rows });
     }
     var result = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(result);

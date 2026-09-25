@@ -60,6 +60,9 @@ inference thread frees. A pointer-keyed cache is invalidated by an ATOMIC MARK, 
 - `.string` on unchecked `std.json.Value` panics.
 - A test that aliases embedded bytes through an alignment cast is a coin flip per binary: copy fixtures to aligned
   storage (Debug builds catch what ReleaseFast hides).
+- Code another build shares (`log`, `mlx`, `io_util`, `test_models`) is imported by MODULE NAME, never by a
+  file-relative path: a file may belong to only one module per compilation, and a relative `@import` inside a foreign
+  module silently compiles a SECOND copy (two loggers, two mlx bindings). `build.zig` binds the four.
 
 ## Tokenizer
 

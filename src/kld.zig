@@ -1,6 +1,6 @@
 const std = @import("std");
-const mlx = @import("mlx.zig");
-const log = @import("log.zig");
+const mlx = @import("mlx");
+const log = @import("log");
 const model_mod = @import("model.zig");
 const chat_mod = @import("chat.zig");
 const tokenizer_mod = @import("tokenizer.zig");
@@ -1457,7 +1457,7 @@ pub fn cmdKld(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8
 
 /// The 60x64 teacher fixture under the models root, or null when it is absent.
 fn teacherFixture(buf: []u8, io: std.Io) ?[]const u8 {
-    const path = @import("test_models.zig").packPath(buf, "kld-teacher/Qwen3.8-Flash-Next-wikitext2-60x64") catch return null;
+    const path = @import("test_models").packPath(buf, "kld-teacher/Qwen3.8-Flash-Next-wikitext2-60x64") catch return null;
     var dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return null;
     defer dir.close(io);
     _ = dir.statFile(io, "baseline.json", .{}) catch return null;

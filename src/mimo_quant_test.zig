@@ -1,5 +1,5 @@
 const std = @import("std");
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 const transformer = @import("transformer.zig");
 
 const testing = std.testing;

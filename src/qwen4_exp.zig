@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const expert_stream = @import("expert_stream.zig");
-const log = @import("log.zig");
+const log = @import("log");
 
 const MASK64: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 const SPLITMIX_GAMMA: u64 = 0x9E3779B97F4A7C15;

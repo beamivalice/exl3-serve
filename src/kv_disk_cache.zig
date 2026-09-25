@@ -52,14 +52,14 @@
 //! (`Load::eval_gpu` is Not Implemented — the lora.zig/model.zig precedent).
 
 const std = @import("std");
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 const kv_quant = @import("kv_quant.zig");
 const transformer_mod = @import("transformer.zig");
 const model = @import("model.zig");
 const model_discovery = @import("model_discovery.zig");
-const io_util = @import("io_util.zig");
+const io_util = @import("io_util");
 const disk_writer = @import("kv_disk_writer.zig");
-const log = @import("log.zig");
+const log = @import("log");
 
 const KVCache = transformer_mod.KVCache;
 

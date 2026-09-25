@@ -26,8 +26,8 @@
 //! (1/16 .. x16) down-conv wrap.
 
 const std = @import("std");
-const log = @import("log.zig");
-const mlx = @import("mlx.zig");
+const log = @import("log");
+const mlx = @import("mlx");
 const status = @import("status.zig");
 
 // ── C ABI (lib/ane/ane_mlp.h) ──

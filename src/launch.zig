@@ -11,7 +11,7 @@
 //! zsh so the user's PATH (nvm, Homebrew, ~/.local/bin) resolves.
 
 const std = @import("std");
-const log = @import("log.zig");
+const log = @import("log");
 
 pub const Budget = struct { context: u64, output: u64 };
 

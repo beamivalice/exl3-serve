@@ -14,7 +14,7 @@ test {
     _ = @import("expert_quant.zig");
     _ = @import("expert_exl3.zig");
     _ = @import("expert_exl3_kernels.zig");
-    _ = @import("log.zig");
+    _ = @import("log");
     _ = @import("version.zig");
     _ = @import("chat.zig");
     _ = @import("format_corpus_test.zig");
@@ -70,6 +70,6 @@ test {
     _ = @import("cli.zig");
     _ = @import("repl_tools.zig");
     _ = @import("launch.zig");
-    _ = @import("mlx.zig");
-    _ = @import("test_models.zig");
+    _ = @import("mlx");
+    _ = @import("test_models");
 }

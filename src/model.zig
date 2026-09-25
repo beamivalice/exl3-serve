@@ -1,6 +1,6 @@
 const std = @import("std");
-const mlx = @import("mlx.zig");
-const log = @import("log.zig");
+const mlx = @import("mlx");
+const log = @import("log");
 const model_discovery = @import("model_discovery.zig");
 const expert_quant = @import("expert_quant.zig");
 const expert_exl3 = @import("expert_exl3.zig");
@@ -7690,7 +7690,7 @@ test "qwen4 streaming resident byte estimate excludes experts PLE and vision" {
 
 test "real qwen streaming resident estimate is trunk plus MTP only" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen/Qwen3.8-Flash-Next");
+    const path = try @import("test_models").packPath(&path_buf, "Qwen/Qwen3.8-Flash-Next");
     var dir = std.Io.Dir.openDirAbsolute(std.testing.io, path, .{}) catch return error.SkipZigTest;
     dir.close(std.testing.io);
     const split = try streamingResidentSplit(std.testing.io, std.testing.allocator, path, .bf16_fused);

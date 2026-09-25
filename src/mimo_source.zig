@@ -7,7 +7,7 @@
 //! quantization step of its own.
 
 const std = @import("std");
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 const model = @import("model.zig");
 const expert_exl3 = @import("expert_exl3.zig");
 const expert_quant = @import("expert_quant.zig");

@@ -1617,7 +1617,7 @@ test "mimo_v2 is the only additional expert streaming architecture" {
 test "real quantized pack resolves nine regions per layer and the per expert bill" {
     const t = std.testing;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
+    const path = try @import("test_models").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
     var dir = std.Io.Dir.openDirAbsolute(t.io, path, .{}) catch return error.SkipZigTest;
     defer dir.close(t.io);
     var store = try QuantStore.open(t.allocator, path, .{ .layers = 48, .experts = 512, .hidden = 2560, .intermediate = 640 });
@@ -1685,7 +1685,7 @@ test "real quantized pack resolves nine regions per layer and the per expert bil
 test "an eight bit tensor beside four bit ones solves to its own width" {
     const t = std.testing;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
+    const path = try @import("test_models").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
     var dir = std.Io.Dir.openDirAbsolute(t.io, path, .{}) catch return error.SkipZigTest;
     dir.close(t.io);
     const shard = try std.fmt.allocPrintSentinel(t.allocator, "{s}/model-00051.safetensors", .{path}, 0);

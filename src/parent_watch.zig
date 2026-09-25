@@ -2,7 +2,7 @@
 //! SIGTERM does once that process is gone, so a crashed host cannot leave it holding GPU memory.
 
 const std = @import("std");
-const log = @import("log.zig");
+const log = @import("log");
 
 const pid_t = std.posix.pid_t;
 

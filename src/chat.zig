@@ -1,7 +1,7 @@
 const std = @import("std");
 const jinja_c = @import("jinja_c");
 const tokenizer_mod = @import("tokenizer.zig");
-const log = @import("log.zig");
+const log = @import("log");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
 

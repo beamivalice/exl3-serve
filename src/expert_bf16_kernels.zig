@@ -1,6 +1,6 @@
 const std = @import("std");
-const mlx = @import("mlx.zig");
-const log = @import("log.zig");
+const mlx = @import("mlx");
+const log = @import("log");
 
 pub const DOWN_KERNEL_MIN_ROWS: usize = 2;
 

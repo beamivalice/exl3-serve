@@ -13,7 +13,7 @@
 //! plan 01 Phase 0 (detangling Transformer state).
 
 const std = @import("std");
-const log = @import("log.zig");
+const log = @import("log");
 // Only the pure JSON contract predicate is referenced — lazy analysis keeps
 // dflash.zig's mlx FFI out of this filesystem-only module.
 const dflash = @import("dflash.zig");
@@ -1289,7 +1289,7 @@ test "a quantized index is a streaming candidate without any PLE shard" {
 
 test "the real quantized pack is a complete streaming discovery candidate" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
+    const path = try @import("test_models").packPath(&path_buf, "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit");
     var dir = std.Io.Dir.openDirAbsolute(std.testing.io, path, .{}) catch return error.SkipZigTest;
     dir.close(std.testing.io);
     try std.testing.expectEqual(expert_quant.Layout.quantized_split, qwen4StreamingIndexComplete(std.testing.io, std.testing.allocator, path).?);
@@ -1299,7 +1299,7 @@ test "the real quantized pack is a complete streaming discovery candidate" {
 
 test "real qwen checkpoint is a complete streaming discovery candidate" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen/Qwen3.8-Flash-Next");
+    const path = try @import("test_models").packPath(&path_buf, "Qwen/Qwen3.8-Flash-Next");
     var dir = std.Io.Dir.openDirAbsolute(std.testing.io, path, .{}) catch return error.SkipZigTest;
     dir.close(std.testing.io);
     try std.testing.expectEqual(expert_quant.Layout.bf16_fused, qwen4StreamingIndexComplete(std.testing.io, std.testing.allocator, path).?);

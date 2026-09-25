@@ -74,6 +74,18 @@ pub fn build(b: *std.Build) void {
     const git_sha = b.option([]const u8, "git-sha", "Engine build id for the round-cost table: a release sha stands for the executable bytes, which are then not hashed; the MLX dylib and metallib fingerprints are always mixed in") orelse "";
     build_options.addOption([]const u8, "git_sha", git_sha);
 
+    // Code shared with another Zig build is reached by NAME, not by a
+    // file-relative path: a file may belong to only one module in a
+    // compilation, and a relative @import inside a foreign module silently
+    // compiles a SECOND copy of it (two loggers, two mlx bindings). Naming them
+    // lets a host build bind these to its own single instances instead.
+    const log_mod = sharedModule(b, "src/log.zig", target, optimize);
+    const mlx_mod = sharedModule(b, "src/mlx.zig", target, optimize);
+    // mlx.zig logs, so the shared mlx module needs the shared log module.
+    mlx_mod.addImport("log", log_mod);
+    const io_util_mod = sharedModule(b, "src/io_util.zig", target, optimize);
+    const test_models_mod = sharedModule(b, "src/test_models.zig", target, optimize);
+
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -84,6 +96,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "jinja_c", .module = addCHeaderModule(b, b.path("lib/jinja_cpp/jinja_wrapper.h"), b.path("lib/jinja_cpp"), target, optimize) },
             .{ .name = "stb", .module = addCHeaderModule(b, b.path("lib/stb_image.h"), b.path("lib"), target, optimize) },
             .{ .name = "webp", .module = addCHeaderModule(b, .{ .cwd_relative = "/opt/homebrew/include/webp/decode.h" }, .{ .cwd_relative = "/opt/homebrew/include" }, target, optimize) },
+            .{ .name = "log", .module = log_mod },
+            .{ .name = "mlx", .module = mlx_mod },
+            .{ .name = "io_util", .module = io_util_mod },
+            .{ .name = "test_models", .module = test_models_mod },
         },
     });
 
@@ -108,6 +124,9 @@ pub fn build(b: *std.Build) void {
     // enabled (the Homebrew bottle ships without them). MUST come before the
     // /opt/homebrew lib path so a leftover brew mlx-c can never win the link.
     addMlxLib(b, mod);
+    // mlx.zig's @cImport resolves against the module that OWNS the file, which
+    // is now mlx_mod; the link and the @loader_path rpaths stay on the roots.
+    mlx_mod.addIncludePath(b.path("lib/mlx/include"));
     // webp include/lib paths (homebrew)
     mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
     mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
@@ -151,6 +170,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "jinja_c", .module = addCHeaderModule(b, b.path("lib/jinja_cpp/jinja_wrapper.h"), b.path("lib/jinja_cpp"), target, optimize) },
             .{ .name = "stb", .module = addCHeaderModule(b, b.path("lib/stb_image.h"), b.path("lib"), target, optimize) },
             .{ .name = "webp", .module = addCHeaderModule(b, .{ .cwd_relative = "/opt/homebrew/include/webp/decode.h" }, .{ .cwd_relative = "/opt/homebrew/include" }, target, optimize) },
+            .{ .name = "log", .module = log_mod },
+            .{ .name = "mlx", .module = mlx_mod },
+            .{ .name = "io_util", .module = io_util_mod },
+            .{ .name = "test_models", .module = test_models_mod },
         },
     });
 
@@ -234,6 +257,17 @@ fn addAneSources(b: *std.Build, module: *std.Build.Module) void {
 
 fn buildRootHandle(b: *std.Build) std.Io.Dir {
     return b.root.root_dir.handle;
+}
+
+/// A module over one of this tree's own source files, for code a host build
+/// shares. It carries no C sources, include paths or link flags: the root
+/// modules own those.
+fn sharedModule(b: *std.Build, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path(path),
+        .target = target,
+        .optimize = optimize,
+    });
 }
 
 /// Link the self-built mlx + mlx-c staged in lib/mlx by scripts/build-mlx.sh

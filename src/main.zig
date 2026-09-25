@@ -1,6 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 const model_mod = @import("model.zig");
 const tokenizer_mod = @import("tokenizer.zig");
 const transformer_mod = @import("transformer.zig");
@@ -19,7 +19,7 @@ const vision_mod = @import("vision.zig");
 const cli_mod = @import("cli.zig");
 const kld_mod = @import("kld.zig");
 const launch_mod = @import("launch.zig");
-const log = @import("log.zig");
+const log = @import("log");
 const metrics_mod = @import("metrics.zig");
 const sleep_inhibit_mod = @import("sleep_inhibit.zig");
 const version_mod = @import("version.zig");

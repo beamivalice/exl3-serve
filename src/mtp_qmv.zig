@@ -1,5 +1,5 @@
 const std = @import("std");
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 const dense_rows = @import("mtp_dense_rows.zig");
 
 // Each row retains MLX qmv's lane assignment, affine dot, accumulation order and bf16 rounding.
@@ -153,7 +153,7 @@ pub fn matmul(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array, sc: mlx.mlx
     }
     if (!engaged) {
         engaged = true;
-        @import("log.zig").info("[mtp-qmv] row-identical affine8 projections engaged\n", .{});
+        @import("log").info("[mtp-qmv] row-identical affine8 projections engaged\n", .{});
     }
     const cfg = try configuration(xs, n, k, @intCast(rows), gs);
     const inputs = [_]mlx.mlx_array{ x, w, sc, bi, cfg.k_size, cfg.n_size };

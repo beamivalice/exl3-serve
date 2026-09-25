@@ -1,6 +1,6 @@
 const std = @import("std");
-const mlx = @import("mlx.zig");
-const log = @import("log.zig");
+const mlx = @import("mlx");
+const log = @import("log");
 const io_mod = @import("expert_io.zig");
 const kernels = @import("expert_bf16_kernels.zig");
 pub const quant = @import("expert_quant.zig");
@@ -1873,7 +1873,7 @@ test "expert stream slab operand preserves direct gather output" {
 test "real qwen expert store spans and source bytes are exact" {
     const t = std.testing;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try @import("test_models.zig").packPath(&path_buf, "Qwen/Qwen3.8-Flash-Next");
+    const path = try @import("test_models").packPath(&path_buf, "Qwen/Qwen3.8-Flash-Next");
     var dir = std.Io.Dir.openDirAbsolute(t.io, path, .{}) catch return error.SkipZigTest;
     dir.close(t.io);
     var store = try ExpertStore.open(t.allocator, path, .{ .layers = 48, .experts = 512, .hidden = 2560, .intermediate = 640 });

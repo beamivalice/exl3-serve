@@ -6,10 +6,10 @@
 //! scaled by 255. The patch layout is Qwen2-VL's (`qwen_vision.buildPixelValues`).
 
 const std = @import("std");
-const mlx = @import("mlx.zig");
+const mlx = @import("mlx");
 const model_mod = @import("model.zig");
 const qwen_vision = @import("qwen_vision.zig");
-const log = @import("log.zig");
+const log = @import("log");
 
 const ModelConfig = model_mod.ModelConfig;
 const Weights = model_mod.Weights;
