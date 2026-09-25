@@ -4,6 +4,15 @@ sushi began as a fork of [mlx-serve](https://github.com/ddalcu/mlx-serve) and wa
 mlx-serve commit `ef5e667` (two commits after mlx-serve v26.9.4). This file covers sushi's own changes since then;
 earlier history is mlx-serve's, in that project's changelog.
 
+## v1.0.3 — Hotfixes
+
+- **Prompt cache**: re-packing a model in place no longer restores stale SSD cache entries, and the RAM cache stays
+  within its cap when every entry is in use.
+- **Video and labels**: multi-part videos that fit are no longer refused, and `/v1/models` names an EXL3 pack's
+  expert rate beside its dense width.
+
+---
+
 ## v1.0.2 — Hotfixes
 
 - **Stability**: two cached conversations can no longer share a prompt-cache key, a failed long-context cache copy no
