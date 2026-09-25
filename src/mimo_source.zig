@@ -745,7 +745,7 @@ fn validateExl3Expert(key: []const u8, meta: TensorMeta, config: *const model.Mo
     if (std.mem.eql(u8, part, "trellis")) {
         if (meta.dtype != .u16) return error.MimoTensorDtypeMismatch;
         if (meta.shape.len != 4) return error.MimoTensorShapeMismatch;
-        if (in_dim % 16 != 0 or out_dim % 16 != 0) return error.MimoTensorShapeMismatch;
+        if (in_dim % 128 != 0 or out_dim % 128 != 0) return error.MimoTensorShapeMismatch;
         if (expert_exl3.kFromPackedDim(meta.shape[3]) == null) return error.Exl3TrellisGeometry;
         try expectShape(meta, &[_]u64{ experts, in_dim / 16, out_dim / 16, meta.shape[3] });
     } else if (std.mem.eql(u8, part, "suh")) {
@@ -1840,4 +1840,31 @@ test "EXL3 shard stamp rejects invalid and nonfinite rates" {
         try source.stamps.put("expert.safetensors", .{ .k = k });
         try validateShardStamps(&source, &config);
     }
+}
+
+test "mimo EXL3 preflight rejects dimensions outside H128" {
+    var config = model.ModelConfig{};
+    config.num_hidden_layers = 2;
+    config.first_k_dense_replace = 1;
+    config.num_experts = 2;
+    config.hidden_size = 128;
+    config.moe_intermediate_size = 144;
+    const shape = [_]u64{ 2, 8, 9, 40 };
+    const meta = TensorMeta{
+        .dtype = .u16,
+        .shape = &shape,
+        .data_start = 0,
+        .data_end = 2 * 8 * 9 * 40 * 2,
+        .data_base = 0,
+        .file = "experts.safetensors",
+    };
+    try std.testing.expectError(error.MimoTensorShapeMismatch, validateExl3Expert("model.layers.1.mlp.switch_mlp.gate_proj.trellis", meta, &config));
+    var down_meta = meta;
+    down_meta.shape = &.{ 2, 9, 8, 40 };
+    try std.testing.expectError(error.MimoTensorShapeMismatch, validateExl3Expert("model.layers.1.mlp.switch_mlp.down_proj.trellis", down_meta, &config));
+    config.moe_intermediate_size = 256;
+    var valid_meta = meta;
+    valid_meta.shape = &.{ 2, 8, 16, 40 };
+    valid_meta.data_end = 2 * 8 * 16 * 40 * 2;
+    try validateExl3Expert("model.layers.1.mlp.switch_mlp.gate_proj.trellis", valid_meta, &config);
 }
