@@ -23376,3 +23376,67 @@ test "visionEncodeBill covers each measured video peak by >= 25% and within 1.5x
         try std.testing.expect(bill * 2 <= m.peak * 3);
     }
 }
+
+fn testQuantizationModelRow(k: ?u8, expected: []const u8, loaded: bool) !void {
+    const t = std.testing;
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(io, &path_buf);
+    const path = path_buf[0..path_len];
+    const expert = if (k) |rate| try std.fmt.allocPrint(t.allocator, ",\"expert_quant\":{{\"format\":\"exl3\",\"codebook\":\"mcg\",\"k\":{d}}}", .{rate}) else try t.allocator.dupe(u8, "");
+    defer t.allocator.free(expert);
+    const raw = try std.fmt.allocPrint(t.allocator, "{{\"model_type\":\"qwen4_exp\",\"quantization\":{{\"bits\":8,\"group_size\":64}}{s}}}", .{expert});
+    defer t.allocator.free(raw);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = raw });
+    const cfg = model_mod.ModelConfig{ .model_type = "qwen4_exp", .quant_bits = 8, .expert_layout = if (k != null) .exl3_k4 else .quantized_split, .expert_quant_rate = .{ .n = if (k) |rate| rate * 16 else 64 } };
+    if (loaded) {
+        const label = try modelQuantizationLabel(t.allocator, &cfg);
+        defer t.allocator.free(label);
+        try t.expectEqualStrings(expected, label);
+        return;
+    }
+    var entry = model_registry_mod.LoadedModel{
+        .allocator = t.allocator,
+        .id = "test-pack",
+        .path = path,
+        .bytes_on_disk = 0,
+        .arch_hint = "qwen4_exp",
+        .config = null,
+        .weights = null,
+        .transformer = null,
+        .tokenizer = null,
+        .chat_config = null,
+        .vision_encoder = null,
+        .drafter = null,
+        .drafter_path = "",
+        .drafter_block_size = 0,
+        .prefix_cache = null,
+        .refcount = std.atomic.Value(u32).init(0),
+        .last_used_ns = 0,
+        .bytes_resident = 0,
+        .state = .unloaded,
+        .error_name = null,
+    };
+    const row = try renderModelEntry(t.allocator, io, &entry);
+    defer t.allocator.free(row);
+    const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, row, .{});
+    defer parsed.deinit();
+    try t.expectEqualStrings(expected, parsed.value.object.get("meta").?.object.get("quantization").?.string);
+}
+
+test "model quantization label K3 loaded and unloaded" {
+    try testQuantizationModelRow(3, "EXL3 3bpw experts, 8-bit dense", true);
+    try testQuantizationModelRow(3, "EXL3 3bpw experts, 8-bit dense", false);
+}
+
+test "model quantization label K4 loaded and unloaded" {
+    try testQuantizationModelRow(4, "EXL3 4bpw experts, 8-bit dense", true);
+    try testQuantizationModelRow(4, "EXL3 4bpw experts, 8-bit dense", false);
+}
+
+test "model quantization label affine unchanged" {
+    try testQuantizationModelRow(null, "8-bit", true);
+    try testQuantizationModelRow(null, "8-bit", false);
+}
