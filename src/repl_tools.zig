@@ -71,7 +71,7 @@ pub fn isSecretName(name: []const u8) bool {
 
 pub const Confined = union(enum) { ok: []u8, refused: []const u8 };
 
-const refuse_outside = "refused: that path is outside the folder `sushi run` started in";
+const refuse_outside = "refused: that path is outside the folder the file tools are fixed to; the user can move it by typing /cd <folder> in the chat, so suggest that instead of trying other paths";
 const refuse_hidden = "refused: hidden files and folders are off limits";
 const refuse_secret = "refused: that file may hold secrets";
 
@@ -110,6 +110,38 @@ pub fn confinePath(allocator: std.mem.Allocator, io: std.Io, root: []const u8, u
     const real_rel = within(root, real_z) orelse return .{ .refused = refuse_outside };
     if (componentRefusal(real_rel)) |msg| return .{ .refused = msg };
     return .{ .ok = try allocator.dupe(u8, real_z) };
+}
+
+pub const RootChange = union(enum) { ok: [:0]u8, refused: []const u8 };
+
+/// The real path of the folder `/cd <arg>` names: absolute, `~`-relative, or
+/// relative to `root`. A folder whose path names a secret store is refused.
+pub fn changeRoot(allocator: std.mem.Allocator, io: std.Io, root: []const u8, home: []const u8, arg: []const u8) !RootChange {
+    const target = std.mem.trim(u8, arg, " \t\r\n");
+    const joined = if (std.mem.eql(u8, target, "~") or std.mem.startsWith(u8, target, "~/"))
+        try std.fs.path.join(allocator, &.{ home, target[1..] })
+    else if (std.fs.path.isAbsolute(target))
+        try allocator.dupe(u8, target)
+    else
+        try std.fs.path.join(allocator, &.{ root, target });
+    defer allocator.free(joined);
+    if (!std.fs.path.isAbsolute(joined)) return .{ .refused = "no such folder" };
+    const real = std.Io.Dir.realPathFileAbsoluteAlloc(io, joined, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .{ .refused = "no such folder" },
+    };
+    const refusal: ?[]const u8 = blk: {
+        var dir = std.Io.Dir.openDirAbsolute(io, real, .{}) catch break :blk "not a folder";
+        dir.close(io);
+        var it = std.mem.tokenizeScalar(u8, real, '/');
+        while (it.next()) |c| if (isSecretName(c)) break :blk "that folder may hold secrets";
+        break :blk null;
+    };
+    if (refusal) |msg| {
+        allocator.free(real);
+        return .{ .refused = msg };
+    }
+    return .{ .ok = real };
 }
 
 // ── HTML ────────────────────────────────────────────────────────────────
@@ -735,8 +767,8 @@ const max_search_file_bytes = 1024 * 1024;
 pub const Context = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    /// Real path of the folder the REPL started in; file tools stay inside it.
-    root: []const u8,
+    /// Real path of the folder the file tools stay inside; `/cd` moves it.
+    root: [:0]const u8,
     vision: bool,
 };
 
@@ -1388,6 +1420,122 @@ test "repl tools: file tools read, list and grep inside the folder only" {
     defer refused.deinit(allocator);
     try testing.expect(refused.image == null);
     try expectStartsWith("error: this model cannot see images", refused.text);
+}
+
+test "repl tools: a path outside the folder tells the model the user can move it with /cd" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "proj");
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside.txt", .data = "o\n" });
+    const root = try tmp.dir.realPathFileAlloc(io, "proj", allocator);
+    defer allocator.free(root);
+    const ctx: Context = .{ .allocator = allocator, .io = io, .root = root, .vision = true };
+    for ([_][2][]const u8{
+        .{ "read_file", "{\"path\":\"../outside.txt\"}" },
+        .{ "read_file", "{\"path\":\"/etc/hosts\"}" },
+        .{ "list_dir", "{\"path\":\"/\"}" },
+        .{ "search_files", "{\"pattern\":\"o\",\"path\":\"..\"}" },
+        .{ "view_image", "{\"path_or_url\":\"/tmp/shot.png\"}" },
+    }) |c| {
+        const text = try runForTest(ctx, c[0], c[1]);
+        defer allocator.free(text);
+        try expectStartsWith("refused:", text);
+        try expectContains("/cd <folder>", text, true);
+    }
+}
+
+test "repl tools: /cd resolves a folder by real path and refuses anything else" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "home/proj/sub");
+    try tmp.dir.createDirPath(io, "home/.ssh");
+    try tmp.dir.createDirPath(io, "other");
+    try tmp.dir.writeFile(io, .{ .sub_path = "home/proj/notes.txt", .data = "hi\n" });
+    try tmp.dir.symLink(io, "../../other", "home/proj/to_other", .{});
+    const base = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(base);
+    const home = try std.fmt.allocPrint(allocator, "{s}/home", .{base});
+    defer allocator.free(home);
+    const proj = try std.fmt.allocPrint(allocator, "{s}/home/proj", .{base});
+    defer allocator.free(proj);
+    const other = try std.fmt.allocPrint(allocator, "{s}/other", .{base});
+    defer allocator.free(other);
+    const sub = try std.fmt.allocPrint(allocator, "{s}/home/proj/sub", .{base});
+    defer allocator.free(sub);
+
+    const Case = struct { arg: []const u8, want: ?[]const u8 };
+    for ([_]Case{
+        .{ .arg = "sub", .want = sub },
+        .{ .arg = "./sub/", .want = sub },
+        .{ .arg = "..", .want = home },
+        .{ .arg = "~", .want = home },
+        .{ .arg = "~/proj/sub", .want = sub },
+        .{ .arg = other, .want = other },
+        .{ .arg = "to_other", .want = other },
+        .{ .arg = "notes.txt", .want = null },
+        .{ .arg = "missing", .want = null },
+        .{ .arg = "~/.ssh", .want = null },
+    }) |c| {
+        switch (try changeRoot(allocator, io, proj, home, c.arg)) {
+            .ok => |got| {
+                defer allocator.free(got);
+                testing.expectEqualStrings(c.want orelse "(refused)", got) catch |err| {
+                    std.debug.print("/cd {s}\n", .{c.arg});
+                    return err;
+                };
+            },
+            .refused => |msg| {
+                testing.expect(c.want == null and msg.len > 0) catch |err| {
+                    std.debug.print("/cd {s} refused: {s}\n", .{ c.arg, msg });
+                    return err;
+                };
+            },
+        }
+    }
+}
+
+test "repl tools: after /cd the file tools are confined to the new folder, just as strictly" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "proj/sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/notes.txt", .data = "parent note\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/sub/a.txt", .data = "inside\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "proj/sub/.env", .data = "KEY=1\n" });
+    try tmp.dir.symLink(io, "../notes.txt", "proj/sub/up.txt", .{});
+    const start = try tmp.dir.realPathFileAlloc(io, "proj", allocator);
+    defer allocator.free(start);
+    const parent_note = try std.fmt.allocPrint(allocator, "{{\"path\":\"{s}/notes.txt\"}}", .{start});
+    defer allocator.free(parent_note);
+
+    const root = switch (try changeRoot(allocator, io, start, "/nonexistent", "sub")) {
+        .ok => |r| r,
+        .refused => return error.CdRefused,
+    };
+    defer allocator.free(root);
+    const ctx: Context = .{ .allocator = allocator, .io = io, .root = root, .vision = false };
+
+    const Case = struct { name: []const u8, args: []const u8, prefix: []const u8 = "", has: []const []const u8 = &.{}, lacks: []const []const u8 = &.{} };
+    for ([_]Case{
+        .{ .name = "read_file", .args = "{\"path\":\"a.txt\"}", .prefix = "inside\n" },
+        .{ .name = "read_file", .args = "{\"path\":\"../notes.txt\"}", .prefix = "refused:", .has = &.{"/cd <folder>"} },
+        .{ .name = "read_file", .args = parent_note, .prefix = "refused:", .has = &.{"/cd <folder>"} },
+        .{ .name = "read_file", .args = "{\"path\":\"up.txt\"}", .prefix = "refused:" },
+        .{ .name = "read_file", .args = "{\"path\":\".env\"}", .prefix = "refused:" },
+        .{ .name = "list_dir", .args = "{}", .has = &.{"a.txt"}, .lacks = &.{ "notes.txt", ".env" } },
+        .{ .name = "search_files", .args = "{\"pattern\":\"note\"}", .prefix = "no matches" },
+    }) |c| {
+        const text = try runForTest(ctx, c.name, c.args);
+        defer allocator.free(text);
+        try expectStartsWith(c.prefix, text);
+        for (c.has) |h| try expectContains(h, text, true);
+        for (c.lacks) |h| try expectContains(h, text, false);
+    }
 }
 
 test "repl tools: web tools refuse local, private and non-http targets before connecting" {

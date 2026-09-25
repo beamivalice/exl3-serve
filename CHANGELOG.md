@@ -8,6 +8,8 @@ earlier history is mlx-serve's, in that project's changelog.
 
 - **Chat in your browser**: `sushi serve` and `sushi run` serve a chat page at `http://127.0.0.1:12345/` that streams
   replies, shows the model's thinking, takes images for vision models and keeps your conversations in the browser.
+- **`/cd <folder>` in `sushi run`**: moves the file tools to another folder, and a model that asks for a file outside
+  it now suggests `/cd` instead of guessing other paths.
 
 ## v1.0.3 — Hotfixes
 

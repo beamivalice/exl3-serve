@@ -67,8 +67,10 @@ fn printUsage(io: std.Io) void {
         \\                      /think <effort> changes it in the chat;
         \\                      --tool on (or /tool on) lets the model search the
         \\                      web, fetch pages and read files in the current
-        \\                      folder, read-only (off by default); /image <path>
-        \\                      shows a vision model an image
+        \\                      folder, read-only (off by default); /cd <folder>
+        \\                      moves that folder; /image <path> shows a vision
+        \\                      model an image. The same chat opens in a browser
+        \\                      at the URL it prints.
         \\  pull <model>        Download a model into ~/.sushi/models
         \\  list                Show downloaded models
         \\  serve               Start the server over ~/.sushi/models

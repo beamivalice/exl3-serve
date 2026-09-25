@@ -132,9 +132,13 @@ effort word's budget > `--reasoning-budget`. `/v1/responses` parsed the word and
 - **8 tool rounds per user turn**, then a user nudge and one request WITHOUT tools for the final answer.
 - **Only the latest USER turn's images are decoded** (`server.activeWireMediaIndex`): a tool image rides a synthetic
   user turn after the tool results. `/image <path>` attaches to the next message; a pasted path is never attached.
-- **File tools are confined to the start folder by REAL path**: `..`, outside absolutes and escaping symlinks are
-  refused, as are dot entries and secret names (`.env*`, `*.pem`, `*.key`, `id_*`, `*.p12`, `credentials*`,
-  `*.keychain*`, `.ssh`, `.aws`, `.gnupg`), checked both as typed and after resolution (`confinePath`).
+- **File tools are confined to one folder by REAL path**, the start folder until `/cd <folder>` moves it
+  (`changeRoot`: absolute, `~` or relative to the current folder; must be a directory, symlinks resolved, a path with
+  a secret name refused; bare `/cd` shows it). `..`, outside absolutes and escaping symlinks are refused, as are dot
+  entries and secret names (`.env*`, `*.pem`, `*.key`, `id_*`, `*.p12`, `credentials*`, `*.keychain*`, `.ssh`,
+  `.aws`, `.gnupg`), checked both as typed and after resolution (`confinePath`).
+- An outside path's refusal tells the model the folder is fixed and the user can type `/cd <folder>`, so it asks for
+  that instead of guessing other paths. `/image` stays unconfined and relative to the start folder.
 - **Web tools reach public hosts only**: http/https, no userinfo, local names refused, EVERY resolved address and the
   connected peer (`getpeername`, defeats DNS rebinding) must classify public (`classifyIp4/6`; mapped, NAT64 and 6to4
   judged by their IPv4); each redirect hop re-checked; no cookies, auth headers or POST.

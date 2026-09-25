@@ -736,6 +736,11 @@ pub fn parseImageCommand(line: []const u8) ?[]const u8 {
     return commandArg(line, "/image");
 }
 
+/// `/cd [folder]`: the raw argument ("" when missing), null for other lines.
+pub fn parseCdCommand(line: []const u8) ?[]const u8 {
+    return commandArg(line, "/cd");
+}
+
 fn commandArg(line: []const u8, name: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, line, name)) return null;
     const rest = line[name.len..];
@@ -1229,16 +1234,15 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
     try writeReadyBanner(w, vision, port);
     try w.flush();
 
-    // File tools are confined to the folder `sushi run` started in.
-    const root = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
-    defer allocator.free(root);
+    // File tools start confined to the folder `sushi run` started in; `/cd` moves them.
     var driver: ReplDriver = .{
         .allocator = allocator,
         .io = io,
         .url = chat_url,
         .w = w,
-        .tools = .{ .allocator = allocator, .io = io, .root = root, .vision = vision },
+        .tools = .{ .allocator = allocator, .io = io, .root = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator), .vision = vision },
     };
+    defer allocator.free(driver.tools.root);
 
     var history = std.ArrayList(Turn).empty;
     defer {
@@ -1280,7 +1284,11 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
                 .set => |on| opts.tools = on,
                 .refuse => |word| try w.print("/tool takes on or off, not '{s}'\n", .{word}),
             }
-            try w.print("tools: {s} ({s}; files under {s})\n", .{ if (opts.tools) "on" else "off", repl_tools.toolNames(vision), root });
+            try w.print("tools: {s} ({s}; files under {s}, /cd <folder> moves them)\n", .{ if (opts.tools) "on" else "off", repl_tools.toolNames(vision), driver.tools.root });
+            continue;
+        }
+        if (parseCdCommand(trimmed)) |arg| {
+            try changeToolFolder(allocator, io, w, &driver.tools, arg);
             continue;
         }
         if (parseImageCommand(trimmed)) |arg| {
@@ -1305,9 +1313,25 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
 
 /// The lines `sushi run` prints once the model answers.
 pub fn writeReadyBanner(w: *std.Io.Writer, vision: bool, port: u16) !void {
-    try w.writeAll("\n>>> chat is live — /bye to exit, /tool on for web search and file tools");
+    try w.writeAll("\n>>> chat is live — /bye to exit, /tool on for web search and file tools (/cd <folder> moves them)");
     try w.writeAll(if (vision) ", /image <path> to show an image\n" else "\n");
     try w.print(">>> chat in your browser: http://127.0.0.1:{d}/\n", .{port});
+}
+
+/// `/cd [folder]`: shows the file tools' folder, or moves them to another one.
+fn changeToolFolder(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, tools: *repl_tools.Context, arg: []const u8) !void {
+    if (arg.len > 0) {
+        const path = try unquotePath(allocator, arg);
+        defer allocator.free(path);
+        switch (try repl_tools.changeRoot(allocator, io, tools.root, homeDir(), path)) {
+            .refused => |msg| return w.print("cannot /cd to {s}: {s}\n", .{ path, msg }),
+            .ok => |root| {
+                allocator.free(tools.root);
+                tools.root = root;
+            },
+        }
+    }
+    try w.print("file tools read under {s}\n", .{tools.root});
 }
 
 fn attachImage(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, vision: bool, arg: []const u8, pending: *std.ArrayList([]const u8)) !void {
@@ -1763,15 +1787,50 @@ test "cli: tools are off by default; --tool, /tool and /image parse" {
     }
 }
 
-test "cli: the ready banner points at the browser chat page" {
+test "cli: the ready banner points at the browser chat page and at /cd" {
     for ([_]bool{ false, true }) |vision| {
         var buf: [512]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
         try writeReadyBanner(&w, vision, 18800);
         const text = w.buffered();
         try testing.expect(std.mem.indexOf(u8, text, "chat in your browser: http://127.0.0.1:18800/\n") != null);
+        try testing.expect(std.mem.indexOf(u8, text, "/tool on") != null);
+        try testing.expect(std.mem.indexOf(u8, text, "/cd <folder>") != null);
         try testing.expectEqual(vision, std.mem.indexOf(u8, text, "/image <path>") != null);
     }
+}
+
+test "cli: /cd parses its folder argument" {
+    try testing.expectEqualStrings("", parseCdCommand("/cd").?);
+    try testing.expectEqualStrings("src", parseCdCommand("/cd  src ").?);
+    try testing.expectEqualStrings("~/My Folder", parseCdCommand("/cd ~/My Folder").?);
+    try testing.expectEqual(@as(?[]const u8, null), parseCdCommand("/cdx"));
+    try testing.expectEqual(@as(?[]const u8, null), parseCdCommand("cd src"));
+}
+
+test "cli: /cd moves the file tools' folder, and a refused /cd keeps it" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "proj/my sub");
+    var tools: repl_tools.Context = .{ .allocator = allocator, .io = io, .root = try tmp.dir.realPathFileAlloc(io, "proj", allocator), .vision = false };
+    defer allocator.free(tools.root);
+
+    var buf: [2048]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try changeToolFolder(allocator, io, &w, &tools, "'my sub'");
+    try testing.expect(std.mem.endsWith(u8, tools.root, "/proj/my sub"));
+    try changeToolFolder(allocator, io, &w, &tools, "missing");
+    try testing.expect(std.mem.endsWith(u8, tools.root, "/proj/my sub"));
+    try changeToolFolder(allocator, io, &w, &tools, "..");
+    try testing.expect(std.mem.endsWith(u8, tools.root, "/proj"));
+    try changeToolFolder(allocator, io, &w, &tools, "");
+    try testing.expect(std.mem.endsWith(u8, tools.root, "/proj"));
+
+    const text = w.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "cannot /cd to missing: no such folder\n") != null);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, text, "file tools read under "));
 }
 
 test "cli: the chat body carries tools only while they are on, plus tool turns and image parts" {
