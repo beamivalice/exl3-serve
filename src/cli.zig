@@ -1231,8 +1231,6 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
         try w.print("{s}\n", .{line});
     } else |_| {}
     const vision = if (models_info) |m| m.vision else false;
-    try writeReadyBanner(w, vision, port);
-    try w.flush();
 
     // File tools start confined to the folder `sushi run` started in; `/cd` moves them.
     var driver: ReplDriver = .{
@@ -1243,6 +1241,9 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
         .tools = .{ .allocator = allocator, .io = io, .root = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator), .vision = vision },
     };
     defer allocator.free(driver.tools.root);
+    var state_buf: [512]u8 = undefined;
+    try writeReadyBanner(w, vision, port, formatPromptStatus(&state_buf, driver.tools.root, homeDir(), opts.tools));
+    try w.flush();
 
     var history = std.ArrayList(Turn).empty;
     defer {
@@ -1260,7 +1261,7 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
     const r = &stdin_r.interface;
 
     while (true) {
-        try w.writeAll(">>> ");
+        try writePrompt(w, formatPromptStatus(&state_buf, driver.tools.root, homeDir(), opts.tools));
         try w.flush();
         const line = r.takeDelimiter('\n') catch break orelse break;
         const trimmed = std.mem.trim(u8, line, " \t\r");
@@ -1311,11 +1312,34 @@ pub fn runRepl(allocator: std.mem.Allocator, io: std.Io, port: u16, launch: Repl
     }
 }
 
-/// The lines `sushi run` prints once the model answers.
-pub fn writeReadyBanner(w: *std.Io.Writer, vision: bool, port: u16) !void {
-    try w.writeAll("\n>>> chat is live — /bye to exit, /tool on for web search and file tools (/cd <folder> moves them)");
+/// The lines `sushi run` prints once the model answers; `state` is `formatPromptStatus`.
+pub fn writeReadyBanner(w: *std.Io.Writer, vision: bool, port: u16, state: []const u8) !void {
+    try w.writeAll("\n>>> chat is live — /bye to exit, /tool on for web search and file tools");
     try w.writeAll(if (vision) ", /image <path> to show an image\n" else "\n");
+    try w.print(">>> {s} (shown before each prompt); /cd <folder> moves the folder the file tools{s} read\n", .{ state, if (vision) " and /image" else "" });
     try w.print(">>> chat in your browser: http://127.0.0.1:{d}/\n", .{port});
+}
+
+const max_status_path = 32;
+
+/// The prompt's status: the tools' folder (`~` for `home`, `…` and the tail past
+/// `max_status_path` characters) and whether the tools are on.
+pub fn formatPromptStatus(buf: []u8, root: []const u8, home: []const u8, tools_on: bool) []const u8 {
+    const under_home = home.len > 1 and std.mem.startsWith(u8, root, home) and (root.len == home.len or root[home.len] == '/');
+    var lead: []const u8 = if (under_home) "~" else "";
+    var path = if (under_home) root[home.len..] else root;
+    if (@min(lead.len, 1) + path.len > max_status_path) {
+        const from = path.len - (max_status_path - 1);
+        const cut = std.mem.indexOfScalarPos(u8, path, from, '/') orelse std.mem.lastIndexOfScalar(u8, path, '/') orelse 0;
+        lead = "…";
+        path = path[cut..];
+    }
+    return std.fmt.bufPrint(buf, "{s}{s} · tools {s}", .{ lead, path, if (tools_on) "on" else "off" }) catch root;
+}
+
+/// The REPL prompt: the dim status, then `>>> `.
+pub fn writePrompt(w: *std.Io.Writer, state: []const u8) !void {
+    try w.print("\x1b[2m{s}\x1b[0m >>> ", .{state});
 }
 
 /// `/cd [folder]`: shows the file tools' folder, or moves them to another one.
@@ -1790,17 +1814,41 @@ test "cli: tools are off by default; --tool, /tool and /image parse" {
     }
 }
 
-test "cli: the ready banner points at the browser chat page and at /cd" {
+test "cli: the ready banner shows the folder, the tools state, /cd and the browser chat page" {
     for ([_]bool{ false, true }) |vision| {
         var buf: [512]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
-        try writeReadyBanner(&w, vision, 18800);
+        try writeReadyBanner(&w, vision, 18800, "~/project · tools off");
         const text = w.buffered();
         try testing.expect(std.mem.indexOf(u8, text, "chat in your browser: http://127.0.0.1:18800/\n") != null);
         try testing.expect(std.mem.indexOf(u8, text, "/tool on") != null);
+        try testing.expect(std.mem.indexOf(u8, text, "~/project · tools off") != null);
         try testing.expect(std.mem.indexOf(u8, text, "/cd <folder>") != null);
-        try testing.expectEqual(vision, std.mem.indexOf(u8, text, "/image <path>") != null);
+        try testing.expectEqual(vision, std.mem.indexOf(u8, text, "/image") != null);
     }
+}
+
+test "cli: the prompt status shows the tools' folder (~ for home, the tail when long) and the tools state" {
+    const Case = struct { root: []const u8, tools: bool, want: []const u8 };
+    for ([_]Case{
+        .{ .root = "/Users/me", .tools = false, .want = "~ · tools off" },
+        .{ .root = "/Users/me/project", .tools = true, .want = "~/project · tools on" },
+        .{ .root = "/Users/meg/project", .tools = false, .want = "/Users/meg/project · tools off" },
+        .{ .root = "/opt/data", .tools = true, .want = "/opt/data · tools on" },
+        .{ .root = "/", .tools = false, .want = "/ · tools off" },
+        .{ .root = "/Users/me/work/clients/acme/backend/services/billing", .tools = true, .want = "…/acme/backend/services/billing · tools on" },
+        .{ .root = "/Volumes/x/a-single-folder-name-longer-than-the-limit-allows", .tools = false, .want = "…/a-single-folder-name-longer-than-the-limit-allows · tools off" },
+    }) |c| {
+        var buf: [256]u8 = undefined;
+        try testing.expectEqualStrings(c.want, formatPromptStatus(&buf, c.root, "/Users/me", c.tools));
+    }
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("/Users/me/p · tools off", formatPromptStatus(&buf, "/Users/me/p", "", false));
+
+    var out: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    try writePrompt(&w, "~/project · tools on");
+    try testing.expectEqualStrings("\x1b[2m~/project · tools on\x1b[0m >>> ", w.buffered());
 }
 
 test "cli: /cd parses its folder argument" {

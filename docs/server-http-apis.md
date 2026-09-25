@@ -141,6 +141,9 @@ effort word's budget > `--reasoning-budget`. `/v1/responses` parsed the word and
   that instead of guessing other paths.
 - The user's `/image <path>` is confined the same way (`loadUserImage`): a relative path resolves in the `/cd` folder,
   and the refusals are reworded for the user.
+- Every prompt carries that folder and the tools state, dim: `~/project · tools on >>> ` (`formatPromptStatus`: `~` for
+  `$HOME`, `…` and the tail past 32 characters); it is rebuilt before each input, so `/cd` and `/tool` show at once.
+  The ready banner prints the same pair.
 - **Web tools reach public hosts only**: http/https, no userinfo, local names refused, EVERY resolved address and the
   connected peer (`getpeername`, defeats DNS rebinding) must classify public (`classifyIp4/6`; mapped, NAT64 and 6to4
   judged by their IPv4); each redirect hop re-checked; no cookies, auth headers or POST.
