@@ -49,6 +49,7 @@ test {
     _ = @import("deepseek_v4.zig");
     _ = @import("qwen4_exp.zig");
     _ = @import("tokenizer.zig");
+    _ = @import("tokenize_cache.zig");
     _ = @import("prefix_cache.zig");
     _ = @import("restore_dump.zig");
     _ = @import("metrics.zig");

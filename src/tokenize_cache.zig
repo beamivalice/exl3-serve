@@ -68,39 +68,40 @@ pub const TokenizeCache = struct {
     ) ?u64 {
         var h = std.hash.Wyhash.init(0xC0DEC0DE);
         for (messages) |m| {
-            h.update(m.role);
+            hashField(&h, m.role);
             h.update("\x1f"); // unit separator — keeps role/content boundary unambiguous
-            h.update(m.content);
+            hashField(&h, m.content);
             h.update("\x1e"); // record separator
-            if (m.tool_call_id) |id| h.update(id);
+            if (m.tool_call_id) |id| hashField(&h, id);
             h.update("\x1e");
-            if (m.reasoning_content) |rc| h.update(rc);
+            if (m.reasoning_content) |rc| hashField(&h, rc);
             h.update("\x1e");
             if (m.media_parts) |parts| for (parts) |part| {
                 h.update(std.mem.asBytes(&part.at));
-                h.update(@tagName(part.kind));
+                hashField(&h, @tagName(part.kind));
             };
             h.update("\x1e");
             if (m.tool_calls) |tcs| {
                 for (tcs) |tc| {
-                    h.update(tc.name);
+                    hashField(&h, tc.id);
+                    hashField(&h, tc.name);
                     h.update("\x1f");
-                    h.update(tc.arguments);
+                    hashField(&h, tc.arguments);
                     h.update("\x1f");
                 }
             }
             h.update("\x1d"); // group separator between messages
         }
-        if (tools_json) |t| h.update(t) else h.update("(no-tools)");
+        if (tools_json) |t| hashField(&h, t) else h.update("(no-tools)");
         h.update("\x1e");
-        if (tool_choice_instruction) |t| h.update(t) else h.update("(no-tc)");
+        if (tool_choice_instruction) |t| hashField(&h, t) else h.update("(no-tc)");
         h.update("\x1e");
         h.update(if (enable_thinking) "thinking=on" else "thinking=off");
         h.update("\x1e");
         // The effort string changes the rendered prompt for templates that
         // map it (dsv4's high/max preamble) — two requests differing only in
         // effort must not share a cached tokenization.
-        if (reasoning_effort) |e| h.update(e) else h.update("(no-effort)");
+        if (reasoning_effort) |e| hashField(&h, e) else h.update("(no-effort)");
         h.update("\x1e");
         // A continuation renders the SAME messages into a different prompt —
         // the trailing assistant becomes a prefill instead of history. Without
@@ -108,6 +109,12 @@ pub const TokenizeCache = struct {
         // other's tokens.
         h.update(if (continue_final) "continue=on" else "continue=off");
         return h.final();
+    }
+
+    fn hashField(h: *std.hash.Wyhash, value: []const u8) void {
+        const len: u64 = value.len;
+        h.update(std.mem.asBytes(&len));
+        h.update(value);
     }
 
     /// Return a freshly-allocated clone of the cached token IDs for `key`,
@@ -250,4 +257,20 @@ test "TokenizeCache get/put + LRU eviction" {
     defer std.testing.allocator.free(got_a);
     try std.testing.expectEqualSlices(u32, &a, got_a);
     try std.testing.expect((try c.get(io, 0xB, std.testing.allocator)) == null);
+}
+
+test "TokenizeCache key keeps separator bytes inside their fields" {
+    const a = [_]chat_mod.Message{.{ .role = "assistant", .content = "x\x1ey", .tool_call_id = "z" }};
+    const b = [_]chat_mod.Message{.{ .role = "assistant", .content = "x", .tool_call_id = "y\x1ez" }};
+    try std.testing.expect(TokenizeCache.keyFor(&a, null, null, false, null, false).? !=
+        TokenizeCache.keyFor(&b, null, null, false, null, false).?);
+}
+
+test "TokenizeCache key includes tool call IDs" {
+    const calls_a = [_]chat_mod.ToolCall{.{ .id = "call_a", .name = "lookup", .arguments = "{}" }};
+    const calls_b = [_]chat_mod.ToolCall{.{ .id = "call_b", .name = "lookup", .arguments = "{}" }};
+    const a = [_]chat_mod.Message{.{ .role = "assistant", .content = "", .tool_calls = &calls_a }};
+    const b = [_]chat_mod.Message{.{ .role = "assistant", .content = "", .tool_calls = &calls_b }};
+    try std.testing.expect(TokenizeCache.keyFor(&a, null, null, false, null, false).? !=
+        TokenizeCache.keyFor(&b, null, null, false, null, false).?);
 }
