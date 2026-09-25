@@ -38,7 +38,7 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Q
 
 Set your memory limit 
 ```bash
-sudo systcl iogpu.wired_limit_mb=58000
+sudo sysctl iogpu.wired_limit_mb=58000
 ```
 
 **96 GB+ Mac, Sushi-4bpw**
@@ -53,8 +53,8 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-4bpw --local-dir ~/.sushi/models/Q
 
 Set your memory limit
 ```bash
-sudo systcl iogpu.wired_limit_mb=88000 # For 96GB
-sudo systcl iogpu.wired_limit_mb=120000 # For 128GB
+sudo sysctl iogpu.wired_limit_mb=88000 # For 96GB
+sudo sysctl iogpu.wired_limit_mb=120000 # For 128GB
 ```
 
 - `--mtp-head-kv-quant` stores the MTP head's own KV at 8 bits too.
