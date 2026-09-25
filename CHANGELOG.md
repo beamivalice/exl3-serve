@@ -12,6 +12,8 @@ earlier history is mlx-serve's, in that project's changelog.
   always shows that folder and whether tools are on, and a model that asks for a file outside it now suggests `/cd`.
 - **MiMo prompt cache**: a conversation keeps its cached prefix when a client's side requests (a status line, a title)
   push it out of the cache, and `--prefix-cache-disk` now stores MiMo prompts, so they survive a restart.
+- **Faster prompts on M1–M4**: Macs without the M5's neural accelerators read prompts about 4x faster on the EXL3
+  packs (M2 Max, 3–4k-token prompts, default settings).
 
 ---
 

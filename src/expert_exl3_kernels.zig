@@ -379,6 +379,121 @@ const GEMM_SORTED_SOURCE: [:0]const u8 =
     \\  row = run_end;
     \\}
 ;
+/// The simdgroup-matrix body's 8x8 fragment readers. A lane at fragment coordinate (fm, fn)
+/// owns tile slot group g = 4*fm + fn/2: its pair j, slots (8g+2j, 8g+2j+1), is W^T block
+/// (n half j>>1, k half j&1) at (fm, fn) and (fm, fn+1).
+const GEMM_SIMDMAT_FRAGS: [:0]const u8 =
+    \\#define SMAT_UNROLL _Pragma("clang loop unroll(full)")
+    \\static inline uint smat_funnel(const device uint *words, uint end, uint nwords) {
+    \\  const uint last = (end - 1u) >> 5u;
+    \\  const uint prev = last == 0u ? nwords - 1u : last - 1u;
+    \\  return uint((((ulong)words[prev] << 32u) | (ulong)words[last]) >> ((0u - end) & 31u));
+    \\}
+    \\static inline half2 smat_pair(uint f, uint s0, uint s1) {
+    \\  return exl3_pairh(uint2((f >> s0) & 0xffffu, (f >> s1) & 0xffffu));
+    \\}
+    \\template<uint N>
+    \\static inline void smat_group(const device uint *words, uint g, thread half2 *p) {
+    \\  if (N == 64u) {
+    \\    const ulong m = ((ulong)words[(g + 31u) & 31u] << 32u) | (ulong)words[g];
+    \\    SMAT_UNROLL for (uint j = 0u; j < 4u; j++) p[j] = smat_pair(uint(m >> (24u - 8u * j)), 4u, 0u);
+    \\  } else if (N == 48u && EXL3_FUNNEL48) {
+    \\    const uint lo = smat_funnel(words, 24u * g + 18u, 24u);
+    \\    const uint hi = smat_funnel(words, 24u * g + 24u, 24u);
+    \\    p[0] = smat_pair(lo, 15u, 12u);
+    \\    p[1] = smat_pair(lo, 9u, 6u);
+    \\    p[2] = smat_pair(lo, 3u, 0u);
+    \\    p[3] = smat_pair(hi, 3u, 0u);
+    \\  } else if (N == 40u) {
+    \\    const uint lo = smat_funnel(words, 20u * g + 15u, 20u);
+    \\    const uint hi = smat_funnel(words, 20u * g + 20u, 20u);
+    \\    p[0] = smat_pair(lo, 13u, 10u);
+    \\    p[1] = smat_pair(lo, 8u, 5u);
+    \\    p[2] = smat_pair(lo, 3u, 0u);
+    \\    p[3] = smat_pair(hi, 3u, 0u);
+    \\  } else {
+    \\    SMAT_UNROLL for (uint j = 0u; j < 4u; j++) {
+    \\      const exl3_win w = exl3_pair_window(8u * g + 2u * j, N);
+    \\      p[j] = smat_pair(uint((((ulong)words[w.i0] << 32u) | (ulong)words[w.i1]) >> w.sh), w.fresh, 0u);
+    \\    }
+    \\  }
+    \\}
+;
+/// Each simdgroup computes 32 output columns of one window as D = W^T X^T in 8x8 blocks, the
+/// decoded weights feeding A directly. The block count is WIN's, never the run's: a data-dependent
+/// count spills the accumulators. Rows past the run read its last row and are never stored.
+const GEMM_SIMDMAT_SOURCE: [:0]const u8 =
+    \\uint win = uint(threadgroup_position_in_grid.y);
+    \\uint sg = uint(simdgroup_index_in_threadgroup);
+    \\ushort lane = ushort(thread_index_in_simdgroup);
+    \\constexpr uint TILE = 16u;
+    \\constexpr uint N = uint(NHW);
+    \\constexpr uint PACKED_W = N / 2u;
+    \\constexpr uint IT = uint(IDIM) / TILE;
+    \\constexpr uint OT = uint(ODIM) / TILE;
+    \\const uint start = wstarts[win];
+    \\const uint n = wnlive[win];
+    \\if (n == 0u || n > uint(WIN)) return;
+    \\const uint col0 = uint(threadgroup_position_in_grid.x) * 128u + sg * 32u;
+    \\const ushort qid = lane >> 2;
+    \\const ushort fm = (qid & 4) + ((lane >> 1) & 3);
+    \\const ushort fn = (qid & 2) * 2 + (lane & 1) * 2;
+    \\const uint g = uint(fm) * 4u + uint(fn >> 1);
+    \\constexpr uint MB = (uint(WIN) + 7u) / 8u;
+    \\uint row = start;
+    \\const uint end = start + n;
+    \\while (row < end) {
+    \\const uint run0 = row;
+    \\const uint eid = uint(eids[row]);
+    \\uint run_end = row + 1u;
+    \\while (run_end < end && uint(eids[run_end]) == eid) run_end++;
+    \\const uint nlive = run_end - row;
+    \\size_t xo[4][2];
+    \\SMAT_UNROLL for (uint mb = 0u; mb < MB; mb++) {
+    \\  xo[mb][0] = (size_t)(run0 + min(mb * 8u + uint(fn), nlive - 1u)) * (size_t)(IDIM);
+    \\  xo[mb][1] = (size_t)(run0 + min(mb * 8u + uint(fn) + 1u, nlive - 1u)) * (size_t)(IDIM);
+    \\}
+    \\simdgroup_matrix<float, 8, 8> acc[4][4];
+    \\SMAT_UNROLL for (uint nb = 0u; nb < 4u; nb++) {
+    \\  SMAT_UNROLL for (uint mb = 0u; mb < MB; mb++) acc[nb][mb] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    \\}
+    \\const device uint *tiles = (const device uint *)(trellis + (size_t)eid * (size_t)IT * (size_t)OT * (size_t)N) + (col0 / TILE) * PACKED_W;
+    \\for (uint tk = 0u; tk < IT; tk++) {
+    \\  const uint kc = tk * TILE + uint(fm);
+    \\  simdgroup_matrix<half, 8, 8> b[2][4];
+    \\  SMAT_UNROLL for (uint mb = 0u; mb < MB; mb++) {
+    \\    SMAT_UNROLL for (uint kb = 0u; kb < 2u; kb++) {
+    \\      b[kb][mb].thread_elements()[0] = x[xo[mb][0] + kc + kb * 8u];
+    \\      b[kb][mb].thread_elements()[1] = x[xo[mb][1] + kc + kb * 8u];
+    \\    }
+    \\  }
+    \\  const device uint *words = tiles + (size_t)tk * (size_t)OT * (size_t)PACKED_W;
+    \\  simdgroup_matrix<half, 8, 8> a[4][2];
+    \\  SMAT_UNROLL for (uint t = 0u; t < 2u; t++) {
+    \\    half2 p[4];
+    \\    smat_group<N>(words + t * PACKED_W, g, p);
+    \\    SMAT_UNROLL for (uint j = 0u; j < 4u; j++) {
+    \\      a[2u * t + (j >> 1u)][j & 1u].thread_elements()[0] = p[j].x;
+    \\      a[2u * t + (j >> 1u)][j & 1u].thread_elements()[1] = p[j].y;
+    \\    }
+    \\  }
+    \\  SMAT_UNROLL for (uint mb = 0u; mb < MB; mb++) {
+    \\    SMAT_UNROLL for (uint kb = 0u; kb < 2u; kb++) {
+    \\      SMAT_UNROLL for (uint nb = 0u; nb < 4u; nb++) simdgroup_multiply_accumulate(acc[nb][mb], a[nb][kb], b[kb][mb], acc[nb][mb]);
+    \\    }
+    \\  }
+    \\}
+    \\SMAT_UNROLL for (uint nb = 0u; nb < 4u; nb++) {
+    \\  const size_t oc = (size_t)(col0 + nb * 8u + uint(fm));
+    \\  SMAT_UNROLL for (uint mb = 0u; mb < MB; mb++) {
+    \\    const uint m = mb * 8u + uint(fn);
+    \\    if (m < nlive) y[(size_t)(run0 + m) * (size_t)(ODIM) + oc] = half(acc[nb][mb].thread_elements()[0]);
+    \\    if (m + 1u < nlive) y[(size_t)(run0 + m + 1u) * (size_t)(ODIM) + oc] = half(acc[nb][mb].thread_elements()[1]);
+    \\  }
+    \\}
+    \\row = run_end;
+    \\}
+;
 const GEMM_NAX_INCLUDES: [:0]const u8 =
     \\#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
     \\using namespace metal;
@@ -749,6 +864,10 @@ const FINISH_SOURCE: [:0]const u8 =
 ;
 
 var gemm_sorted_kernel: KernelSlots = no_kernels;
+var gemm_simdmat_kernel: KernelSlots = no_kernels;
+/// Test seam: false sends a non-NAX GEMM to the scalar SIMD body.
+var gemm_simdmat_force: ?bool = null;
+var gemm_simdmat_engaged: bool = false;
 var prepare_kernel: ?mlx.mlx_fast_metal_kernel = null;
 var finish_kernel: ?mlx.mlx_fast_metal_kernel = null;
 var gemv_kernel: KernelSlots = no_kernels;
@@ -845,6 +964,11 @@ fn naxHeader(comptime cb: exl3.Codebook, comptime win: exl3.Window) [:0]const u8
 /// A weight kernel under the active decode parameters: its own slot, name and
 /// header.
 fn codebookKernel(slots: *KernelSlots, comptime base: [:0]const u8, ins: []const [*:0]const u8, outs: []const [*:0]const u8, source: [:0]const u8) !mlx.mlx_fast_metal_kernel {
+    return codebookKernelWith(slots, base, ins, outs, source, "");
+}
+
+/// `codebookKernel` with helpers of its own appended to the codebook header.
+fn codebookKernelWith(slots: *KernelSlots, comptime base: [:0]const u8, ins: []const [*:0]const u8, outs: []const [*:0]const u8, source: [:0]const u8, comptime frags: [:0]const u8) !mlx.mlx_fast_metal_kernel {
     switch (active_decode.codebook) {
         inline else => |cb| switch (active_decode.window) {
             inline else => |win| return getNamedKernel(
@@ -853,7 +977,7 @@ fn codebookKernel(slots: *KernelSlots, comptime base: [:0]const u8, ins: []const
                 ins,
                 outs,
                 source,
-                codebookHelpers(cb, win),
+                comptime codebookHelpers(cb, win) ++ frags,
             ),
         },
     }
@@ -908,9 +1032,10 @@ const GemmSortedKey = struct { in_dim: c_int, out_dim: c_int, rows: c_int, win: 
 
 const GEMM_WINDOW_ROWS: c_int = 32;
 
-/// Rows one run-window may carry. `GEMM_SORTED_SOURCE` accumulates `acc[8][4]`
-/// and the NAX body has two 16-row destinations, so past this the kernels'
-/// own `n > WIN` guard still admits the window and the extra rows go unwritten.
+/// Rows one run-window may carry. `GEMM_SORTED_SOURCE` accumulates `acc[8][4]`,
+/// the simdgroup-matrix body four 8-row blocks and the NAX body two 16-row
+/// destinations, so past this the kernels' own `n > WIN` guard still admits the
+/// window and the extra rows go unwritten.
 const GEMM_WINDOW_MAX_ROWS: c_int = 32;
 
 var gemm_win_cached: ?c_int = null;
@@ -951,6 +1076,7 @@ var indexed_coop_cfgs: CfgCache(IndexedKey, 8) = .{};
 var prepare_cfgs: CfgCache(UnaryKey, 8) = .{};
 var finish_cfgs: CfgCache(UnaryKey, 8) = .{};
 var gemm_sorted_cfgs: CfgCache(GemmSortedKey, 8) = .{};
+var gemm_simdmat_cfgs: CfgCache(GemmSortedKey, 8) = .{};
 var gemm_nax_cfgs: CfgCache(GemmSortedKey, 8) = .{};
 var gemm_nax_kernel: KernelSlots = no_kernels;
 var gemm_nax_failed: bool = false;
@@ -1117,6 +1243,41 @@ fn getGemmSortedKernel() !mlx.mlx_fast_metal_kernel {
     const ins = [_][*:0]const u8{ "x", "trellis", "eids", "wstarts", "wnlive" };
     const outs = [_][*:0]const u8{"y"};
     return codebookKernel(&gemm_sorted_kernel, "sushi_exl3_k4_gemm_sorted", &ins, &outs, GEMM_SORTED_SOURCE);
+}
+
+fn getGemmSimdmatKernel() !mlx.mlx_fast_metal_kernel {
+    const ins = [_][*:0]const u8{ "x", "trellis", "eids", "wstarts", "wnlive" };
+    const outs = [_][*:0]const u8{"y"};
+    return codebookKernelWith(&gemm_simdmat_kernel, "sushi_exl3_k4_gemm_simdmat", &ins, &outs, GEMM_SIMDMAT_SOURCE, GEMM_SIMDMAT_FRAGS);
+}
+
+/// Every sorted-GEMM body takes the same config: f16 [rows, out_dim] out, 128-thread groups.
+fn sortedGemmCfg(cache: *CfgCache(GemmSortedKey, 8), key: GemmSortedKey) !mlx.mlx_fast_metal_kernel_config {
+    if (cache.get(key)) |c| return c;
+    const c = mlx.mlx_fast_metal_kernel_config_new();
+    errdefer _ = mlx.mlx_fast_metal_kernel_config_free(c);
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &[_]c_int{ key.rows, key.out_dim }, 2, .float16));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(c, 128, 1, 1));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "IDIM", key.in_dim));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "ODIM", key.out_dim));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "WIN", key.win));
+    try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "NHW", @intCast(key.n)));
+    cache.put(key, c);
+    return c;
+}
+
+fn applySortedGemm(s: mlx.mlx_stream, kernel: mlx.mlx_fast_metal_kernel, cfg: mlx.mlx_fast_metal_kernel_config, x: mlx.mlx_array, trellis: mlx.mlx_array, eids: mlx.mlx_array, tab: WindowTable) !mlx.mlx_array {
+    const inputs = [_]mlx.mlx_array{ x, trellis, eids, tab.starts, tab.nlives };
+    const inputs_vec = mlx.mlx_vector_array_new_data(&inputs, inputs.len);
+    defer _ = mlx.mlx_vector_array_free(inputs_vec);
+    var outputs_vec = mlx.mlx_vector_array_new();
+    defer _ = mlx.mlx_vector_array_free(outputs_vec);
+    try mlx.check(mlx.mlx_fast_metal_kernel_apply(&outputs_vec, kernel, inputs_vec, cfg, s));
+    if (mlx.mlx_vector_array_size(outputs_vec) != 1) return error.MetalKernelBadOutputCount;
+    var out = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(out);
+    try mlx.check(mlx.mlx_vector_array_get(&out, outputs_vec, 0));
+    return out;
 }
 
 const WindowTable = struct { starts: mlx.mlx_array, nlives: mlx.mlx_array, nwin: c_int };
@@ -1335,18 +1496,7 @@ fn innerGemmSortedTable(
         // decode tick's `MlxFailure`.
         const had_error = mlx.errorPending();
         if (getGemmNaxKernel()) |nk| {
-            const ncfg = gemm_nax_cfgs.get(key) orelse blk: {
-                const c = mlx.mlx_fast_metal_kernel_config_new();
-                errdefer _ = mlx.mlx_fast_metal_kernel_config_free(c);
-                try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &[_]c_int{ n, out_dim }, 2, .float16));
-                try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(c, 128, 1, 1));
-                try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "IDIM", in_dim));
-                try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "ODIM", out_dim));
-                try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "WIN", win));
-                try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "NHW", @intCast(rate.n)));
-                gemm_nax_cfgs.put(key, c);
-                break :blk c;
-            };
+            const ncfg = try sortedGemmCfg(&gemm_nax_cfgs, key);
             try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(ncfg, out_dim, tab.nwin, 1));
             const ninputs = [_]mlx.mlx_array{ x, trellis, eids, tab.starts, tab.nlives };
             const ninputs_vec = mlx.mlx_vector_array_new_data(&ninputs, ninputs.len);
@@ -1370,30 +1520,22 @@ fn innerGemmSortedTable(
         }
         mlx.dropLatchedErrorUnless(had_error);
     }
-    const cfg = gemm_sorted_cfgs.get(key) orelse blk: {
-        const c = mlx.mlx_fast_metal_kernel_config_new();
-        errdefer _ = mlx.mlx_fast_metal_kernel_config_free(c);
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_output_arg(c, &[_]c_int{ n, out_dim }, 2, .float16));
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_thread_group(c, 128, 1, 1));
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "IDIM", in_dim));
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "ODIM", out_dim));
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "WIN", win));
-        try mlx.check(mlx.mlx_fast_metal_kernel_config_add_template_arg_int(c, "NHW", @intCast(rate.n)));
-        gemm_sorted_cfgs.put(key, c);
-        break :blk c;
-    };
+    // x feeds `simdgroup_matrix<half>` as stored, so only f16 activations take the matrix body.
+    if ((gemm_simdmat_force orelse true) and @rem(out_dim, 128) == 0 and mlx.mlx_array_dtype(x) == .float16) {
+        const cfg = try sortedGemmCfg(&gemm_simdmat_cfgs, key);
+        try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(cfg, out_dim, tab.nwin, 1));
+        const out = try applySortedGemm(s, try getGemmSimdmatKernel(), cfg, x, trellis, eids, tab);
+        if (!gemm_simdmat_engaged) {
+            gemm_simdmat_engaged = true;
+            log.info("[exl3-gemm] simdgroup-matrix body engaged n={d}\n", .{rate.n});
+        }
+        logN48Funnel(rate.n, .simdmat, mlx.mlx_array_dtype(x));
+        return out;
+    }
+    // The scalar body: any activation dtype, any 16-multiple width.
+    const cfg = try sortedGemmCfg(&gemm_sorted_cfgs, key);
     try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(cfg, out_tiles * 128, tab.nwin, 1));
-    const inputs = [_]mlx.mlx_array{ x, trellis, eids, tab.starts, tab.nlives };
-    const inputs_vec = mlx.mlx_vector_array_new_data(&inputs, inputs.len);
-    defer _ = mlx.mlx_vector_array_free(inputs_vec);
-    var outputs_vec = mlx.mlx_vector_array_new();
-    defer _ = mlx.mlx_vector_array_free(outputs_vec);
-    try mlx.check(mlx.mlx_fast_metal_kernel_apply(&outputs_vec, try getGemmSortedKernel(), inputs_vec, cfg, s));
-    if (mlx.mlx_vector_array_size(outputs_vec) != 1) return error.MetalKernelBadOutputCount;
-    var out = mlx.mlx_array_new();
-    errdefer _ = mlx.mlx_array_free(out);
-    try mlx.check(mlx.mlx_vector_array_get(&out, outputs_vec, 0));
-    return out;
+    return applySortedGemm(s, try getGemmSortedKernel(), cfg, x, trellis, eids, tab);
 }
 
 fn getPrepareKernel() !mlx.mlx_fast_metal_kernel {
@@ -2285,8 +2427,8 @@ const REDUCE_SOURCE: [:0]const u8 =
 ;
 
 var n40_decode_engaged: bool = false;
-const N48FunnelArm = enum { pair, fused_mid_down, prepared_down, nax };
-var n48_funnel_engaged: [4]bool = @splat(false);
+const N48FunnelArm = enum { pair, fused_mid_down, prepared_down, nax, simdmat };
+var n48_funnel_engaged: [5]bool = @splat(false);
 
 fn logN48Funnel(n: u32, arm: N48FunnelArm, dtype: mlx.mlx_dtype) void {
     if (n != 48 or active_decode.codebook == .mul1 or n48_funnel_engaged[@backingInt(arm)]) return;
@@ -4672,7 +4814,7 @@ test "exl3 K3 sorted GEMM matches host MUL1 on 20-40 row runs" {
 }
 
 test "exl3 sorted GEMM matches host MUL1 with the NAX arm forced off" {
-    // On NAX hardware every other sorted-GEMM test takes the NAX arm (out_dim 128), so this is the SIMD body's only bar.
+    // On NAX hardware every other sorted-GEMM test takes the NAX arm (out_dim 128), so this bars the non-NAX body there.
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -5817,6 +5959,14 @@ test "exl3 cooperative indexed GEMV matches the host tile decode below window 12
 /// One sorted-GEMM arm (NAX where the shape and silicon allow, else the SIMD
 /// body) against the host tile decode, at whatever rate the trellis names.
 fn sortedGemmParityStats(rate: exl3.Rate, dec: exl3.Decode, win: c_int, seed: u64, mutate: Exl3Mutation) !Exl3GemmParityStats {
+    return sortedGemmParityShape(rate, dec, win, seed, mutate, .{});
+}
+
+/// Unequal widths catch a swapped stride a square shape hides; `aligned = false` packs
+/// several runs into one window.
+const ParityShape = struct { in_dim: usize = 128, out_dim: usize = 128, aligned: bool = true };
+
+fn sortedGemmParityShape(rate: exl3.Rate, dec: exl3.Decode, win: c_int, seed: u64, mutate: Exl3Mutation, shape: ParityShape) !Exl3GemmParityStats {
     setDecodeParams(dec);
     defer setDecodeParams(.mul1);
     const t = std.testing;
@@ -5826,10 +5976,10 @@ fn sortedGemmParityStats(rate: exl3.Rate, dec: exl3.Decode, win: c_int, seed: u6
     defer arena.deinit();
     const alloc = arena.allocator();
     const E: usize = 4;
-    const dim: usize = 128;
-    const tiles = dim / 16;
+    const in_dim = shape.in_dim;
+    const out_dim = shape.out_dim;
     const packed_n = rate.halfwords();
-    const tile_n = tiles * tiles * packed_n;
+    const tile_n = (in_dim / 16) * (out_dim / 16) * packed_n;
     const stacked = try alloc.alloc(u16, E * tile_n);
     var prng = std.Random.DefaultPrng.init(seed);
     const rnd = prng.random();
@@ -5846,15 +5996,15 @@ fn sortedGemmParityStats(rate: exl3.Rate, dec: exl3.Decode, win: c_int, seed: u6
             off += r;
         }
     }
-    const xh = try alloc.alloc(u16, rows * dim);
+    const xh = try alloc.alloc(u16, rows * in_dim);
     for (xh) |*v| v.* = exl3.f32ToF16Bits(rnd.float(f32) * 2 - 1);
-    const x_arr = mlx.mlx_array_new_data(xh.ptr, &[_]c_int{ @intCast(rows), @intCast(dim) }, 2, .float16);
+    const x_arr = mlx.mlx_array_new_data(xh.ptr, &[_]c_int{ @intCast(rows), @intCast(in_dim) }, 2, .float16);
     defer _ = mlx.mlx_array_free(x_arr);
-    const tr_arr = mlx.mlx_array_new_data(stacked.ptr, &[_]c_int{ @intCast(E), @intCast(tiles), @intCast(tiles), @intCast(packed_n) }, 4, .uint16);
+    const tr_arr = mlx.mlx_array_new_data(stacked.ptr, &[_]c_int{ @intCast(E), @intCast(in_dim / 16), @intCast(out_dim / 16), @intCast(packed_n) }, 4, .uint16);
     defer _ = mlx.mlx_array_free(tr_arr);
     const eid_a = mlx.mlx_array_new_data(eids.ptr, &[_]c_int{@intCast(rows)}, 1, .uint32);
     defer _ = mlx.mlx_array_free(eid_a);
-    const got = try innerGemmSortedWin(s, x_arr, tr_arr, eid_a, win);
+    const got = try innerGemmSortedWinAlign(s, x_arr, tr_arr, eid_a, win, shape.aligned);
     defer _ = mlx.mlx_array_free(got);
     var contig = mlx.mlx_array_new();
     defer _ = mlx.mlx_array_free(contig);
@@ -5862,7 +6012,7 @@ fn sortedGemmParityStats(rate: exl3.Rate, dec: exl3.Decode, win: c_int, seed: u6
     try mlx.check(mlx.mlx_array_eval(contig));
     const src = mlx.mlx_array_data_float16(contig) orelse return error.F16Unreadable;
     if (mutate == .codeword) stacked[tile_n / 2] ^= 0x40;
-    return measureInnerGemmParity(alloc, s, src[0 .. rows * dim], xh, eids, stacked, dim, dim, rate, mutatedDecode(dec, mutate));
+    return measureInnerGemmParity(alloc, s, src[0 .. rows * out_dim], xh, eids, stacked, in_dim, out_dim, rate, mutatedDecode(dec, mutate));
 }
 
 fn sortedGemmParity(rate: exl3.Rate, dec: exl3.Decode, win: c_int, seed: u64) !void {
@@ -5928,6 +6078,110 @@ test "exl3 sorted GEMM matches the host tile decode at a narrowed window with th
         try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 }, 32, 1001 + i);
         try sortedGemmParity(exl3.Rate.fromK(4), .{ .codebook = .mul1, .window = .w14 }, 16, 1101 + i);
     }
+}
+
+test "exl3 sorted GEMM: the simdgroup-matrix body and the scalar body both match the host tile decode" {
+    const t = std.testing;
+    if (!mlx.streamIsGpu(mlx.gpuStream())) return error.SkipZigTest;
+    var env: FallbackEnv = .{};
+    env.force();
+    defer env.restore();
+    try t.expect(!gemmNaxOn());
+    defer gemm_simdmat_force = null;
+    const w15: exl3.Decode = .{ .codebook = .mcg, .window = .w15 };
+    for ([_]bool{ true, false }) |simdmat| {
+        gemm_simdmat_force = simdmat;
+        gemm_simdmat_engaged = false;
+        n48_funnel_engaged = @splat(false);
+        for (0..PARITY_SEEDS) |i| {
+            // The served rates (n40, n48, n64), n48 under MUL1 (generic reader) and a generic-pair rate.
+            try sortedGemmParity(.{ .n = 48 }, w15, 32, 1201 + i);
+            try sortedGemmParity(exl3.Rate.fromK(4), w15, 32, 1301 + i);
+            try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 }, 16, 1401 + i);
+            try sortedGemmParity(.{ .n = 48 }, .mul1, 16, 1501 + i);
+            try sortedGemmParity(.{ .n = 44 }, .mul1, 32, 1601 + i);
+            // Stride windows carry several runs; the served Qwen widths in both directions.
+            try reportGemmParity(try sortedGemmParityShape(.{ .n = 48 }, w15, 32, 1701 + i, .none, .{ .aligned = false }));
+            try reportGemmParity(try sortedGemmParityShape(.{ .n = 48 }, w15, 32, 1801 + i, .none, .{ .in_dim = 2560, .out_dim = 640 }));
+            try reportGemmParity(try sortedGemmParityShape(exl3.Rate.fromK(4), w15, 32, 1901 + i, .none, .{ .in_dim = 640, .out_dim = 2560, .aligned = false }));
+        }
+        try t.expectEqual(simdmat, gemm_simdmat_engaged);
+        try t.expectEqual(simdmat, n48_funnel_engaged[@backingInt(N48FunnelArm.simdmat)]);
+    }
+}
+
+test "exl3 sorted GEMM body ubench: simdgroup-matrix vs scalar at the served shapes, A B B A" {
+    if (!exl3UbenchOn()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var env: FallbackEnv = .{};
+    env.force();
+    defer env.restore();
+    setDecodeParams(.{ .codebook = .mcg, .window = .w15 });
+    defer setDecodeParams(.mul1);
+    defer gemm_simdmat_force = null;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const E: c_int = 512;
+    const BLOCKS = 3;
+    var prng = std.Random.DefaultPrng.init(0xab12);
+    const rnd = prng.random();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    // The served rates: n48 (Sushi-3bpw) and n64 (Sushi-4bpw).
+    for ([_]c_int{ 48, 64 }) |nhw| for ([_][2]c_int{ .{ 2560, 640 }, .{ 640, 2560 } }) |shape| {
+        const it = @divExact(shape[0], 16);
+        const ot = @divExact(shape[1], 16);
+        const tr_h = try alloc.alloc(u16, @intCast(E * it * ot * nhw));
+        for (tr_h) |*v| v.* = @truncate(rnd.int(u32));
+        const tr = mlx.mlx_array_new_data(tr_h.ptr, &[_]c_int{ E, it, ot, nhw }, 4, .uint16);
+        defer _ = mlx.mlx_array_free(tr);
+        // Prompt chunks of 17, 64, 205 and 2048 tokens at top-k 10: short ones are mostly 1-2 row runs.
+        for ([_]c_int{ 170, 640, 2050, 20480 }) |nslots| {
+            const ids = try alloc.alloc(u32, @intCast(nslots));
+            for (ids) |*v| v.* = rnd.uintLessThan(u32, @intCast(E));
+            std.mem.sort(u32, ids, {}, std.sort.asc(u32));
+            const eids = mlx.mlx_array_new_data(ids.ptr, &[_]c_int{nslots}, 1, .uint32);
+            defer _ = mlx.mlx_array_free(eids);
+            const xh = try alloc.alloc(u16, @intCast(nslots * shape[0]));
+            for (xh) |*v| v.* = exl3.f32ToF16Bits(rnd.float(f32) * 0.1);
+            const x = mlx.mlx_array_new_data(xh.ptr, &[_]c_int{ nslots, shape[0] }, 2, .float16);
+            defer _ = mlx.mlx_array_free(x);
+            // One window table, built outside the timed calls (the host build drains the GPU).
+            const tab = try gemmWindowTable(s, eids, nslots, 32, true);
+            defer _ = mlx.mlx_array_free(tab.starts);
+            defer _ = mlx.mlx_array_free(tab.nlives);
+            for ([_]bool{ false, true }) |arm| {
+                gemm_simdmat_force = arm;
+                const warm = try innerGemmSortedTable(s, x, tr, eids, 32, true, tab);
+                try mlx.check(mlx.mlx_array_eval(warm));
+                _ = mlx.mlx_array_free(warm);
+            }
+            // Each A B B A block yields one paired ratio (scalar over simdgroup-matrix).
+            var ratio: [BLOCKS]f64 = undefined;
+            var total: [2]u64 = .{ 0, 0 };
+            for (&ratio) |*r| {
+                var blk: [2]u64 = .{ 0, 0 };
+                for ([_]bool{ false, true, true, false }) |arm| {
+                    gemm_simdmat_force = arm;
+                    var sw = io_util.Stopwatch.init(io);
+                    const got = try innerGemmSortedTable(s, x, tr, eids, 32, true, tab);
+                    try mlx.check(mlx.mlx_array_eval(got));
+                    blk[@intFromBool(arm)] += sw.read();
+                    _ = mlx.mlx_array_free(got);
+                }
+                r.* = @as(f64, @floatFromInt(blk[0])) / @as(f64, @floatFromInt(blk[1]));
+                total[0] += blk[0];
+                total[1] += blk[1];
+            }
+            std.mem.sort(f64, &ratio, {}, std.sort.asc(f64));
+            benchPrint("[gemm-body] n{d} {d}->{d} slots={d}: scalar {d} us, simdgroup-matrix {d} us per call; paired A B B A ratio {d:.2}x (blocks {d:.2}..{d:.2})\n", .{
+                nhw,                             shape[0],                        shape[1],                        nslots,
+                total[0] / (2 * BLOCKS * 1000),  total[1] / (2 * BLOCKS * 1000),  ratio[BLOCKS / 2],
+                ratio[0],                        ratio[BLOCKS - 1],
+            });
+        }
+    };
 }
 
 test "exl3 decode and prefill arms agree with the indexed chain at production geometry" {
@@ -6912,6 +7166,25 @@ test "exl3 a novel row count does not compile another sorted GEMM" {
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
+/// Forces the non-NAX arms for one test and puts back whatever the caller's environment held.
+const FallbackEnv = struct {
+    prior: [64:0]u8 = @splat(0),
+    had: bool = false,
+    fn force(self: *FallbackEnv) void {
+        if (std.c.getenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK")) |p| {
+            const v = std.mem.span(p);
+            if (v.len > self.prior.len) @panic("SUSHI_FORCE_GPU_FAMILY_FALLBACK is too long to restore");
+            @memcpy(self.prior[0..v.len], v);
+            self.prior[v.len] = 0;
+            self.had = true;
+        }
+        _ = setenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK", "1", 1);
+    }
+    fn restore(self: *FallbackEnv) void {
+        if (self.had) _ = setenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK", &self.prior, 1) else _ = unsetenv("SUSHI_FORCE_GPU_FAMILY_FALLBACK");
+    }
+};
+
 // Codebook A/B at production expert shape: ITER forwards per arm built lazily
 // and timed as ONE eval, arms alternated over rounds, medians reported.
 // Prints only under SUSHI_EXL3_CODEBOOK_AB (a diagnostic, never a test).
@@ -7102,8 +7375,13 @@ fn n40Bf16TruthGeometry(seed: u64, win: c_int, rows: usize, decode: bool, hidden
 }
 
 fn bf16TruthCase(c: MimoMoeCase, win: c_int, decode: bool) !void {
+    if (!gemmNaxOn()) return error.SkipZigTest;
+    return bf16TruthCaseAnyArm(c, win, decode);
+}
+
+fn bf16TruthCaseAnyArm(c: MimoMoeCase, win: c_int, decode: bool) !void {
     const s = mlx.gpuStream();
-    if (!mlx.streamIsGpu(s) or !gemmNaxOn()) return error.SkipZigTest;
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const hidden = c.hidden;
     const inter = c.inter;
     const rows = c.rows;
@@ -7183,6 +7461,28 @@ test "exl3 n40 NAX BF16 prefill no worse than composite against f32 truth" {
     for ([_]c_int{32}) |win| {
         for (0..3) |seed| try n40PrefillBf16Truth(318 + seed, win);
     }
+}
+
+test "exl3 BF16 prefill on the simdgroup-matrix body no worse than composite against f32 truth" {
+    if (!mlx.streamIsGpu(mlx.gpuStream())) return error.SkipZigTest;
+    var env: FallbackEnv = .{};
+    env.force();
+    defer env.restore();
+    defer mimo_prefill_force = null;
+    gemm_simdmat_engaged = false;
+    // Both window tables: the host-built one, and MiMo's GPU-built metadata with its sorted finish.
+    for ([_]?bool{ null, true }) |mimo_meta| {
+        mimo_prefill_force = mimo_meta;
+        for (0..PARITY_SEEDS) |seed| {
+            for ([_]struct { rate: exl3.Rate, dec: exl3.Decode }{
+                .{ .rate = .{ .n = 40 }, .dec = .{ .codebook = .mcg, .window = .w12 } },
+                .{ .rate = .{ .n = 48 }, .dec = .{ .codebook = .mcg, .window = .w15 } },
+            }) |arm| {
+                try bf16TruthCaseAnyArm(.{ .e = 8, .hidden = 256, .inter = 128, .topk = 8, .rows = 65, .rate = arm.rate, .dec = arm.dec, .seed = 318 + seed, .banks = MIMO_BANKS, .x_scale = 3 }, 32, false);
+            }
+        }
+    }
+    try std.testing.expect(gemm_simdmat_engaged);
 }
 
 const MimoWindowTable = struct { table: WindowTable, inverse: mlx.mlx_array };

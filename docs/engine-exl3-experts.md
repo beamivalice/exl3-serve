@@ -14,7 +14,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [pack-format](pack-format.
 |---|---|
 | `src/expert_quant.zig` | Expert layout detection from PACKED shapes: `.quantized_split` (affine banks) vs `.exl3_k4` (trellis); affine (bits, group_size) solved from geometry; `expert_quant` parse |
 | `src/expert_exl3.zig` | Host reference decoders (MUL1, MCG), `Rate`, `Window`, `Decode`, fixtures |
-| `src/expert_exl3_kernels.zig` | Prefill run-aligned 32-row window GEMM (NAX body, K4 fast branch), decode chain (`moeSwigluFused`), `DECODE_ROWS_MAX` (16), `usesPrefillArm` |
+| `src/expert_exl3_kernels.zig` | Prefill run-aligned 32-row window GEMM (NAX body, K4 fast branch; simdgroup-matrix body off NAX; scalar body), decode chain (`moeSwigluFused`), `DECODE_ROWS_MAX` (16), `usesPrefillArm` |
 | `src/expert_bf16_kernels.zig` | bf16 selected-expert kernels over a slab (`gateUpSwiglu`; `downReduce`) for the unquantized HF checkpoint |
 
 ## Format as the engine sees it
@@ -53,6 +53,12 @@ source FP8→bf16 loader (`usesMimoSourceTrunk`), billed dense by `mimoSourceRes
 - **Prefill**: run-aligned 32-row windows over a window table built on the GPU, K-generic cooperative readers, the
   NAX 16x32x16 GEMM body with a K4 fast branch; ONE GEMM config reused across window counts (a per-row-count JIT
   compiled per novel prompt length). The prefill scatter is fused into the finish reduce.
+- **Prefill off NAX** (M1–M4, or NAX declined): the 8x8 `simdgroup_matrix` body computes D = W^T X^T so each lane's
+  eight-weight slot group lands straight in its A fragments (the tile layout is the MMA fragment layout). f16 x and
+  128-multiple widths only; anything else takes the scalar body. Not byte-identical to the scalar body (sum order).
+- **Its block count is compile-time** (`(WIN+7)/8`), never the run's: a data-dependent bound over the
+  `simdgroup_matrix` arrays spilled them, 2.6x slower. Short runs pay the padding and still win
+  ([perf-baselines](perf-baselines.md#m2max-64gb)).
 - **Decode**: four dispatches per MoE layer — pair prepare, split-K pair GEMV with f32 inner planes, fused mid+down
   GEMV, f32 finish reduce (`moeSwigluFused`; top-k ≤ 32, named refusal above). On MiMo geometry the pair prepare is
   fused into the pair GEMV and the SwiGLU mid is prepared once per (row, expert) (`preparedMidOn`, disabled for
