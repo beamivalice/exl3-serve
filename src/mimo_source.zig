@@ -859,6 +859,10 @@ fn validateRequired(
                         try requireKind(source, allocator, config, k, .routed_expert);
                     }
                 }
+                const gate_key = try std.fmt.allocPrint(allocator, "{s}.mlp.switch_mlp.gate_proj.trellis", .{layer_prefix});
+                const up_key = try std.fmt.allocPrint(allocator, "{s}.mlp.switch_mlp.up_proj.trellis", .{layer_prefix});
+                if (source.tensors.get(gate_key).?.shape[3] != source.tensors.get(up_key).?.shape[3])
+                    return error.Exl3GateUpRateMismatch;
             }
         }
     }
@@ -1867,4 +1871,33 @@ test "mimo EXL3 preflight rejects dimensions outside H128" {
     valid_meta.shape = &.{ 2, 8, 16, 40 };
     valid_meta.data_end = 2 * 8 * 16 * 40 * 2;
     try validateExl3Expert("model.layers.1.mlp.switch_mlp.gate_proj.trellis", valid_meta, &config);
+}
+
+test "mimo EXL3 preflight refuses mismatched gate and up rates" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTinyExl3Source(t.io, alloc, tmp.dir, 40);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(t.io, &path_buf);
+    const path = path_buf[0..path_len];
+    var config = try model.parseConfig(t.io, alloc, path);
+    defer config.deinit(alloc);
+    config.expert_layout = .exl3_k4;
+    config.expert_quant_rate = .{ .n = 64 };
+    var source = try loadSourceIndex(t.io, alloc, path);
+    try validatePlan(&source, alloc, &config);
+    const up = source.tensors.getPtr("model.layers.1.mlp.switch_mlp.up_proj.trellis").?;
+    const original = up.*;
+    up.shape = &.{ 2, 8, 8, 48 };
+    up.data_end = up.data_start + 2 * 8 * 8 * 48 * 2;
+    try t.expectError(error.Exl3GateUpRateMismatch, validatePlan(&source, alloc, &config));
+    up.* = original;
+    const down = source.tensors.getPtr("model.layers.1.mlp.switch_mlp.down_proj.trellis").?;
+    down.shape = &.{ 2, 8, 8, 48 };
+    down.data_end = down.data_start + 2 * 8 * 8 * 48 * 2;
+    try validatePlan(&source, alloc, &config);
 }

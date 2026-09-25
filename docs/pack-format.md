@@ -182,6 +182,7 @@ composite.
 - A trellis whose packed shape does not match the config's rate or expert
   geometry is refused by name at load; a config `k` narrower than a shard would
   under-bill, which on this engine is a Metal OOM rather than an error.
+- MiMo EXL3 gate and up trellises in each layer must have equal packed rates (`n`); a mismatch refuses before upload as `Exl3GateUpRateMismatch`; down may use a different admitted rate.
 - **Quant modes resolve PER WEIGHT** (`computeQuantParams`; scales dtype decides
   fp8 vs affine; `.biases` mandatory under affine, optional in `loadLinear`;
   `qLinearFwd` passes `mode.cstr()`). A layer-init path that DEMANDS `.scales`
