@@ -155,6 +155,9 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 
 - QKV is ONE FP8 GEMV per layer with three outputs (`fp8_block` `gemv3`); V leaves it already multiplied by
   `attention_value_scale` (`RowSplit.v_scale`, rounded to the output dtype first, as the composed multiply did).
+- The GEMV's three width arms REASSOCIATE the f32 sum, so a row is byte-identical to a decode tick only at or below
+  `MIMO_VERIFY_ROWS_MAX`: direct (<=4 rows) strides each row in 16-byte chunks per lane, staged x (5-16) gives each
+  lane one 4-column group per 128-column tile, and the wide arm (>=17) dequantizes the weights to bf16.
 - Every residual add runs in one kernel with the norm that reads its sum (`fusedAddRmsNormUngated`): the
   post-attention norm (`fusedAddRmsNormRouted` also emits the f32 router input), the next layer's input norm and the
   final norm. The router is widened to f32 once at load (source-trunk packs), not per forward.

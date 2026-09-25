@@ -3894,8 +3894,12 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     entry.mtp_depth = generate_mod.Generator.resolveMtpDepthCapForProfile(params.mtp_depth, mtp_cost_profile);
     xfm_ptr.mtp_depth_free = generate_mod.Generator.mtpDepthCapFree(params.mtp_depth);
     if (mimo_head) |h| {
-        entry.mtp_depth = @min(entry.mtp_depth, @as(u32, @intCast(h.heads)));
-        xfm_ptr.mtp_depth_free = @min(xfm_ptr.mtp_depth_free, @as(u32, @intCast(h.heads)));
+        // The head count AND the widest verify whose rows stay byte-identical
+        // to serial decode: a deeper round would hand the forward more rows
+        // than the decode-shaped MiMo verify serves.
+        const rows_max: u32 = generate_mod.Generator.mtpVerifyDraftsMax(true);
+        entry.mtp_depth = @min(entry.mtp_depth, @min(@as(u32, @intCast(h.heads)), rows_max));
+        xfm_ptr.mtp_depth_free = @min(xfm_ptr.mtp_depth_free, @min(@as(u32, @intCast(h.heads)), rows_max));
     }
     // A MERGED drafter has no `--drafter` to echo, so the reported path comes
     // from what was actually resolved — `drafter_loaded` and `drafter_path`

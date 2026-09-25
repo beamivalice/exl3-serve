@@ -553,14 +553,16 @@ fn classifyKey(key: []const u8, config: *const model.ModelConfig) !TensorKind {
 
     const ref = layerKey(key) orelse return error.UnclassifiedMimoTensor;
     if (ref.layer >= config.num_hidden_layers) return error.MimoLayerOutOfRange;
+    // The dense prefix is `first_k_dense_replace` layers, as the parser and the
+    // transformer read it.
     if (std.mem.eql(u8, ref.rest, "self_attn.qkv_proj.weight") or
-        (ref.layer == 0 and
+        (ref.layer < config.first_k_dense_replace and
             (std.mem.eql(u8, ref.rest, "mlp.gate_proj.weight") or
                 std.mem.eql(u8, ref.rest, "mlp.up_proj.weight") or
                 std.mem.eql(u8, ref.rest, "mlp.down_proj.weight"))))
         return .fp8_weight;
     if (std.mem.eql(u8, ref.rest, "self_attn.qkv_proj.weight_scale_inv") or
-        (ref.layer == 0 and
+        (ref.layer < config.first_k_dense_replace and
             (std.mem.eql(u8, ref.rest, "mlp.gate_proj.weight_scale_inv") or
                 std.mem.eql(u8, ref.rest, "mlp.up_proj.weight_scale_inv") or
                 std.mem.eql(u8, ref.rest, "mlp.down_proj.weight_scale_inv"))))
@@ -665,7 +667,7 @@ fn validateFp8Pair(
     } else {
         var expected_rows = rows;
         var expected_cols = cols;
-        if (ref.layer != 0) return error.UnclassifiedMimoTensor;
+        if (ref.layer >= config.first_k_dense_replace) return error.UnclassifiedMimoTensor;
         if (std.mem.eql(u8, ref.rest, "mlp.gate_proj.weight") or
             std.mem.eql(u8, ref.rest, "mlp.up_proj.weight"))
         {
@@ -840,7 +842,7 @@ fn validateRequired(
         if (config.layerHasAttnSinks(layer)) {
             try requireKind(source, allocator, config, try std.fmt.allocPrint(allocator, "{s}.self_attn.attention_sink_bias", .{layer_prefix}), .resident);
         }
-        if (layer == 0) {
+        if (layer < config.first_k_dense_replace) {
             for ([_][]const u8{ "gate", "up", "down" }) |projection| {
                 const k = try std.fmt.allocPrint(
                     allocator,
@@ -1302,6 +1304,7 @@ fn makeTinySourceFixture(
             .head_dim = 16,
             .v_head_dim = 16,
             .num_experts = 1,
+            .first_k_dense_replace = 1,
             .has_sliding_window = false,
         },
         .qkv_weight = qkv_weight,
@@ -1323,10 +1326,18 @@ const TinyBank = union(enum) {
 };
 
 fn writeTinyExl3Source(io: std.Io, allocator: Allocator, dir: std.Io.Dir, n: u64) !void {
-    return writeTinySource(io, allocator, dir, if (n == 0) .none else .{ .exl3 = .{ .n = n } });
+    return writeTinySource(io, allocator, dir, if (n == 0) .none else .{ .exl3 = .{ .n = n } }, 1);
 }
 
-fn writeTinySource(io: std.Io, allocator: Allocator, dir: std.Io.Dir, bank: TinyBank) !void {
+/// `dense` is the size of the dense prefix (`first_k_dense_replace`); exactly
+/// one MoE layer follows it, carrying `bank`.
+fn writeTinySource(
+    io: std.Io,
+    allocator: Allocator,
+    dir: std.Io.Dir,
+    bank: TinyBank,
+    dense: u32,
+) !void {
     const dim: u64 = 128;
     const tiles = dim / 16;
     const n: u64 = switch (bank) {
@@ -1337,20 +1348,29 @@ fn writeTinySource(io: std.Io, allocator: Allocator, dir: std.Io.Dir, bank: Tiny
         .exl3 => |v| v.stamp,
         else => null,
     };
-    try dir.writeFile(io, .{ .sub_path = "config.json", .data =
-        \\{"model_type":"mimo_v2","vocab_size":2,"hidden_size":128,
-        \\ "num_hidden_layers":2,"intermediate_size":128,
+    const layers: usize = @as(usize, dense) + 1;
+    var pattern: [64]u8 = undefined;
+    var freq: [64]u8 = undefined;
+    var pattern_len: usize = 0;
+    var freq_len: usize = 0;
+    for (0..layers) |l| {
+        pattern_len += (try std.fmt.bufPrint(pattern[pattern_len..], "{s}1", .{ if (l == 0) "" else "," })).len;
+        freq_len += (try std.fmt.bufPrint(freq[freq_len..], "{s}{d}", .{ if (l == 0) "" else ",", @intFromBool(l >= dense) })).len;
+    }
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data = try std.fmt.allocPrint(allocator,
+        \\{{"model_type":"mimo_v2","vocab_size":2,"hidden_size":128,
+        \\ "num_hidden_layers":{d},"intermediate_size":128,
         \\ "moe_intermediate_size":128,"n_routed_experts":2,
         \\ "num_experts_per_tok":1,"n_group":1,"topk_group":1,
         \\ "num_attention_heads":8,"num_key_value_heads":8,"head_dim":16,
         \\ "v_head_dim":16,"swa_num_attention_heads":8,
         \\ "swa_num_key_value_heads":8,"swa_head_dim":16,"swa_v_head_dim":16,
-        \\ "hybrid_layer_pattern":[1,1],"moe_layer_freq":[0,1],
+        \\ "hybrid_layer_pattern":[{s}],"moe_layer_freq":[{s}],
         \\ "attention_projection_layout":"fused_qkv",
         \\ "add_swa_attention_sink_bias":false,
         \\ "add_full_attention_sink_bias":false,
-        \\ "expert_quant":{"format":"exl3","k":2.5,"codebook":"mcg"}}
-    });
+        \\ "expert_quant":{{"format":"exl3","k":2.5,"codebook":"mcg"}}}}
+    , .{ layers, pattern[0..pattern_len], freq[0..freq_len] }) });
     const embed = try testBf16Bytes(allocator, 2 * 128, 0x3f80);
     defer allocator.free(embed);
     const norm = try testBf16Bytes(allocator, 128, 0x3f80);
@@ -1391,7 +1411,7 @@ fn writeTinySource(io: std.Io, allocator: Allocator, dir: std.Io.Dir, bank: Tiny
     try tensors.append(allocator, .{ .key = "model.embed_tokens.weight", .dtype = "BF16", .shape = &embed_shape, .bytes = embed });
     try tensors.append(allocator, .{ .key = "lm_head.weight", .dtype = "BF16", .shape = &embed_shape, .bytes = embed });
     try tensors.append(allocator, .{ .key = "model.norm.weight", .dtype = "BF16", .shape = &vector_shape, .bytes = norm });
-    for (0..2) |layer| {
+    for (0..layers) |layer| {
         inline for ([_][]const u8{ "input_layernorm.weight", "post_attention_layernorm.weight" }) |leaf| {
             try tensors.append(allocator, .{
                 .key = try std.fmt.allocPrint(allocator, "model.layers.{d}.{s}", .{ layer, leaf }),
@@ -1418,40 +1438,40 @@ fn writeTinySource(io: std.Io, allocator: Allocator, dir: std.Io.Dir, bank: Tiny
             .shape = &qkv_scale_shape,
             .bytes = qkv_scales,
         });
-        if (layer == 0) {
+        if (layer < dense) {
             inline for ([_][]const u8{ "gate", "up", "down" }) |proj| {
                 try tensors.append(allocator, .{
-                    .key = try std.fmt.allocPrint(allocator, "model.layers.0.mlp.{s}_proj.weight", .{proj}),
+                    .key = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp.{s}_proj.weight", .{ layer, proj }),
                     .dtype = "F8_E4M3",
                     .shape = &matrix_shape,
                     .bytes = mlp_weight,
                 });
                 try tensors.append(allocator, .{
-                    .key = try std.fmt.allocPrint(allocator, "model.layers.0.mlp.{s}_proj.weight_scale_inv", .{proj}),
+                    .key = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp.{s}_proj.weight_scale_inv", .{ layer, proj }),
                     .dtype = "F32",
                     .shape = &mlp_scale_shape,
                     .bytes = mlp_scales,
                 });
             }
         } else {
-            try tensors.append(allocator, .{ .key = "model.layers.1.mlp.gate.weight", .dtype = "BF16", .shape = &embed_shape, .bytes = router });
-            try tensors.append(allocator, .{ .key = "model.layers.1.mlp.gate.e_score_correction_bias", .dtype = "F32", .shape = &corr_shape, .bytes = corr });
+            try tensors.append(allocator, .{ .key = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp.gate.weight", .{layer}), .dtype = "BF16", .shape = &embed_shape, .bytes = router });
+            try tensors.append(allocator, .{ .key = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp.gate.e_score_correction_bias", .{layer}), .dtype = "F32", .shape = &corr_shape, .bytes = corr });
             if (n > 0) {
                 inline for ([_][]const u8{ "gate", "up", "down" }) |proj| {
                     try tensors.append(allocator, .{
-                        .key = try std.fmt.allocPrint(allocator, "model.layers.1.mlp.switch_mlp.{s}_proj.trellis", .{proj}),
+                        .key = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp.switch_mlp.{s}_proj.trellis", .{ layer, proj }),
                         .dtype = "U16",
                         .shape = &trellis_shape,
                         .bytes = trellis[0..@intCast(2 * tiles * tiles * n * 2)],
                     });
                     try tensors.append(allocator, .{
-                        .key = try std.fmt.allocPrint(allocator, "model.layers.1.mlp.switch_mlp.{s}_proj.suh", .{proj}),
+                        .key = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp.switch_mlp.{s}_proj.suh", .{ layer, proj }),
                         .dtype = "F16",
                         .shape = &axis_shape,
                         .bytes = axis,
                     });
                     try tensors.append(allocator, .{
-                        .key = try std.fmt.allocPrint(allocator, "model.layers.1.mlp.switch_mlp.{s}_proj.svh", .{proj}),
+                        .key = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp.switch_mlp.{s}_proj.svh", .{ layer, proj }),
                         .dtype = "F16",
                         .shape = &axis_shape,
                         .bytes = axis,
@@ -1568,7 +1588,7 @@ test "mimo source refuses an EXL3 shard whose stamp disagrees with the config" {
         try tmp.dir.createDirPath(io, case.dir);
         var dir = try tmp.dir.openDir(io, case.dir, .{});
         defer dir.close(io);
-        try writeTinySource(io, alloc, dir, .{ .exl3 = .{ .n = 40, .stamp = case.stamp } });
+        try writeTinySource(io, alloc, dir, .{ .exl3 = .{ .n = 40, .stamp = case.stamp } }, 1);
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path_len = try dir.realPath(io, &path_buf);
         const path = path_buf[0..path_len];
@@ -1900,4 +1920,44 @@ test "mimo EXL3 preflight refuses mismatched gate and up rates" {
     down.shape = &.{ 2, 8, 8, 48 };
     down.data_end = down.data_start + 2 * 8 * 8 * 48 * 2;
     try validatePlan(&source, alloc, &config);
+}
+
+test "mimo source classifies a multi-layer dense prefix's FP8 MLP as the trunk it is" {
+    // The dense prefix is config-driven: a checkpoint whose `first_k_dense_replace`
+    // is 2 puts an FP8 MLP on layer 1 too, and the parser and the transformer both
+    // read it from the config. The loader must not decide otherwise.
+    const t = std.testing;
+    const io = t.io;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTinySource(io, alloc, tmp.dir, .{ .exl3 = .{ .n = 40 } }, 2);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(io, &path_buf);
+    const path = path_buf[0..path_len];
+    var config = try model.parseConfig(io, alloc, path);
+    defer config.deinit(alloc);
+    try t.expectEqual(@as(u32, 2), config.first_k_dense_replace);
+    config.expert_layout = .exl3_k4;
+    config.expert_quant_rate = .{ .n = 64 };
+
+    var source = try loadSourceIndex(io, alloc, path);
+    try t.expectEqual(TensorKind.fp8_weight, try classifyKey("model.layers.1.mlp.gate_proj.weight", &config));
+    try t.expectEqual(TensorKind.fp8_scale, try classifyKey("model.layers.1.mlp.gate_proj.weight_scale_inv", &config));
+    try t.expectEqual(
+        TensorKind.routed_expert,
+        try classifyKey("model.layers.2.mlp.switch_mlp.gate_proj.trellis", &config),
+    );
+    // The whole plan, which requires each dense layer's own FP8 MLP pair.
+    try validatePlan(&source, alloc, &config);
+    _ = try residentBytesWithConfig(io, t.allocator, path, &config);
+    var weights = try loadWeights(io, t.allocator, path, &config);
+    defer weights.deinit();
+    for ([_][]const u8{ "gate", "up", "down" }) |proj| {
+        const k = try std.fmt.allocPrint(alloc, "model.layers.1.mlp.{s}_proj.weight", .{proj});
+        const w = weights.get(k) orelse return error.TestMissingWeight;
+        try t.expectEqual(mlx.mlx_dtype.uint8, mlx.mlx_array_dtype(w));
+    }
 }

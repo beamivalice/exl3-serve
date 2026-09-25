@@ -50,8 +50,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [arch-qwen4exp](arch-qwen4
   per-request `RowCache` holding the window, never a `KVCache`; the prompt appends only its last window per head.
 - The `.mimo` arm maps the generic stash + merged first step onto head 0 and each later step onto head i
   (`draftStep`); the step index rides `hidden_next` (a scalar), host token ids ride `host_ids`. Depth and the free
-  EV cap clamp to the head count; rounds stay solo (`mtpRoundsStaySolo`); no prefix-cache persistence (the head
-  rebuilds from the prompt's last window).
+  EV cap clamp to the head count and to the verify row budget; rounds stay solo (`mtpRoundsStaySolo`); no
+  prefix-cache persistence (the head rebuilds from the prompt's last window).
 - **Verify rows keep decode arithmetic** (`ForwardCtx.verify_rows`, up to `MIMO_VERIFY_ROWS_MAX` = 4 rows, the FP8
   GEMV's direct-row limit): every row's attention runs through `mimoDecodeAttn` on the keys its own decode tick saw
   (`mimoVerifyRowsAttn`), the rest of the forward is row-identical already (FP8 GEMV <= 4 rows, `mtp_qmv` affine-8,
