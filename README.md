@@ -51,9 +51,10 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-4bpw --local-dir ~/.sushi/models/Q
   --prefix-cache-entries 1 --prefix-cache-mem 2GB --temp 1
 ```
 
-Set your memory limit 
+Set your memory limit
 ```bash
-sudo systcl iogpu.wired_limit_mb=88000
+sudo systcl iogpu.wired_limit_mb=88000 # For 96GB
+sudo systcl iogpu.wired_limit_mb=120000 # For 128GB
 ```
 
 - `--mtp-head-kv-quant` stores the MTP head's own KV at 8 bits too.
