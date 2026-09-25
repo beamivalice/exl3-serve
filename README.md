@@ -2,12 +2,13 @@
 
 # SUSHI
 
-A detached fork from ddalcu's MLX-serve masterpiece, focus only to support selected models in Apple Silicon using custom sushi quant. Sushi uses both EXL3 and affine mixed format tailored for M5+ Max class, other chips can still run well.
+A detached fork of ddalcu's mlx-serve masterpiece, focused only on serving selected models on Apple Silicon with custom sushi
+quants. Sushi mixes EXL3 and affine formats tailored for M5 Max-class chips; other chips still run well.
 
 ## Model support list
 
-* Qwen3.8-Flash-Next-sushi-3bpw (Require 64GB+)
-* Qwen3.8-Flash-Next-sushi-4bpw (Require 96GB+)
+* [Qwen3.8-Flash-Next-Sushi-3bpw](https://huggingface.co/beamster/Qwen3.8-Flash-Next-Sushi-3bpw) (requires 64 GB+)
+* [Qwen3.8-Flash-Next-Sushi-4bpw](https://huggingface.co/beamster/Qwen3.8-Flash-Next-Sushi-4bpw) (requires 96 GB+)
 
 ## Streaming
 
@@ -36,7 +37,7 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Q
   --prefix-cache-entries 1 --prefix-cache-mem 1GB --temp 1
 ```
 
-Set your memory limit 
+Set the GPU memory limit before serving (it resets at reboot):
 ```bash
 sudo sysctl iogpu.wired_limit_mb=58000
 ```
@@ -51,18 +52,18 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-4bpw --local-dir ~/.sushi/models/Q
   --prefix-cache-entries 1 --prefix-cache-mem 2GB --temp 1
 ```
 
-Set your memory limit
+Set the GPU memory limit before serving (it resets at reboot):
 ```bash
-sudo sysctl iogpu.wired_limit_mb=88000 # For 96GB
-sudo sysctl iogpu.wired_limit_mb=120000 # For 128GB
+sudo sysctl iogpu.wired_limit_mb=88000    # 96 GB Mac
+sudo sysctl iogpu.wired_limit_mb=120000   # 128 GB Mac
 ```
 
 - `--mtp-head-kv-quant` stores the MTP head's own KV at 8 bits too.
-- `--prefill-chunk 2048` caps the prompt tokens forwarded per step, 4096 get faster prefill with larger memory trade off.
-- `--prefix-cache-mem 1GB` keeps seen prompt prefix hot on RAM, faster than SSD.
+- `--prefill-chunk 2048` caps the prompt tokens forwarded per step; 4096 prefills faster but needs more memory.
+- `--prefix-cache-mem 1GB` keeps seen prompt prefixes hot in RAM, faster than the SSD.
 - `--prefix-cache-disk 20GB` keeps seen prompt prefixes on the SSD, so a repeated prompt skips its prefill.
-- `--mtp-typical 0.2` makes sampled decoding 15-20% faster (Sushi-4bpw, temperature 1.0) at tiny quality trade off
-- `--prefix-cache-entries 1` for using multiple agents at once, recommend 1-8.
+- `--mtp-typical 0.2` makes sampled decoding 15-20% faster (Sushi-4bpw, temperature 1.0) at a tiny quality cost.
+- `--prefix-cache-entries 1` keeps one conversation's prefix; raise it to 4-8 when several agents share the server.
 
 ## Memory
 
@@ -74,9 +75,13 @@ GPU memory in GiB (what `sushi run` reports); the n-gram table stays on the SSD.
 | MTP head | 0.98 | 1.27 |
 | vision tower | 0.84 | 0.84 |
 | **weights loaded** | **49.33** | **63.68** |
-| KV cache, 256k tokens | 53.4 | 67.6 |
-| KV cache, 512k tokens | 57.5 | 71.8 |
-| KV cache, 1M tokens | 65.6 | 79.9 |
+| KV cache, 256k tokens | 4.06 | 4.06 |
+| KV cache, 512k tokens | 8.12 | 8.12 |
+| KV cache, 1M tokens | 16.25 | 16.25 |
+| **total at 256k / 512k / 1M** | **53.4 / 57.5 / 65.6** | **67.7 / 71.8 / 79.9** |
+
+The KV cache is for one request at 8 bits with MTP on and `--mtp-head-kv-quant`: 16,640 bytes per token of context.
+Leave room for the hot prefix cache (`--prefix-cache-mem`) and the prefill buffers.
 
 ## Quality
 
@@ -88,9 +93,9 @@ with either pack). Numbers: [docs/quality-kld.md](docs/quality-kld.md).
 
 ## Speed
 
-Sushi-3bpw on an M5 Max 128 GB, sushi v1.0.0: `--ctx-size 1048576 --kv-quant 8 --mtp`, llmprobe `--bench-only`, quiet box.
+Sushi-3bpw on an M5 Max 128 GB, sushi v1.0.0 release candidate (build 725b76ca): `--ctx-size 1048576 --kv-quant 8 --mtp`, llmprobe `--bench-only`, quiet box.
 
-<p align="center"><img src="docs/assets/perf-sushi3bpw-1m.png" alt="decode, first token and prefill vs context" width="100%"></p>
+<p align="center"><img src="docs/assets/perf-sushi3bpw-1m.png" alt="decode and prefill vs context" width="100%"></p>
 
 | context | decode tok/s | prefill tok/s | first token | tokens per step |
 |---|---|---|---|---|
@@ -105,3 +110,8 @@ Sushi-3bpw on an M5 Max 128 GB, sushi v1.0.0: `--ctx-size 1048576 --kv-quant 8 -
 | 1004k | 56.6 | 1465 | 685.2 s | 3.31 |
 
 Smaller Macs have less memory bandwidth, so expect lower numbers.
+
+## License
+
+MIT, for sushi and the mlx-serve code it forks ([LICENSE](LICENSE)); ported kernels and vendored code are listed in
+[NOTICE](NOTICE). The model packs follow the Qwen Community License, stated on each Hugging Face page.
