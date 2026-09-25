@@ -8952,6 +8952,12 @@ pub const KVCacheSnapshot = struct {
         self.allocator.free(self.entries);
     }
 
+    /// A second snapshot holding the same buffers by refcount (no data copy).
+    pub fn share(self: *const KVCacheSnapshot) !KVCacheSnapshot {
+        const view: KVCache = .{ .entries = self.entries, .step = self.step, .allocator = self.allocator, .config = self.config, .swa_ring_window = self.swa_ring_window };
+        return view.snapshot();
+    }
+
     /// Could a cache restored from this snapshot clamp to `len` (`KVCache.truncate`)?
     pub fn ringServes(self: *const KVCacheSnapshot, len: usize) bool {
         for (self.entries) |*e| {

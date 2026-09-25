@@ -49,6 +49,10 @@ pub const MIN_CANCELLED_COMMIT_TOKENS: usize = 256;
 /// Shortest prefix a ring-checkpoint restore reuses; below it the request cold-prefills.
 pub const RING_RESTORE_MIN_TOKENS: usize = 64;
 
+/// Ring checkpoints one entry keeps; the highest survive, since a later request forks near the
+/// end of the conversation. One is ~16 MiB on MiMo at kv8.
+pub const RING_CHECKPOINT_MAX: usize = 4;
+
 /// Why a lookup that found a real raw token match still restored nothing.
 /// `findBestRestorableMatch` `continue`s every candidate whose highest SSM
 /// checkpoint sits past the shared prefix, so a hybrid lookup can return null
@@ -232,10 +236,10 @@ const Entry = struct {
     mtp: ?DflashSnap = null,
     /// Bytes resident in `mtp`, folded into `kv_bytes` like `ssm_bytes`.
     mtp_bytes: u64 = 0,
-    /// Ringed caches only: the prompt-end restore point (`KVCache.ringCheckpoint`), billed in
-    /// `kv_bytes`. The snapshot's ring holds the window at the entry's END, which a long reply
-    /// carries past where the next turn's rendering diverges.
-    ring_cp: ?KVCacheSnapshot = null,
+    /// Ringed caches only: restore points below the entry's END (`KVCache.ringCheckpoint`),
+    /// ascending by `step`, billed in `kv_bytes`: the prompt end, which a long reply carries the
+    /// ring past, and those inherited from the entry this prompt forked off (`bestRingDonor`).
+    ring_cps: ?[]KVCacheSnapshot = null,
     /// Restore by move: the slot that took ownership of this entry's KV buffers (`KVCache.adopt`).
     /// While set the snapshot holds empty handles and the entry is invisible to every other
     /// reader. Cleared by the commit that replaces it; dropped at slot end otherwise.
@@ -486,9 +490,9 @@ pub const HotPrefixCache = struct {
             m.deinit();
             e.mtp = null;
         }
-        if (e.ring_cp) |*r| {
-            r.deinit();
-            e.ring_cp = null;
+        if (e.ring_cps) |r| {
+            freeRingCps(allocator, r);
+            e.ring_cps = null;
         }
     }
 
@@ -1033,18 +1037,21 @@ pub const HotPrefixCache = struct {
         return null;
     }
 
-    const RingRestore = struct { len: usize, from_cp: bool };
+    const RingRestore = struct { len: usize, cp: ?*const KVCacheSnapshot };
 
     /// Where an entry restores a match of `shared` tokens. A ringed entry's own ring holds the
-    /// window at its END; below that only its prompt-end checkpoint (`from_cp`) can serve, at
-    /// its position or the match, whichever is lower. Null = un-restorable. Any other entry
-    /// holds a prefix and restores at `shared`.
+    /// window at its END; below that only a ring checkpoint (`cp`) can serve, the one reaching
+    /// highest at its position or the match, whichever is lower. Null = un-restorable. Any
+    /// other entry holds a prefix and restores at `shared`.
     fn ringRestore(e: *const Entry, shared: usize, prompt_len: usize) ?RingRestore {
-        if (e.snapshot.ringServes(clampLen(shared, prompt_len))) return .{ .len = shared, .from_cp = false };
-        const cp = if (e.ring_cp) |*c| c else return null;
-        const at = @min(shared, cp.step);
-        if (at < RING_RESTORE_MIN_TOKENS or !cp.ringServes(clampLen(at, prompt_len))) return null;
-        return .{ .len = at, .from_cp = true };
+        if (e.snapshot.ringServes(clampLen(shared, prompt_len))) return .{ .len = shared, .cp = null };
+        var best: ?RingRestore = null;
+        for (e.ring_cps orelse return null) |*cp| {
+            const at = @min(shared, cp.step);
+            if (at < RING_RESTORE_MIN_TOKENS or !cp.ringServes(clampLen(at, prompt_len))) continue;
+            if (best == null or at > best.?.len) best = .{ .len = at, .cp = cp };
+        }
+        return best;
     }
 
     /// The length a restore of `len` matched tokens clamps to: a full match re-forwards its last token.
@@ -1391,10 +1398,10 @@ pub const HotPrefixCache = struct {
                 effective_matched = 0;
             }
         } else if (ringRestore(e, restore_cap, prompt_ids.len)) |rr| {
-            if (rr.from_cp) {
-                try target_cache.restoreRing(&e.ring_cp.?);
+            if (rr.cp) |cp| {
+                try target_cache.restoreRing(cp);
                 effective_matched = rr.len;
-                log.info("  [hot-cache] ring checkpoint @{d} serves the match of {d} (the entry's ring ends at {d})\n", .{ rr.len, m.shared, e.snapshot.step });
+                log.info("  [hot-cache] ring checkpoint @{d} serves the match of {d} (the entry's ring ends at {d})\n", .{ cp.step, m.shared, e.snapshot.step });
             }
         }
         target_moe_seq_offset.* = effective_matched;
@@ -1620,10 +1627,19 @@ pub const HotPrefixCache = struct {
         prompt_len: usize,
         ring_cp: ?KVCacheSnapshot,
     ) !CommitStatus {
-        // Freed on every path that does not move it into an entry.
-        var new_ring = ring_cp;
-        defer if (new_ring) |*r| r.deinit();
-        var new_ring_bytes: u64 = if (new_ring) |*r| snapshotBytes(r) else 0;
+        // Freed on every path that does not move it into an entry. Best effort, like its capture.
+        var new_rings: ?[]KVCacheSnapshot = null;
+        defer if (new_rings) |r| freeRingCps(self.allocator, r);
+        if (ring_cp) |cp| {
+            if (self.allocator.alloc(KVCacheSnapshot, 1)) |one| {
+                one[0] = cp;
+                new_rings = one;
+            } else |_| {
+                var dropped = cp;
+                dropped.deinit();
+            }
+        }
+        var new_ring_bytes = ringCpsBytes(new_rings);
         const quant_config = source_cache.config;
 
         // Record what the live cache holds now, before any byte-budget trim.
@@ -1828,10 +1844,11 @@ pub const HotPrefixCache = struct {
                 if (eff_cps) |cps| {
                     for (cps) |*cp| new_ssm_bytes += ssmCheckpointBytes(cp);
                 }
-                if (new_ring) |*r| {
-                    if (r.step > tl) {
-                        r.deinit();
-                        new_ring = null;
+                // Only this turn's prompt-end checkpoint so far; inheritance runs below.
+                if (new_rings) |r| {
+                    if (r[0].step > tl) {
+                        freeRingCps(self.allocator, r);
+                        new_rings = null;
                         new_ring_bytes = 0;
                     }
                 }
@@ -1972,6 +1989,34 @@ pub const HotPrefixCache = struct {
             });
         }
 
+        // The ring's twin of the checkpoint inheritance above: a request that restored off a
+        // donor and appended its own tail keeps the donor's restore points below the fork, so a
+        // later request diverging there restores after the donor is gone.
+        if (replace_idx == null) ring_inherit: {
+            const cap = @min(if (prompt_len == 0) eff_tokens.len else prompt_len, eff_tokens.len);
+            const donor = self.bestRingDonor(eff_tokens, has_tools, eff_vision_key, eff_media_start, quant_config, cap) orelse
+                break :ring_inherit;
+            const budget: ?u64 = if (self.max_kv_bytes == 0)
+                null
+            else if (new_bytes >= self.max_kv_bytes)
+                break :ring_inherit
+            else
+                self.max_kv_bytes - new_bytes;
+            const inherited = (shareRingCpsUpTo(self.allocator, self.entries.items[donor.idx].ring_cps.?, donor.limit, budget) catch |err| {
+                log.warn("  [hot-cache] ring checkpoint inheritance failed: {s}\n", .{@errorName(err)});
+                break :ring_inherit;
+            }) orelse break :ring_inherit;
+            const merged = mergeRingCps(self.allocator, inherited, new_rings);
+            new_rings = merged catch |err| blk: {
+                log.warn("  [hot-cache] ring checkpoint merge failed: {s}\n", .{@errorName(err)});
+                break :blk null;
+            };
+            const merged_bytes = ringCpsBytes(new_rings);
+            new_bytes = new_bytes - new_ring_bytes + merged_bytes;
+            new_ring_bytes = merged_bytes;
+            log.info("  [hot-cache] inherited ring checkpoints (<= {d} tokens) from a shared prefix\n", .{donor.limit});
+        }
+
         if (replace_idx) |idx| {
             const e = &self.entries.items[idx];
 
@@ -2010,13 +2055,16 @@ pub const HotPrefixCache = struct {
             e.dflash = null;
             if (e.mtp) |*m4| m4.deinit();
             e.mtp = null;
-            // The old restore point sits inside the new tokens too; a newer one supersedes it.
-            if (new_ring) |r| {
-                if (e.ring_cp) |*old| old.deinit();
-                e.ring_cp = r;
-                new_ring = null;
-            }
-            const ring_bytes: u64 = if (e.ring_cp) |*r| snapshotBytes(r) else 0;
+            // The old restore points sit inside the new tokens too; at a tie the newer wins.
+            const old_rings = e.ring_cps;
+            e.ring_cps = null;
+            const merged_rings = mergeRingCps(self.allocator, old_rings, new_rings);
+            new_rings = null;
+            e.ring_cps = merged_rings catch |err| blk: {
+                log.warn("  [hot-cache] ring checkpoint merge failed: {s}\n", .{@errorName(err)});
+                break :blk null;
+            };
+            const ring_bytes = ringCpsBytes(e.ring_cps);
             self.current_kv_bytes -|= e.kv_bytes;
 
             // Recompute ssm bytes from the merged list.
@@ -2084,9 +2132,9 @@ pub const HotPrefixCache = struct {
             .dflash_bytes = new_dflash_bytes,
             .mtp = new_mtp,
             .mtp_bytes = new_mtp_bytes,
-            .ring_cp = new_ring,
+            .ring_cps = new_rings,
         };
-        new_ring = null;
+        new_rings = null;
         if (!try self.retainNewEntry(incoming)) return .declined;
         // The trim prices a prefix against the checkpoints that survive a shed, so the shed runs here too.
         if (self.max_kv_bytes > 0) self.shedCheckpointsToFit();
@@ -2587,18 +2635,8 @@ pub const HotPrefixCache = struct {
         var best_shared: usize = 0;
         var best_pos: usize = 0;
         for (self.entries.items, 0..) |*e, i| {
-            if (e.has_tools != has_tools) continue;
-            if (!std.meta.eql(e.quant_config, quant_config)) continue;
             const cps = e.ssm_checkpoints orelse continue;
-            var max_shared = @min(e.tokens.len, tokens.len);
-            if (e.vision_key != vision_key) {
-                // Same rule as `findBestRestorableMatch`: rows before the
-                // earliest media placeholder are ordinary text and cross keys.
-                const safe_boundary = crossKeyBoundary(e.vision_key, e.media_start, media_start, &.{}) orelse continue;
-                max_shared = @min(max_shared, safe_boundary);
-            }
-            var shared: usize = 0;
-            while (shared < max_shared and e.tokens[shared] == tokens[shared]) shared += 1;
+            const shared = donorShared(e, tokens, has_tools, vision_key, media_start, quant_config) orelse continue;
             const cp = highestCheckpointAtOrBelow(cps, shared) orelse continue;
             if (cp.pos > best_pos) {
                 best_pos = cp.pos;
@@ -2608,6 +2646,138 @@ pub const HotPrefixCache = struct {
         }
         if (best_idx) |idx| return .{ .idx = idx, .shared = best_shared };
         return null;
+    }
+
+    /// Tokens a key-compatible entry provably shares with `tokens`; null = another key.
+    fn donorShared(
+        e: *const Entry,
+        tokens: []const u32,
+        has_tools: bool,
+        vision_key: u64,
+        media_start: ?usize,
+        quant_config: kv_quant.KVQuantConfig,
+    ) ?usize {
+        if (e.has_tools != has_tools) return null;
+        if (!std.meta.eql(e.quant_config, quant_config)) return null;
+        var max_shared = @min(e.tokens.len, tokens.len);
+        if (e.vision_key != vision_key) {
+            // Same rule as `findBestRestorableMatch`: rows before the
+            // earliest media placeholder are ordinary text and cross keys.
+            const safe_boundary = crossKeyBoundary(e.vision_key, e.media_start, media_start, &.{}) orelse return null;
+            max_shared = @min(max_shared, safe_boundary);
+        }
+        var shared: usize = 0;
+        while (shared < max_shared and e.tokens[shared] == tokens[shared]) shared += 1;
+        return shared;
+    }
+
+    const RingDonor = struct { idx: usize, limit: usize };
+
+    /// The resident entry holding the highest ring checkpoint a commit of `tokens` may inherit:
+    /// one whose rows are all shared tokens, at or below `cap` (the committing prompt's length).
+    /// Returns that entry's index and the bound.
+    fn bestRingDonor(
+        self: *const HotPrefixCache,
+        tokens: []const u32,
+        has_tools: bool,
+        vision_key: u64,
+        media_start: ?usize,
+        quant_config: kv_quant.KVQuantConfig,
+        cap: usize,
+    ) ?RingDonor {
+        var best: ?RingDonor = null;
+        var best_step: usize = 0;
+        for (self.entries.items, 0..) |*e, i| {
+            const cps = e.ring_cps orelse continue;
+            const shared = donorShared(e, tokens, has_tools, vision_key, media_start, quant_config) orelse continue;
+            const limit = @min(shared, cap);
+            for (cps) |*cp| {
+                if (cp.step < RING_RESTORE_MIN_TOKENS or cp.step > limit or cp.step <= best_step) continue;
+                best_step = cp.step;
+                best = .{ .idx = i, .limit = limit };
+            }
+        }
+        return best;
+    }
+
+    /// Refcount-share `src`'s ring checkpoints with `step <= limit` into an ascending slice the
+    /// caller owns, highest first while `budget` (null = unbounded) lasts. Null when none
+    /// qualifies. Billed again per entry, as `cloneCheckpointsUpTo` explains.
+    fn shareRingCpsUpTo(allocator: std.mem.Allocator, src: []const KVCacheSnapshot, limit: usize, budget: ?u64) !?[]KVCacheSnapshot {
+        var out = std.ArrayList(KVCacheSnapshot).empty;
+        errdefer {
+            for (out.items) |*c| c.deinit();
+            out.deinit(allocator);
+        }
+        var spent: u64 = 0;
+        var k = src.len;
+        while (k > 0 and out.items.len < RING_CHECKPOINT_MAX) {
+            k -= 1;
+            const cp = &src[k];
+            if (cp.step > limit) continue;
+            const cost = snapshotBytes(cp);
+            if (budget) |b| {
+                if (spent + cost > b) break;
+            }
+            spent += cost;
+            try out.ensureUnusedCapacity(allocator, 1);
+            out.appendAssumeCapacity(try cp.share());
+        }
+        if (out.items.len == 0) {
+            out.deinit(allocator);
+            return null;
+        }
+        std.mem.reverse(KVCacheSnapshot, out.items);
+        return try out.toOwnedSlice(allocator);
+    }
+
+    /// One ascending list from two owned ones (a tie keeps `new`'s), cut to the highest
+    /// `RING_CHECKPOINT_MAX`. Consumes both on every path.
+    fn mergeRingCps(allocator: std.mem.Allocator, old: ?[]KVCacheSnapshot, new: ?[]KVCacheSnapshot) !?[]KVCacheSnapshot {
+        var none = [_]KVCacheSnapshot{};
+        const a: []KVCacheSnapshot = old orelse &none;
+        const b: []KVCacheSnapshot = new orelse &none;
+        defer {
+            if (old) |o| allocator.free(o);
+            if (new) |n| allocator.free(n);
+        }
+        var kept: [RING_CHECKPOINT_MAX]KVCacheSnapshot = undefined;
+        var n: usize = 0;
+        var i = a.len;
+        var j = b.len;
+        while (i > 0 or j > 0) {
+            const from_new = i == 0 or (j > 0 and b[j - 1].step >= a[i - 1].step);
+            var cp = if (from_new) b[j - 1] else a[i - 1];
+            if (from_new) {
+                if (i > 0 and a[i - 1].step == cp.step) {
+                    a[i - 1].deinit();
+                    i -= 1;
+                }
+                j -= 1;
+            } else i -= 1;
+            if (n < kept.len) {
+                kept[n] = cp;
+                n += 1;
+            } else cp.deinit();
+        }
+        if (n == 0) return null;
+        const out = allocator.alloc(KVCacheSnapshot, n) catch |err| {
+            for (kept[0..n]) |*c| c.deinit();
+            return err;
+        };
+        for (out, 0..) |*o, k| o.* = kept[n - 1 - k];
+        return out;
+    }
+
+    fn freeRingCps(allocator: std.mem.Allocator, cps: []KVCacheSnapshot) void {
+        for (cps) |*c| c.deinit();
+        allocator.free(cps);
+    }
+
+    fn ringCpsBytes(cps: ?[]const KVCacheSnapshot) u64 {
+        var total: u64 = 0;
+        for (cps orelse return 0) |*c| total += snapshotBytes(c);
+        return total;
     }
 
     /// Refcount-share `src`'s checkpoints with `pos <= limit` into a fresh
@@ -3638,6 +3808,170 @@ test "ringed candidates rank by restorable position, not raw match" {
     var moe_off: usize = 0;
     const hit = try hc.lookupAndRestore(&restored, &moe_off, null, s, &next, false, 0, null, null);
     try testing.expectEqual(@as(usize, short), hit.matched);
+}
+
+/// A ring checkpoint with no rows; `mark` tells two at one position apart.
+fn stubRingCp(step: usize, mark: usize) !KVCacheSnapshot {
+    const entries = try testing.allocator.alloc(transformer_mod.KVCacheEntry, 1);
+    entries[0] = transformer_mod.newEmptyKVEntry();
+    entries[0].offset = mark;
+    return .{ .entries = entries, .step = step, .allocator = testing.allocator, .config = kv_quant.KVQuantConfig.dense };
+}
+
+fn stubRingCps(steps: []const usize, mark: usize) ![]KVCacheSnapshot {
+    const out = try testing.allocator.alloc(KVCacheSnapshot, steps.len);
+    for (out, steps) |*o, st| o.* = try stubRingCp(st, mark);
+    return out;
+}
+
+test "ring checkpoints merge ascending, a tie keeps the newer, and only the highest RING_CHECKPOINT_MAX stay" {
+    const merged = (try HotPrefixCache.mergeRingCps(
+        testing.allocator,
+        try stubRingCps(&.{ 100, 300, 500 }, 1),
+        try stubRingCps(&.{ 300, 700, 900 }, 2),
+    )).?;
+    defer HotPrefixCache.freeRingCps(testing.allocator, merged);
+    try testing.expectEqual(RING_CHECKPOINT_MAX, merged.len);
+    const want = [_]struct { step: usize, mark: usize }{ .{ .step = 300, .mark = 2 }, .{ .step = 500, .mark = 1 }, .{ .step = 700, .mark = 2 }, .{ .step = 900, .mark = 2 } };
+    for (merged, want) |cp, w| {
+        try testing.expectEqual(w.step, cp.step);
+        try testing.expectEqual(w.mark, cp.entries[0].offset);
+    }
+    try testing.expectEqual(@as(?[]KVCacheSnapshot, null), try HotPrefixCache.mergeRingCps(testing.allocator, null, null));
+}
+
+test "an entry extended in place keeps its older ring checkpoints" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    const n_layers: u32 = 4;
+    const prompt: u32 = 700;
+    const reply: u32 = 600;
+    const turn2 = prompt + reply + 100;
+
+    var toks: [turn2 + 300]u32 = undefined;
+    for (&toks, 0..) |*t, i| t.* = @intCast(i + 1);
+    var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+    defer hc.deinit();
+    var live = try KVCache.init(testing.allocator, n_layers);
+    defer live.deinit();
+    const cp = try ringTurn(&live, s, n_layers, window, prompt, reply);
+    _ = try hc.commitWithRing(&live, toks[0 .. prompt + reply], false, 0, 0, null, null, null, null, prompt, cp);
+
+    // A client that sends the whole reply back extends the entry, which the commit replaces.
+    var ext = try KVCache.init(testing.allocator, n_layers);
+    defer ext.deinit();
+    ext.setSwaRing(window);
+    var moe_off: usize = 0;
+    const hit = try hc.lookupAndRestore(&ext, &moe_off, null, s, toks[0..turn2], false, 0, null, null);
+    try testing.expectEqual(@as(usize, prompt + reply), hit.matched);
+    try ringFill(&ext, s, n_layers, window, prompt + reply, turn2, 64);
+    var cp2 = try ext.ringCheckpoint(turn2, s);
+    errdefer if (cp2) |*c| c.deinit();
+    try ringFill(&ext, s, n_layers, window, turn2, toks.len, 16);
+    const moved = cp2;
+    cp2 = null;
+    _ = try hc.commitWithRing(&ext, &toks, false, 0, 0, null, null, null, null, turn2, moved);
+    try testing.expectEqual(@as(usize, 1), hc.entries.items.len);
+    try testing.expectEqual(@as(usize, 2), hc.entries.items[0].ring_cps.?.len);
+
+    // A turn diverging right after the first prompt still restores there.
+    var next: [prompt + 40]u32 = undefined;
+    @memcpy(next[0 .. prompt + 1], toks[0 .. prompt + 1]);
+    for (next[prompt + 1 ..], 0..) |*t, i| t.* = @intCast(900_000 + i);
+    var restored = try KVCache.init(testing.allocator, n_layers);
+    defer restored.deinit();
+    restored.setSwaRing(window);
+    const again = try hc.lookupAndRestore(&restored, &moe_off, null, s, &next, false, 0, null, null);
+    try testing.expectEqual(@as(usize, prompt), again.matched);
+}
+
+test "a fork entry keeps its donor's ring checkpoint, so evicting the donor still restores at the fork" {
+    if (mlx.noGpuBackend()) return error.SkipZigTest;
+    const s = mlx.gpuStream();
+    const window: u32 = 8;
+    const n_layers: u32 = 4;
+    const prompt: u32 = 700;
+    const reply: u32 = 600;
+    const tail: u32 = 100; // the conversation past the donor's prompt (its reply, re-rendered)
+    const reminder: u32 = 330;
+    const fork_prompt = prompt + tail + reminder;
+
+    var toks: [fork_prompt + reply]u32 = undefined;
+    for (&toks, 0..) |*t, i| t.* = @intCast(i + 1);
+    var hc = HotPrefixCache.initWithMem(testing.allocator, 2, 0);
+    defer hc.deinit();
+
+    var donor = try KVCache.init(testing.allocator, n_layers);
+    defer donor.deinit();
+    const donor_cp = try ringTurn(&donor, s, n_layers, window, prompt, reply);
+    var donor_toks: [prompt + reply]u32 = undefined;
+    @memcpy(donor_toks[0..prompt], toks[0..prompt]);
+    for (donor_toks[prompt..], 0..) |*t, i| t.* = @intCast(700_000 + i);
+    _ = try hc.commitWithRing(&donor, &donor_toks, false, 0, 0, null, null, null, null, prompt, donor_cp);
+
+    // The side request: the conversation plus an appended reminder, restored off the donor.
+    var fork = try KVCache.init(testing.allocator, n_layers);
+    defer fork.deinit();
+    fork.setSwaRing(window);
+    var moe_off: usize = 0;
+    const fork_hit = try hc.lookupAndRestore(&fork, &moe_off, null, s, toks[0..fork_prompt], false, 0, null, null);
+    try testing.expectEqual(@as(usize, prompt), fork_hit.matched);
+    try ringFill(&fork, s, n_layers, window, prompt, fork_prompt, 64);
+    var fork_cp = try fork.ringCheckpoint(fork_prompt, s);
+    errdefer if (fork_cp) |*c| c.deinit();
+    try ringFill(&fork, s, n_layers, window, fork_prompt, fork_prompt + reply, 16);
+    const moved_cp = fork_cp;
+    fork_cp = null;
+    _ = try hc.commitWithRing(&fork, &toks, false, 0, 0, null, null, null, null, fork_prompt, moved_cp);
+
+    // The fork entry bills its own end, its own checkpoint and the inherited one.
+    var end = try fork.snapshotRetained(s);
+    const end_bytes = HotPrefixCache.snapshotBytes(&end);
+    end.deinit();
+    var cp_bytes: u64 = 0;
+    for (fork.entries) |*e| {
+        if (e.ringed) cp_bytes += (window + model_mod.ModelConfig.SWA_RING_CHECKPOINT_BACKOFF) * (ringRowBytes(e.keys) + ringRowBytes(e.values));
+    }
+    for (hc.entries.items) |*e| {
+        if (e.tokens.len == toks.len) try testing.expectEqual(end_bytes + 2 * cp_bytes, e.kv_bytes);
+    }
+
+    // An unrelated request under the count cap evicts the donor, the LRU entry.
+    var other = try KVCache.init(testing.allocator, n_layers);
+    defer other.deinit();
+    other.setSwaRing(window);
+    try ringFill(&other, s, n_layers, window, 0, 300, 64);
+    var other_toks: [300]u32 = undefined;
+    for (&other_toks, 0..) |*t, i| t.* = @intCast(500_000 + i);
+    _ = try hc.commitWithState(&other, &other_toks, false, 0, null, null, null);
+    for (hc.entries.items) |*e| try testing.expect(e.tokens.len != donor_toks.len);
+
+    // The next main turn shares the conversation and diverges where the reminder was appended.
+    var next: [prompt + tail + 40]u32 = undefined;
+    @memcpy(next[0 .. prompt + tail], toks[0 .. prompt + tail]);
+    for (next[prompt + tail ..], 0..) |*t, i| t.* = @intCast(900_000 + i);
+    var restored = try KVCache.init(testing.allocator, n_layers);
+    defer restored.deinit();
+    restored.setSwaRing(window);
+    const hit = try hc.lookupAndRestore(&restored, &moe_off, null, s, &next, false, 0, null, null);
+    try testing.expectEqual(@as(usize, prompt), hit.matched);
+
+    var ref = try KVCache.init(testing.allocator, n_layers);
+    defer ref.deinit();
+    ref.setSwaRing(window);
+    try ringFill(&ref, s, n_layers, window, 0, next.len, 64);
+    try ringFill(&restored, s, n_layers, window, prompt, next.len, 40);
+    var li: u32 = 0;
+    while (li < n_layers) : (li += 1) {
+        var rv = try ringWriteLayer(&ref, s, li, next.len, 1, window);
+        defer rv.deinit();
+        var sv = try ringWriteLayer(&restored, s, li, next.len, 1, window);
+        defer sv.deinit();
+        try testing.expectEqual(@as(f32, 0), try transformer_mod.maxAbsDiffF32(rv.k, sv.k, s));
+        try testing.expectEqual(@as(f32, 0), try transformer_mod.maxAbsDiffF32(rv.v, sv.v, s));
+        try testing.expectEqual(ref.absSeqLen(li), restored.absSeqLen(li));
+    }
 }
 
 test "HotPrefixCache: disk tier restores across a fresh cache instance (restart shape)" {

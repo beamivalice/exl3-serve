@@ -32,14 +32,19 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
   scorer boots with the cache off.
 - The always-on SSM snapshot sits 30 tokens BEFORE prompt end; a restored tail inside that window forwards as ONE
   span (`ssmSnapshotBackoff`). Guard: `tests/test_hybrid_reuse_equivalence.sh`.
-- **A ringed (sliding-window) entry restores at its end or at its prompt-end ring checkpoint**
-  (`KVCache.ringCheckpoint`, `Entry.ring_cp`): each ringed layer's window + 30 rows at the prompt end, taken right
-  after prefill. A reply longer than the ring's slack compacts it past where the next turn diverges (the previous
-  reply re-renders); the checkpoint's rows go under the ringed layers (`restoreRing`) and the usual clamp follows.
+- **A ringed (sliding-window) entry restores at its end or at one of its ring checkpoints**
+  (`KVCache.ringCheckpoint`, `Entry.ring_cps`, the highest `RING_CHECKPOINT_MAX` = 4 kept): each ringed layer's
+  window + 30 rows at a position; its own is the prompt end, taken right after prefill. A reply longer than the
+  ring's slack compacts it past where the next turn diverges (the previous reply re-renders); the checkpoint's rows
+  go under the ringed layers (`restoreRing`) and the usual clamp follows.
   A checkpoint restore of fewer than `RING_RESTORE_MIN_TOKENS` (64) cold-prefills: on MiMo kv8 one costs +6 to
   +41 ms over the cold prefill at 16-32 tokens, breaks even at 64, and saves ~180 ms at 256.
   Below both, `SlidingRingRewindPastWindow` → cold prefill. The SSD tier skips ringed entries; persisting the global
   prefix plus the checkpoint would lift that ([arch-mimo-v2](arch-mimo-v2.md#sliding-layers-the-ring)).
+- **A commit that forked off another entry inherits that entry's ring checkpoints below the fork** (`bestRingDonor`,
+  refcount-shared and billed per entry like SSM checkpoints): a request appending to the conversation (a client's
+  side request: the chat + a reminder) otherwise holds only its own prompt end, and once the count cap evicts the
+  main entry the next main turn, diverging where the reminder was appended, cold-prefilled every turn.
 
 ## Candidate ranking and trimming
 
