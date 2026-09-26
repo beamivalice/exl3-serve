@@ -121,6 +121,27 @@ between them).
 EXL3 K4 (turboderp), 60x64 screen: the f32 SwiGLU widening moved mean KLD 0.01872 → 0.01816 and top-1 96.20% →
 96.07% (a wash; the widening stands on MiMo's magnitudes).
 
+<a id="kv-width"></a>
+### KV cache width (the one setting that is not the pack)
+
+The tables above rank packs at kv8. The cache width is a separate dial, and the first measurement of it:
+
+| Sushi-3bpw, 16x512 raw | mean KLD | top-1 | NLL |
+|---|---|---|---|
+| `--kv-quant 8` (the default) | 0.104699 | 90.34% | 0.431483 |
+| `--kv-quant 4` | 0.114179 | 89.65% | 0.437941 |
+| delta | **+0.009480 (+9.05%)** | **-0.70 pp** | +1.50% |
+
+kv4 is 9% of KLD, three times the noise bar and nine times the ROUNDING-FLIP floor, so it is a real cost and not an
+accumulation artefact. For scale it gives back about three times what the w12 -> w15 window change bought (2.8%), and
+spends 49% of the gap between this pack and the affine 4/8 control. It buys 1.9x the context bytes (27 KB a token
+against 52 KB), which is the only reason to take it.
+
+Binary `db249826` (Zig sources identical to `e8e2a3cb`), M5 Max 128 GB, teacher `mlx-serve-bf16-16x512-raw`,
+`--tokens 512 --top-k 10 --ctx-size 8192`, no `--mtp`, 7186 positions to first EOS. Both arms ran on the same binary,
+so the delta stands on that; the absolute kv8 figure reads 0.1047 where the table above records 0.1012, a +3.5% gap
+against a different binary and flag set, which is why the delta is quoted rather than either absolute.
+
 <a id="mimo"></a>
 ## MiMo (16x512, first EOS, student kv8)
 

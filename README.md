@@ -28,18 +28,49 @@ The model's own MTP draft head and the 8-bit KV cache are on by default.
 
 **64 GB Mac, Sushi-3bpw**
 
+Set the GPU memory limit first (it resets at reboot). 59,000 MB is the ceiling for this box: above it macOS runs out
+of memory before the model does, and the kernel panics rather than the server refusing.
 ```bash
-hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw
-./sushi-macos-arm64/sushi serve --model ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw \
-  --mtp --kv-quant 8 --mtp-head-kv-quant --ctx-size 200000 \
-  --prefill-chunk 2048 --max-tokens 64000 --prefix-cache-disk 20GB \
-  --prefix-cache-entries 1 --prefix-cache-mem 1GB --temp 1
+sudo sysctl iogpu.wired_limit_mb=59000
 ```
 
-Set the GPU memory limit before serving (it resets at reboot):
+Then pick one of the two. They differ only in KV width; the context is set explicitly because auto-context reads free
+memory, so its answer is not the same on two 64 GB machines.
+
 ```bash
-sudo sysctl iogpu.wired_limit_mb=58000
+hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw
+
+# 1. images, 8-bit KV — the default quality
+./sushi-macos-arm64/sushi serve --model ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw \
+  --mtp --kv-quant 8 --mtp-head-kv-quant --ctx-size 128000 \
+  --max-tokens 64000 --prefix-cache-disk 20GB --prefix-cache-entries 1 --prefix-cache-mem 1GB --temp 1
+
+# 2. images, 4-bit KV — twice the context, at 9% KLD and 0.7 points of next-token agreement
+./sushi-macos-arm64/sushi serve --model ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw \
+  --mtp --kv-quant 4 --mtp-head-kv-quant --ctx-size 256000 \
+  --max-tokens 64000 --prefix-cache-disk 20GB --prefix-cache-entries 1 --prefix-cache-mem 1GB --temp 1
 ```
+
+Add `--no-vision` to either one to stop serving images. It saves the 0.8 GB tower but not context: the tower is too
+small to move the plan, so the two serve the same length.
+
+Why those numbers. The pack holds 49.3 GB of resident weights and the limit is 57.6 GB, so the load check (weights plus
+7 GB of headroom, 56.3 GB) passes without `--skip-mem-preflight`. What is left over is 6.8 GB, and it all goes to the
+KV cache: 52 KB a token at 8-bit, 27 KB at 4-bit, which is 128k and 256k. Those two figures leave about 1.5 GB for
+warmup buffers and activations. The KV cache grows as a conversation lengthens, so a short one never spends the budget;
+the context is a ceiling, not an up-front cost. Keep the context under 262144: at that number the n-gram prefill gate
+turns the parallel reader on by itself, and on a box this size the table is not resident.
+
+At 4-bit KV the quality cost is measured, not guessed: mean KLD 0.1047 to 0.1142 and next-token agreement 90.34% to
+89.65% on the 16x512 teacher
+([numbers](docs/quality-kld.md)). For scale, the w12-to-w15 window change bought 2.8%, so 4-bit KV gives back about
+three times what the best expert tuning won. Prefer 1 unless you need the length.
+
+`--wired-margin-gib` does nothing at this limit, because it only lowers a floor the working-set limit already sits
+under.
+
+Close a browser before serving if the load check refuses. The 30 GB n-gram table lives on the SSD, so its reads are the
+cost of a 64 GB box, not a reason to raise the limit.
 
 **96 GB+ Mac, Sushi-4bpw**
 
