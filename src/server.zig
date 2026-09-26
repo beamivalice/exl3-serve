@@ -9892,6 +9892,8 @@ fn handleStreamingGeneration(
     var delivery: ?rp_mod.Delivery = if (constrained_proto) rp_mod.Delivery.init(sampling.constraint.?.proto.?) else null;
     defer if (delivery) |*d| d.deinit(allocator);
     var think_closed = false; // a complete think block was already split+emitted this stream
+    var arg_stream: ArgStream = .{};
+    defer arg_stream.deinit(allocator);
     // Leading whitespace is suppressed until the first visible byte, so the
     // stream reaches the same content bytes as splitThinkBlock's own
     // trimStart (chat.streamContentLead).
@@ -10033,6 +10035,20 @@ fn handleStreamingGeneration(
 
             const buf = text_buf.items;
             const maybe_tool = chat_mod.streamShouldBufferForTools(buf);
+
+            if (maybe_tool and has_tools and argStreamAllowed(opens_think or think_scan.saw_open, think_closed, stop_sequences.len)) {
+                if (try arg_stream.advance(allocator, buf, tools_json)) |fresh| {
+                    const tc_id = try std.fmt.allocPrint(allocator, "call_{d}_0", .{chat_id});
+                    defer allocator.free(tc_id);
+                    const delta = if (arg_stream.header_sent)
+                        try formatChatStreamToolArgs(allocator, 0, fresh)
+                    else
+                        try formatChatStreamToolCall(allocator, 0, tc_id, arg_stream.name.?, fresh);
+                    defer allocator.free(delta);
+                    arg_stream.header_sent = true;
+                    try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null, .tool_calls_json = delta }, null, null, null, .{ .logprobs_json = try lps.take() });
+                }
+            }
 
             if (!maybe_tool) {
                 // No tool call pattern — ask the shared gate (chat.streamThinkGate,
@@ -10507,6 +10523,20 @@ fn handleStreamingGeneration(
 
             // Emit tool call deltas in OpenAI streaming format
             for (tool_calls, 0..) |tc, i| {
+                if (arg_stream.header_sent and i == 0) {
+                    // Call 0 already streamed: ship only what the client lacks. A final parse that
+                    // does not extend it is handled below as a cut-off call; the turn is flagged
+                    // `length`, so its later calls are not offered either.
+                    if (!arg_stream.extendedBy(tc)) break;
+                    const rest = tc.arguments[arg_stream.sent.items.len..];
+                    if (rest.len > 0) {
+                        const delta = try formatChatStreamToolArgs(allocator, 0, rest);
+                        defer allocator.free(delta);
+                        try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null, .tool_calls_json = delta }, null, null, null, .{ .logprobs_json = try lps.take() });
+                    }
+                    arg_stream.completed = true;
+                    continue;
+                }
                 const tc_id = try std.fmt.allocPrint(allocator, "call_{d}_{d}", .{ chat_id, i });
                 defer allocator.free(tc_id);
 
@@ -10562,6 +10592,15 @@ fn handleStreamingGeneration(
     }
 
     const total_prompt = ts.prompt_tokens;
+    if (!client_gone and arg_stream.header_sent and !arg_stream.completed) {
+        // The streamed call was cut off (or the finished parse disowned it): close its JSON and
+        // report `length`, so no client runs a call whose arguments never finished.
+        log.warn("  [tool-stream] streamed call 0 did not complete ({d} bytes sent); closed and flagged length\n", .{arg_stream.sent.items.len});
+        const delta = try formatChatStreamToolArgs(allocator, 0, if (arg_stream.in_string) "\"}" else "}");
+        defer allocator.free(delta);
+        try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null, .tool_calls_json = delta }, null, null, null, .{ .logprobs_json = try lps.take() });
+        finish_reason = "length";
+    }
     if (!client_gone) {
         // Final chunk with finish_reason
         try sendSSEChunk(allocator, stream, chat_id, model_name, .{ .role = null, .content = null }, .{ .reason = finish_reason, .details = ts.finish_details }, null, null, .{ .logprobs_json = try lps.take() });
@@ -12028,6 +12067,71 @@ fn quotedJsonInner(escaped: []const u8) []const u8 {
     if (escaped.len >= 2 and escaped[0] == '"' and escaped[escaped.len - 1] == '"') return escaped[1 .. escaped.len - 1];
     return escaped;
 }
+
+fn formatChatStreamToolArgs(allocator: std.mem.Allocator, index: usize, arguments: []const u8) ![]u8 {
+    const escaped_args = try jsonEscape(allocator, arguments);
+    defer allocator.free(escaped_args);
+    return std.fmt.allocPrint(allocator,
+        \\[{{"index":{d},"function":{{"arguments":"{s}"}}}}]
+    , .{ index, quotedJsonInner(escaped_args) });
+}
+
+/// A call drafted inside a thought is discarded when the thought closes, and a stop sequence can
+/// cut bytes already sent: neither is streamed.
+fn argStreamAllowed(thought_opened: bool, thought_closed: bool, stop_sequence_count: usize) bool {
+    return !(thought_opened and !thought_closed) and stop_sequence_count == 0;
+}
+
+/// A chat stream's first tool call, streamed as its arguments become final
+/// (`chat.toolArgsStreamPrefix`); the finished parse must extend what was sent.
+const ArgStream = struct {
+    tools: ?std.json.Parsed(std.json.Value) = null,
+    name: ?[]u8 = null,
+    sent: std.ArrayList(u8) = .empty,
+    in_string: bool = false,
+    frozen: bool = false,
+    header_sent: bool = false,
+    completed: bool = false,
+    scanned_len: usize = 0,
+
+    fn deinit(self: *ArgStream, allocator: std.mem.Allocator) void {
+        if (self.tools) |*t| t.deinit();
+        if (self.name) |n| allocator.free(n);
+        self.sent.deinit(allocator);
+    }
+
+    /// Argument bytes newly final in `text`, or null. Rescans only after the text has grown by a
+    /// fixed share of its length, so a long value costs linear time overall.
+    fn advance(self: *ArgStream, allocator: std.mem.Allocator, text: []const u8, tools_json: ?[]const u8) !?[]const u8 {
+        if (self.frozen) return null;
+        if (text.len - self.scanned_len < @max(32, text.len / 32)) return null;
+        self.scanned_len = text.len;
+        if (self.tools == null) {
+            self.tools = std.json.parseFromSlice(std.json.Value, allocator, tools_json orelse return null, .{}) catch {
+                self.frozen = true;
+                return null;
+            };
+        }
+        const p = (try chat_mod.toolArgsStreamPrefix(allocator, text, self.tools.?.value)) orelse return null;
+        defer allocator.free(p.args);
+        if (self.name) |n| {
+            if (!std.mem.eql(u8, n, p.name) or !std.mem.startsWith(u8, p.args, self.sent.items)) {
+                self.frozen = true;
+                return null;
+            }
+        } else self.name = try allocator.dupe(u8, p.name);
+        const old = self.sent.items.len;
+        try self.sent.appendSlice(allocator, p.args[old..]);
+        self.in_string = p.in_string;
+        self.frozen = p.frozen;
+        if (self.sent.items.len == old and self.header_sent) return null;
+        return self.sent.items[old..];
+    }
+
+    fn extendedBy(self: *const ArgStream, tc: chat_mod.ParsedToolCall) bool {
+        return std.mem.eql(u8, self.name.?, tc.name) and std.mem.startsWith(u8, tc.arguments, self.sent.items);
+    }
+};
 
 fn formatChatStreamToolCall(allocator: std.mem.Allocator, index: usize, id: []const u8, name: []const u8, arguments: []const u8) ![]u8 {
     const escaped_name = try jsonEscape(allocator, name);
@@ -23750,4 +23854,159 @@ test "MiMo MTP state bill is constant and follows retained storage" {
     cfg.sliding_window = 64;
     const smaller: u64 = 2 * (3 * (2 * 64 - 1) * 4 * (192 + 128) * 2 + 256 * 2048 * 2) + 3 * 64 * 2048 * 2;
     try t.expectEqual(smaller, prefillRequestTerms(&cfg, 1024, 2048, 4, 512, .{}).state_bytes);
+}
+
+/// Streams `raw` cut every `step` bytes; returns the bytes a client would hold before the final
+/// chunk, or null when nothing streamed. Asserts the stream never retracts a byte.
+fn streamedArgsFor(a: std.mem.Allocator, raw: []const u8, tools_v: std.json.Value, step: usize) !?struct { name: []const u8, args: []u8 } {
+    var sent = std.ArrayList(u8).empty;
+    errdefer sent.deinit(a);
+    var name: ?[]const u8 = null;
+    var cut: usize = @min(step, raw.len);
+    while (true) : (cut = @min(cut + step, raw.len)) {
+        if (try chat_mod.toolArgsStreamPrefix(a, raw[0..cut], tools_v)) |p| {
+            defer a.free(p.args);
+            if (name) |n| try testing.expectEqualStrings(n, p.name);
+            name = p.name;
+            if (!std.mem.startsWith(u8, p.args, sent.items)) return error.StreamRetractedBytes;
+            sent.clearRetainingCapacity();
+            try sent.appendSlice(a, p.args);
+        } else if (name != null) return error.StreamLostItsCall;
+        if (cut == raw.len) break;
+    }
+    const n = name orelse {
+        sent.deinit(a);
+        return null;
+    };
+    return .{ .name = n, .args = try sent.toOwnedSlice(a) };
+}
+
+test "tool-arg streaming: every recorded qwen XML call's streamed bytes start its finished arguments" {
+    const a = testing.allocator;
+    const fixture = @embedFile("fixtures/tool_traffic.jsonl");
+    var lines = std.mem.splitScalar(u8, fixture, '\n');
+    var streamed: usize = 0;
+    var diverged: usize = 0;
+    const diag = std.c.getenv("SUSHI_ARG_STREAM_DIAG") != null;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const rec = try std.json.parseFromSlice(std.json.Value, a, line, .{});
+        defer rec.deinit();
+        const raw = (rec.value.object.get("raw") orelse continue).string;
+        const tools_v = rec.value.object.get("tools") orelse continue;
+        if (std.mem.indexOf(u8, raw, "<function=") == null) continue;
+        const tools_json = try std.json.Stringify.valueAlloc(a, tools_v, .{});
+        defer a.free(tools_json);
+        // The server streams only outside a thought, over the text after its close. A first close
+        // AFTER the call means the prompt opened the thought the call sits in: nothing streams.
+        const first_tool = std.mem.indexOf(u8, raw, "<tool") orelse raw.len;
+        const visible = if (std.mem.indexOf(u8, raw, "</think>")) |c| (if (c < first_tool) raw[c + "</think>".len ..] else continue) else raw;
+        const got = (try streamedArgsFor(a, visible, tools_v, @max(1, visible.len / 150))) orelse continue;
+        defer a.free(got.args);
+        streamed += 1;
+        const calls = (try parseToolCallsForRequest(a, raw, tools_json, true)) orelse return error.StreamedCallVanished;
+        defer {
+            for (calls) |tc| {
+                a.free(tc.name);
+                a.free(tc.arguments);
+            }
+            a.free(calls);
+        }
+        // A call that never closed is the cut-off case: the stream closes it and flags it.
+        const closed = std.mem.indexOf(u8, raw, "</function>") != null;
+        const ok = std.mem.eql(u8, calls[0].name, got.name) and std.mem.startsWith(u8, calls[0].arguments, got.args);
+        if (!ok and closed) {
+            diverged += 1;
+            if (diag) std.debug.print("---- DIVERGED\nstreamed {s}\nfinal    {s}\nraw {s}\n", .{ got.args[0..@min(got.args.len, 200)], calls[0].arguments[0..@min(calls[0].arguments.len, 200)], raw[0..@min(raw.len, 1500)] });
+        }
+    }
+    if (diag) std.debug.print("streamed {d} diverged {d}\n", .{ streamed, diverged });
+    try testing.expect(streamed > 500);
+    try testing.expectEqual(@as(usize, 0), diverged);
+}
+
+test "tool-arg streaming: a coerced sibling re-serializes the call without moving streamed bytes" {
+    const a = testing.allocator;
+    const tools_json =
+        \\[{"type":"function","function":{"name":"write","parameters":{"type":"object","properties":{
+        \\"content":{"type":"string"},"force":{"type":"boolean"}}}}}]
+    ;
+    const raw = "<tool_call>\n<function=write>\n<parameter=content>\nq\"b\\c\td/é😀\x7f end\n</parameter>\n" ++
+        "<parameter=force>\nTrue\n</parameter>\n</function>\n</tool_call>";
+    const tools = try std.json.parseFromSlice(std.json.Value, a, tools_json, .{});
+    defer tools.deinit();
+    const got = (try streamedArgsFor(a, raw, tools.value, 1)).?;
+    defer a.free(got.args);
+    const calls = (try parseToolCallsForRequest(a, raw, tools_json, true)).?;
+    defer {
+        for (calls) |tc| {
+            a.free(tc.name);
+            a.free(tc.arguments);
+        }
+        a.free(calls);
+    }
+    try testing.expectEqualStrings("{\"content\":\"q\\\"b\\\\c\\td/é😀\x7f end\",\"force\":true}", calls[0].arguments);
+    try testing.expect(std.mem.startsWith(u8, calls[0].arguments, got.args));
+    try testing.expect(got.args.len > "{\"content\":\"".len + 10);
+}
+
+test "argStreamAllowed: no streaming inside an open thought, whoever opened it, or under stop sequences" {
+    try testing.expect(argStreamAllowed(false, false, 0));
+    try testing.expect(argStreamAllowed(true, true, 0));
+    try testing.expect(!argStreamAllowed(true, false, 0));
+    try testing.expect(!argStreamAllowed(false, false, 1));
+}
+
+const ArgStreamOutcome = enum { none, extended, diverged };
+
+/// What a client ends up holding when `raw` streams byte by byte and the server's final pass
+/// (think normalization, then the chokepoint) runs: `diverged` is the closed-and-flagged path.
+fn argStreamOutcome(raw: []const u8, tools_json: []const u8) !ArgStreamOutcome {
+    const a = testing.allocator;
+    const tools = try std.json.parseFromSlice(std.json.Value, a, tools_json, .{});
+    defer tools.deinit();
+    const got = (try streamedArgsFor(a, raw, tools.value, 1)) orelse return .none;
+    defer a.free(got.args);
+    const norm = try chat_mod.normalizeEmbeddedThinkBlocks(a, raw);
+    defer if (norm) |n| a.free(n);
+    const calls = (try parseToolCallsForRequest(a, norm orelse raw, tools_json, true)) orelse return .diverged;
+    defer {
+        for (calls) |tc| {
+            a.free(tc.name);
+            a.free(tc.arguments);
+        }
+        a.free(calls);
+    }
+    const ok = std.mem.eql(u8, calls[0].name, got.name) and std.mem.startsWith(u8, calls[0].arguments, got.args);
+    return if (ok) .extended else .diverged;
+}
+
+test "tool-arg streaming: adversarial calls either extend what streamed or take the closed-and-flagged path" {
+    const tools =
+        \\[{"type":"function","function":{"name":"write","parameters":{"type":"object","properties":{
+        \\"path":{"type":"string"},"content":{"type":"string"},"limit":{"type":"number"}}}}},
+        \\{"type":"function","function":{"name":"get","parameters":{"type":"object","properties":{"a":{"type":"string"}}}}}]
+    ;
+    const call = "<tool_call>\n<function=write>\n<parameter=content>\n";
+    const done = "\n</parameter>\n</function>\n</tool_call>";
+    const Case = struct { raw: []const u8, want: ArgStreamOutcome };
+    const cases = [_]Case{
+        // The value spells the dialect's own close tags: the LAST close wins, so it only grows.
+        .{ .raw = call ++ "Format:\n</parameter>\n</function>\nend of example" ++ done, .want = .extended },
+        .{ .raw = call ++ "hello" ++ done ++ "\nI closed it with </parameter> as usual.", .want = .extended },
+        .{ .raw = call ++ "hello" ++ done ++ "\n<tool_call>\n{\"name\":\"get\",\"arguments\":{\"a\":\"</parameter>\"}}\n</tool_call>", .want = .extended },
+        // A thought the model opens itself holds the call: nothing streams.
+        .{ .raw = "<think>\nMaybe " ++ call ++ "hello there" ++ done ++ "\nno.\n</think>\n\nThe answer is 4.", .want = .none },
+        // Held whitespace survives think normalization rewriting an in-value think block.
+        .{ .raw = call ++ "abc <think>X</think> Y" ++ done, .want = .extended },
+        // The finished parse prefers markup the call carries or that FOLLOWS it (other families, a
+        // trailing thought close), or rejects keys that escape alike: no streamer sees those coming.
+        .{ .raw = call ++ "hello\n</parameter>\n<parameter=x\xff>\n1\n</parameter>\n<parameter=x\xfe>\n2\n</parameter>\n</function>\n</tool_call>", .want = .diverged },
+        .{ .raw = call ++ "Example: <|tool_call_start|>[get(a='x')]<|tool_call_end|> done" ++ done, .want = .diverged },
+        .{ .raw = call ++ "hello" ++ done ++ "\n<|tool_call_start|>[get(a='x')]<|tool_call_end|>", .want = .diverged },
+        .{ .raw = call ++ "Gemma closes a thought with <channel|> then answers" ++ done, .want = .diverged },
+        .{ .raw = call ++ "hello" ++ done ++ "\n</think>\nDone.", .want = .diverged },
+        .{ .raw = call ++ "hello" ++ done ++ "\nto=functions.get<|channel|>commentary json<|message|>{\"a\":\"x\"}<|call|>", .want = .diverged },
+    };
+    for (cases) |c| try testing.expectEqual(c.want, try argStreamOutcome(c.raw, tools));
 }
