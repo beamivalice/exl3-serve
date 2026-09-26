@@ -33,13 +33,17 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Q
 ./sushi-macos-arm64/sushi serve --model ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw \
   --mtp --kv-quant 8 --mtp-head-kv-quant --ctx-size 200000 \
   --prefill-chunk 2048 --max-tokens 64000 --prefix-cache-disk 20GB \
-  --prefix-cache-entries 1 --prefix-cache-mem 1GB --temp 1
+  --prefix-cache-entries 1 --prefix-cache-mem 1GB --temp 1 --skip-mem-preflight
 ```
 
 Set the GPU memory limit before serving (it resets at reboot):
 ```bash
 sudo sysctl iogpu.wired_limit_mb=58000
 ```
+
+The load check wants the weights plus 7 GiB free, which a 64 GB Mac reaches only with nearly every app closed.
+`--skip-mem-preflight` loads anyway and lets macOS compress or swap the other apps; quit what you can (a browser is
+the big one), since sushi exits if memory truly runs out.
 
 **96 GB+ Mac, Sushi-4bpw**
 
