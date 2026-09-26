@@ -8,6 +8,7 @@
 
 ## Decode tok/s by release
 
-| Model | v1.0.0 | speedup |
-|---|---|---|
-| Qwen3.8-Flash-Next-Sushi-4bpw (MTP) | · | · |
+| Model | v1.0.0 | v1.0.4 | speedup |
+|---|---|---|---|
+| Qwen3.8-Flash-Next-Sushi-3bpw (MTP) | · | 98 mtp | · |
+| Qwen3.8-Flash-Next-Sushi-4bpw (MTP) | · | · | · |

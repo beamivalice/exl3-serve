@@ -4,18 +4,18 @@ sushi began as a fork of [mlx-serve](https://github.com/ddalcu/mlx-serve) and wa
 mlx-serve commit `ef5e667` (two commits after mlx-serve v26.9.4). This file covers sushi's own changes since then;
 earlier history is mlx-serve's, in that project's changelog.
 
-## Unreleased
+## v1.0.4 — Faster prompts and browser chat
 
-- **Chat in your browser**: `sushi serve` and `sushi run` serve a chat page at `http://127.0.0.1:12345/` that streams
-  replies, shows the model's thinking, takes images for vision models and keeps your conversations in the browser.
-- **`/cd <folder>` in `sushi run`**: moves the folder the file tools and relative `/image` paths read from, the prompt
-  always shows that folder and whether tools are on, and a model that asks for a file outside it now suggests `/cd`.
-- **MiMo prompt cache**: a conversation keeps its cached prefix when a client's side requests (a status line, a title)
-  push it out of the cache, and `--prefix-cache-disk` now stores MiMo prompts, so they survive a restart.
 - **Faster prompts on M1–M4**: Macs without the M5's neural accelerators read prompts about 4x faster on the EXL3
   packs (M2 Max, 3–4k-token prompts, default settings).
 - **Faster Flash-Next prompts on 64 GB Macs**: when the n-gram table cannot stay in memory beside the model, prompt
   processing reads it in parallel by default instead of one row at a time.
+- **Smaller contexts need less free memory to load**: resident Flash-Next EXL3 packs without separate sidecars or
+  ANE now size load headroom from the chosen context instead of always asking for 7 GB above the weights.
+- **Chat in your browser**: `sushi serve` and `sushi run` serve a chat page at `http://127.0.0.1:12345/` that streams
+  replies, shows the model's thinking, takes images for vision models and keeps your conversations in the browser.
+- **`/cd <folder>` in `sushi run`**: moves the folder the file tools and relative `/image` paths read from, the prompt
+  always shows that folder and whether tools are on, and a model that asks for a file outside it now suggests `/cd`.
 
 ---
 

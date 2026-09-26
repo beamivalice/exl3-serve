@@ -51,8 +51,9 @@ fi
 
 pkill -f "sushi.*--port $PORT" 2>/dev/null
 sleep 1
-# --no-pld for predictable prefill timing; big ctx for the long prompt.
-"$BINARY" --model "$MODEL" --serve --port "$PORT" --ctx-size 32768 --no-pld --log-level debug > "$LOG" 2>&1 &
+# Cancellation takes effect at a chunk boundary; auto-sized chunks can exceed
+# the entire 12s bound under GPU contention. Pin the workload, not a looser deadline.
+"$BINARY" --model "$MODEL" --serve --port "$PORT" --ctx-size 32768 --prefill-chunk 512 --no-pld --log-level debug > "$LOG" 2>&1 &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null' EXIT
 
@@ -83,7 +84,8 @@ big_body 7 > /tmp/disconnect_cancel_big.json
 big_body 1234 > /tmp/disconnect_cancel_big2.json
 
 echo "1. keepalive pings flow during a long prefill (/v1/messages stream)"
-curl -sN -m 120 "$BASE/v1/messages" -H 'Content-Type: application/json' \
+# Small chunks trade throughput for cancellation latency; let the full prompt finish.
+curl -sN -m 300 "$BASE/v1/messages" -H 'Content-Type: application/json' \
     -d @/tmp/disconnect_cancel_big.json > /tmp/disconnect_keepalive.sse
 PINGS=$(grep -c '"type":"ping"' /tmp/disconnect_keepalive.sse)
 echo "    -> $PINGS ping event(s)"

@@ -113,6 +113,24 @@ prefill at every rung (1358 at 2k, 1127 at 1004k) and 71.8 decode at 4k. Prefill
 binaries, so that gap is the box. Decode also gained from d72178a (the MTP regime gate). Never compare a ladder cell
 across a thermal state.
 
+## Release 1.0.4, Sushi-3bpw
+
+Owner-scoped Sushi-3bpw run (the default release gate uses 4bpw): `ad4a3ce0` plus the context-bill change,
+ReleaseFast binary SHA-256 `2aeee2e678521727e66994d75260c25cd4cffd0d05ecb797c73210a2b0ea9704`,
+mtime 2026-09-26 15:26:43 +0700. M5 Max 128 GB, `--ctx-size 1048576 --kv-quant 8 --mtp`,
+`tests/bench.sh --url` with llmprobe 0.6.12 `--bench-only` (default ladder, median-of-3 headline cells).
+QoS `taskpolicy -a`, GPU lock `release-104-quiet-sushi3bpw`, conversion stopped, no other test running;
+fans at max and 10 s idle from 51.9 °C, fans restored to auto afterward.
+
+| decode tok/s | prefill tok/s (2042 tokens) | first token | tokens per step | sustained decode drift |
+|---:|---:|---:|---:|---:|
+| 98.4 (97.5–100.0) MTP | 1671 (1665.6–1707.4) | 280 ms | 2.87 | -4.5% |
+
+MTP engaged in 37 logged requests; the measured n-gram pool arm engaged and the table warmed fully. Relative to
+the inherited `725b76ca` headline cells above, decode is +4.9% and prefill -12.3%; no old binary was rerun.
+This is not a paired speedup/regression claim: sessions differ, the old prompt was 2041 tokens, and the old loader
+billed a duplicate vision shard (50.17 versus 49.33 GiB). There is no prior measured 3bpw release-column cell.
+
 <a id="m2max-64gb"></a>
 ## Flash-Next Sushi-3bpw on an M2 Max 64 GB
 

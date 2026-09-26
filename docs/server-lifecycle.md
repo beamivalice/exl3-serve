@@ -66,6 +66,7 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
   server config.
 - A new per-model setting or launch flag follows this order, carries an `*_explicit` bit through both load sites and
   cold loads, and logs its resolved value with its source at load.
+- Load-time context bills see explicit KV and MTP choices before `Scheduler.init` returns, including `--no-mtp`.
 
 ## Scheduler and batching
 

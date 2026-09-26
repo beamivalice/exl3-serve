@@ -54,12 +54,13 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Q
 Add `--no-vision` to either one to stop serving images. It saves the 0.8 GB tower but not context: the tower is too
 small to move the plan, so the two serve the same length.
 
-Why those numbers. The pack holds 49.3 GB of resident weights and the limit is 57.6 GB, so the load check (weights plus
-7 GB of headroom, 56.3 GB) passes without `--skip-mem-preflight`. What is left over is 6.8 GB, and it all goes to the
-KV cache: 52 KB a token at 8-bit, 27 KB at 4-bit, which is 128k and 256k. Those two figures leave about 1.5 GB for
-warmup buffers and activations. The KV cache grows as a conversation lengthens, so a short one never spends the budget;
-the context is a ceiling, not an up-front cost. Keep the context under 262144: at that number the n-gram prefill gate
-turns the parallel reader on by itself, and on a box this size the table is not resident.
+Why those numbers. The pack holds 49.3 GB of resident weights and the limit is 57.6 GB. With an explicit context,
+resident Flash-Next EXL3 loads without separate sidecars or ANE ask for the weights plus 2 GB for load/warmup scratch
+and the context's cache bill, capped at the old 7 GB headroom. A smaller `--ctx-size` asks for less; auto context keeps
+the old headroom. The 8-bit cache is about 16.6 KB per token (the memory table below), not the whole spare budget:
+prompt processing and the prompt cache also need room. The KV cache grows as a conversation lengthens, so a short one
+never spends the full budget; the context is a ceiling, not an up-front cost. The n-gram reader pools its reads when
+the table cannot stay resident beside the weights, including at short contexts.
 
 At 4-bit KV the quality cost is measured, not guessed: mean KLD 0.1047 to 0.1142 and next-token agreement 90.34% to
 89.65% on the 16x512 teacher

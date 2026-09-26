@@ -620,10 +620,13 @@ fn pldReport(enable: bool, explicit: bool, module_spec: bool) PldReport {
     return .{ .on = choice.value, .source = model_settings.sourceLabel(choice.source, if (choice.value) "--pld" else "--no-pld") };
 }
 
+/// Explicit launch choice, available to memory bills before Scheduler.init returns.
+var configured_mtp: ?bool = null;
+
 /// THIS model's MTP decision and its source, the answer the load log and `/props` read.
 pub fn mtpChoiceFor(config: *const model_mod.ModelConfig) model_settings.MtpChoice {
     if (global_scheduler) |sch| return scheduler_mod.mtpChoiceFor(sch.mtp_enabled, sch.mtp_explicit, config);
-    const flag: ?bool = if (server_config.default_force_mtp) true else null;
+    const flag: ?bool = configured_mtp orelse (if (server_config.default_force_mtp) @as(?bool, true) else null);
     return model_settings.MtpChoice.resolve(flag, config.mtp_override, true);
 }
 
@@ -1606,6 +1609,10 @@ pub fn serve(
     // asks for the KV width.
     configured_kv_quant = if (load_params.kv_quant_explicit) load_params.kv_quant_config else null;
     defer configured_kv_quant = null;
+    configured_mtp = model_settings.launchFlag(bool, load_params.mtp_enabled, load_params.mtp_explicit);
+    defer configured_mtp = null;
+    scheduler_mod.load_context_bytes = &loadContextBytes;
+    defer scheduler_mod.load_context_bytes = null;
 
     // ── Phase A1: spin up the scheduler. Its inference thread does the
     //    Transformer/vision/drafter load, JIT compile, and warmup before
@@ -3134,6 +3141,67 @@ pub fn billedPrefillChunk(
 pub fn sizerCtxKvBytes(config: *const model_mod.ModelConfig, kv_bits: u64) u64 {
     if (manualContext(config) == 0) return 0;
     return sessionBytesPerToken(config, kv_bits) *| manualContext(config) +| slotRingBytes(config, kv_bits);
+}
+
+/// The explicit-context cache bill for the load preflight, or the flat-headroom fallback.
+pub fn loadContextBytes(config: *const model_mod.ModelConfig) ?u64 {
+    // Other architectures and expert layouts need their own measured warmup allowance.
+    if (!std.mem.eql(u8, config.model_type, "qwen4_exp") or config.expert_layout != .exl3_k4 or config.expert_streaming) return null;
+    if (manualContext(config) == 0) return null;
+    return sizerCtxKvBytes(config, defaultKvBits(config));
+}
+
+test "loadContextBytes reuses the sizer with launch and model settings precedence" {
+    const guard = qsaScoreFusedOffGuard();
+    defer guard.deinit();
+    const saved_ctx = server_config.max_context_size;
+    defer server_config.max_context_size = saved_ctx;
+    const saved_kv = configured_kv_quant;
+    defer configured_kv_quant = saved_kv;
+    var cfg = qwen4RequestTestConfig();
+    cfg.expert_layout = .exl3_k4;
+    server_config.max_context_size = 0;
+    configured_kv_quant = null;
+    try std.testing.expectEqual(@as(?u64, null), loadContextBytes(&cfg));
+
+    cfg.ctx_override = 1248;
+    cfg.kv_quant_override = transformer_mod.KVQuantConfig.affine(4);
+    try std.testing.expectEqual(@as(?u64, sizerCtxKvBytes(&cfg, 4)), loadContextBytes(&cfg));
+    server_config.max_context_size = 4096;
+    configured_kv_quant = transformer_mod.KVQuantConfig.affine(8);
+    try std.testing.expectEqual(@as(?u64, sizerCtxKvBytes(&cfg, 8)), loadContextBytes(&cfg));
+    try std.testing.expectEqual(
+        @as(?u64, sessionBytesPerToken(&cfg, 8) * 4096 + slotRingBytes(&cfg, 8)),
+        loadContextBytes(&cfg),
+    );
+
+    cfg.expert_streaming = true;
+    try std.testing.expectEqual(@as(?u64, null), loadContextBytes(&cfg));
+    cfg.expert_streaming = false;
+    cfg.expert_layout = .bf16_fused;
+    try std.testing.expectEqual(@as(?u64, null), loadContextBytes(&cfg));
+    cfg.expert_layout = .exl3_k4;
+    cfg.model_type = "mimo_v2";
+    try std.testing.expectEqual(@as(?u64, null), loadContextBytes(&cfg));
+}
+
+test "loadContextBytes honors --no-mtp before the scheduler is published" {
+    const saved_ctx = server_config.max_context_size;
+    defer server_config.max_context_size = saved_ctx;
+    const saved_mtp = configured_mtp;
+    defer configured_mtp = saved_mtp;
+    var cfg = qwen4RequestTestConfig();
+    cfg.expert_layout = .exl3_k4;
+    server_config.max_context_size = 1248;
+    cfg.mtp_override = false;
+    configured_mtp = null;
+    const without_head = loadContextBytes(&cfg);
+    cfg.mtp_override = true;
+    configured_mtp = false;
+    try std.testing.expectEqual(without_head, loadContextBytes(&cfg));
+    configured_mtp = true;
+    cfg.mtp_override = false;
+    try std.testing.expect(loadContextBytes(&cfg).? > without_head.?);
 }
 
 /// Freeze this model's prefill chunk at load, from live memory. Idempotent.

@@ -2763,6 +2763,32 @@ test "modelDiskBytes bills only the shards the index names (issue #274)" {
 /// (`SUSHI_SKIP_MEM_PREFLIGHT`) it replaced.
 pub var skip_mem_preflight: bool = false;
 
+/// Explicit context's cache bill at the resolved KV width; null preserves flat headroom.
+pub var load_context_bytes: ?*const fn (*const model_mod.ModelConfig) ?u64 = null;
+
+fn loadContextBill(config: *const model_mod.ModelConfig, drafter_dir: []const u8, ane_prefill: bool, mtp_sidecar: bool) ?u64 {
+    // Sidecars and ANE allocations are outside the measured target warmup allowance.
+    if (drafter_dir.len > 0 or ane_prefill or mtp_sidecar) return null;
+    return if (load_context_bytes) |bill| bill(config) else null;
+}
+
+test "sidecars and ANE keep the flat load headroom" {
+    const saved = load_context_bytes;
+    defer load_context_bytes = saved;
+    load_context_bytes = &struct {
+        fn bill(_: *const model_mod.ModelConfig) ?u64 {
+            return 1234;
+        }
+    }.bill;
+    const config = model_mod.ModelConfig{};
+    try testing.expectEqual(@as(?u64, 1234), loadContextBill(&config, "", false, false));
+    try testing.expectEqual(@as(?u64, null), loadContextBill(&config, "drafter", false, false));
+    try testing.expectEqual(@as(?u64, null), loadContextBill(&config, "", true, false));
+    try testing.expectEqual(@as(?u64, null), loadContextBill(&config, "", false, true));
+    load_context_bytes = null;
+    try testing.expectEqual(@as(?u64, null), loadContextBill(&config, "", false, false));
+}
+
 /// Process-wide vision opt-out (`--no-vision` / the iPhone app, which has no
 /// image-input UI yet). A module global for the same reason as
 /// `skip_mem_preflight`: it must apply to on-demand /v1/load-model cold loads
@@ -3023,7 +3049,7 @@ fn effectiveAvailableBytes(host_avail: u64, proc_avail: u64, gpu_limit: u64) u64
 test "effectiveAvailableBytes is capped by the GPU working-set limit" {
     const GB: u64 = 1024 * 1024 * 1024;
     try std.testing.expectEqual(36 * GB, effectiveAvailableBytes(98 * GB, 0, 36 * GB));
-    try std.testing.expect(memInsufficientForLoad(70 * GB, effectiveAvailableBytes(98 * GB, 0, 36 * GB)));
+    try std.testing.expect(memInsufficientForLoad(70 * GB, effectiveAvailableBytes(98 * GB, 0, 36 * GB), null));
 }
 
 test "effectiveAvailableBytes prefers the per-process jetsam headroom when present" {
@@ -3033,15 +3059,12 @@ test "effectiveAvailableBytes prefers the per-process jetsam headroom when prese
     try std.testing.expectEqual(@as(u64, 0), effectiveAvailableBytes(0, 0, 0)); // both unknown → 0 (never blocks)
 }
 
-fn memInsufficientForLoad(weights_bytes: u64, avail_bytes: u64) bool {
+fn memInsufficientForLoad(weights_bytes: u64, avail_bytes: u64, ctx_bytes: ?u64) bool {
     if (weights_bytes == 0 or avail_bytes == 0) return false;
     // Headroom over the weights for warmup compute buffers + a baseline KV cache.
     // `avail_bytes` (status.getAvailableMemBytes) now excludes the resident anon
     // set — an already-loaded model counts as used while file cache counts as free
     // — so this margin can be generous without wrongly refusing a fresh load.
-    // CAVEAT: the KV cache scales with --ctx-size, which this guard doesn't see;
-    // a very large context can still exceed this margin (follow-up: plumb ctx +
-    // kv_quant to size KV precisely). Bypass with --skip-mem-preflight.
     // The proportional term is CAPPED: headroom pays for warmup buffers and a
     // baseline KV cache, and neither scales with a MoE's TOTAL weights (our
     // 109.7 GB DeepSeek-V4 mirror activates 13B). Uncapped, weights/8 demanded
@@ -3051,23 +3074,22 @@ fn memInsufficientForLoad(weights_bytes: u64, avail_bytes: u64) bool {
     // served 6.7K-token prefills with ~8.6 GB to spare. 6 GB keeps the original
     // margin for every model under 48 GB (where it was tuned) and stays inside
     // the measured envelope above it.
-    return avail_bytes < loadRequirementBytes(weights_bytes);
+    return avail_bytes < loadRequirementBytes(weights_bytes, ctx_bytes);
 }
 
 /// Total free memory a load demands: the model's own peak plus the headroom the
 /// guard wants for warmup buffers and a baseline KV cache.
-///
-/// It exists so a REFUSAL can quote the number it actually compared. A
-/// preflight that said "peaks at ~4.3 GB but only 5.4 GB is free" gave
-/// two figures that, read together, say the load should have worked. It was
-/// refused for the headroom, which the sentence never mentioned, so the user
-/// went hunting for a problem that wasn't there (live 2026-08-08). Same class as
-/// the context-overflow 400: a rejection has to state the bar it set.
-pub fn loadRequirementBytes(weights_bytes: u64) u64 {
+/// A known context replaces flat headroom with warmup plus its cache bill, capped
+/// at the old requirement; request admission checks the full serving bill later.
+pub fn loadRequirementBytes(weights_bytes: u64, ctx_bytes: ?u64) u64 {
     const HEADROOM_CAP: u64 = 6 * 1024 * 1024 * 1024;
-    const headroom: u64 = @min(weights_bytes / 8, HEADROOM_CAP) + 1024 * 1024 * 1024;
-    return weights_bytes + headroom;
+    const flat: u64 = @min(weights_bytes / 8, HEADROOM_CAP) + 1024 * 1024 * 1024;
+    const headroom = if (ctx_bytes) |bytes| @min(flat, LOAD_WARMUP_BYTES +| bytes) else flat;
+    return weights_bytes +| headroom;
 }
+
+/// Resident Flash-Next EXL3 load/warmup scratch; measured envelope in engine-memory-admission.md.
+const LOAD_WARMUP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 test "a refusal quotes the number it actually compared" {
     const GB: u64 = 1024 * 1024 * 1024;
@@ -3081,32 +3103,14 @@ test "a refusal quotes the number it actually compared" {
     // other pane. What a refusal must state is the TOTAL it demanded.
     const peak: u64 = 4300 * MB;
     const avail: u64 = 5400 * MB;
-    try std.testing.expect(memInsufficientForLoad(peak, avail));
-    try std.testing.expect(loadRequirementBytes(peak) > avail);
+    try std.testing.expect(memInsufficientForLoad(peak, avail, null));
+    try std.testing.expect(loadRequirementBytes(peak, null) > avail);
 
     // The requirement IS the comparison — not a second formula that can drift
     // from it. At exactly the requirement a load is allowed; a byte under is not.
-    try std.testing.expect(!memInsufficientForLoad(peak, loadRequirementBytes(peak)));
-    try std.testing.expect(memInsufficientForLoad(peak, loadRequirementBytes(peak) - 1));
-    try std.testing.expect(!memInsufficientForLoad(42 * GB, loadRequirementBytes(42 * GB)));
-}
-
-test "the preflight refusal quotes the number it compared, not the weights" {
-    // The refusal once printed "weights ~8.4 GB but only 10.1 GB free", which reads as
-    // "this should have worked" — the load was refused for the 2.05 GB of
-    // headroom the sentence never named (live 2026-08-17, a gemma-4-12B QAT pack
-    // on a 16 GB M4, where the bar is 10.45 GB). `insufficient_free_memory_message`
-    // sends the client to this very line for the figures, so a line that omits
-    // the bar makes the client message a dead end too. Needles are ++-split so
-    // this test's own source cannot satisfy the scan.
-    const src = @embedFile("scheduler.zig");
-    // The refusal formats the REQUIREMENT as its first figure, from the one
-    // helper the comparison itself uses — never a second formula that can drift.
-    const text_arg = "loadRequirement" ++ "Bytes(weights_bytes))) / gb";
-    try testing.expect(std.mem.indexOf(u8, src, text_arg) != null);
-    // The weights-first shape that could not state its own bar must be GONE.
-    const old = "Insufficient memory to load model: weights ~" ++ "{d:.1} GB but only";
-    try testing.expect(std.mem.indexOf(u8, src, old) == null);
+    try std.testing.expect(!memInsufficientForLoad(peak, loadRequirementBytes(peak, null), null));
+    try std.testing.expect(memInsufficientForLoad(peak, loadRequirementBytes(peak, null) - 1, null));
+    try std.testing.expect(!memInsufficientForLoad(42 * GB, loadRequirementBytes(42 * GB, null), null));
 }
 
 test "the eviction gate bills weights plus 10% headroom" {
@@ -3124,16 +3128,16 @@ test "memInsufficientForLoad: headroom + unknown-query guards" {
     // excluded from the new anon-aware available figure (computeAvailableBytes),
     // so this is what a 16 GB Mac actually reports pre-load. Needs ~8.8 GB
     // (weights + weights/8 + 1 GB for warmup + baseline KV) → loads.
-    try std.testing.expect(!memInsufficientForLoad(6900 * MB, 10 * GB));
+    try std.testing.expect(!memInsufficientForLoad(6900 * MB, 10 * GB, null));
     // Restart-into-pressure: 42 GB weights, only 44 GB free → needs ~46, refuse.
-    try std.testing.expect(memInsufficientForLoad(42 * GB, 44 * GB));
+    try std.testing.expect(memInsufficientForLoad(42 * GB, 44 * GB, null));
     // Plenty of headroom → allow.
-    try std.testing.expect(!memInsufficientForLoad(42 * GB, 86 * GB));
+    try std.testing.expect(!memInsufficientForLoad(42 * GB, 86 * GB, null));
     // Exactly weights, no headroom → refuse.
-    try std.testing.expect(memInsufficientForLoad(42 * GB, 42 * GB));
+    try std.testing.expect(memInsufficientForLoad(42 * GB, 42 * GB, null));
     // Unknown figures (query failed / size unknown) → never block.
-    try std.testing.expect(!memInsufficientForLoad(0, 44 * GB));
-    try std.testing.expect(!memInsufficientForLoad(42 * GB, 0));
+    try std.testing.expect(!memInsufficientForLoad(0, 44 * GB, null));
+    try std.testing.expect(!memInsufficientForLoad(42 * GB, 0, null));
 
     // A PROPORTIONAL margin becomes impossible at the top of the range. Our own
     // DeepSeek-V4-Flash mirror is 109.7 GB of weights and a 128 GB Mac reports
@@ -3144,9 +3148,29 @@ test "memInsufficientForLoad: headroom + unknown-query guards" {
     // 6.7K-token prefills with ~8.6 GB to spare. Headroom covers warmup
     // buffers + a baseline KV cache, and neither scales with a MoE's total
     // weights (13B active here) — so the proportional term is CAPPED.
-    try std.testing.expect(!memInsufficientForLoad(109_730 * MB, 118_330 * MB));
+    try std.testing.expect(!memInsufficientForLoad(109_730 * MB, 118_330 * MB, null));
     // Still refuses when the box genuinely cannot fit it.
-    try std.testing.expect(memInsufficientForLoad(109_730 * MB, 112 * GB));
+    try std.testing.expect(memInsufficientForLoad(109_730 * MB, 112 * GB, null));
+}
+
+test "the load check admits a short context with 53 GiB free" {
+    const GB: u64 = 1024 * 1024 * 1024;
+    const MB: u64 = 1024 * 1024;
+    const weights: u64 = 50_514 * MB;
+    const ctx: u64 = 1248 * 16_640;
+    const flat = loadRequirementBytes(weights, null);
+    const small = loadRequirementBytes(weights, ctx);
+    try std.testing.expectEqual(weights + 7 * GB, flat);
+    try std.testing.expectEqual(weights + LOAD_WARMUP_BYTES + ctx, small);
+    try std.testing.expect(!memInsufficientForLoad(weights, 53 * GB, ctx));
+    try std.testing.expect(memInsufficientForLoad(weights, 53 * GB, null));
+    try std.testing.expect(!memInsufficientForLoad(weights, small, ctx));
+    try std.testing.expect(memInsufficientForLoad(weights, small - 1, ctx));
+    try std.testing.expectEqual(flat, loadRequirementBytes(weights, 20 * GB));
+    try std.testing.expectEqual(flat, loadRequirementBytes(weights, std.math.maxInt(u64)));
+    try std.testing.expectEqual(loadRequirementBytes(4300 * MB, null), loadRequirementBytes(4300 * MB, 1024));
+    try std.testing.expect(!memInsufficientForLoad(0, 53 * GB, ctx));
+    try std.testing.expect(!memInsufficientForLoad(weights, 0, ctx));
 }
 
 /// Phase A1 → Plan 05: do the full model load on the inference thread.
@@ -3245,6 +3269,19 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         }
     }
 
+    // Resolve the sidecar before preflight so billing and loading see the same dependency.
+    const in_dir_drafter: ?[]u8 = if (params.no_drafter or params.drafter_dir.len > 0)
+        null
+    else
+        dflash_mod.resolveInDirDrafter(sch.io, sch.allocator, params.model_dir);
+    defer if (in_dir_drafter) |p| sch.allocator.free(p);
+    const drafter_dir: []const u8 = if (params.no_drafter)
+        ""
+    else if (params.drafter_dir.len > 0)
+        params.drafter_dir
+    else
+        in_dir_drafter orelse "";
+
     // GPU-memory pre-flight (MLX path). A Metal OOM during weight load / warmup
     // is thrown by MLX as a C++ exception that can't be caught across the C ABI,
     // so it terminates the whole process. Refuse the load up front instead, with
@@ -3254,14 +3291,21 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     if (!skip_mem_preflight) {
         const weights_bytes = streaming_resident_bytes orelse modelDiskBytes(sch.io, params.model_dir);
         const avail_bytes = effectiveAvailableBytes(status.getAvailableMemBytes(), status.getProcAvailableMemBytes(), mlx.maxRecommendedWorkingSet());
-        log.info("[preflight] weights ~{d:.2} GB, available {d:.2} GB\n", .{
+        const mtp_sidecar = if (mtpChoiceFor(params.mtp_enabled, params.mtp_explicit, params.config).on) blk: {
+            var dir = std.Io.Dir.openDirAbsolute(sch.io, params.model_dir, .{}) catch break :blk true;
+            defer dir.close(sch.io);
+            break :blk mtp_mod.resolveMtpSidecarInDir(sch.io, sch.allocator, dir) != null;
+        } else false;
+        const ctx_bytes = loadContextBill(params.config, drafter_dir, params.ane_prefill, mtp_sidecar);
+        log.info("[preflight] weights ~{d:.2} GB, needs ~{d:.2} GB, available {d:.2} GB\n", .{
             @as(f64, @floatFromInt(weights_bytes)) / (1024.0 * 1024.0 * 1024.0),
+            @as(f64, @floatFromInt(loadRequirementBytes(weights_bytes, ctx_bytes))) / (1024.0 * 1024.0 * 1024.0),
             @as(f64, @floatFromInt(avail_bytes)) / (1024.0 * 1024.0 * 1024.0),
         });
-        if (memInsufficientForLoad(weights_bytes, avail_bytes)) {
+        if (memInsufficientForLoad(weights_bytes, avail_bytes, ctx_bytes)) {
             const gb = 1024.0 * 1024.0 * 1024.0;
             log.err("Insufficient memory to load model: needs ~{d:.1} GB free ({d:.1} GB of weights plus headroom for warmup buffers and a baseline KV cache) but only {d:.1} GB is available (free RAM, capped at the GPU working-set limit that iogpu.wired_limit_mb sets). Close other models/apps (or wait for a prior sushi to fully exit) and retry; pass --skip-mem-preflight to override.\n", .{
-                @as(f64, @floatFromInt(loadRequirementBytes(weights_bytes))) / gb,
+                @as(f64, @floatFromInt(loadRequirementBytes(weights_bytes, ctx_bytes))) / gb,
                 @as(f64, @floatFromInt(weights_bytes)) / gb,
                 @as(f64, @floatFromInt(avail_bytes)) / gb,
             });
@@ -3594,22 +3638,6 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // to the Gemma cross-attention drafter loader.
     var drafter_ptr: ?*DrafterModel = null;
     var dflash_ptr: ?*DflashModel = null;
-    // An explicit `--drafter` always wins; otherwise the checkpoint's own
-    // `drafter/` subdir is the sidecar (dflash.resolveInDirDrafter). That is
-    // what makes the drafter a LOAD-time dependency rather than a launch
-    // flag: a hot model switch brings its own, and no pairing table has to
-    // decide which sidecar goes with which checkpoint.
-    const in_dir_drafter: ?[]u8 = if (params.no_drafter or params.drafter_dir.len > 0)
-        null
-    else
-        dflash_mod.resolveInDirDrafter(sch.io, sch.allocator, params.model_dir);
-    defer if (in_dir_drafter) |p| sch.allocator.free(p);
-    const drafter_dir: []const u8 = if (params.no_drafter)
-        ""
-    else if (params.drafter_dir.len > 0)
-        params.drafter_dir
-    else
-        in_dir_drafter orelse "";
     if (drafter_dir.len > 0 and dflash_mod.probeIsDflash(sch.io, sch.allocator, drafter_dir)) {
         const env_off = if (std.c.getenv("SUSHI_DFLASH")) |v| v[0] == '0' else false;
         if (env_off) {

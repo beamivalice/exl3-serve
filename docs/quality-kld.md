@@ -111,6 +111,13 @@ n-gram table. Sizes are GiB of the weight files the engine loads (the Sushi pack
 | Sushi-4bpw with the same 4-bit g32 table | 63.68 | 0.0666 | 92.35% |
 | MCG K2 w15, pin pass 64 (Sushi-3bpw dense) | 36.0 active | 0.2244 | 85.42% |
 
+Release 1.0.4 check: `ad4a3ce0` plus the context-bill change, ReleaseFast binary SHA-256
+`2aeee2e678521727e66994d75260c25cd4cffd0d05ecb797c73210a2b0ea9704` (mtime 2026-09-26 15:26:43 +0700),
+Sushi-3bpw, `mlx-serve-bf16-16x512-raw`, kv8, `--tokens 512 --top-k 10 --ctx-size 8192`, no MTP:
+first-EOS KLD **0.10469852**, top-1 **90.3423%** (7186 positions); all-position KLD 0.09614411, top-1 91.1743%.
+This reproduces the published 0.1047 baseline (-0.0014% relative, inside the 1% floor), without an old-binary rerun.
+M5 Max 128 GB, `taskpolicy -a`, GPU lock `release-v1.0.4-kld-sushi3bpw`; conversion suspended, no timing claim.
+
 w12 -> w15 bought 2.8% of KLD on MCG; the remaining gap to turboderp's MUL1 w16 (0.0946) is not mostly the window.
 Pack `Qwen3.8-Flash-Next-Sushi-3bpw` (MCG K3 w15, plugged). Pack `Qwen3.8-Flash-Next-Sushi-4bpw` (MCG K4 w15, plugged) reads below the
 affine 4/8 control.
@@ -134,8 +141,8 @@ The tables above rank packs at kv8. The cache width is a separate dial, and the 
 
 kv4 is 9% of KLD, three times the noise bar and nine times the ROUNDING-FLIP floor, so it is a real cost and not an
 accumulation artefact. For scale it gives back about three times what the w12 -> w15 window change bought (2.8%), and
-spends 49% of the gap between this pack and the affine 4/8 control. It buys 1.9x the context bytes (27 KB a token
-against 52 KB), which is the only reason to take it.
+spends 49% of the gap between this pack and the affine 4/8 control. It nearly halves the cache's bytes per token,
+which is the only reason to take it.
 
 Binary `db249826` (Zig sources identical to `e8e2a3cb`), M5 Max 128 GB, teacher `mlx-serve-bf16-16x512-raw`,
 `--tokens 512 --top-k 10 --ctx-size 8192`, no `--mtp`, 7186 positions to first EOS. Both arms ran on the same binary,
