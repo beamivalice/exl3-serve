@@ -47,7 +47,7 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Q
 
 # 2. images, 4-bit KV — twice the context, at 9% KLD and 0.7 points of next-token agreement
 ./sushi-macos-arm64/sushi serve --model ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw \
-  --mtp --kv-quant 4 --mtp-head-kv-quant --ctx-size 256000 \
+  --mtp --kv-quant 4 --mtp-head-kv-quant --ctx-size 248000 \
   --max-tokens 64000 --prefix-cache-disk 20GB --prefix-cache-entries 1 --prefix-cache-mem 1GB --temp 1
 ```
 
