@@ -15,7 +15,13 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [server-http-apis](server-
   parallel clamp → buried-param hoist → schema coercion (last two gated by `--no-tool-autocorrect`; emitted
   `arguments` ALWAYS valid JSON).
 - Serialization `chat.serializeMessagesJson`: role "tool" native, args as JSON STRINGS, every string via
-  `appendJsonString`. Streaming: full args in ONE SSE delta, thinking → `reasoning_content`.
+  `appendJsonString`. Thinking → `reasoning_content`.
+- **Streaming args (chat completions)**: call 0 of the qwen XML dialect streams the bytes `toolArgsStreamPrefix` proves
+  final (declared string params, held tails, frozen at markup); the final chunk ships the chokepoint's remainder.
+  A silent buffered call hit client idle watchdogs (omp 300 s) that retried it forever. Other calls: ONE delta.
+- **A streamed call that does not complete** (cut off, or the finished parse disowns it) is closed as valid JSON and
+  flagged `finish_reason: "length"` (a loop cut's `finish_details` is not carried). Never inside a thought, never
+  under stop sequences (`argStreamAllowed`). Guard: the fixture prefix test + the adversarial outcome table.
 - **Hard invariants (replay-pinned)**: emitted args ALWAYS valid JSON; every converter escapes + dedups; coercion
   never worsens conformance; a parsed NAME never contains `<|`; no tag leaks. Harness:
   `src/tool_traffic_replay_test.zig` over `src/fixtures/tool_traffic.jsonl`.

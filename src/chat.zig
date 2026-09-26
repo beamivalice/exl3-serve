@@ -6600,6 +6600,182 @@ fn stripHermesValueFraming(raw: []const u8) []const u8 {
     return v;
 }
 
+/// The part of a still-generating qwen XML tool call's `arguments` that is already final: the
+/// streamer ships these bytes early and the finished parse must start with them.
+pub const ToolArgsPrefix = struct {
+    name: []const u8, // borrows the text
+    args: []u8, // owned
+    in_string: bool, // `args` ends inside a string value
+    frozen: bool, // no byte past `args` may ever be streamed for this call
+};
+
+/// Only the FIRST call streams, only through declared string parameters: `parseHermesToolCall`
+/// builds those bytes with `appendJsonString`, and coercion leaves a string-typed string alone.
+/// Anything the finished parse could still read differently is held (null = nothing streamable).
+pub fn toolArgsStreamPrefix(allocator: std.mem.Allocator, text: []const u8, tools: std.json.Value) !?ToolArgsPrefix {
+    const opener = "<tool_call>";
+    const at = std.mem.indexOf(u8, text, "<tool") orelse return null;
+    if (!std.mem.startsWith(u8, text[at..], opener)) return null;
+    // Other tool families parse BEFORE the generic `<tool` scan; any sign of one ahead of the
+    // call makes the finished parse unpredictable.
+    const pre = text[0..at];
+    for ([_][]const u8{ "<|", "\u{FF5C}", "<atem", "to=functions.", "<function", "<parameter", "<think", "</think" }) |m| {
+        if (std.mem.indexOf(u8, pre, m) != null) return null;
+    }
+    var pos = at + opener.len;
+    while (pos < text.len and isArgStreamSpace(text[pos])) pos += 1;
+    const fn_tag = "<function=";
+    if (!std.mem.startsWith(u8, text[pos..], fn_tag)) return null;
+    const name_start = pos + fn_tag.len;
+    const name_end = std.mem.indexOfScalarPos(u8, text, name_start, '>') orelse return null;
+    const name = std.mem.trim(u8, text[name_start..name_end], " \n");
+    if (!isPlausibleParamName(name)) return null;
+    const props = toolPropertiesFor(tools, name) orelse return null;
+
+    var args = std.ArrayList(u8).empty;
+    errdefer args.deinit(allocator);
+    try args.append(allocator, '{');
+    var in_string = false;
+    var frozen = false;
+    var seen = std.ArrayList([]const u8).empty;
+    defer seen.deinit(allocator);
+
+    pos = name_end + 1;
+    params: while (true) {
+        while (pos < text.len and isArgStreamSpace(text[pos])) pos += 1;
+        const rest = text[pos..];
+        const p_tag = "<parameter=";
+        if (!std.mem.startsWith(u8, rest, p_tag)) {
+            // Still spelling the next tag, or the body closed: nothing more to add yet.
+            if (std.mem.startsWith(u8, p_tag, rest) or std.mem.startsWith(u8, rest, "</function>") or
+                std.mem.startsWith(u8, "</function>", rest)) break :params;
+            frozen = true;
+            break :params;
+        }
+        const pn_start = pos + p_tag.len;
+        const pn_end = std.mem.indexOfScalarPos(u8, text, pn_start, '>') orelse break :params;
+        const p_name = std.mem.trim(u8, text[pn_start..pn_end], " \n");
+        const want = if (props.get(p_name)) |p| declaredJsonType(p) else null;
+        const is_dup = for (seen.items) |s| {
+            if (std.mem.eql(u8, s, p_name)) break true;
+        } else false;
+        const ascii = for (p_name) |c| {
+            if (c >= 0x80) break false;
+        } else true;
+        if (!isPlausibleParamName(p_name) or !ascii or is_dup or want == null or !std.mem.eql(u8, want.?, "string")) {
+            frozen = true;
+            break :params;
+        }
+        try seen.append(allocator, p_name);
+
+        const val_start = pn_end + 1;
+        const region = text[val_start..];
+        const mark = argStreamMarker(region);
+        if (mark) |m| {
+            // Closed only by `</parameter>` followed by the next tag: that fixes where
+            // `hermesValueEnd` (the LAST close before the next opener) ends the value.
+            if (std.mem.startsWith(u8, region[m..], "</parameter>")) {
+                var after = m + "</parameter>".len;
+                while (after < region.len and isArgStreamSpace(region[after])) after += 1;
+                const next = region[after..];
+                if (std.mem.startsWith(u8, next, p_tag)) {
+                    const value = stripHermesValueFraming(region[0..m]);
+                    if (isJsonLiteral(std.mem.trim(u8, value, " \t\r\n"))) {
+                        frozen = true;
+                        break :params;
+                    }
+                    if (args.items.len > 1) try args.append(allocator, ',');
+                    try appendJsonString(allocator, &args, p_name);
+                    try args.append(allocator, ':');
+                    try appendJsonString(allocator, &args, value);
+                    pos = val_start + after;
+                    continue :params;
+                }
+                // Before `</function>` the value may still grow: its later bytes go in the final chunk.
+                if (next.len != 0 and !std.mem.startsWith(u8, p_tag, next)) frozen = true;
+            } else if (!std.mem.startsWith(u8, "</parameter>", region[m..])) frozen = true;
+        }
+
+        // Open value: ship what no later byte can change.
+        var end = mark orelse (region.len - argStreamHeldTail(region));
+        end -= utf8IncompleteTail(region[0..end]);
+        var value = region[0..end];
+        if (value.len == 0 or std.mem.eql(u8, value, "\r")) break :params;
+        if (std.mem.startsWith(u8, value, "\r\n")) value = value[2..] else if (value[0] == '\n') value = value[1..];
+        // Trailing whitespace is held: think normalization trims it off a part cut by markup.
+        value = std.mem.trimEnd(u8, value, " \t\r\n");
+        if (couldStillBeJsonLiteral(value)) break :params;
+        if (args.items.len > 1) try args.append(allocator, ',');
+        try appendJsonString(allocator, &args, p_name);
+        try args.append(allocator, ':');
+        try appendJsonString(allocator, &args, value);
+        _ = args.pop(); // the value is still open
+        in_string = true;
+        break :params;
+    }
+    return .{ .name = name, .args = try args.toOwnedSlice(allocator), .in_string = in_string, .frozen = frozen };
+}
+
+fn isArgStreamSpace(c: u8) bool {
+    return c == ' ' or c == '\n' or c == '\r' or c == '\t';
+}
+
+/// Byte sequences inside a value that some parse path treats as structure, or that the two JSON
+/// escapers spell differently (`\b` vs `\u0008`): streaming stops where the first one starts.
+const arg_stream_markers = [_][]const u8{ "</", "<tool", "<function", "<parameter", "<think", "<|", "<channel", "<atem", "\u{FF5C}", "to=functions." };
+
+fn argStreamMarker(s: []const u8) ?usize {
+    var best: ?usize = null;
+    for (arg_stream_markers) |m| {
+        if (std.mem.indexOf(u8, s, m)) |i| best = if (best) |b| @min(b, i) else i;
+    }
+    for (s, 0..) |c, i| {
+        if (best != null and i >= best.?) break;
+        if (c < 0x20 and c != '\n' and c != '\r' and c != '\t') return i;
+    }
+    return best;
+}
+
+/// Length of the longest tail of `s` that could still grow into a marker.
+fn argStreamHeldTail(s: []const u8) usize {
+    var held: usize = 0;
+    for (arg_stream_markers) |m| {
+        var k = @min(m.len - 1, s.len);
+        while (k > held) : (k -= 1) {
+            if (std.mem.endsWith(u8, s, m[0..k])) {
+                held = k;
+                break;
+            }
+        }
+    }
+    return held;
+}
+
+fn utf8IncompleteTail(s: []const u8) usize {
+    var i = s.len;
+    while (i > 0 and s.len - i < 4) {
+        i -= 1;
+        if (s[i] & 0xC0 != 0x80) {
+            const want = std.unicode.utf8ByteSequenceLength(s[i]) catch return 0;
+            return if (s.len - i < want) s.len - i else 0;
+        }
+    }
+    return 0;
+}
+
+/// Could more bytes still make the trimmed value a bare JSON literal (`isJsonLiteral`)?
+fn couldStillBeJsonLiteral(value: []const u8) bool {
+    const core = std.mem.trim(u8, value, " \t\r\n");
+    if (std.mem.indexOfAny(u8, core, " \t\r\n") != null) return false;
+    for ([_][]const u8{ "true", "false", "null" }) |lit| {
+        if (std.mem.startsWith(u8, lit, core)) return true;
+    }
+    for (core) |c| {
+        if (!std.ascii.isDigit(c) and std.mem.indexOfScalar(u8, "-+.eE", c) == null) return false;
+    }
+    return true;
+}
+
 /// MiniCPM5 V3 XML tool calls — attribute-quoted, one call per `<function>`
 /// tag, no outer wrapper:
 ///   <function name="shell">
@@ -14474,4 +14650,63 @@ test "foldSystemMessages: a system turn past index 0 joins the leading system me
     try plain.append(al, .{ .role = "user", .content = "hi" });
     try std.testing.expect((try foldSystemMessages(al, &plain)) == null);
     try std.testing.expectEqual(@as(usize, 2), plain.items.len);
+}
+
+const arg_stream_test_tools =
+    \\[{"type":"function","function":{"name":"write","parameters":{"type":"object","properties":{
+    \\"path":{"type":"string"},"content":{"type":"string"},"limit":{"type":"number"}}}}}]
+;
+
+fn expectArgPrefix(text: []const u8, want: ?[]const u8, want_frozen: bool) !void {
+    const tools = try std.json.parseFromSlice(std.json.Value, testing.allocator, arg_stream_test_tools, .{});
+    defer tools.deinit();
+    const got = try toolArgsStreamPrefix(testing.allocator, text, tools.value);
+    if (want) |w| {
+        const p = got orelse return error.TestExpectedPrefix;
+        defer testing.allocator.free(p.args);
+        try testing.expectEqualStrings("write", p.name);
+        try testing.expectEqualStrings(w, p.args);
+        try testing.expectEqual(want_frozen, p.frozen);
+    } else if (got) |p| {
+        testing.allocator.free(p.args);
+        return error.TestUnexpectedPrefix;
+    }
+}
+
+test "toolArgsStreamPrefix: a string value streams before its call closes" {
+    try expectArgPrefix("<tool_call>\n<function=write>\n<parameter=path>\nnotes.md\n</parameter>\n<parameter=content>\nhello wor", "{\"path\":\"notes.md\",\"content\":\"hello wor", false);
+}
+
+test "toolArgsStreamPrefix: the value's closing framing and a partial tag are held back" {
+    try expectArgPrefix("<tool_call>\n<function=write>\n<parameter=content>\nline1\n</para", "{\"content\":\"line1", false);
+    try expectArgPrefix("<tool_call>\n<function=write>\n<parameter=content>\nline1\r", "{\"content\":\"line1", false);
+}
+
+test "toolArgsStreamPrefix: a value that could still be a JSON literal is held" {
+    try expectArgPrefix("<tool_call>\n<function=write>\n<parameter=content>\n12", "{", false);
+    try expectArgPrefix("<tool_call>\n<function=write>\n<parameter=content>\n12a", "{\"content\":\"12a", false);
+}
+
+test "toolArgsStreamPrefix: a non-string parameter freezes the stream before its key" {
+    try expectArgPrefix("<tool_call>\n<function=write>\n<parameter=path>\na\n</parameter>\n<parameter=limit>\n5", "{\"path\":\"a\"", true);
+}
+
+test "toolArgsStreamPrefix: a tool the request never declared is not streamed" {
+    try expectArgPrefix("<tool_call>\n<function=nope>\n<parameter=content>\nhello", null, false);
+}
+
+test "toolArgsStreamPrefix: markup inside a value freezes the stream where it starts" {
+    try expectArgPrefix("<tool_call>\n<function=write>\n<parameter=content>\nsay <tool_call> twice", "{\"content\":\"say", true);
+}
+
+test "toolArgsStreamPrefix: a value closed before </function> still ships open (a later close may extend it)" {
+    try expectArgPrefix("<tool_call>\n<function=write>\n<parameter=content>\nFormat:\n</parameter>\n</function>\nend\n</parameter>", "{\"content\":\"Format:", true);
+}
+
+test "toolArgsStreamPrefix: a thought ahead of the call is never streamed" {
+    try expectArgPrefix("<think>\nMaybe <tool_call>\n<function=write>\n<parameter=content>\nhello there", null, false);
+}
+
+test "toolArgsStreamPrefix: whitespace before in-value markup is held" {
+    try expectArgPrefix("<tool_call>\n<function=write>\n<parameter=content>\nabc <think>X</think> Y", "{\"content\":\"abc", true);
 }
