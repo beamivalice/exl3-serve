@@ -3150,6 +3150,9 @@ pub const HotPrefixCache = struct {
         protect_restored: bool,
     ) EvictionReport {
         var report = EvictionReport{};
+        // A command buffer in flight keeps its inputs' buffers until it completes: drain the
+        // stream so `fits` and every live delta below read settled memory.
+        _ = mlx.mlx_synchronize(mlx.gpuStream());
         while (!fits(ctx)) {
             const idx = self.lruIndexExcluding(if (protect_restored) self.last_restored_used else null, null) orelse break;
             // Accounting bytes are what the entry was billed; live bytes are what the allocator got back.
@@ -8147,6 +8150,60 @@ test "the lien weighs the share a restore DELIVERS, not the one it matched" {
     try t.expect(rep.admitted);
     try t.expectEqual(@as(usize, 1), rep.entries);
     try t.expect(rep.bytes > 0);
+}
+test "the admission pass weighs an eviction after the GPU work still reading the entry drains" {
+    // A command buffer in flight keeps its inputs' buffers until it completes: read before the
+    // stream drains, the eviction returns nothing live and the pass stops as if it were shared.
+    const t = testing;
+    const s = mlx.gpuStream();
+    var hc = HotPrefixCache.initWithMem(testing.allocator, 4, 0);
+    defer hc.deinit();
+
+    var tokens: [4096]u32 = undefined;
+    for (&tokens, 0..) |*x, i| x.* = @intCast(i + 7);
+    var src = try KVCache.init(testing.allocator, 8);
+    var src_live = true;
+    defer if (src_live) src.deinit();
+    try testFillCache(&src, s, 8, 4096);
+    _ = try hc.commit(&src, &tokens, false);
+    try t.expect(hc.entries.items[0].kv_bytes >= HotPrefixCache.SHARED_RATIO_MIN_BYTES);
+
+    // A matmul chain queued ahead of a read of every buffer the entry shares.
+    const pending = mlx.mlx_vector_array_new();
+    defer _ = mlx.mlx_vector_array_free(pending);
+    const dim = [_]c_int{ 1024, 1024 };
+    var chain = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(chain);
+    try mlx.check(mlx.mlx_ones(&chain, &dim, 2, .float32, s));
+    for (0..64) |_| {
+        var next = mlx.mlx_array_new();
+        try mlx.check(mlx.mlx_matmul(&next, chain, chain, s));
+        _ = mlx.mlx_array_free(chain);
+        chain = next;
+    }
+    _ = mlx.mlx_vector_array_append_value(pending, chain);
+    for (src.entries) |*e| for ([_]mlx.mlx_array{ e.keys, e.values }) |buf| {
+        if (buf.ctx == null) continue;
+        var total = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(total);
+        try mlx.check(mlx.mlx_sum(&total, buf, false, s));
+        _ = mlx.mlx_vector_array_append_value(pending, total);
+    };
+    _ = mlx.mlx_async_eval(pending);
+    // The entry is now the buffers' only owner.
+    src.deinit();
+    src_live = false;
+
+    const Fits = struct {
+        fn call(ctx: ?*anyopaque) bool {
+            const cache: *HotPrefixCache = @ptrCast(@alignCast(ctx.?));
+            return cache.entryCount() == 0;
+        }
+    };
+    const rep = hc.evictLruToAdmit(600_000, &hc, Fits.call, true);
+    try t.expect(rep.admitted);
+    try t.expect(!rep.shared_stop);
+    try t.expect(rep.bytes * HotPrefixCache.SHARED_RETURN_DIVISOR >= rep.accounted_bytes);
 }
 test "spec adopt: a qwen4 head target declines a payload with no QSA half; KV-only targets are unaffected" {
     // The qwen4_exp head's KV is meaningless without its index-key history, so the two halves

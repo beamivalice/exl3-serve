@@ -51,6 +51,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-kv-cache](engine-k
 - One `[admission] needed=… available=… reclaimable=… width=… verdict=…` line per decision.
 - A long prefill evicts the hot cache on the INFERENCE thread to be admitted (`evictLruToAdmit`), crediting only
   provably reclaimable bytes; `PrefillDoesNotFit` → 400 by name.
+- The eviction pass drains the GPU stream before it reads live memory: a command buffer in flight holds its inputs'
+  buffers, so an eviction read early frees nothing and trips the shared-entry stop.
 - **Concurrent arrivals are each billed against the SAME free memory** on their connection threads. The gated arch
   (qwen4_exp) re-bills live memory before each prefill in `runPrefill`; an ungated one (mimo_v2) is re-billed at the
   pending drain (`admitsWithinMemory`: live requests plus this tick's earlier admits). One that does not fit beside
