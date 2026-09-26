@@ -10,6 +10,7 @@
 //! [R, dim/gs]) or, at `bits` 16, one raw `weight` BF16 [R, dim] region.
 
 const std = @import("std");
+const io_util = @import("io_util.zig");
 const expert_stream = @import("expert_stream.zig");
 const log = @import("log.zig");
 
@@ -217,8 +218,10 @@ pub const NgramTable = struct {
     warm_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     warm_bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     bf16: ?expert_stream.Bf16NgramStore = null,
-    /// Set at load when the page cache cannot keep the table beside the GPU's memory.
-    evicted: bool = false,
+    /// Set by `calibrateArm` when the pool measured faster than the serial walk.
+    prefer_pool: bool = false,
+    /// What the calibration read, for the one line that reports it.
+    calib: Calibration = .{},
 
     pub fn open(path: []const u8) !NgramTable {
         var pbuf: [std.fs.max_path_bytes]u8 = undefined;
@@ -412,10 +415,77 @@ pub const NgramTable = struct {
         std.posix.munmap(self.map);
     }
 
-    /// Call once the weights are resident on the GPU.
-    pub fn checkResidency(self: *NgramTable, gpu_bytes: u64, ram_bytes: u64) void {
-        self.evicted = ngramTableEvicted(self.map.len, gpu_bytes, ram_bytes);
-        if (self.evicted) log.info("[qwen4] ngram table not resident: {d:.1} GB + {d:.1} GB of GPU memory + {d:.0} GB headroom exceed {d:.1} GB RAM, so prefill gathers pool\n", .{ asGb(self.map.len), asGb(gpu_bytes), asGb(NGRAM_RAM_HEADROOM), asGb(ram_bytes) });
+    /// Time both arms on the real table, once, before `startWarm` faults it in. The answer
+    /// is a property of this machine's SSD, which no formula about RAM can know: the same
+    /// table serial-walks at 1130 tok/s on an M5 Max and pools 2x faster on an M2 Max.
+    /// The arms read DISJOINT row sets, so neither warms the other's pages, and the pool
+    /// arm is timed in the batch shape a wide gather uses.
+    pub fn calibrateArm(self: *NgramTable) void {
+        if (self.bf16 != null) return; // the bf16 store has its own wide path
+        const p = self.pool orelse return;
+        if (self.fd < 0 or self.rows < 2 * PLE_CALIBRATION_ROWS) return;
+        if (self.rowBytes() > PrefetchPool.ROW_BUF) return;
+
+        var seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        var serial_rows: [PLE_CALIBRATION_ROWS]i64 = undefined;
+        var pool_rows: [PLE_CALIBRATION_ROWS]i64 = undefined;
+        for (&serial_rows) |*r| r.* = @intCast(calibRow(&seed, self.rows));
+        for (&pool_rows) |*r| r.* = @intCast(calibRow(&seed, self.rows));
+
+        // The serial arm's read: the mmap the walk itself uses, so a cold row costs its
+        // page fault and a warm one costs a cache hit.
+        const io = std.Io.Threaded.global_single_threaded.io();
+        var sw = io_util.Stopwatch.init(io);
+        var acc: u64 = 0;
+        for (serial_rows) |r| acc +%= self.touchRow(@intCast(r));
+        const serial_ns = sw.read();
+        std.mem.doNotOptimizeAway(acc);
+
+        sw.reset();
+        var start: usize = 0;
+        while (start < pool_rows.len) : (start += PrefetchPool.MAX_ROWS) {
+            const end = @min(start + PrefetchPool.MAX_ROWS, pool_rows.len);
+            if (!p.run(self, pool_rows[start..end])) return; // an unreadable pool leaves the default
+        }
+        const pool_ns = sw.read();
+
+        self.calib = .{ .serial_ns = serial_ns, .pool_ns = pool_ns, .rows = pool_rows.len };
+        self.prefer_pool = plePrefillPrefetchArm(serial_ns, pool_ns);
+        if (self.calib.serial_ns == 0) return; // the timer never ticked; say nothing
+        log.info("[qwen4] ngram gather arm: {s} ({d} cold rows: serial {d:.2} ms, pool {d:.2} ms, {d:.1}x)\n", .{
+            if (self.prefer_pool) "POOLED" else "SERIAL",
+            pool_rows.len,
+            asMs(serial_ns),
+            asMs(pool_ns),
+            @as(f64, @floatFromInt(serial_ns)) / @as(f64, @floatFromInt(pool_ns)),
+        });
+    }
+
+    /// Sum a byte from each of the row's regions through the mmap, so the read cannot be
+    /// elided and a missing page is faulted in. The regions mirror `preadSite`.
+    fn touchRow(self: *const NgramTable, r: u64) u64 {
+        const wl: usize = self.wcols * 4;
+        const sl: usize = self.scols * 2;
+        var regions: [3]Region = undefined;
+        var count: usize = 0;
+        if (self.bits == 16) {
+            const len = self.dim * 2;
+            regions[count] = .{ .off = self.w_off + r * len, .len = len };
+            count += 1;
+        } else {
+            regions[count] = .{ .off = self.w_off + r * wl, .len = wl };
+            regions[count + 1] = .{ .off = self.s_off + r * sl, .len = sl };
+            regions[count + 2] = .{ .off = self.b_off + r * sl, .len = sl };
+            count += 3;
+        }
+        var acc: u64 = 0;
+        for (regions[0..count]) |region| {
+            if (region.off + region.len > self.map.len) continue;
+            var i: usize = 0;
+            while (i < region.len) : (i += std.heap.page_size_min) acc +%= self.map[region.off + i];
+            if (region.len > 0) acc +%= self.map[region.off + region.len - 1];
+        }
+        return acc;
     }
 
     const WARM_CHUNK: usize = 8 << 20;
@@ -533,12 +603,12 @@ pub const NgramTable = struct {
         const need: usize = self.rowBytes();
         const wide = row_ids.len > PrefetchPool.MAX_ROWS;
         const oversized_bf16 = self.bits == 16 and self.map.len > ngramCacheLimit();
-        const evicted = oversized_bf16 or self.evicted;
-        const wide_ok = !wide or plePrefillPrefetchEnabled(kv_len, evicted);
+        const prefer_pool = oversized_bf16 or self.prefer_pool;
+        const wide_ok = !wide or plePrefillPrefetchEnabled(kv_len, prefer_pool);
         // Announce the arm that actually runs, not the lever that permits it.
         const pooled = wide_ok and self.pool != null and self.fd >= 0 and need <= PrefetchPool.ROW_BUF;
         const whole_chunk = wide and oversized_bf16;
-        if (wide) notePrefillGatherArm(pooled, row_ids.len, if (whole_chunk) row_ids.len else PrefetchPool.MAX_ROWS, prefillGatherWhy(wide_ok, pooled, evicted));
+        if (wide) notePrefillGatherArm(pooled, row_ids.len, if (whole_chunk) row_ids.len else PrefetchPool.MAX_ROWS, prefillGatherWhy(wide_ok, pooled, prefer_pool));
         if (pooled and whole_chunk) {
             if (try self.pool.?.runBf16(self, row_ids, out)) return;
         } else if (pooled) {
@@ -569,11 +639,11 @@ pub const NgramTable = struct {
         const need = self.rowBytes();
         const wide = row_ids.len > PrefetchPool.MAX_ROWS;
         const oversized = self.map.len > ngramCacheLimit();
-        const evicted = oversized or self.evicted;
-        const wide_ok = !wide or plePrefillPrefetchEnabled(kv_len, evicted);
+        const prefer_pool = oversized or self.prefer_pool;
+        const wide_ok = !wide or plePrefillPrefetchEnabled(kv_len, prefer_pool);
         const pooled = wide_ok and self.pool != null and self.fd >= 0 and need <= PrefetchPool.ROW_BUF;
         const whole_chunk = wide and oversized;
-        if (wide) notePrefillGatherArm(pooled, row_ids.len, if (whole_chunk) row_ids.len else PrefetchPool.MAX_ROWS, prefillGatherWhy(wide_ok, pooled, evicted));
+        if (wide) notePrefillGatherArm(pooled, row_ids.len, if (whole_chunk) row_ids.len else PrefetchPool.MAX_ROWS, prefillGatherWhy(wide_ok, pooled, prefer_pool));
         if (pooled and whole_chunk) {
             if (try self.pool.?.runBf16Into(self, row_ids, .{ .words = out }, allocator)) return;
         } else if (pooled) {
@@ -833,21 +903,46 @@ pub fn plePrefillPrefetchMinKvFromEnv(raw: ?[]const u8) u64 {
     return std.fmt.parseInt(u64, t, 10) catch PREFILL_PREFETCH_MIN_KV;
 }
 
-/// What macOS and the process's later allocations keep from the page cache (the default wired margin).
-pub const NGRAM_RAM_HEADROOM: u64 = 8 << 30;
+const Region = struct { off: usize, len: usize };
 
-/// The page cache cannot keep the table when it, the GPU's memory and the headroom exceed RAM;
-/// unknown RAM (0) counts as room.
-pub fn ngramTableEvicted(table_bytes: u64, gpu_bytes: u64, ram_bytes: u64) bool {
-    return ram_bytes != 0 and table_bytes +| gpu_bytes +| NGRAM_RAM_HEADROOM > ram_bytes;
+/// What the one calibration read, kept for the line that reports it.
+pub const Calibration = struct { serial_ns: u64 = 0, pool_ns: u64 = 0, rows: usize = 0 };
+
+fn asMs(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / (1000.0 * 1000.0);
 }
 
-/// An evicted table pools at any kv: the serial walk would fault its rows from SSD one by one.
-pub fn plePrefillPrefetchWanted(mode: PrefillPrefetchMode, kv_len: u64, min_kv: u64, evicted: bool) bool {
+/// A row for the calibration. SplitMix64, so the same seed reads the same rows twice.
+fn calibRow(seed: *u64, rows: u64) u64 {
+    seed.* +%= 0x9E37_79B9_7F4A_7C15;
+    var z = seed.*;
+    z = (z ^ (z >> 30)) *% 0xBF58_476D_1CE4_E5B9;
+    z = (z ^ (z >> 27)) *% 0x94D0_49BB_1331_11EB;
+    z ^= z >> 31;
+    return z % rows;
+}
+
+/// One region of a row: the 4-bit layout splits words, scales and biases, the 16-bit one
+/// does not.
+pub const PLE_CALIBRATION_ROWS: usize = 128;
+
+/// How much faster the pool must measure before a wide gather takes it. A win inside the
+/// margin is noise, and the serial walk is the right default on a table already in page cache.
+pub const PLE_CALIBRATION_MARGIN_PCT: u64 = 20;
+
+/// Which arm the calibration picked. Unreadable timings (0) never claim the pool.
+pub fn plePrefillPrefetchArm(serial_ns: u64, pool_ns: u64) bool {
+    if (serial_ns == 0 or pool_ns == 0) return false;
+    return pool_ns * 100 < serial_ns * (100 - PLE_CALIBRATION_MARGIN_PCT);
+}
+
+/// A measured pool pools at any kv: the serial walk faults its rows from the SSD one by one.
+/// The kv gate still forces the pool past the threshold, whatever the calibration said.
+pub fn plePrefillPrefetchWanted(mode: PrefillPrefetchMode, kv_len: u64, min_kv: u64, prefer_pool: bool) bool {
     return switch (mode) {
         .off => false,
         .on => true,
-        .kv_gated => evicted or kv_len >= min_kv,
+        .kv_gated => prefer_pool or kv_len >= min_kv,
     };
 }
 
@@ -875,16 +970,16 @@ fn plePrefillPrefetchMode() PrefillPrefetchMode {
     return m;
 }
 
-fn plePrefillPrefetchEnabled(kv_len: u64, evicted: bool) bool {
-    return plePrefillPrefetchWanted(plePrefillPrefetchMode(), kv_len, plePrefillPrefetchMinKv(), evicted);
+fn plePrefillPrefetchEnabled(kv_len: u64, prefer_pool: bool) bool {
+    return plePrefillPrefetchWanted(plePrefillPrefetchMode(), kv_len, plePrefillPrefetchMinKv(), prefer_pool);
 }
 
 /// Why a wide gather took its arm, for the engagement line.
-fn prefillGatherWhy(wanted: bool, pooled: bool, evicted: bool) []const u8 {
+fn prefillGatherWhy(wanted: bool, pooled: bool, prefer_pool: bool) []const u8 {
     if (wanted and !pooled) return "no pool";
     if (plePrefillPrefetchMode() != .kv_gated) return "QWEN4_PLE_PREFETCH_PREFILL";
-    if (evicted) return "table not resident";
-    return if (wanted) "kv past the gate" else "table resident, kv under the gate";
+    if (prefer_pool) return "pool measured faster";
+    return if (wanted) "kv past the gate" else "serial measured faster, kv under the gate";
 }
 
 pub fn bf16ToF32(u: u16) f32 {
@@ -1213,20 +1308,24 @@ test "ngram prefill prefetch is KV-GATED: a short prompt walks, a long one pools
     try testing.expectEqual(@as(u64, 0), plePrefillPrefetchMinKvFromEnv("0")); // an explicit always-on
 }
 
-test "ngram prefill prefetch pools at any kv when RAM cannot keep the table beside the weights" {
-    const gib: u64 = 1 << 30;
-    const table: u64 = 32_000_153_976;
+test "ngram prefill prefetch pools at any kv when the calibration measured the pool faster" {
     const min = PREFILL_PREFETCH_MIN_KV;
-    const evicted_64 = ngramTableEvicted(table, 48 * gib, 64 * gib);
-    const evicted_128 = ngramTableEvicted(table, 48 * gib, 128 * gib);
-    try testing.expect(evicted_64 and !evicted_128);
-    try testing.expect(ngramTableEvicted(table, 62 * gib, 96 * gib));
-    try testing.expect(!ngramTableEvicted(table, 48 * gib, 0));
-    try testing.expect(plePrefillPrefetchWanted(.kv_gated, 4096, min, evicted_64));
-    try testing.expect(!plePrefillPrefetchWanted(.kv_gated, 4096, min, evicted_128));
-    try testing.expect(plePrefillPrefetchWanted(.kv_gated, min, min, evicted_128));
-    try testing.expect(!plePrefillPrefetchWanted(.off, 4096, min, evicted_64));
-    try testing.expect(plePrefillPrefetchWanted(.on, 4096, min, evicted_128));
+    const slow_ssd = plePrefillPrefetchArm(9_000_000, 1_000_000); // pool 9x faster
+    const fast_ssd = plePrefillPrefetchArm(1_000_000, 2_000_000); // serial 2x faster
+    try testing.expect(slow_ssd and !fast_ssd);
+    // A tie, and a win inside the margin, keep the serial walk: a noisy measurement
+    // must not move the arm.
+    try testing.expect(!plePrefillPrefetchArm(1_000_000, 1_000_000));
+    try testing.expect(!plePrefillPrefetchArm(1_000_000, 900_000));
+    // An unreadable measurement (no timer) never claims the pool.
+    try testing.expect(!plePrefillPrefetchArm(0, 0));
+    try testing.expect(!plePrefillPrefetchArm(1_000_000, 0));
+    try testing.expect(plePrefillPrefetchWanted(.kv_gated, 4096, min, slow_ssd));
+    try testing.expect(!plePrefillPrefetchWanted(.kv_gated, 4096, min, fast_ssd));
+    // The kv gate still forces the pool past the threshold, whatever the calibration said.
+    try testing.expect(plePrefillPrefetchWanted(.kv_gated, min, min, fast_ssd));
+    try testing.expect(!plePrefillPrefetchWanted(.off, 4096, min, slow_ssd));
+    try testing.expect(plePrefillPrefetchWanted(.on, 4096, min, fast_ssd));
 }
 
 test "ngram prefill gather: 4096 rows through the pool equal the direct mmap read" {
@@ -1298,13 +1397,13 @@ test "ngram prefill gather: 4096 rows through the pool equal the direct mmap rea
 
     try testing.expectEqualSlices(f32, ref, got);
 
-    // A table the page cache cannot keep rides the pool below the gate too.
-    t.evicted = true;
-    const evicted_before = pool.runs.load(.monotonic);
+    // A calibration that measured the pool faster rides it below the gate too.
+    t.prefer_pool = true;
+    const calibrated_before = pool.runs.load(.monotonic);
     try t.gatherChecked(ids, got, 8192);
-    try testing.expectEqual(evicted_before + ROWS / PrefetchPool.MAX_ROWS, pool.runs.load(.monotonic));
+    try testing.expectEqual(calibrated_before + ROWS / PrefetchPool.MAX_ROWS, pool.runs.load(.monotonic));
     try testing.expectEqualSlices(f32, ref, got);
-    t.evicted = false;
+    t.prefer_pool = false;
 
     ple_prefill_prefetch_override = false;
     defer ple_prefill_prefetch_override = null;
