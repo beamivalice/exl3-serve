@@ -144,7 +144,12 @@ load check refuses with apps open), `taskpolicy -a`, the lock held per run, NOT 
   0.7831; f42cd8e itself 0.0000. On this pack any bit-different kernel reads about 0.04 against another.
 - `QWEN4_PLE_PREFETCH_PREFILL=1` (pool) vs the default serial walk on f22a383 + the body, A B B A, a distinct 3.5-4.3k
   prompt per run: 165.2 / 378.7 / 353.1 / 224.9 tok/s, the pool 2.29x and 1.57x per pair. (On f42cd8e, with the
-  scalar GEMM dominating, the same screen read 14-24%.) The kv gate still picks serial here; a gate keyed on residency is its own change.
+  scalar GEMM dominating, the same screen read 14-24%.)
+- The n-gram residency gate pools by default here (29.8 GB table + 47.6 GB of GPU memory + 8 GB headroom > 64 GB).
+  Default flags, one boot per cell, a distinct 3.4-4.4k prompt per run, `max_tokens` 1. 8c16b2b against 8c16b2b +
+  the gate, A B B A: 189.8 / 393.6 / 395.7 / 219.6 tok/s, 2.07x and 1.80x per pair. Before the body, f22a383 against
+  f22a383 + the gate, A B B A twice: 33.9 / 36.6 / 31.4 / 34.8 and 30.7 / 37.0 / 37.4 / 35.1 tok/s, paired 1.08,
+  0.90, 1.21, 1.07 (mean 1.06, inside the prompt-to-prompt spread).
 
 ## Upstream comparison (decided: no rebase)
 

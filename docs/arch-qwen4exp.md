@@ -67,6 +67,11 @@ hidden 2560, expert intermediate 640.
   at every width) or raw bf16 (bits-16 arm).
 - A random read into a cold 32 GB mmap is a serial SSD fault, so `gather` rides a `PrefetchPool`
   (`QWEN4_PLE_PREFETCH=0` disables) and `startWarm` preads the table at load (`SUSHI_NGRAM_WARM=0`).
+- A wide prefill gather walks a resident table serially below `PREFILL_PREFETCH_MIN_KV` (256k) and pools past it;
+  `QWEN4_PLE_PREFETCH_PREFILL=0|1` forces either arm, and the one-shot `PLE prefill gather:` line names the reason.
+- A table the page cache cannot keep pools at every kv: its bytes, MLX active memory at load and 8 GiB of headroom
+  exceed RAM (3bpw on 64 GB; by pack size, 4bpw on 96 GB), logged as `ngram table not resident`. A misjudged pool
+  costs a resident table 2-7%; a misjudged walk costs an evicted one about 4x in gather time.
 - The n-gram hash's eos is the TEXT config's (`ngram_eos`).
 - `SUSHI_NGRAM_BF16_DIR=<hf checkpoint>` serves any pack with the ORIGINAL bf16 n-gram table, so `kld compare`
   isolates the PLE table's cost.

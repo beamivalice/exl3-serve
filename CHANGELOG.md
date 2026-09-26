@@ -14,6 +14,8 @@ earlier history is mlx-serve's, in that project's changelog.
   push it out of the cache, and `--prefix-cache-disk` now stores MiMo prompts, so they survive a restart.
 - **Faster prompts on M1–M4**: Macs without the M5's neural accelerators read prompts about 4x faster on the EXL3
   packs (M2 Max, 3–4k-token prompts, default settings).
+- **Faster Flash-Next prompts on 64 GB Macs**: when the n-gram table cannot stay in memory beside the model, prompt
+  processing reads it in parallel by default instead of one row at a time.
 
 ---
 
