@@ -15,6 +15,11 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 - A kernel keyed on `batch*seq == 1` declines every verify row AND batched slot, so the grid carries the rows
   (`HC_FUSED_MAX_ROWS`/`GDN_FUSED_MAX_ROWS` 16).
 - GDN decode = three fused dispatches (`SUSHI_GDN_DECODE_FUSED=0`; S 1..9 bit-identity is SAMPLING).
+- The qwen4 fused HC read groups verify rows (`HC_ROW_GROUP` 8 per D/U dispatch group), so each weight word is read
+  once per group; configs are cached per row count, since MTP alternates widths every round.
+- A GEMV that beats MLX's qmv in a chained in-graph ubench can still lose inside the forward: a vectorized affine-8
+  reader 10-57% faster in-graph was 2-4% slower per decode forward on an M2 Max
+  ([perf-baselines](perf-baselines.md#m2max-decode)). Judge a decode kernel by the decode meter.
 - A dependent-kernel cut that REDISTRIBUTES a reduction into every threadgroup loses; a routing-independent chain
   the GPU already OVERLAPS is not a dispatch to fuse. Meter: `SUSHI_DECODE_FWD_UBENCH`.
 - A matmul2d decode tile of 16 query rows is latency-bound: its barriers and small matmuls cost more than its
@@ -118,6 +123,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 - Size every probe and config cache for all the arms of an A/B. A full cache re-probes on every call, which added
   ~170 us per call to the dev arms. An ablation that skips a tile's only reader lets the compiler drop the tile's
   stores and their loads.
+- Attribute DECODE by `QWEN4_STANDIN` ablations under the decode meter, never by shader samples: the profiler
+  under-samples short kernels and mis-shares the rest ([perf-baselines](perf-baselines.md#m2max-decode)).
 - A Metal System Trace: `xcrun xctrace record --template 'Metal System Trace' --instrument 'Metal GPU Counters'
   --attach <pid>`, then export `metal-shader-profiler-intervals` (the profiler under-samples short kernels).
 - Every timing run takes the GPU lock and restores QoS ([CLAUDE.md, Team process](../CLAUDE.md#team-process)).

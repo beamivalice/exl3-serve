@@ -197,6 +197,46 @@ per arm, NOT a quiet box (no §4b fan protocol available). `SUSHI_FORCE_GPU_FAMI
   cannot produce one (49 GB of weights + 30 GB of table fits inside 128 GB, so nothing is evicted) — a 64 GB box
   would.
 
+<a id="m2max-decode"></a>
+### M2 Max decode attribution (8c16b2b)
+
+Decode meter (`SUSHI_DECODE_FWD_UBENCH`, 4096 keys of context, no sampling around the forward), `--mtp
+--skip-mem-preflight`, `taskpolicy -a`, lock per boot. A verify row costs ~16 ms, ~47% of a 1-row forward (the M5 Max
+reads ~26%), so MTP nets ~1.1-1.35x here. ms per forward at 1 / 2 / 4 / 7 rows, f22a383: 36.1 / 51.3 / 80.6 / 131.4.
+
+- `QWEN4_STANDIN` sweep on 8c16b2b + row-grouped HC reads (baseline 33.4 / 127.3 then 34.0 / 129.3 ms at 1 / 7 rows),
+  what each stand-in removes: whole MoE 9.4 ms at 1 row and ~8.6 ms per extra row (experts ~6.4 of it by ablating
+  `moeExl3`, shared expert ~1.4); GDN 8.7 / ~3.0 (the projections, not the recurrence); attention 6.7 / ~2.0; HC 4.2 /
+  ~2.5. The `gdn_proj` and `moe_router` stand-ins cost more than what they replace: unusable as ablations.
+- The expert decode chain alone, 12 chained layers per eval: 149 us per layer at 1 row, 730 at 7 (+97 us per row per
+  layer). 12 or 40 distinct layers' weights (11 / 38 GB) read the same as one layer reused: not TLB or working set.
+- MLX affine-8 `qmv` chained in one graph: 244-259 GB/s of weights at 12288x2560, 2560x6144, 2560x2560 (~65% of peak).
+  The row-identical `mtp_qmv` kernel reads within ~10% of serial `qmv` and batched `quantized_matmul` at 2-7 rows.
+- HC reads grouped by row (weights read once per group, configs cached per width), bit-identical to f22a383 in 24/24
+  cross-boot greedy comparisons, MTP on and off, A B B A: 1 / 2 / 4 / 7 rows 36.1 / 51.3 / 80.6 / 131.4 and 35.4 /
+  49.9 / 79.1 / 129.5 -> 35.1 / 49.0 / 77.7 / 127.4 and 36.3 / 49.1 / 78.6 / 128.4 ms, 2-3% at verify widths and
+  nothing at 1 row. On 8c16b2b it passes `test_mtp_equivalence.sh` 11/11 and its MTP output equals 8c16b2b's.
+  End to end on 68b6f9f, greedy, 4 prompts x 256 tokens (code / list / prose / story), decode tok/s: default adaptive
+  MTP, two A B B A blocks, 131.8 -> 136.0 and 132.1 -> 135.5 summed (+3.2% / +2.5%, 28/28 outputs identical);
+  forced depth 3, 43.75 / 38.15 / 28.3 / 25.3 -> 44.75 / 39.15 / 28.35 / 25.6 (+1.7%, faster on every prompt).
+- `SUSHI_MTP_DENSE_ROWS=1` read another 2-3% (35.6 / 49.3 / 78.0 / 129.1 and 35.6 / 49.4 / 78.3 / 127.0 -> 35.7 / 47.5
+  / 76.1 / 125.0 and 35.2 / 48.2 / 75.8 / 125.5 ms). One `test_mtp_equivalence.sh` run of 8c16b2b + HC grouping +
+  dense rows failed 3/11 (the story prompt left `--no-mtp` at output token 16, top-2 gap 1.125 nats; that boot decoded
+  at 12 tok/s, under load). Seven reruns passed 11/11: the same commit, dense alone on 8c16b2b and 68b6f9f, router or
+  gate alone, and with HC grouping on 68b6f9f. The one wrong value is unexplained, so dense rows stay off by default.
+- Ruled out: a vectorized affine-8 reader (one uint2 of codes and two vec4 activations per lane, 8 rows per simdgroup),
+  bit-identical to per-row `qmv`. In a chained in-graph ubench it read 10-57% faster on 6k-12k x 2560 and 2560 x 6144
+  at 1-3 rows. On the decode meter (8c16b2b + HC grouping + dense rows), A B B A off / on / on / off: 33.96 / 48.59 /
+  74.97 / 125.81, 34.65 / 49.87 / 78.21 / 127.24, 34.94 / 47.42 / 76.28 / 124.08, 33.85 / 46.26 / 74.55 / 124.52 ms,
+  2-4% slower at 1-4 rows.
+- Expert overlap between verify rows on `test_mtp_equivalence.sh` traffic (`SUSHI_EXL3_UNION_HIST`): 20 / 28 / 31% of
+  routed slots repeat an expert at 2 / 3 / 4 rows, 41-47% at 6-8. Ruled out all the same: MiMo's grouped gate/up GEMV,
+  byte-identical at the qwen geometry, on 68b6f9f at forced depth 3 / 5, greedy, 4 prompts x 256 tokens, A B B A:
+  decode -0.8% / -1.3% (code / list / prose / story 43.4 / 37.9 / 27.1 / 24.5 -> 43.0 / 36.9 / 27.5 / 24.5 and
+  46.3 / 35.3 / 22.8 / 18.7 -> 45.6 / 34.9 / 22.4 / 18.5 tok/s).
+- The sampled shader profiler misattributes decode (HC read 13% of sampled time at 7 rows, ~2.5 ms of ~130 by ablation);
+  attribute by stand-in or ablation, never by samples.
+
 ## Upstream comparison (decided: no rebase)
 
 - Rebased onto upstream vs main 6755ff2 on the MCG K3 pack, interleaved: MTP
