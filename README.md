@@ -20,6 +20,16 @@ curl -L https://github.com/beamivalice/sushi/releases/latest/download/sushi-bin-
 ./sushi-macos-arm64/sushi --version
 ```
 
+Or build from source (needs Xcode 26.2+ with its Metal toolchain; `brew bundle` installs cmake and webp):
+
+```bash
+git clone --recurse-submodules https://github.com/beamivalice/sushi && cd sushi
+brew bundle
+./scripts/fetch-zig.sh && ./scripts/build-mlx.sh
+.zig-toolchain/zig build -Doptimize=ReleaseFast
+ln -s "$PWD/zig-out/bin/sushi" ~/.local/bin/sushi   # or any directory on your PATH
+```
+
 The server listens on `127.0.0.1:12345` by default.
 
 ## Recommended launch
@@ -76,6 +86,18 @@ sudo sysctl iogpu.wired_limit_mb=120000   # 128 GB Mac
 - `--prefix-cache-disk 20GB` keeps seen prompt prefixes on the SSD, so a repeated prompt skips its prefill.
 - `--mtp-typical 0.2` makes sampled decoding 15-20% faster (Sushi-4bpw, temperature 1.0) at a tiny quality cost.
 - `--prefix-cache-entries 1` keeps one conversation's prefix; raise it to 4-8 when several agents share the server.
+
+## Coding agents
+
+With the server running, `sushi launch <agent>` starts claude, pi, omp, opencode, codex, hermes or aider against it:
+
+```bash
+sushi launch omp
+```
+
+pi, omp, codex and hermes run from their own home under `~/.sushi/<agent>/`, so your usual config is untouched and
+the session does not see your other providers, settings or history; claude, opencode and aider reach the server
+through environment variables. `--print` writes the config and prints the launch script instead of running it.
 
 ## Memory
 
