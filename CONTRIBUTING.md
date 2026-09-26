@@ -2,7 +2,7 @@
 
 Short on purpose. Read it once, remember it.
 
-**Setup:** Apple Silicon Mac. `./scripts/fetch-zig.sh` (Zig 0.17 nightly into `.zig-toolchain/`), `scripts/build-mlx.sh` (pinned mlx submodules). Build: `zig build -Doptimize=ReleaseFast`.
+**Setup:** Apple Silicon Mac. `git submodule update --init`, `./scripts/fetch-zig.sh` (Zig 0.17 nightly into `.zig-toolchain/`), `scripts/build-mlx.sh` (pinned mlx submodules). Build: `zig build -Doptimize=ReleaseFast`.
 
 ## Before you open anything
 
