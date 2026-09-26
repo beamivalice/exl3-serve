@@ -85,6 +85,8 @@ Index: [CLAUDE.md](../CLAUDE.md#docs-index). Related: [engine-exl3-experts](engi
 - A cooperative tensor's layout depends on the element types and the precision flag. Read it with
   `get_multidimensional_index`, never assume it. A STRICT (unrelaxed) float operand changes all three operands'
   layouts. It also runs ~1.4x slower than two bf16 ops, because it is emulated.
+- **A `simdgroup_matrix` array under a data-dependent loop bound spills**: loop to a compile-time count and predicate
+  the stores ([engine-exl3-experts](engine-exl3-experts.md#kernels), 2.6x on the non-NAX GEMM).
 - Cooperative-only matmul2d takes M, N, K in {16, 32}, with at least one of them 32. Larger tiles are the 16x16
   fragments concatenated. A K=32 op runs no faster than two K=16 ops.
 

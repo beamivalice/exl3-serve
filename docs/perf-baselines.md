@@ -113,6 +113,39 @@ prefill at every rung (1358 at 2k, 1127 at 1004k) and 71.8 decode at 4k. Prefill
 binaries, so that gap is the box. Decode also gained from d72178a (the MTP regime gate). Never compare a ladder cell
 across a thermal state.
 
+<a id="m2max-64gb"></a>
+## Flash-Next Sushi-3bpw on an M2 Max 64 GB
+
+A second box: M2 Max, 38-core GPU (no NAX), 64 GB, `iogpu.wired_limit_mb=58000`, `--mtp --skip-mem-preflight` (the
+load check refuses with apps open), `taskpolicy -a`, the lock held per run, NOT a quiet box (desktop apps open, 6-13% memory free, swap in use).
+
+- Before the simdgroup-matrix body (f42cd8e): prefill 28-38 tok/s at 3.1-3.9k; omp's first turn, 13,194 tokens,
+  prefilled at 19.1 tok/s (11.5 min) and decoded 751 tokens at 19.7 tok/s.
+- Metal System Trace over a 2.5k prefill on f42cd8e (`--instrument 'Metal GPU Counters'`): the scalar sorted EXL3
+  GEMM took 90.7% of sampled GPU time (gate/up 59.5%, down 31.2%), MLX's bf16 GEMM 5.1%, everything else 4%.
+- The simdgroup-matrix body against the scalar body, one process (f22a383 + the body), A B B A, paired per-block ratio,
+  window table built outside the timed calls (`SUSHI_EXL3_LAYER_UBENCH=1`, MCG w15, 512 experts, top-10):
+
+| prompt chunk | n48 2560->640 | n48 640->2560 | n64 2560->640 | n64 640->2560 |
+|---|---|---|---|---|
+| 17 tokens | 3.2x | 5.4x | 3.1x | 4.3x |
+| 64 tokens | 3.5x | 5.0x | 3.5x | 4.8x |
+| 205 tokens | 4.6x | 6.2x | 4.7x | 5.9x |
+| 2048 tokens | 22.2x (241.0 -> 10.9 ms) | 19.7x (323.9 -> 16.9 ms) | 19.2x (343.8 -> 18.1 ms) | 17.8x (354.0 -> 20.3 ms) |
+
+- End to end, f22a383 against f22a383 + the body, B A A B with a distinct 3.4-4.0k prompt per run: 123.8 / 30.9 /
+  31.7 / 140.8 tok/s, 4.0x and 4.4x per pair. Disk reads rose from ~1,200 to ~5,000/s: the n-gram walk's share grew.
+- llmprobe 0.6.12 `--bench-only` (`tests/bench.sh --url`), both arms `--mtp --skip-mem-preflight` with
+  `QWEN4_PLE_PREFETCH_PREFILL=1`, B A A B, one boot per cell, AC power. Prefill at 2k 344.8 / 37.6 / 38.6 / 340.5 tok/s
+  (9.2x, 8.8x per pair); first token at 16.3k 45.8 / 418.5 / 418.8 / 47.7 s; decode 32.7 / 34.1 / 33.8 / 32.5 tok/s
+  (the change cannot reach decode: rows <= 16 take the decode chain; MTP 2.9-3.9 tokens per step across cells).
+- Quality, teacher-forced against f42cd8e's own capture (16 doc paragraphs x 256 tokens, kv8): the body scores KLD
+  0.0406 / top-1 91.0% / NLL 0.7830; a rounding-only control (f42cd8e with `SUSHI_FUSED_256=0`) 0.0347 / 90.8% /
+  0.7831; f42cd8e itself 0.0000. On this pack any bit-different kernel reads about 0.04 against another.
+- `QWEN4_PLE_PREFETCH_PREFILL=1` (pool) vs the default serial walk on f22a383 + the body, A B B A, a distinct 3.5-4.3k
+  prompt per run: 165.2 / 378.7 / 353.1 / 224.9 tok/s, the pool 2.29x and 1.57x per pair. (On f42cd8e, with the
+  scalar GEMM dominating, the same screen read 14-24%.) The kv gate still picks serial here; a gate keyed on residency is its own change.
+
 ## Upstream comparison (decided: no rebase)
 
 - Rebased onto upstream vs main 6755ff2 on the MCG K3 pack, interleaved: MTP
