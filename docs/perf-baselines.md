@@ -145,11 +145,39 @@ load check refuses with apps open), `taskpolicy -a`, the lock held per run, NOT 
 - `QWEN4_PLE_PREFETCH_PREFILL=1` (pool) vs the default serial walk on f22a383 + the body, A B B A, a distinct 3.5-4.3k
   prompt per run: 165.2 / 378.7 / 353.1 / 224.9 tok/s, the pool 2.29x and 1.57x per pair. (On f42cd8e, with the
   scalar GEMM dominating, the same screen read 14-24%.)
-- The n-gram residency gate pools by default here (29.8 GB table + 47.6 GB of GPU memory + 8 GB headroom > 64 GB).
-  Default flags, one boot per cell, a distinct 3.4-4.4k prompt per run, `max_tokens` 1. 8c16b2b against 8c16b2b +
+- The n-gram residency gate pools by default on that box: its 29.8 GB table cannot stay beside 47.6 GB of weights in
+  64 GB. Default flags, one boot per cell, a distinct 3.4-4.4k prompt per run, `max_tokens` 1. 8c16b2b against 8c16b2b +
   the gate, A B B A: 189.8 / 393.6 / 395.7 / 219.6 tok/s, 2.07x and 1.80x per pair. Before the body, f22a383 against
   f22a383 + the gate, A B B A twice: 33.9 / 36.6 / 31.4 / 34.8 and 30.7 / 37.0 / 37.4 / 35.1 tok/s, paired 1.08,
   0.90, 1.21, 1.07 (mean 1.06, inside the prompt-to-prompt spread).
+
+<a id="ngram-arm"></a>
+## The n-gram gather arm is measured per load (feb9ed7d)
+
+M5 Max 128 GB, macOS 27, Sushi-3bpw (29.8 GB table) and Sushi-4bpw (95.4 GB), `--mtp --kv-quant 8
+--mtp-head-kv-quant --ctx-size 128000 --prefix-cache-disk 20GB --prefix-cache-entries 1 --prefix-cache-mem 1GB`,
+llmprobe 0.6.12 `--bench-only --rungs 4k,16k --runs 1` (one sample per cell, no median), `taskpolicy -a`, GPU lock held
+per arm, NOT a quiet box (no §4b fan protocol available). `SUSHI_FORCE_GPU_FAMILY_FALLBACK=1` for the non-NAX rows.
+
+| arm | calibration read | picked | 2041 tok | ~4.2k | ~16.5k |
+|---|---|---|---|---|---|
+| 3bpw NAX, table warm | serial 0.67 ms, pool 4.14 ms (0.2x) | SERIAL | 1811.7 | 1890 | 1918 |
+| 3bpw NAX, `SUSHI_NGRAM_WARM=0` | serial 20.94 ms, pool 1.88 ms (11.2x) | POOLED | 1535 | 1616 | 1709 |
+| 3bpw non-NAX, table warm | serial 0.63 ms, pool 3.75 ms (0.2x) | SERIAL | 1130.9 | 1134 | 1131 |
+| 3bpw non-NAX, pool forced | warm at the time of the probe | POOLED | 1015.9 | 990 | 1048 |
+| 4bpw NAX, warm declined by the cap | serial 11.45 ms, pool 1.02 ms (11.3x) | POOLED | 1757.1 | 1891 | 1954 |
+| 4bpw NAX, warm FORCED past the cap | serial 11.01 ms, pool 1.24 ms (8.9x) | POOLED | 1621.6 | 1620 | 1622 |
+
+- **The arm flips with the state, so it cannot be a constant.** A cold table reads 7.7-11.3x for the pool; a warm one
+  5-10x for serial. Forcing the pool on a warm table costs 6-13% of prefill; a serial walk on a cold one costs
+  7.7-11.3x in gather time, so the 20% margin leans to the pool.
+- **Forcing the 4bpw warm is 8-17% WORSE and buys nothing**: the pread finished all 95.4 GB in 7.9 s, the calibration
+  read cold either way (11.45 vs 11.01 ms), because 95.4 GB of table plus ~57 GB of weights does not fit in 128 GB. The
+  residency cap already declines it; that is the rule earning its keep.
+- `SUSHI_NGRAM_WARM=0` on the 3bpw cost 11-15% of prefill here, but that arm ran against a partly warm page cache:
+  `WARM=0` skips the pread, it does not evict. A genuinely cold 3bpw end-to-end cell is still unmeasured, and this box
+  cannot produce one (49 GB of weights + 30 GB of table fits inside 128 GB, so nothing is evicted) — a 64 GB box
+  would.
 
 ## Upstream comparison (decided: no rebase)
 
