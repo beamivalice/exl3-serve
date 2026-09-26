@@ -43,7 +43,7 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Q
 # 1. images, 8-bit KV — the default quality
 ./sushi-macos-arm64/sushi serve --model ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw \
   --mtp --kv-quant 8 --mtp-head-kv-quant --ctx-size 128000 \
-  --max-tokens 64000 --prefix-cache-disk 20GB --prefix-cache-entries 1 --prefix-cache-mem 1GB --temp 1
+  --max-tokens 32000 --prefix-cache-disk 20GB --prefix-cache-entries 1 --prefix-cache-mem 1GB --temp 1
 
 # 2. images, 4-bit KV — twice the context, at 9% KLD and 0.7 points of next-token agreement
 ./sushi-macos-arm64/sushi serve --model ~/.sushi/models/Qwen3.8-Flash-Next-Sushi-3bpw \
@@ -51,27 +51,8 @@ hf download beamster/Qwen3.8-Flash-Next-Sushi-3bpw --local-dir ~/.sushi/models/Q
   --max-tokens 64000 --prefix-cache-disk 20GB --prefix-cache-entries 1 --prefix-cache-mem 1GB --temp 1
 ```
 
-Add `--no-vision` to either one to stop serving images. It saves the 0.8 GB tower but not context: the tower is too
-small to move the plan, so the two serve the same length.
-
-Why those numbers. The pack holds 49.3 GB of resident weights and the limit is 57.6 GB. With an explicit context,
-resident Flash-Next EXL3 loads without separate sidecars or ANE ask for the weights plus 2 GB for load/warmup scratch
-and the context's cache bill, capped at the old 7 GB headroom. A smaller `--ctx-size` asks for less; auto context keeps
-the old headroom. The 8-bit cache is about 16.6 KB per token (the memory table below), not the whole spare budget:
-prompt processing and the prompt cache also need room. The KV cache grows as a conversation lengthens, so a short one
-never spends the full budget; the context is a ceiling, not an up-front cost. The n-gram reader pools its reads when
-the table cannot stay resident beside the weights, including at short contexts.
-
-At 4-bit KV the quality cost is measured, not guessed: mean KLD 0.1047 to 0.1142 and next-token agreement 90.34% to
-89.65% on the 16x512 teacher
-([numbers](docs/quality-kld.md)). For scale, the w12-to-w15 window change bought 2.8%, so 4-bit KV gives back about
-three times what the best expert tuning won. Prefer 1 unless you need the length.
-
-`--wired-margin-gib` does nothing at this limit, because it only lowers a floor the working-set limit already sits
-under.
-
-Close a browser before serving if the load check refuses. The 30 GB n-gram table lives on the SSD, so its reads are the
-cost of a 64 GB box, not a reason to raise the limit.
+At 4-bit KV the quality cost: mean KLD 0.1047 to 8-bit KV's 0.1142 and next-token agreement 90.34% to
+89.65%.
 
 **96 GB+ Mac, Sushi-4bpw**
 
