@@ -16743,6 +16743,9 @@ pub const Transformer = struct {
                 st.table.close();
                 return error.NgramTableMismatch;
             }
+            var gpu_bytes: usize = 0;
+            _ = mlx.mlx_get_active_memory(&gpu_bytes);
+            st.table.checkResidency(gpu_bytes, totalMemBytes());
             st.table.startWarm(); // the weights load just evicted the table from page cache
             qwen4_state = st;
             qwen4_mtp = try loadQwen4Mtp(allocator, config, weights, &name_buf, s);
