@@ -415,11 +415,8 @@ pub const NgramTable = struct {
         std.posix.munmap(self.map);
     }
 
-    /// Time both arms on the real table, once, before `startWarm` faults it in. The answer
-    /// is a property of this machine's SSD, which no formula about RAM can know: the same
-    /// table serial-walks at 1130 tok/s on an M5 Max and pools 2x faster on an M2 Max.
-    /// The arms read DISJOINT row sets, so neither warms the other's pages, and the pool
-    /// arm is timed in the batch shape a wide gather uses.
+    /// Measure before `startWarm`, using disjoint rows and the wide gather's pool shape:
+    /// the choice depends on SSD and page-cache state, not just available RAM.
     pub fn calibrateArm(self: *NgramTable) void {
         if (self.bf16 != null) return; // the bf16 store has its own wide path
         const p = self.pool orelse return;
@@ -432,8 +429,7 @@ pub const NgramTable = struct {
         for (&serial_rows) |*r| r.* = @intCast(calibRow(&seed, self.rows));
         for (&pool_rows) |*r| r.* = @intCast(calibRow(&seed, self.rows));
 
-        // The serial arm's read: the mmap the walk itself uses, so a cold row costs its
-        // page fault and a warm one costs a cache hit.
+        // Use the gather's mmap path so calibration includes its page faults.
         const io = std.Io.Threaded.global_single_threaded.io();
         var sw = io_util.Stopwatch.init(io);
         var acc: u64 = 0;
@@ -905,14 +901,12 @@ pub fn plePrefillPrefetchMinKvFromEnv(raw: ?[]const u8) u64 {
 
 const Region = struct { off: usize, len: usize };
 
-/// What the one calibration read, kept for the line that reports it.
 pub const Calibration = struct { serial_ns: u64 = 0, pool_ns: u64 = 0, rows: usize = 0 };
 
 fn asMs(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / (1000.0 * 1000.0);
 }
 
-/// A row for the calibration. SplitMix64, so the same seed reads the same rows twice.
 fn calibRow(seed: *u64, rows: u64) u64 {
     seed.* +%= 0x9E37_79B9_7F4A_7C15;
     var z = seed.*;
@@ -922,12 +916,9 @@ fn calibRow(seed: *u64, rows: u64) u64 {
     return z % rows;
 }
 
-/// One region of a row: the 4-bit layout splits words, scales and biases, the 16-bit one
-/// does not.
 pub const PLE_CALIBRATION_ROWS: usize = 128;
 
-/// How much faster the pool must measure before a wide gather takes it. A win inside the
-/// margin is noise, and the serial walk is the right default on a table already in page cache.
+/// Keep the serial default unless the pool wins beyond timing noise.
 pub const PLE_CALIBRATION_MARGIN_PCT: u64 = 20;
 
 /// Which arm the calibration picked. Unreadable timings (0) never claim the pool.
@@ -1310,11 +1301,10 @@ test "ngram prefill prefetch is KV-GATED: a short prompt walks, a long one pools
 
 test "ngram prefill prefetch pools at any kv when the calibration measured the pool faster" {
     const min = PREFILL_PREFETCH_MIN_KV;
-    const slow_ssd = plePrefillPrefetchArm(9_000_000, 1_000_000); // pool 9x faster
-    const fast_ssd = plePrefillPrefetchArm(1_000_000, 2_000_000); // serial 2x faster
+    const slow_ssd = plePrefillPrefetchArm(9_000_000, 1_000_000);
+    const fast_ssd = plePrefillPrefetchArm(1_000_000, 2_000_000);
     try testing.expect(slow_ssd and !fast_ssd);
-    // A tie, and a win inside the margin, keep the serial walk: a noisy measurement
-    // must not move the arm.
+    // Timing noise must not move the arm.
     try testing.expect(!plePrefillPrefetchArm(1_000_000, 1_000_000));
     try testing.expect(!plePrefillPrefetchArm(1_000_000, 900_000));
     // An unreadable measurement (no timer) never claims the pool.
@@ -1322,7 +1312,6 @@ test "ngram prefill prefetch pools at any kv when the calibration measured the p
     try testing.expect(!plePrefillPrefetchArm(1_000_000, 0));
     try testing.expect(plePrefillPrefetchWanted(.kv_gated, 4096, min, slow_ssd));
     try testing.expect(!plePrefillPrefetchWanted(.kv_gated, 4096, min, fast_ssd));
-    // The kv gate still forces the pool past the threshold, whatever the calibration said.
     try testing.expect(plePrefillPrefetchWanted(.kv_gated, min, min, fast_ssd));
     try testing.expect(!plePrefillPrefetchWanted(.off, 4096, min, slow_ssd));
     try testing.expect(plePrefillPrefetchWanted(.on, 4096, min, fast_ssd));

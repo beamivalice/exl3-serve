@@ -56,6 +56,8 @@ source FP8→bf16 loader (`usesMimoSourceTrunk`), billed dense by `mimoSourceRes
 - **Prefill off NAX** (M1–M4, or NAX declined): the 8x8 `simdgroup_matrix` body computes D = W^T X^T so each lane's
   eight-weight slot group lands straight in its A fragments (the tile layout is the MMA fragment layout). f16 x and
   128-multiple widths only; anything else takes the scalar body. Not byte-identical to the scalar body (sum order).
+- K2.25 (`n36`, including MiMo MCG w12) reads each eight-weight group through one 32-bit funnel; codewords and
+  decoded weights equal the generic reader's, with no change to the GEMM accumulation order.
 - **Its block count is compile-time** (`(WIN+7)/8`), never the run's: a data-dependent bound over the
   `simdgroup_matrix` arrays spilled them, 2.6x slower. Short runs pay the padding and still win
   ([perf-baselines](perf-baselines.md#m2max-64gb)).

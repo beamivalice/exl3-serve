@@ -71,14 +71,9 @@ hidden 2560, expert intermediate 640.
   `QWEN4_PLE_PREFETCH_PREFILL=0|1` forces either arm, and the one-shot `PLE prefill gather:` line names the reason.
 - Which arm a wide gather takes is MEASURED on the table, not predicted from RAM: `calibrateArm` reads 128 random rows
   both ways, on DISJOINT sets so neither arm warms the other's pages, before the warm thread faults the table in, and
-  takes the pool only when it wins by 20% (`ngram gather arm: POOLED (128 cold rows: serial 11.1 ms, pool 1.4 ms,
-  7.7x)`). RAM arithmetic cannot see the SSD, which is what decides, and it cannot see a lowered
-  `iogpu.wired_limit_mb`. The answer flips with the machine's state — a cold table reads 7.7-11.3x for the pool, a
-  warm one 5-10x for serial — so the arm is measured per load, not chosen once. A pool over a warm table costs 6-13%
-  of prefill; a serial walk over a cold one costs 7.7-11.3x in gather time, which is why the margin leans to the pool.
+  takes the pool only when it wins by 20%; SSD and page-cache state determine the choice on each load.
 - `SUSHI_NGRAM_WARM` preads the whole table, and the residency cap (`ngramCacheLimit` = half of RAM) already declines
-  one that cannot be held: forcing the 95.4 GB Sushi-4bpw table warm cost 8-17% of prefill and left it no more
-  resident than not warming it.
+  one that cannot be held. Calibration and residency measurements: [perf-baselines](perf-baselines.md#ngram-arm).
 - The n-gram hash's eos is the TEXT config's (`ngram_eos`).
 - `SUSHI_NGRAM_BF16_DIR=<hf checkpoint>` serves any pack with the ORIGINAL bf16 n-gram table, so `kld compare`
   isolates the PLE table's cost.

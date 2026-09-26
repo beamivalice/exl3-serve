@@ -411,6 +411,12 @@ const GEMM_SIMDMAT_FRAGS: [:0]const u8 =
     \\    p[1] = smat_pair(lo, 8u, 5u);
     \\    p[2] = smat_pair(lo, 3u, 0u);
     \\    p[3] = smat_pair(hi, 3u, 0u);
+    \\  } else if (N == 36u) {
+    \\    const uint f = smat_funnel(words, 18u * g + 18u, 18u);
+    \\    p[0] = smat_pair(f, 16u, 14u);
+    \\    p[1] = smat_pair(f, 12u, 9u);
+    \\    p[2] = smat_pair(f, 7u, 5u);
+    \\    p[3] = smat_pair(f, 3u, 0u);
     \\  } else {
     \\    SMAT_UNROLL for (uint j = 0u; j < 4u; j++) {
     \\      const exl3_win w = exl3_pair_window(8u * g + 2u * j, N);
@@ -419,9 +425,8 @@ const GEMM_SIMDMAT_FRAGS: [:0]const u8 =
     \\  }
     \\}
 ;
-/// Each simdgroup computes 32 output columns of one window as D = W^T X^T in 8x8 blocks, the
-/// decoded weights feeding A directly. The block count is WIN's, never the run's: a data-dependent
-/// count spills the accumulators. Rows past the run read its last row and are never stored.
+/// A data-dependent block count spills the accumulators, so use compile-time WIN.
+/// Short runs repeat their last row; padded rows are never stored.
 const GEMM_SIMDMAT_SOURCE: [:0]const u8 =
     \\uint win = uint(threadgroup_position_in_grid.y);
     \\uint sg = uint(simdgroup_index_in_threadgroup);
@@ -1032,10 +1037,7 @@ const GemmSortedKey = struct { in_dim: c_int, out_dim: c_int, rows: c_int, win: 
 
 const GEMM_WINDOW_ROWS: c_int = 32;
 
-/// Rows one run-window may carry. `GEMM_SORTED_SOURCE` accumulates `acc[8][4]`,
-/// the simdgroup-matrix body four 8-row blocks and the NAX body two 16-row
-/// destinations, so past this the kernels' own `n > WIN` guard still admits the
-/// window and the extra rows go unwritten.
+/// Maximum run supported by all sorted-GEMM bodies; larger runs leave tail rows unwritten.
 const GEMM_WINDOW_MAX_ROWS: c_int = 32;
 
 var gemm_win_cached: ?c_int = null;
@@ -1251,7 +1253,6 @@ fn getGemmSimdmatKernel() !mlx.mlx_fast_metal_kernel {
     return codebookKernelWith(&gemm_simdmat_kernel, "sushi_exl3_k4_gemm_simdmat", &ins, &outs, GEMM_SIMDMAT_SOURCE, GEMM_SIMDMAT_FRAGS);
 }
 
-/// Every sorted-GEMM body takes the same config: f16 [rows, out_dim] out, 128-thread groups.
 fn sortedGemmCfg(cache: *CfgCache(GemmSortedKey, 8), key: GemmSortedKey) !mlx.mlx_fast_metal_kernel_config {
     if (cache.get(key)) |c| return c;
     const c = mlx.mlx_fast_metal_kernel_config_new();
@@ -1532,7 +1533,6 @@ fn innerGemmSortedTable(
         logN48Funnel(rate.n, .simdmat, mlx.mlx_array_dtype(x));
         return out;
     }
-    // The scalar body: any activation dtype, any 16-multiple width.
     const cfg = try sortedGemmCfg(&gemm_sorted_cfgs, key);
     try mlx.check(mlx.mlx_fast_metal_kernel_config_set_grid(cfg, out_tiles * 128, tab.nwin, 1));
     return applySortedGemm(s, try getGemmSortedKernel(), cfg, x, trellis, eids, tab);
@@ -6094,13 +6094,12 @@ test "exl3 sorted GEMM: the simdgroup-matrix body and the scalar body both match
         gemm_simdmat_engaged = false;
         n48_funnel_engaged = @splat(false);
         for (0..PARITY_SEEDS) |i| {
-            // The served rates (n40, n48, n64), n48 under MUL1 (generic reader) and a generic-pair rate.
+            try sortedGemmParity(.{ .n = 36 }, .{ .codebook = .mcg, .window = .w12 }, 32, 2001 + i);
             try sortedGemmParity(.{ .n = 48 }, w15, 32, 1201 + i);
             try sortedGemmParity(exl3.Rate.fromK(4), w15, 32, 1301 + i);
             try sortedGemmParity(.{ .n = 40 }, .{ .codebook = .mcg, .window = .w12 }, 16, 1401 + i);
             try sortedGemmParity(.{ .n = 48 }, .mul1, 16, 1501 + i);
             try sortedGemmParity(.{ .n = 44 }, .mul1, 32, 1601 + i);
-            // Stride windows carry several runs; the served Qwen widths in both directions.
             try reportGemmParity(try sortedGemmParityShape(.{ .n = 48 }, w15, 32, 1701 + i, .none, .{ .aligned = false }));
             try reportGemmParity(try sortedGemmParityShape(.{ .n = 48 }, w15, 32, 1801 + i, .none, .{ .in_dim = 2560, .out_dim = 640 }));
             try reportGemmParity(try sortedGemmParityShape(exl3.Rate.fromK(4), w15, 32, 1901 + i, .none, .{ .in_dim = 640, .out_dim = 2560, .aligned = false }));
@@ -6108,6 +6107,10 @@ test "exl3 sorted GEMM: the simdgroup-matrix body and the scalar body both match
         try t.expectEqual(simdmat, gemm_simdmat_engaged);
         try t.expectEqual(simdmat, n48_funnel_engaged[@backingInt(N48FunnelArm.simdmat)]);
     }
+    gemm_simdmat_force = true;
+    const mimo: exl3.Decode = .{ .codebook = .mcg, .window = .w12 };
+    try reportGemmParity(try sortedGemmParityShape(.{ .n = 36 }, mimo, 32, 2101, .none, .{ .in_dim = 4096, .out_dim = 2048 }));
+    try reportGemmParity(try sortedGemmParityShape(.{ .n = 36 }, mimo, 16, 2201, .none, .{ .in_dim = 2048, .out_dim = 4096, .aligned = false }));
 }
 
 test "exl3 sorted GEMM body ubench: simdgroup-matrix vs scalar at the served shapes, A B B A" {
@@ -6128,7 +6131,6 @@ test "exl3 sorted GEMM body ubench: simdgroup-matrix vs scalar at the served sha
     var prng = std.Random.DefaultPrng.init(0xab12);
     const rnd = prng.random();
     const io = std.Io.Threaded.global_single_threaded.io();
-    // The served rates: n48 (Sushi-3bpw) and n64 (Sushi-4bpw).
     for ([_]c_int{ 48, 64 }) |nhw| for ([_][2]c_int{ .{ 2560, 640 }, .{ 640, 2560 } }) |shape| {
         const it = @divExact(shape[0], 16);
         const ot = @divExact(shape[1], 16);
@@ -6136,7 +6138,6 @@ test "exl3 sorted GEMM body ubench: simdgroup-matrix vs scalar at the served sha
         for (tr_h) |*v| v.* = @truncate(rnd.int(u32));
         const tr = mlx.mlx_array_new_data(tr_h.ptr, &[_]c_int{ E, it, ot, nhw }, 4, .uint16);
         defer _ = mlx.mlx_array_free(tr);
-        // Prompt chunks of 17, 64, 205 and 2048 tokens at top-k 10: short ones are mostly 1-2 row runs.
         for ([_]c_int{ 170, 640, 2050, 20480 }) |nslots| {
             const ids = try alloc.alloc(u32, @intCast(nslots));
             for (ids) |*v| v.* = rnd.uintLessThan(u32, @intCast(E));
@@ -6147,7 +6148,7 @@ test "exl3 sorted GEMM body ubench: simdgroup-matrix vs scalar at the served sha
             for (xh) |*v| v.* = exl3.f32ToF16Bits(rnd.float(f32) * 0.1);
             const x = mlx.mlx_array_new_data(xh.ptr, &[_]c_int{ nslots, shape[0] }, 2, .float16);
             defer _ = mlx.mlx_array_free(x);
-            // One window table, built outside the timed calls (the host build drains the GPU).
+            // Build the window table outside timed calls; it drains the GPU.
             const tab = try gemmWindowTable(s, eids, nslots, 32, true);
             defer _ = mlx.mlx_array_free(tab.starts);
             defer _ = mlx.mlx_array_free(tab.nlives);
@@ -6157,7 +6158,6 @@ test "exl3 sorted GEMM body ubench: simdgroup-matrix vs scalar at the served sha
                 try mlx.check(mlx.mlx_array_eval(warm));
                 _ = mlx.mlx_array_free(warm);
             }
-            // Each A B B A block yields one paired ratio (scalar over simdgroup-matrix).
             var ratio: [BLOCKS]f64 = undefined;
             var total: [2]u64 = .{ 0, 0 };
             for (&ratio) |*r| {
@@ -6176,9 +6176,9 @@ test "exl3 sorted GEMM body ubench: simdgroup-matrix vs scalar at the served sha
             }
             std.mem.sort(f64, &ratio, {}, std.sort.asc(f64));
             benchPrint("[gemm-body] n{d} {d}->{d} slots={d}: scalar {d} us, simdgroup-matrix {d} us per call; paired A B B A ratio {d:.2}x (blocks {d:.2}..{d:.2})\n", .{
-                nhw,                             shape[0],                        shape[1],                        nslots,
-                total[0] / (2 * BLOCKS * 1000),  total[1] / (2 * BLOCKS * 1000),  ratio[BLOCKS / 2],
-                ratio[0],                        ratio[BLOCKS - 1],
+                nhw,                            shape[0],                       shape[1],          nslots,
+                total[0] / (2 * BLOCKS * 1000), total[1] / (2 * BLOCKS * 1000), ratio[BLOCKS / 2], ratio[0],
+                ratio[BLOCKS - 1],
             });
         }
     };
@@ -7281,14 +7281,23 @@ fn n40NaxReaderExact(comptime cb: exl3.Codebook, comptime win: exl3.Window, comp
 }
 
 fn n40WeightReaderExact(comptime cb: exl3.Codebook, comptime win: exl3.Window, comptime raw: bool, comptime lane_reader: bool) !void {
-    return weightReaderExact(40, cb, win, raw, lane_reader);
+    return weightReaderExact(40, cb, win, raw, if (lane_reader) .lane else .nax);
 }
 
-fn weightReaderExact(comptime n: u32, comptime cb: exl3.Codebook, comptime win: exl3.Window, comptime raw: bool, comptime lane_reader: bool) !void {
+fn weightReaderExact(comptime n: u32, comptime cb: exl3.Codebook, comptime win: exl3.Window, comptime raw: bool, comptime reader: enum { lane, nax, simdmat }) !void {
     const t = std.testing;
     const s = mlx.gpuStream();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
-    const source = if (lane_reader)
+    const source = if (reader == .simdmat)
+        \\const uint lane = thread_position_in_grid.x % 32u;
+        \\const uint tile = thread_position_in_grid.x / 32u;
+        \\half2 p[4];
+        \\smat_group<uint(NHW)>((const device uint *)trellis + tile * (uint(NHW) / 2u), lane, p);
+        \\for (uint j = 0u; j < 4u; j++) {
+        \\  result[tile * 256u + lane * 8u + 2u * j] = as_type<ushort>(p[j].x);
+        \\  result[tile * 256u + lane * 8u + 2u * j + 1u] = as_type<ushort>(p[j].y);
+        \\}
+    else if (reader == .lane)
         \\const uint lane = thread_position_in_grid.x % 32u;
         \\const uint tile = thread_position_in_grid.x / 32u;
         \\const device uint *words = (const device uint *)trellis + tile * (uint(NHW) / 2u);
@@ -7309,9 +7318,9 @@ fn weightReaderExact(comptime n: u32, comptime cb: exl3.Codebook, comptime win: 
         \\#define exl3_pairh exl3_raw_pair
         \\
     ;
-    const header = comptime GEMM_NAX_INCLUDES ++ codebookHelpers(cb, win) ++ (if (raw) identity else "") ++ GEMM_NAX_FRAGS;
+    const header = comptime (if (reader == .simdmat) "" else GEMM_NAX_INCLUDES) ++ codebookHelpers(cb, win) ++ (if (raw) identity else "") ++ (if (reader == .simdmat) GEMM_SIMDMAT_FRAGS else GEMM_NAX_FRAGS);
     var kernel: ?mlx.mlx_fast_metal_kernel = null;
-    const k = try getNamedKernel(&kernel, comptime std.fmt.comptimePrint("exl3_n{d}_reader_exact", .{n}) ++ cbSuffix(cb) ++ winSuffix(win) ++ (if (raw) "_raw" else "_weights") ++ (if (lane_reader) "_lane" else "_nax"), &.{"trellis"}, &.{"result"}, source, header);
+    const k = try getNamedKernel(&kernel, comptime std.fmt.comptimePrint("exl3_n{d}_reader_exact", .{n}) ++ cbSuffix(cb) ++ winSuffix(win) ++ (if (raw) "_raw" else "_weights") ++ "_" ++ @tagName(reader), &.{"trellis"}, &.{"result"}, source, header);
     defer _ = mlx.mlx_fast_metal_kernel_free(k);
     var trellis_data: [128 * n]u16 = undefined;
     var prng = std.Random.DefaultPrng.init(430);
@@ -7346,7 +7355,7 @@ fn weightReaderExact(comptime n: u32, comptime cb: exl3.Codebook, comptime win: 
         for (0..32) |lane| {
             const tau = 64 * (lane >> 4) + ((lane & 7) << 3) + ((lane >> 3) & 1);
             for ([_]usize{ 0, 1, 8, 9, 4, 5, 12, 13 }, 0..) |offset, j| {
-                const code = codes[if (lane_reader) lane * 8 + j else 2 * tau + offset];
+                const code = codes[if (reader == .nax) 2 * tau + offset else lane * 8 + j];
                 const want = if (raw) code else exl3.decodeCodeword(code & win.mask(), cb);
                 try t.expectEqual(want, got[tile * 256 + lane * 8 + j]);
             }
@@ -7359,6 +7368,15 @@ test "exl3 n40 NAX codewords and decoded weights are exact" {
     try n40NaxReaderExact(.mcg, .w12, false);
     try n40NaxReaderExact(.mul1, .w8, false);
     try n40NaxReaderExact(.mul1, .w16, false);
+}
+
+test "exl3 n36 simdgroup reader codewords and decoded weights are exact" {
+    try weightReaderExact(36, .mcg, .w12, true, .simdmat);
+    inline for (.{ exl3.Codebook.mcg, exl3.Codebook.mul1 }) |cb| {
+        inline for (.{ exl3.Window.w8, exl3.Window.w12, exl3.Window.w16 }) |win| {
+            try weightReaderExact(36, cb, win, false, .simdmat);
+        }
+    }
 }
 
 fn n40PrefillBf16Truth(seed: u64, win: c_int) !void {
@@ -7475,6 +7493,7 @@ test "exl3 BF16 prefill on the simdgroup-matrix body no worse than composite aga
         mimo_prefill_force = mimo_meta;
         for (0..PARITY_SEEDS) |seed| {
             for ([_]struct { rate: exl3.Rate, dec: exl3.Decode }{
+                .{ .rate = .{ .n = 36 }, .dec = .{ .codebook = .mcg, .window = .w12 } },
                 .{ .rate = .{ .n = 40 }, .dec = .{ .codebook = .mcg, .window = .w12 } },
                 .{ .rate = .{ .n = 48 }, .dec = .{ .codebook = .mcg, .window = .w15 } },
             }) |arm| {
@@ -8128,10 +8147,10 @@ test "exl3 MCG half pairs preserve every codeword at windows 8 through 16" {
 }
 
 test "exl3 n48 funnel readers preserve codewords and weights on every non-MUL1 codebook" {
-    inline for ([_]exl3.Codebook{ .mcg }) |cb| {
+    inline for ([_]exl3.Codebook{.mcg}) |cb| {
         inline for ([_]bool{ false, true }) |lane_reader| {
-            try weightReaderExact(48, cb, .w12, true, lane_reader);
-            inline for (8..17) |bits| try weightReaderExact(48, cb, comptime exl3.Window.fromBits(bits).?, false, lane_reader);
+            try weightReaderExact(48, cb, .w12, true, if (lane_reader) .lane else .nax);
+            inline for (8..17) |bits| try weightReaderExact(48, cb, comptime exl3.Window.fromBits(bits).?, false, if (lane_reader) .lane else .nax);
         }
     }
 }
